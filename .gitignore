@@ -1,0 +1,17 @@
+.env
+.env.local
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+storybook-static/
+coverage/
+.superpowers/
+.vite/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.DS_Store
+.remember/
