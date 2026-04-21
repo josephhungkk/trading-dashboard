@@ -23,5 +23,6 @@
     "ignoreDeprecations": "6.0"
   },
   "include": ["src"],
+  "exclude": ["src/stories"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

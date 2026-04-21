@@ -1,4 +1,3 @@
-// @ts-expect-error — @storybook/react-vite types arrive in Task 14
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { Button } from './Button';
 
