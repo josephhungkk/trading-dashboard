@@ -198,6 +198,20 @@ See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3` for the ca
 - Mobile native apps (responsive web UI only)
 - Paper trading simulation (use broker-side paper accounts)
 
+## Phase workflow (standard for every phase)
+
+Every phase follows this exact sequence:
+
+1. **Brainstorm** — `superpowers:brainstorming` skill. Produces `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`.
+2. **Spec self-review** — placeholder scan, internal consistency, scope check, ambiguity check. Fix inline.
+3. **Architect review** — invoke the user-scope `ARCHITECT-REVIEW` skill adversarially on the spec. It returns findings ranked CRITICAL / HIGH / MEDIUM / LOW with concrete "change X to Y" recommendations. **Apply all CRITICAL + HIGH findings before proceeding.** MEDIUMs fix-or-document. LOWs defer or document. Record the findings table in the spec under an "Architect review — applied" section.
+4. **User spec approval.**
+5. **Writing plans** — `superpowers:writing-plans` skill. Produces `docs/superpowers/plans/YYYY-MM-DD-<topic>-plan.md`.
+6. **Implementation** — `superpowers:subagent-driven-development` (preferred) or `superpowers:executing-plans`.
+7. **Phase close-out** — update `CLAUDE.md`, `CHANGELOG.md`, `TASKS.md`; tag `vN.N.N`; commit + push.
+
+**Skip step 3 only for truly trivial phases (single-file refactors, docs-only changes).** Phases 2–9 all get the architect review. Phase 0 skipped it (~2 hrs of preventable CI debugging as a result); Phase 1 used it (10 findings, all fixed before implementation). Worth the ~5-min round-trip.
+
 ## When Claude Code Makes Changes
 
 - Always run tests after edits: `docker compose exec backend pytest` and `cd frontend && pnpm test`.
