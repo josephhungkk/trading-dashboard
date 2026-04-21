@@ -1,0 +1,213 @@
+# Trading Dashboard — Project Constitution
+
+This file tells Claude Code how this project is structured, what conventions to follow, and which commands to use. Keep it current as the project evolves.
+
+## Project Overview
+
+A self-hosted multi-broker, multi-account trading dashboard. The dashboard should be able to trade common assets: Stocks, Forex, Commodities, Indexes, Bonds, ETF, Futures, Crypto, CFD, Options, Derivatives.
+
+The frontend and backend run on an IONOS VPS behind Cloudflare. Broker gateways (IB Gateway, FutuOpenD) and PostgreSQL 18 run on the NUC15PRO and reach the VPS over WireGuard. A second home machine (RTX 4080 16 GB VRAM + 64 GB RAM) runs heavy Ollama models on demand.
+
+## Stack
+
+### Runtimes
+- **Backend:** Python **3.14** + FastAPI (latest stable) + SQLAlchemy 2.0 async + Alembic + Pydantic v2 + asyncpg
+- **Frontend:** **React 19** + **Vite 7** + **TypeScript 6.0 strict**
+- **Styling:** **Tailwind v4** (CSS-first `@theme`) + **shadcn/ui** primitives (owned in-repo)
+- **State:** **Zustand** for global; `useState` for local
+- **Charting:** klineschart (Phase 3+)
+- **Component workbench:** **Storybook 10**
+- **Testing:** Vitest 4 + React Testing Library 16 (frontend); pytest 9 + pytest-asyncio + httpx (backend); Playwright deferred to Phase 5+
+- **Cache / pubsub:** Redis 7 (always containerized — dev and prod)
+- **Database:** PostgreSQL 18 running **natively on Windows on the NUC15PRO** (never containerized). Dev uses DB `dashboard`; the legacy Phase-1 deployment continues to use DB `trading` on the same server. Both dev and prod point `DATABASE_URL` at `10.10.0.2:5432` (the NUC's WireGuard IP).
+- **Broker adapters:** `ib_async` (IBKR), `futu-api` (Futu HK), `requests-oauthlib` (Schwab) — land in Phases 4, 6, 8 respectively
+- **AI:** Ollama — 7-8B models on NUC, 14-70B on the heavy box (WoL-woken on demand)
+- **Orchestration:** Docker Compose (docker-ce inside WSL on the NUC; Phase 1 adds `docker-compose.prod.yml` for the VPS)
+- **Reverse proxy:** Nginx with Let's Encrypt DNS-01 via Cloudflare (Phase 1+, on the VPS)
+- **Node:** Node 24 LTS via Corepack
+- **Package managers:** `pnpm` (frontend), `uv` (backend)
+- **Lint:** ruff + mypy (Python); ESLint 9 flat config + `eslint-plugin-boundaries` + `eslint-plugin-jsx-a11y` + Stylelint (frontend); `pre-commit` + `commitlint` at commit-msg
+
+### Fonts
+Noto only. Self-hosted `.woff2` in `frontend/public/fonts/` — 3 Latin weights + 5 CJK regional variants (TC, SC, HK, JP, KR). Loaded via `@font-face` with `unicode-range`, variants selected via `lang` attributes. When rendering stock names always set `lang` via `langForMarket(exchange)` from `src/services/lang.ts` so the correct CJK glyph variant renders. Bold CJK is synthesized via CSS `font-synthesis` for MVP. (Phase 0 ships the stub; Phase 3 ships the real fonts and mapping.)
+
+### Mobile
+Mobile-first responsive design. Bottom tab bar on mobile (one-thumb reach), sidebar on desktop. Minimum 2.75 rem (44 px equivalent at default root font-size) touch targets. Tables collapse to card view below the `md` breakpoint.
+
+### Versioning policy
+**Latest stable at scaffold time.** Pin via lockfiles (`uv.lock`, `pnpm-lock.yaml`), never hand-pinned semver ranges.
+
+## Component Architecture (Frontend)
+
+Five layers with one-way dependencies. Enforced by `eslint-plugin-boundaries`; violations break CI.
+
+| Layer | Path | May import from |
+|---|---|---|
+| `design-tokens/` | `src/design-tokens/**` | — (leaf) |
+| `components/primitives/` | `src/components/primitives/**` | tokens, lib |
+| `components/patterns/` | `src/components/patterns/**` | tokens, primitives, patterns, lib |
+| `components/layout/` | `src/components/layout/**` | tokens, primitives, patterns, layout, lib |
+| `features/` | `src/features/**` | everything |
+
+Rules:
+1. `design-tokens/` is the **only** place rem values, color hex codes, and font stacks are defined as raw literals. Everything else references tokens (usually via Tailwind classes).
+2. Primitives and patterns have `Component.stories.tsx` and `Component.test.tsx` alongside them. Features do not — they're tested end-to-end.
+3. No `px` or `em` anywhere on the site. Stylelint `unit-disallowed-list` enforces this.
+4. Boundaries rules in `frontend/eslint.config.mjs` are the source of truth. Violations fail CI.
+
+## Configuration Storage
+
+**The app keeps runtime settings in the database, not in `.env`.** (Phase 2+; Phase 0 has no DB-backed config yet.)
+
+`.env` only holds bootstrap values the app needs before it can reach the DB:
+`APP_ENV`, `APP_SECRET_KEY`, `APP_CORS_ORIGINS`, `DATABASE_URL`, `POSTGRES_POOL_SIZE`, `POSTGRES_MAX_OVERFLOW`, `REDIS_PASSWORD`, `REDIS_URL`.
+
+(`POSTGRES_POOL_SIZE` / `POSTGRES_MAX_OVERFLOW` are here — not in `app_config` — because SQLAlchemy reads them at engine construction, which runs before `ConfigService` can reach the DB. `REDIS_PASSWORD` is split out from `REDIS_URL` so docker-compose can interpolate it into `redis-server --requirepass ${REDIS_PASSWORD}`.)
+
+Everything else (broker hosts, Ollama URLs, Telegram tokens, API keys, WoL MAC, Schwab OAuth, etc.) will live in two tables from Phase 2 onward:
+
+- `app_config` — plain-text settings, readable by any admin-authed client
+- `app_secrets` — sensitive values encrypted with Fernet (key derived from `APP_SECRET_KEY`)
+
+Both will be edited at runtime via `/api/admin/config` and `/api/admin/secrets`, or programmatically through `app.services.config.config.set()` / `set_secret()`. An in-memory cache is invalidated across all backend workers via Redis pub/sub on every write, so changes take effect immediately.
+
+**Do not add new values to `.env` beyond the bootstrap list.** When writing code that needs a setting, read it via the `config` service (from Phase 2 onward) and fall back to a sensible default:
+
+    from app.services.config import config
+    heavy_url = await config.get("ollama.heavy_url", "http://10.10.0.3:11434")
+    bot_token = await config.get_secret("telegram.bot_token")
+
+Rotating `APP_SECRET_KEY` invalidates all encrypted secrets — treat it as permanent.
+
+## Network Topology
+
+| Node | Role | LAN IP | WG IP |
+|------|------|--------|-------|
+| IONOS VPS | Prod HTTP host (Phase 1+) | 88.208.197.219 | 10.10.0.1 |
+| NUC15PRO | **Dev host + broker gateways + Postgres + light Ollama (24/7)** | 192.168.50.20 | 10.10.0.2 |
+| Heavy AI box | Large Ollama + ML training (on-demand, WoL) | 192.168.50.30 | 10.10.0.3 |
+| Router | | 192.168.50.1 | 10.10.0.254 |
+
+**The NUC is the dev host.** Claude Code runs in WSL2 on the NUC; `/mnt/c/dashboard` is the NUC's own `C:\dashboard`. There is no separate Windows dev box. Docker runs as docker-ce inside WSL (not Docker Desktop).
+
+SSH to VPS: `ssh -p 2222 trader@88.208.197.219` (key in `.ssh/`).
+
+### Postgres connectivity gotcha (dev)
+
+Containers inside WSL Docker reach PG at `10.10.0.2:5432` (WG-interface IP), NOT via `host.docker.internal`. Reasons:
+1. docker-ce in WSL (unlike Docker Desktop) doesn't tunnel `host.docker.internal` to the Windows host — it resolves to `172.17.0.1` (the Docker bridge gateway internal to WSL).
+2. When containers hit `10.10.0.2:5432`, WSL SNATs the outbound packet to the host's WG IP. PG sees the connection as coming from `10.10.0.2` itself — so `pg_hba.conf` must include `host all trader 10.10.0.0/24 scram-sha-256`.
+
+`.env.example` defaults to the working URL.
+
+## Project Paths
+
+- **NUC (dev host):** `C:\dashboard` — where `claude`, `pnpm dev`, `docker compose`, and (Phase 1+) `scripts/deploy.sh` all run. Reachable from WSL as `/mnt/c/dashboard`.
+- **VPS (prod host):** `/home/trader/trading-dashboard` — the rsync destination for Phase 1+. Docker Compose runs here for the prod stack.
+
+Both trees contain the same repo. Deploy script rsyncs from the NUC to the VPS.
+
+### Third-party services live OUTSIDE the repo
+
+Installed on the NUC via their own installers:
+
+| Service | NUC path | Why not in the repo |
+|---------|----------|---------------------|
+| IB Gateway | `C:\Jts\ibgateway\<version>\` | Third-party binary with its own updater |
+| FutuOpenD | `C:\FutuOpenD\` | Third-party binary, login credentials in config |
+| PostgreSQL 18 | `C:\Program Files\PostgreSQL\18\` | Windows service, own data dir |
+| Ollama | `%LOCALAPPDATA%\Programs\Ollama\` | Auto-updating binary + model cache |
+
+Ops glue (PowerShell + VBS helpers for broker auto-start, TOTP fill, window hiding, watchdog, daily restart) runs directly from the repo at `C:\dashboard\deploy\nuc\*`. Scheduled tasks reference those paths. Not part of the Docker build and not rsync'd to the VPS.
+
+## Directory Layout
+
+See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3` for the canonical tree.
+
+## Coding Conventions
+
+### Python (backend)
+- Python 3.14, type hints everywhere, Pydantic v2 for all I/O models.
+- Async all the way down — no sync DB calls, use `asyncpg` driver.
+- One adapter per broker file in `app/brokers/`. All adapters subclass `BrokerAdapter` in `base.py` (base lands in Phase 4 with the first concrete adapter — not speculatively earlier).
+- When adding a method to `BrokerAdapter`, update every adapter in the same commit.
+- Use dependency injection via FastAPI's `Depends` — never import singletons directly.
+- Log via `structlog`, never `print`.
+- No bare `except:` — always name the exception class.
+- Lint: `ruff` (rules `E,F,W,I,N,UP,B,A,C4,ASYNC,RUF`). Format: `ruff format`. Types: `mypy --strict` on `app/`.
+
+### TypeScript (frontend)
+- Strict mode on (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`). No `any` unless annotated with `// eslint-disable-next-line` and a comment explaining why.
+- Function components only, no class components.
+- Zustand for global state. Component-local state stays in `useState`.
+- API calls go through `services/api.ts` — never `fetch` directly from a component.
+- WebSocket subscriptions happen in `services/ws.ts` and feed Zustand stores.
+- No `px` or `em` in CSS or inline styles. Only rem, %, vh/vw, fr, auto. Enforced by Stylelint `unit-disallowed-list`.
+- Layer imports enforced by `eslint-plugin-boundaries` (see Component Architecture above).
+
+### SQL
+- All schema changes go through Alembic migrations. Never edit the DB manually.
+- Column names: `snake_case`. Table names: plural `snake_case` (`orders`, `portfolio_snapshots`).
+- Timestamps: `created_at`, `updated_at`, always `TIMESTAMPTZ`.
+- Money: `NUMERIC(20, 8)`. Never `FLOAT` or `REAL`.
+
+### Git
+- Conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, `perf:`, `ci:`). Enforced by commitlint at `commit-msg`.
+- Commit body lines ≤ 100 chars (enforced by commitlint).
+- Feature branches off `main`. Squash-merge PRs.
+- Never commit `.env`, `*.key`, or anything in `secrets/`.
+
+## Common Commands
+
+    # Local dev (on the NUC in WSL)
+    docker compose up -d                              # Start full stack
+    docker compose logs -f backend                    # Tail backend logs
+    docker compose exec backend alembic upgrade head  # Run migrations (Phase 2+)
+    docker compose exec backend pytest                # Run tests
+
+    # Frontend dev (hot reload)
+    cd frontend && pnpm dev
+
+    # Backend dev (hot reload outside docker)
+    cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+    # Storybook
+    cd frontend && pnpm storybook
+
+    # Lint
+    cd frontend && pnpm lint && pnpm stylelint && pnpm typecheck
+    cd backend && uv run ruff check . && uv run mypy app/
+
+    # Database (Phase 2+)
+    docker compose exec backend alembic revision --autogenerate -m "add_alerts_table"
+    docker compose exec backend alembic upgrade head
+
+    # Deploy to VPS (Phase 1+)
+    ./scripts/deploy.sh
+
+## Security Rules
+
+- Never log API keys, OAuth tokens, or passwords — `structlog` redacts via a processor in `app/core/logging.py`.
+- All broker credentials live in `app_secrets` (Fernet-encrypted) from Phase 2 onward, never in git.
+- Postgres is only reachable via WireGuard from the VPS and directly on LAN/WSL from the NUC — never exposed publicly.
+- Frontend never sees broker credentials. Only the backend holds them.
+- Trade execution endpoints require a confirmation token (nonce) to prevent CSRF.
+
+## Non-Goals (for now)
+
+- Mobile native apps (responsive web UI only)
+- Paper trading simulation (use broker-side paper accounts)
+
+## When Claude Code Makes Changes
+
+- Always run tests after edits: `docker compose exec backend pytest` and `cd frontend && pnpm test`.
+- Always regenerate types when changing API schemas: see `scripts/gen-types.sh` (Phase 2+).
+- Never modify `brokers/base.py` without also updating every concrete adapter.
+- Prefer editing existing files over creating new ones.
+- For schema changes, generate an Alembic migration instead of editing models and hoping for the best.
+
+Use `/frontend-design` skill to design the frontend; discuss direction with the user.
+
+The frontend supports both desktop and mobile. Rem-based CSS only, no px anywhere.
+
+GitHub is the canonical repo. Update `CLAUDE.md`, `CHANGELOG.md`, `TASKS.md` on every phase completion; commit to repo.
