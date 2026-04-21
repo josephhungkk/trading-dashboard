@@ -1,0 +1,40 @@
+@import "./tailwind.css";
+
+@theme {
+  --color-bg: hsl(0 0% 100%);
+  --color-fg: hsl(222 15% 12%);
+  --color-muted: hsl(210 10% 45%);
+  --color-primary: hsl(217 91% 60%);
+  --color-primary-fg: hsl(0 0% 100%);
+  --color-border: hsl(220 13% 91%);
+  --color-destructive: hsl(0 72% 51%);
+  --color-destructive-fg: hsl(0 0% 100%);
+
+  --spacing-0: 0;
+  --spacing-px: 0.0625rem;
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-3: 0.75rem;
+  --spacing-4: 1rem;
+  --spacing-6: 1.5rem;
+  --spacing-8: 2rem;
+  --spacing-12: 3rem;
+  --spacing-16: 4rem;
+  --spacing-24: 6rem;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+
+  --font-sans: "Noto Sans", system-ui, sans-serif;
+  --font-mono: "Noto Sans Mono", ui-monospace, monospace;
+}
+
+:root { color-scheme: light; }
+html.dark { color-scheme: dark; }
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+}
