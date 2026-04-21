@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: trader
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: dashboard
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U trader"
+          --health-interval 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.14'
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Ruff check
+        working-directory: backend
+        run: uv run ruff check .
+      - name: Ruff format check
+        working-directory: backend
+        run: uv run ruff format --check .
+      - name: Mypy
+        working-directory: backend
+        run: uv run mypy app/
+      - name: Pytest
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://trader:ci@localhost:5432/dashboard
+          APP_SECRET_KEY: ci-secret-key-32-chars-minimum-req
+          APP_ENV: dev
+          APP_CORS_ORIGINS: '["http://localhost:5173"]'
+          POSTGRES_POOL_SIZE: '2'
+          POSTGRES_MAX_OVERFLOW: '2'
+          REDIS_PASSWORD: ci
+          REDIS_URL: redis://:ci@localhost:6379/0
+        run: uv run pytest --cov=app --cov-report=term-missing
+      - name: Docker build (main only)
+        if: github.ref == 'refs/heads/main'
+        working-directory: backend
+        run: docker build -t trading-dashboard-backend:ci .
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+      - name: Stylelint
+        working-directory: frontend
+        run: pnpm stylelint
+      - name: Typecheck
+        working-directory: frontend
+        run: pnpm typecheck
+      - name: Tests
+        working-directory: frontend
+        run: pnpm test
+      - name: Build
+        working-directory: frontend
+        run: pnpm build
+      - name: Storybook build
+        working-directory: frontend
+        run: pnpm build-storybook
+      - name: Docker build (main only)
+        if: github.ref == 'refs/heads/main'
+        working-directory: frontend
+        run: docker build -t trading-dashboard-frontend:ci .
