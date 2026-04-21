@@ -34,7 +34,7 @@
 html.dark { color-scheme: dark; }
 
 body {
-  background: var(--color-bg);
-  color: var(--color-fg);
   font-family: var(--font-sans);
+  color: var(--color-fg);
+  background: var(--color-bg);
 }

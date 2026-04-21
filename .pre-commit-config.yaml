@@ -1,0 +1,35 @@
+# Revs pinned by `pre-commit autoupdate` at impl time.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.20.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [pydantic, sqlalchemy, pydantic-settings]
+        files: ^backend/app/
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: bash -c 'cd frontend && pnpm lint --fix'
+        language: system
+        files: ^frontend/.*\.(ts|tsx|js|jsx|mjs|cjs)$
+        pass_filenames: false
+      - id: stylelint
+        name: stylelint
+        entry: bash -c 'cd frontend && pnpm stylelint --fix'
+        language: system
+        files: ^frontend/.*\.(css|tsx)$
+        pass_filenames: false
+      - id: commitlint
+        name: commitlint
+        stages: [commit-msg]
+        entry: bash -c 'cd frontend && pnpm exec commitlint --config ../commitlint.config.cjs --edit "$1"'
+        language: system
