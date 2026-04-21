@@ -4,5 +4,6 @@
  * since no stock names render yet.
  */
 export function langForMarket(_exchange: string): string {
+  void _exchange;
   return 'en';
 }
