@@ -1,17 +1,17 @@
 # Tasks
 
-## Phase 0 — Repo scaffold & local-dev loop  *(in progress)*
-- [ ] Initialize git + gh remote (private, proprietary) + conventional-commits pre-commit
-- [ ] Backend: uv project, FastAPI /health, structlog + redaction stub, Alembic init, tests, Dockerfile
-- [ ] Frontend: Vite + React 19 + TS strict + Tailwind v4 + shadcn init + Button primitive
-- [ ] Storybook 9 configured, Button has stories + tests
-- [ ] Design tokens: spacing/typography/colors/radii/motion (rem only)
-- [ ] Lint stack: Stylelint (no-px), ESLint (boundaries), pre-commit, commitlint
-- [ ] docker-compose.yml: redis + backend + frontend (Postgres runs natively on Windows)
-- [ ] .env.example with all bootstrap vars documented
-- [ ] GitHub Actions CI: backend + frontend jobs, both green
-- [ ] Docs: CLAUDE.md (updated), TASKS.md, CHANGELOG.md, README.md
-- [ ] First PR merged; tag v0.0.1
+## Phase 0 — Repo scaffold & local-dev loop  *(complete — v0.0.1 · 2026-04-21)*
+- [x] Initialize git + gh remote (private, proprietary) + conventional-commits pre-commit
+- [x] Backend: uv project, FastAPI /health, structlog + redaction stub, Alembic init, tests, Dockerfile
+- [x] Frontend: Vite + React 19 + TS strict + Tailwind v4 + shadcn init + Button primitive
+- [x] Storybook 10 configured, Button has stories + tests *(bumped from plan's 9 per latest-stable policy)*
+- [x] Design tokens: spacing/typography/colors/radii/motion (rem only)
+- [x] Lint stack: Stylelint (no-px), ESLint (boundaries), pre-commit, commitlint
+- [x] docker-compose.yml: redis + backend + frontend (Postgres runs natively on Windows)
+- [x] .env.example with all bootstrap vars documented
+- [x] GitHub Actions CI: backend + frontend jobs, both green
+- [x] Docs: CLAUDE.md, TASKS.md, CHANGELOG.md, README.md
+- [x] First PR merged (`#1`); tag `v0.0.1`
 
 ## Phase 1 — VPS infra skeleton  *(next)*
 ## Phase 2 — Auth + DB-backed config service (app_config, app_secrets)
