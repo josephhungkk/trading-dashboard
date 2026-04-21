@@ -1,0 +1,8 @@
+# Copy to docker-compose.override.yml and tweak for your local setup.
+# Common WSL quirk: Vite HMR misses filesystem events across the WSL boundary.
+# See memory feedback_vite_wsl_restart.md
+services:
+  frontend:
+    environment:
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
