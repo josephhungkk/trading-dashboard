@@ -1,0 +1,23 @@
+"""Bootstrap config — only values needed before the DB is reachable.
+
+DB-backed ConfigService (app_config/app_secrets) lands in Phase 2.
+"""
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    env: str = Field(default="dev", alias="APP_ENV")
+    secret_key: str = Field(alias="APP_SECRET_KEY")
+    cors_origins: list[str] = Field(default_factory=list, alias="APP_CORS_ORIGINS")
+    database_url: str = Field(alias="DATABASE_URL")
+    postgres_pool_size: int = Field(default=5, alias="POSTGRES_POOL_SIZE")
+    postgres_max_overflow: int = Field(default=10, alias="POSTGRES_MAX_OVERFLOW")
+    redis_password: str = Field(alias="REDIS_PASSWORD")
+    redis_url: str = Field(alias="REDIS_URL")
+
+
+settings = Settings()  # type: ignore[call-arg]
