@@ -16,3 +16,5 @@ coverage/
 .DS_Store
 .remember/
 .claude/
+scripts/cloudflare/.state/
+!scripts/cloudflare/.state/.gitkeep
