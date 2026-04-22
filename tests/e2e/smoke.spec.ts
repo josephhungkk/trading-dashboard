@@ -27,10 +27,10 @@ test.describe('Phase 1 smoke', () => {
     expect(h['content-security-policy']).toContain("default-src 'self'");
   });
 
-  test('unauthenticated requests are blocked at CF Access', async ({ browser }) => {
-    const ctx = await browser.newContext({ extraHTTPHeaders: {} });
-    const resp = await ctx.request.get('/health', { failOnStatusCode: false });
-    expect([302, 401, 403]).toContain(resp.status());
-    await ctx.close();
+  test('unauthenticated requests are blocked at CF Access', async ({ baseURL }) => {
+    // Use Node fetch with redirect:'manual' — Playwright's APIRequestContext
+    // silently follows the CF 302 to the login page and surfaces 200, masking the gate.
+    const resp = await fetch(`${baseURL}/health`, { redirect: 'manual' });
+    expect([302, 401, 403]).toContain(resp.status);
   });
 });
