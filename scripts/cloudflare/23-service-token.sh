@@ -22,7 +22,9 @@ if [[ -n "$existing" && "$existing" != "null" ]]; then
 fi
 
 log "Creating new service token..."
-body=$(jq -n --arg n "$TOKEN_NAME" '{name:$n,duration:"non-expiring"}')
+# CF no longer accepts "non-expiring"; omitting duration defaults to 8760h (1 year).
+# TODO: annual rotation reminder — regenerate + update GH secrets before expires_at.
+body=$(jq -n --arg n "$TOKEN_NAME" '{name:$n}')
 resp=$(cf POST "/accounts/$CF_ACCOUNT_ID/access/service_tokens" --data "$body")
 echo "$resp" | jq -e '.success' >/dev/null || die "Create failed: $(echo "$resp" | jq -c .)"
 
