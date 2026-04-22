@@ -41,7 +41,12 @@ if ! sshd -t; then
 fi
 
 echo "==> Config valid. Reloading sshd..."
-systemctl reload sshd
+# Service name differs: Debian/Ubuntu = 'ssh'; RHEL/CentOS/Fedora = 'sshd'.
+if systemctl list-unit-files ssh.service 2>/dev/null | grep -q ssh.service; then
+    systemctl reload ssh
+else
+    systemctl reload sshd
+fi
 
 echo
 echo "============================================================"
