@@ -34,6 +34,9 @@ services:
   backend:
     build: ./backend
     env_file: .env
+    # Override uv cache to tmpfs — /root/.cache is on read-only root FS.
+    environment:
+      UV_CACHE_DIR: /tmp/uv-cache
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       redis: { condition: service_healthy }
@@ -77,8 +80,8 @@ services:
     cap_add: ["NET_BIND_SERVICE"]
     read_only: true
     tmpfs:
-      - "/var/cache/nginx:size=20m"
-      - "/var/run:size=1m"
+      - "/var/cache/nginx:size=20m,mode=1777"
+      - "/var/run:size=1m,mode=1777"
       - "/tmp:size=10m"
     logging:
       driver: json-file
@@ -120,9 +123,9 @@ services:
     cap_add: ["NET_BIND_SERVICE"]
     read_only: true
     tmpfs:
-      - "/var/log/nginx:size=20m"
-      - "/var/cache/nginx:size=20m"
-      - "/var/run:size=1m"
+      - "/var/log/nginx:size=20m,mode=1777"
+      - "/var/cache/nginx:size=20m,mode=1777"
+      - "/var/run:size=1m,mode=1777"
     logging:
       driver: json-file
       options:
