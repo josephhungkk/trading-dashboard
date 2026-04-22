@@ -5,15 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
-### Changed
-- Smoke-test PR confirming the CI loop works on `pull_request: branches: [main]`.
+## [0.1.0] — 2026-04-22
+### Added
+- Cloudflare Tunnel (cloudflared on VPS) replaces public 80/443.
+- Cloudflare Access with Google IdP + 2-email allowlist.
+- CF Access service token bypass for CI smoke tests.
+- WireGuard dev-bypass route to nginx (10.10.0.1:80).
+- `scripts/cloudflare/` — 10 idempotent CF API driver scripts.
+- `deploy/vps/` — install-prep + install-enable + sshd-hardening + UFW + fail2ban + cloudflared.service.
+- `docker-compose.prod.yml` — dual-bound nginx, tmpfs, non-root users, resource limits, pinned digests.
+- `tests/e2e/` — Playwright smoke test; runs in CI via deploy.yml.
+- `.github/workflows/deploy.yml` — rsync + compose up + smoke on push-to-main.
+- gitleaks pre-commit hook.
+- `pnpm audit` + `pip-audit` CI steps (fail on high/critical).
+- Real `scripts/deploy.sh` (replaced Phase 0 stub).
+- Architect-review workflow codified in CLAUDE.md phase workflow.
 
-### Planned for [0.1.0]
-- Full VPS cutover: Dashboard_old torn down, new rebuild deployed at dashboard.kiusinghung.com.
-- Cloudflare Tunnel replacing public 80/443 ports + certbot.
-- CF Access Google-login gate with 2-email allowlist + service-token CI bypass.
-- Multi-layer hardening: IONOS firewall + UFW + fail2ban + nginx security headers + CF WAF + gitleaks.
-- `trading` DB dropped; `dashboard` DB is sole survivor.
+### Changed
+- Nginx kept as defense-in-depth (headers, rate limits, Host: strict-match); certbot + cert-reload watcher removed.
+- IONOS firewall reduced to 2222/tcp + 51820/udp only (was 80, 443, 8443, 8447, 51820, 2222).
+- SSH hardened: password auth off, `AllowUsers trader` only, `MaxAuthTries 3`, Port 2222.
+
+### Removed
+- Dashboard_old deployment at dashboard.kiusinghung.com (torn down during cutover).
+- Let's Encrypt certbot container + cert-reload sentinel.
+- `trading` DB on NUC PG18 (already dropped pre-cutover).
+- Public 80/443 exposure on VPS.
 
 ## [0.0.1] — 2026-04-21
 ### Added
