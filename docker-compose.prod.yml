@@ -8,7 +8,10 @@
 services:
   redis:
     image: redis:7-alpine@sha256:7aec734b2bb298a1d769fd8729f13b8514a41bf90fcdd1f38ec52267fbaa8ee6
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    # Start as non-root to skip su-exec (blocked by cap_drop: ALL).
+    user: "redis"
+    # Disable persistence — session cache only; no /data writes under read_only.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--save", "", "--appendonly", "no"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
@@ -59,6 +62,8 @@ services:
     # default final target. Phase 0 compose overrode to target: build for dev.
     build:
       context: ./frontend
+    # Start as nginx user (uid 101) to skip entrypoint's chown (blocked by cap_drop: ALL).
+    user: "nginx"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
@@ -69,6 +74,7 @@ services:
     cpus: "0.5"
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
     read_only: true
     tmpfs:
       - "/var/cache/nginx:size=20m"
@@ -83,6 +89,8 @@ services:
 
   nginx:
     image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    # Start as nginx user (uid 101) to skip entrypoint's chown (blocked by cap_drop: ALL).
+    user: "nginx"
     restart: unless-stopped
     # DUAL-bound: loopback for cloudflared + wg0 for NUC dev bypass.
     ports:
