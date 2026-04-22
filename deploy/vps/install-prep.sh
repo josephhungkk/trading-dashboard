@@ -30,7 +30,7 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 2222/tcp  comment 'SSH on non-default port'
 ufw allow 51820/udp comment 'WireGuard'
-ufw allow in on wg0 to any port 80 proto tcp comment 'WG dev bypass to nginx'
+ufw allow in on wg0 comment 'WG mesh is trusted (peer admission via wg keys)'
 ufw --force enable
 ufw status verbose
 
