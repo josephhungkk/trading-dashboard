@@ -13,20 +13,21 @@
 - [x] Docs: CLAUDE.md, TASKS.md, CHANGELOG.md, README.md
 - [x] First PR merged (`#1`); tag `v0.0.1`
 
-## Phase 1 — VPS cutover & security hardening  *(in progress)*
-- [ ] Cloudflare automation scripts (scripts/cloudflare/*.sh, 10+1 helpers)
-- [ ] VPS install scripts (deploy/vps/install-prep.sh + install-enable.sh + friends)
-- [ ] nginx config ported from Dashboard_old, certbot stripped
-- [ ] docker-compose.prod.yml with dual-bound nginx + tmpfs + pinned digests
-- [ ] Playwright smoke test (tests/e2e/smoke.spec.ts)
-- [ ] GitHub Actions deploy.yml + CI audit steps
-- [ ] gitleaks pre-commit hook
-- [ ] Real scripts/deploy.sh (replace Phase 0 stub)
-- [ ] Cutover executed: old stack down, trading DB dropped, new stack live
-- [ ] IONOS firewall reduced to 2 ports, direct-IP bypass confirmed closed
-- [ ] Playwright smoke test passes via CF Access service token
-- [ ] v0.1.0 tagged and pushed
-## Phase 2 — Auth + DB-backed config service (app_config, app_secrets)
+## Phase 1 — VPS cutover & security hardening  *(complete — v0.1.0 · 2026-04-22)*
+- [x] Cloudflare automation scripts (scripts/cloudflare/*.sh, 10+1 helpers)
+- [x] VPS install scripts (deploy/vps/install-prep.sh + install-enable.sh + friends)
+- [x] nginx config ported from Dashboard_old, certbot stripped
+- [x] docker-compose.prod.yml with dual-bound nginx + tmpfs + pinned digests
+- [x] Playwright smoke test (tests/e2e/smoke.spec.ts)
+- [x] GitHub Actions deploy.yml + CI audit steps
+- [x] gitleaks pre-commit hook
+- [x] Real scripts/deploy.sh (replace Phase 0 stub)
+- [x] Cutover executed: old stack down, trading DB dropped, new stack live
+- [x] IONOS firewall reduced to 2 ports, direct-IP bypass confirmed closed
+- [x] Playwright smoke test passes via CF Access service token
+- [x] v0.1.0 tagged and pushed
+
+## Phase 2 — Auth + DB-backed config service (app_config, app_secrets)  *(next)*
 ## Phase 3 — Frontend shell (mocks)
 ## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)
 ## Phase 5 — Trade execution (IBKR)
