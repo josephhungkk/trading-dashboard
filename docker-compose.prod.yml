@@ -112,7 +112,8 @@ services:
       backend:  { condition: service_healthy }
       frontend: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/health || exit 1"]
+      # Must send correct Host — nginx returns 444 (close-without-response) for other hosts.
+      test: ["CMD-SHELL", "wget -q -O- --header='Host: dashboard.kiusinghung.com' http://127.0.0.1/health | grep -q status.:.ok || exit 1"]
       interval: 15s
       retries: 5
       start_period: 20s

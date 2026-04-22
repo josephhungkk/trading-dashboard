@@ -39,7 +39,7 @@ EOF
 
 echo "==> Waiting for backend health..."
 for i in $(seq 1 30); do
-    if ssh -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" 'curl -sf http://127.0.0.1/health' >/dev/null; then
+    if ssh -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" 'curl -sf -H "Host: dashboard.kiusinghung.com" http://127.0.0.1/health' >/dev/null; then
         echo "✓ Backend healthy"
         break
     fi

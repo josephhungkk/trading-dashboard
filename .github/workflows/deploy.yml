@@ -60,7 +60,7 @@ jobs:
       - name: Wait for backend health (remote)
         run: |
           ssh -p 2222 trader@88.208.197.219 \
-            'for i in $(seq 1 30); do curl -sf http://127.0.0.1/health && exit 0; sleep 2; done; exit 1'
+            'for i in $(seq 1 30); do curl -sf -H "Host: dashboard.kiusinghung.com" http://127.0.0.1/health && exit 0; sleep 2; done; exit 1'
 
       - uses: pnpm/action-setup@v4
         with: { version: latest }

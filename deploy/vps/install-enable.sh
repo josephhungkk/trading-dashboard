@@ -36,7 +36,7 @@ cp -f "$REPO/deploy/vps/cloudflared.service" /etc/systemd/system/cloudflared.ser
 systemctl daemon-reload
 
 echo "==> Verifying backend reachable on loopback..."
-if ! curl -sf http://127.0.0.1/health -o /dev/null; then
+if ! curl -sf -H "Host: dashboard.kiusinghung.com" http://127.0.0.1/health -o /dev/null; then
     echo "✗ http://127.0.0.1/health not responding. Start the compose stack first."
     exit 1
 fi
