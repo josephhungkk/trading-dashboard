@@ -23,7 +23,8 @@ The frontend and backend run on an IONOS VPS behind Cloudflare. Broker gateways 
 - **Broker adapters:** `ib_async` (IBKR), `futu-api` (Futu HK), `requests-oauthlib` (Schwab) — land in Phases 4, 6, 8 respectively
 - **AI:** Ollama — 7-8B models on NUC, 14-70B on the heavy box (WoL-woken on demand)
 - **Orchestration:** Docker Compose (docker-ce inside WSL on the NUC; Phase 1 adds `docker-compose.prod.yml` for the VPS)
-- **Reverse proxy:** Nginx with Let's Encrypt DNS-01 via Cloudflare (Phase 1+, on the VPS)
+- **Reverse proxy & TLS:** Cloudflare Tunnel terminates TLS at CF edge (no public 80/443 on VPS); nginx runs on the VPS as defense-in-depth (rate limits, security headers, Host: strict-match). Let's Encrypt + certbot retired in Phase 1.
+- **Access gate:** CF Access with Google IdP for `josephhungkk@gmail.com` + `ispyling@gmail.com`; CF Access service token for CI bypass; WireGuard route (`http://10.10.0.1/`) for NUC-local dev bypass.
 - **Node:** Node 24 LTS via Corepack
 - **Package managers:** `pnpm` (frontend), `uv` (backend)
 - **Lint:** ruff + mypy (Python); ESLint 9 flat config + `eslint-plugin-boundaries` + `eslint-plugin-jsx-a11y` + Stylelint (frontend); `pre-commit` + `commitlint` at commit-msg
@@ -182,8 +183,16 @@ See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3` for the ca
     docker compose exec backend alembic revision --autogenerate -m "add_alerts_table"
     docker compose exec backend alembic upgrade head
 
-    # Deploy to VPS (Phase 1+)
+    # Deploy to VPS (manual; GitHub Actions auto-deploys on push-to-main)
     ./scripts/deploy.sh
+
+    # Dev bypass (from NUC, over WireGuard — no CF Access needed)
+    curl -sf http://10.10.0.1/health
+
+    # CI bypass (from anywhere, via service token)
+    curl -sf https://dashboard.kiusinghung.com/health \
+      -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+      -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
 
 ## Security Rules
 
