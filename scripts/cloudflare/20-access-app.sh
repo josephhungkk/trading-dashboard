@@ -23,8 +23,7 @@ else
           type:"self_hosted",
           session_duration:"24h",
           auto_redirect_to_identity:false,
-          app_launcher_visible:false,
-          cors_headers:{allow_all_methods:false,allow_all_origins:false}}')
+          app_launcher_visible:false}')
     resp=$(cf POST "/accounts/$CF_ACCOUNT_ID/access/apps" --data "$body")
     echo "$resp" | jq -e '.success' >/dev/null || die "Create failed: $(echo "$resp" | jq -c .)"
     APP_ID=$(echo "$resp" | jq -r '.result.id')
