@@ -14,6 +14,10 @@ TUNNEL_ID="${1:-}"
 [[ -n "$TUNNEL_ID" ]] || { echo "Usage: $0 <tunnel-uuid>"; exit 1; }
 
 CRED_PATH="/etc/cloudflared/$TUNNEL_ID.json"
+# Accept NUC-side naming (10-tunnel-create.sh writes cloudflared-<UUID>.json) and rename on-the-fly.
+if [[ ! -f "$CRED_PATH" && -f "/etc/cloudflared/cloudflared-$TUNNEL_ID.json" ]]; then
+    mv "/etc/cloudflared/cloudflared-$TUNNEL_ID.json" "$CRED_PATH"
+fi
 [[ -f "$CRED_PATH" ]] || { echo "Credentials file missing: $CRED_PATH"; exit 1; }
 
 chown root:root "$CRED_PATH"
