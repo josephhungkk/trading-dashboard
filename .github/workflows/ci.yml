@@ -29,6 +29,9 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: uv sync --frozen
+      - name: pip-audit
+        working-directory: backend
+        run: uv run pip-audit --strict
       - name: Ruff check
         working-directory: backend
         run: uv run ruff check .
@@ -70,6 +73,9 @@ jobs:
       - name: Install frontend deps
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+      - name: pnpm audit
+        working-directory: frontend
+        run: pnpm audit --audit-level=high
       - name: Lint
         working-directory: frontend
         run: pnpm lint
