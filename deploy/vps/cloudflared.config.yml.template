@@ -1,0 +1,16 @@
+# /etc/cloudflared/config.yml
+# install-enable.sh fills in the tunnel UUID.
+tunnel: __TUNNEL_ID__
+credentials-file: /etc/cloudflared/__TUNNEL_ID__.json
+
+loglevel: info
+
+ingress:
+  # Primary hostname — forward to nginx on loopback
+  - hostname: dashboard.kiusinghung.com
+    service: http://127.0.0.1:80
+    originRequest:
+      connectTimeout: 5s
+      noHappyEyeballs: true
+  # Catch-all: 404 everything else
+  - service: http_status:404
