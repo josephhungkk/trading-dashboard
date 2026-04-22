@@ -1,0 +1,94 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'TASKS.md'
+      - 'CHANGELOG.md'
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 2222 -H 88.208.197.219 >> ~/.ssh/known_hosts
+
+      - name: Rsync to VPS
+        run: |
+          rsync -avz --delete \
+            --exclude '.git/' \
+            --exclude 'node_modules/' \
+            --exclude '__pycache__/' \
+            --exclude '.venv/' \
+            --exclude '*.pyc' \
+            --exclude '.env' \
+            --exclude 'secrets/' \
+            --exclude 'frontend/dist/' \
+            --exclude 'tests/e2e/test-results/' \
+            --exclude 'tests/e2e/playwright-report/' \
+            --exclude 'scripts/cloudflare/.state/' \
+            -e "ssh -p 2222" \
+            ./ trader@88.208.197.219:/home/trader/trading-dashboard/
+
+      - name: Remote build + up + nginx reload
+        run: |
+          ssh -p 2222 trader@88.208.197.219 <<'EOF'
+            set -e
+            cd /home/trader/trading-dashboard
+            docker compose -f docker-compose.prod.yml build
+            docker compose -f docker-compose.prod.yml up -d
+            docker compose -f docker-compose.prod.yml exec -T nginx nginx -s reload
+            docker compose -f docker-compose.prod.yml ps
+          EOF
+
+      - name: Wait for backend health (remote)
+        run: |
+          ssh -p 2222 trader@88.208.197.219 \
+            'for i in $(seq 1 30); do curl -sf http://127.0.0.1/health && exit 0; sleep 2; done; exit 1'
+
+      - uses: pnpm/action-setup@v4
+        with: { version: latest }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: tests/e2e/pnpm-lock.yaml
+
+      - name: Install e2e deps
+        working-directory: tests/e2e
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install chromium --with-deps
+
+      - name: Smoke test via CF Access service token
+        working-directory: tests/e2e
+        env:
+          CF_ACCESS_CLIENT_ID:     ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          SMOKE_BASE_URL:          https://dashboard.kiusinghung.com
+        run: pnpm test:smoke
+
+      - name: Upload smoke artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-failure-${{ github.run_id }}
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
