@@ -34,14 +34,13 @@ services:
   backend:
     build: ./backend
     env_file: .env
-    # Override uv cache to tmpfs — /root/.cache is on read-only root FS.
-    environment:
-      UV_CACHE_DIR: /tmp/uv-cache
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       redis: { condition: service_healthy }
     restart: unless-stopped
-    # Prod: use the Dockerfile CMD (uvicorn WITHOUT --reload). No command: override here.
+    # Bypass `uv run` at runtime — dev-deps sync would OOM the /tmp tmpfs + needs
+    # network + writes to a cache dir that's read-only under our hardening.
+    command: ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8000/health || exit 1"]
       interval: 15s
