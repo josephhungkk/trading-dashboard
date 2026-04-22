@@ -31,6 +31,10 @@ class AdminIdentity:
     kind: AdminKind
     claims: dict[str, Any] = field(default_factory=dict)
 
+    def __repr__(self) -> str:
+        # Don't leak `claims` (full JWT payload) into logs via default dataclass repr.
+        return f"AdminIdentity(email={self.email!r}, kind={self.kind!r})"
+
 
 def client_ip_in_trusted_nets(client_ip: str, nets: list[str]) -> bool:
     """Return True if client_ip is contained in any CIDR in nets."""
@@ -86,6 +90,7 @@ class CFAccessVerifier:
             return None
         if not client_ip_in_trusted_nets(client_ip, self.trusted_dev_nets):
             return None
+        log.warning("dev_bypass_granted client_ip=%s", client_ip)
         return AdminIdentity(email="dev@localhost", kind="dev-bypass", claims={})
 
     def verify(self, token: str, client_ip: str) -> AdminIdentity:

@@ -217,17 +217,22 @@ def test_kid_miss_forces_refresh(rsa_public_pem, rsa_private_pem):
     v._jwks_client.invalidate_cache.assert_called_once()
 
 
-def test_dev_bypass_when_env_dev_and_ip_in_list():
+def test_dev_bypass_when_env_dev_and_ip_in_list(caplog):
+    import logging
+
     v = CFAccessVerifier(
         team_domain="",
         audience="",
         trusted_dev_nets=["10.10.0.0/24"],
         env="dev",
     )
-    identity = v.check_dev_bypass(client_ip="10.10.0.5")
+    with caplog.at_level(logging.WARNING, logger="app.core.cf_access"):
+        identity = v.check_dev_bypass(client_ip="10.10.0.5")
     assert identity is not None
     assert identity.email == "dev@localhost"
     assert identity.kind == "dev-bypass"
+    assert any("dev_bypass_granted" in rec.message for rec in caplog.records)
+    assert any("10.10.0.5" in rec.message for rec in caplog.records)
 
 
 def test_dev_bypass_inactive_when_env_dev_but_ip_not_in_list():
@@ -292,3 +297,18 @@ def test_client_ip_skips_malformed_cidrs():
     nets = ["not-a-cidr", "10.10.0.0/24"]
     assert client_ip_in_trusted_nets("10.10.0.5", nets)
     assert not client_ip_in_trusted_nets("8.8.8.8", ["not-a-cidr"])
+
+
+def test_admin_identity_repr_scrubs_claims():
+    """repr(AdminIdentity) must not include claims (could leak iss/aud/exp to logs)."""
+    identity = AdminIdentity(
+        email="alice@example.com",
+        kind="user",
+        claims={"iss": "secret-issuer", "aud": "secret-aud", "exp": 12345},
+    )
+    r = repr(identity)
+    assert "alice@example.com" in r
+    assert "user" in r
+    assert "secret-issuer" not in r
+    assert "secret-aud" not in r
+    assert "12345" not in r
