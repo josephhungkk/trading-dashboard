@@ -102,3 +102,41 @@ async def test_listener_evicts_on_message(redis):
         await task
     except asyncio.CancelledError:
         pass
+
+
+# Opt-in real-Redis fidelity test. fakeredis is great for correctness but its
+# pub/sub dispatcher runs on the same process — it won't catch issues where the
+# real redis-py asyncio client mis-parses a subscribe frame or reconnect. Set
+# CI_USE_REAL_REDIS=1 (CI workflow does this via its `redis` service) to run.
+import os  # noqa: E402
+
+import redis.asyncio as real_redis_asyncio  # noqa: E402
+
+
+@pytest.mark.skipif(
+    os.environ.get("CI_USE_REAL_REDIS") != "1",
+    reason="set CI_USE_REAL_REDIS=1 to run against a real redis:7-alpine service",
+)
+@pytest.mark.asyncio
+async def test_real_redis_pubsub_fidelity():
+    url = os.environ.get("CI_REDIS_URL", "redis://localhost:6379/0")
+    r = real_redis_asyncio.from_url(url, decode_responses=False)
+    try:
+        cache = ConfigCache(
+            redis=r, channel="config:invalidate:real", kind_label="config", ttl_seconds=60
+        )
+        cache.set(("ns", "k"), "stale")
+
+        task = asyncio.create_task(cache.run_listener())
+        await asyncio.sleep(0.2)
+        await r.publish("config:invalidate:real", b"ns|k")
+        await asyncio.sleep(0.3)
+        assert cache.get(("ns", "k")) is None
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        await r.aclose()

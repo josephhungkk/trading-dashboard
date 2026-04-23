@@ -21,6 +21,13 @@ jobs:
           --health-cmd "pg_isready -U trader"
           --health-interval 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -51,7 +58,9 @@ jobs:
           POSTGRES_POOL_SIZE: '2'
           POSTGRES_MAX_OVERFLOW: '2'
           REDIS_PASSWORD: ci
-          REDIS_URL: redis://:ci@localhost:6379/0
+          REDIS_URL: redis://localhost:6379/0
+          CI_USE_REAL_REDIS: '1'
+          CI_REDIS_URL: redis://localhost:6379/0
         run: uv run pytest --cov=app --cov-report=term-missing
       - name: Docker build (main only)
         if: github.ref == 'refs/heads/main'
