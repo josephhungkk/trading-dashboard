@@ -87,13 +87,6 @@ async def require_admin_jwt(request: Request) -> AdminIdentity:
     token = request.headers.get("Cf-Access-Jwt-Assertion")
     if not token:
         metrics.cf_jwt_verification_total.labels(result="missing_header").inc()
-        # TEMP diag (v0.2.0): dump header NAMES (no values) when JWT absent —
-        # helps identify CF Access misconfig vs. nginx header stripping.
-        log.warning(
-            "jwt_missing client_ip=%s hdrs=%s",
-            client_ip,
-            ",".join(sorted(request.headers.keys())),
-        )
         raise HTTPException(status_code=401, detail="missing cf-access jwt")
 
     try:
