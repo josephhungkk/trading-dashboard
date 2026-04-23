@@ -50,6 +50,10 @@
 ## Phase 6 — Futu adapter + CJK font polish
 ## Phase 7 — Alerts + Telegram + AI router (Ollama light + heavy-box WoL)
 ## Phase 8 — Schwab adapter
+## Phase 2.x — follow-ups discovered during v0.2.0 verify
+
+- [ ] nginx: add `location = /metrics { proxy_pass http://backend:8000/metrics; }` so Prometheus / Grafana can scrape through CF Access + service token. Backend endpoint exists and is auth-gated; only nginx is missing the proxy. Verified in prod 2026-04-23.
+
 ## Phase 9 — Bots service + security hardening
 
 - [ ] PG client-cert auth over WireGuard — drop the plaintext `DATABASE_URL` password.
