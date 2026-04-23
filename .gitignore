@@ -8,6 +8,9 @@ dist/
 build/
 storybook-static/
 coverage/
+.coverage
+.coverage.*
+htmlcov/
 .superpowers/
 .vite/
 .ruff_cache/
