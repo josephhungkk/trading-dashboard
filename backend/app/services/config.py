@@ -1,4 +1,20 @@
-"""ConfigService — typed DB-backed config + Fernet-encrypted secrets."""
+"""ConfigService — typed DB-backed config + Fernet-encrypted secrets.
+
+Cache coherence contract
+------------------------
+Writes (``set``, ``set_secret``, ``delete``, ``delete_secret``) invalidate the
+local in-process cache and publish a Redis pub/sub message *after* the DB
+commit succeeds. Between ``commit()`` and ``publish_invalidation()`` there is
+a small window in which peer workers still serve the old value from their own
+local caches; the cache's TTL (``ttl_seconds`` on ``ConfigCache``) is the
+hard upper bound on staleness if the publish itself fails (e.g., Redis is
+down — ``publish_invalidation`` swallows + counts the error). For config
+data this is intentional: availability > strict coherence.
+
+Plaintext is never cached locally. ``secrets_cache`` exists only so that
+writes to a secret emit a cross-worker invalidation signal; the read path
+(``_reveal_typed``) always round-trips to the DB + Fernet.
+"""
 
 import builtins
 import json
@@ -44,6 +60,39 @@ def _coerce_from_stored(raw: str | None, raw_json: Any, value_type: str) -> Any:
     return raw
 
 
+def _encode_plaintext(value: Any, value_type: ValueType) -> bytes:
+    if value_type == "json":
+        return json.dumps(value).encode()
+    if value_type == "bool":
+        return b"true" if bool(value) else b"false"
+    if value_type == "int":
+        return str(int(value)).encode()
+    return str(value).encode()
+
+
+def _decode_plaintext(plaintext: bytes, value_type: str) -> Any:
+    if value_type == "json":
+        return json.loads(plaintext.decode())
+    if value_type == "int":
+        return int(plaintext.decode())
+    if value_type == "bool":
+        return plaintext.decode() == "true"
+    return plaintext.decode()
+
+
+def _pack_config_row(value: Any, value_type: ValueType) -> tuple[str | None, Any]:
+    """Return (``value`` column, ``value_json`` column) honoring the
+    ``app_config_value_exclusive`` CHECK constraint. Non-json rows bind SQL
+    NULL (not JSONB null) to ``value_json``."""
+    if value_type == "json":
+        return None, value
+    if value_type == "bool":
+        return ("true" if bool(value) else "false", null())
+    if value_type == "int":
+        return str(int(value)), null()
+    return str(value), null()
+
+
 class ConfigService:
     def __init__(
         self,
@@ -56,24 +105,40 @@ class ConfigService:
         self._cache = cache
         self._secrets_cache = secrets_cache
         self._fernet = fernet
+        # Capture the MultiFernet primary at construction so the reveal path
+        # does not reach into library internals on every call. A library
+        # upgrade that renames ``_fernets`` now fails loudly at startup
+        # instead of silently skipping the PREV-hit metric.
+        self._primary_fernet: Fernet | None = (
+            fernet._fernets[0] if isinstance(fernet, MultiFernet) else None
+        )
 
-    async def get(self, ns: str, key: str, default: Any = None) -> Any:
-        cached = self._cache.get((ns, key))
-        if cached is not None:
-            metrics.config_ops_total.labels(op="get", kind="config", result="hit").inc()
-            return cached[0]
+    async def _fetch_row(self, ns: str, key: str) -> tuple[Any, str] | None:
+        """Fetch a config row from the DB, coerce, cache, and return
+        ``(materialized_value, value_type)``. Returns ``None`` if absent.
+        Callers apply type-guard / default logic on top."""
         async with self._session_factory() as s:
             stmt = select(AppConfig.value, AppConfig.value_json, AppConfig.value_type).where(
                 AppConfig.namespace == ns, AppConfig.key == key
             )
             row = (await s.execute(stmt)).one_or_none()
         if row is None:
-            metrics.config_ops_total.labels(op="get", kind="config", result="miss").inc()
-            return default
+            return None
         materialized = _coerce_from_stored(row.value, row.value_json, row.value_type)
         self._cache.set((ns, key), (materialized, row.value_type))
+        return materialized, row.value_type
+
+    async def get(self, ns: str, key: str, default: Any = None) -> Any:
+        cached = self._cache.get((ns, key))
+        if cached is not None:
+            metrics.config_ops_total.labels(op="get", kind="config", result="hit").inc()
+            return cached[0]
+        fetched = await self._fetch_row(ns, key)
+        if fetched is None:
+            metrics.config_ops_total.labels(op="get", kind="config", result="miss").inc()
+            return default
         metrics.config_ops_total.labels(op="get", kind="config", result="ok").inc()
-        return materialized
+        return fetched[0]
 
     async def get_int(self, ns: str, key: str, default: int | None = None) -> int | None:
         return cast(int | None, await self._get_typed(ns, key, "int", default))
@@ -84,7 +149,7 @@ class ConfigService:
     async def get_json(self, ns: str, key: str, default: Any = None) -> Any:
         return await self._get_typed(ns, key, "json", default)
 
-    async def _get_typed(self, ns: str, key: str, expected: str, default: Any) -> Any:
+    async def _get_typed(self, ns: str, key: str, expected: ValueType, default: Any) -> Any:
         cached = self._cache.get((ns, key))
         if cached is not None:
             value, stored_type = cached
@@ -93,40 +158,20 @@ class ConfigService:
                     f"{ns}.{key} has value_type={stored_type!r}, accessor expected {expected!r}"
                 )
             return value
-        async with self._session_factory() as s:
-            stmt = select(AppConfig.value, AppConfig.value_json, AppConfig.value_type).where(
-                AppConfig.namespace == ns, AppConfig.key == key
-            )
-            row = (await s.execute(stmt)).one_or_none()
-        if row is None:
+        fetched = await self._fetch_row(ns, key)
+        if fetched is None:
             return default
-        if row.value_type != expected:
+        materialized, stored_type = fetched
+        if stored_type != expected:
             raise ConfigTypeError(
-                f"{ns}.{key} has value_type={row.value_type!r}, accessor expected {expected!r}"
+                f"{ns}.{key} has value_type={stored_type!r}, accessor expected {expected!r}"
             )
-        materialized = _coerce_from_stored(row.value, row.value_json, row.value_type)
-        self._cache.set((ns, key), (materialized, row.value_type))
         return materialized
 
-    async def set(self, ns: str, key: str, value: Any, value_type: str = "str") -> AppConfig:
+    async def set(self, ns: str, key: str, value: Any, value_type: ValueType = "str") -> AppConfig:
         if value_type not in ("str", "int", "bool", "json"):
             raise ValueError(f"invalid value_type={value_type!r}")
-
-        # For non-json rows, bind SQL NULL (not JSONB null) to value_json so the
-        # app_config_value_exclusive CHECK constraint is satisfied. JSONB columns
-        # otherwise serialize Python None as JSONB 'null' literal, which is NOT NULL.
-        if value_type == "json":
-            row_value = None
-            row_value_json: Any = value
-        elif value_type == "bool":
-            row_value = "true" if bool(value) else "false"
-            row_value_json = null()
-        elif value_type == "int":
-            row_value = str(int(value))
-            row_value_json = null()
-        else:
-            row_value = str(value)
-            row_value_json = null()
+        row_value, row_value_json = _pack_config_row(value, value_type)
 
         async with self._session_factory() as s:
             base = pg_insert(AppConfig).values(
@@ -159,8 +204,8 @@ class ConfigService:
             result = await s.execute(
                 delete(AppConfig).where(AppConfig.namespace == ns, AppConfig.key == key)
             )
-            await s.commit()
             existed = bool(result.rowcount > 0)  # type: ignore[attr-defined]
+            await s.commit()
         self._cache.pop((ns, key))
         await self._cache.publish_invalidation(ns, key)
         metrics.config_ops_total.labels(op="delete", kind="config", result="ok").inc()
@@ -176,17 +221,12 @@ class ConfigService:
         metrics.config_ops_total.labels(op="list", kind="config", result="ok").inc()
         return list(rows)
 
-    async def set_secret(self, ns: str, key: str, value: Any, value_type: str = "str") -> AppSecret:
+    async def set_secret(
+        self, ns: str, key: str, value: Any, value_type: ValueType = "str"
+    ) -> AppSecret:
         if value_type not in ("str", "int", "bool", "json"):
             raise ValueError(f"invalid value_type={value_type!r}")
-        if value_type == "json":
-            plaintext = json.dumps(value).encode()
-        elif value_type == "bool":
-            plaintext = b"true" if bool(value) else b"false"
-        elif value_type == "int":
-            plaintext = str(int(value)).encode()
-        else:
-            plaintext = str(value).encode()
+        plaintext = _encode_plaintext(value, value_type)
         ciphertext = self._fernet.encrypt(plaintext)
 
         async with self._session_factory() as s:
@@ -247,7 +287,9 @@ class ConfigService:
     async def reveal_secret_json(self, ns: str, key: str, default: Any = None) -> Any:
         return await self._reveal_typed(ns, key, "json", default)
 
-    async def _reveal_typed(self, ns: str, key: str, expected: str | None, default: Any) -> Any:
+    async def _reveal_typed(
+        self, ns: str, key: str, expected: ValueType | None, default: Any
+    ) -> Any:
         async with self._session_factory() as s:
             stmt = select(AppSecret.value_encrypted, AppSecret.value_type).where(
                 AppSecret.namespace == ns, AppSecret.key == key
@@ -268,30 +310,21 @@ class ConfigService:
                 key,
             )
             raise
-        # Detect PREV-key hit (MultiFernet).
-        if isinstance(self._fernet, MultiFernet):
-            primary = self._fernet._fernets[0]
+        if self._primary_fernet is not None:
             try:
-                primary.decrypt(row.value_encrypted)
+                self._primary_fernet.decrypt(row.value_encrypted)
             except InvalidToken:
                 metrics.fernet_prev_key_hits_total.inc()
                 log.info("fernet_prev_key_hit ns=%s key=%s", ns, key)
-
-        if row.value_type == "json":
-            return json.loads(plaintext.decode())
-        if row.value_type == "int":
-            return int(plaintext.decode())
-        if row.value_type == "bool":
-            return plaintext.decode() == "true"
-        return plaintext.decode()
+        return _decode_plaintext(plaintext, row.value_type)
 
     async def delete_secret(self, ns: str, key: str) -> bool:
         async with self._session_factory() as s:
             result = await s.execute(
                 delete(AppSecret).where(AppSecret.namespace == ns, AppSecret.key == key)
             )
-            await s.commit()
             existed = bool(result.rowcount > 0)  # type: ignore[attr-defined]
+            await s.commit()
         self._secrets_cache.pop((ns, key))
         await self._secrets_cache.publish_invalidation(ns, key)
         metrics.config_ops_total.labels(op="delete", kind="secret", result="ok").inc()

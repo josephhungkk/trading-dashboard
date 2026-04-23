@@ -196,7 +196,10 @@ async def test_cache_hit_after_first_read(service):
 
 
 @pytest.mark.asyncio
-async def test_cache_invalidation_via_pubsub(service):
+async def test_cache_evict_then_db_update_returns_fresh(service):
+    """Confirms cache eviction (simulating a received pub/sub invalidate) causes
+    the next read to re-fetch the DB value. Pub/sub wire fidelity itself is
+    covered by the opt-in real-Redis test (Task 18)."""
     await service.set("ns", "k", "v1")
     assert await service.get("ns", "k") == "v1"
     service._cache.pop(("ns", "k"))
@@ -204,3 +207,71 @@ async def test_cache_invalidation_via_pubsub(service):
         await s.execute(text("UPDATE app_config SET value='v2' WHERE namespace='ns' AND key='k'"))
         await s.commit()
     assert await service.get("ns", "k") == "v2"
+
+
+@pytest.mark.asyncio
+async def test_multifernet_prev_key_hit_increments_metric(session_factory):
+    """Row encrypted under the previous key is decryptable via MultiFernet
+    fallback, and the PREV-hit metric is incremented exactly once per reveal."""
+    from cryptography.fernet import MultiFernet
+
+    from app.core import metrics
+    from app.core.crypto import get_fernet
+
+    prev_fernet = get_fernet("rotated-old-key", None)
+    current_fernet = get_fernet("rotated-new-key", "rotated-old-key")
+    assert isinstance(current_fernet, MultiFernet)
+
+    r = fakeredis_async.FakeRedis(decode_responses=False)
+    cache = ConfigCache(r, "config:invalidate", "config", ttl_seconds=60)
+    secrets_cache = ConfigCache(r, "config:invalidate:secrets", "secret", ttl_seconds=60)
+
+    writer = ConfigService(
+        session_factory=session_factory,
+        cache=cache,
+        secrets_cache=secrets_cache,
+        fernet=prev_fernet,
+    )
+    await writer.set_secret("rot", "k", "ancient-value", value_type="str")
+
+    reader = ConfigService(
+        session_factory=session_factory,
+        cache=cache,
+        secrets_cache=secrets_cache,
+        fernet=current_fernet,
+    )
+    before = metrics.fernet_prev_key_hits_total._value.get()  # type: ignore[attr-defined]
+    plaintext = await reader.reveal_secret("rot", "k")
+    after = metrics.fernet_prev_key_hits_total._value.get()  # type: ignore[attr-defined]
+
+    assert plaintext == "ancient-value"
+    assert after == before + 1
+    await r.aclose()
+
+
+@pytest.mark.asyncio
+async def test_multifernet_primary_hit_does_not_increment_metric(session_factory):
+    """Row freshly encrypted under the current primary key must NOT increment
+    the PREV-hit metric."""
+    from app.core import metrics
+    from app.core.crypto import get_fernet
+
+    current_fernet = get_fernet("rotated-new-key", "rotated-old-key")
+    r = fakeredis_async.FakeRedis(decode_responses=False)
+    cache = ConfigCache(r, "config:invalidate", "config", ttl_seconds=60)
+    secrets_cache = ConfigCache(r, "config:invalidate:secrets", "secret", ttl_seconds=60)
+    svc = ConfigService(
+        session_factory=session_factory,
+        cache=cache,
+        secrets_cache=secrets_cache,
+        fernet=current_fernet,
+    )
+    await svc.set_secret("rot", "k2", "fresh-value", value_type="str")
+
+    before = metrics.fernet_prev_key_hits_total._value.get()  # type: ignore[attr-defined]
+    plaintext = await svc.reveal_secret("rot", "k2")
+    after = metrics.fernet_prev_key_hits_total._value.get()  # type: ignore[attr-defined]
+
+    assert plaintext == "fresh-value"
+    assert after == before
+    await r.aclose()
