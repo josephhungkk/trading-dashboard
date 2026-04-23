@@ -34,4 +34,10 @@
 ## Phase 6 — Futu adapter + CJK font polish
 ## Phase 7 — Alerts + Telegram + AI router (Ollama light + heavy-box WoL)
 ## Phase 8 — Schwab adapter
-## Phase 9 — Bots service
+## Phase 9 — Bots service + security hardening
+
+- [ ] PG client-cert auth over WireGuard — drop the plaintext `DATABASE_URL` password.
+  - Edit `pg_hba.conf` on NUC: `hostssl dashboard trader 10.10.0.0/24 cert clientcert=verify-full`
+  - Generate + distribute `secrets/postgres-client.{key,crt}` to VPS (600, `trader:trader`)
+  - Shrink `DATABASE_URL` to `postgresql+asyncpg://trader@10.10.0.2/dashboard?ssl=require`
+  - Context: user asked 2026-04-23; Phase 2 left `.env` password plaintext because `DATABASE_URL` is bootstrap. File-perms + WG isolation are current protection; cert auth eliminates the secret entirely.
