@@ -58,27 +58,30 @@ Rules:
 
 ## Configuration Storage
 
-**The app keeps runtime settings in the database, not in `.env`.** (Phase 2+; Phase 0 has no DB-backed config yet.)
+**The app keeps runtime settings in the database, not in `.env`.** (Active as of v0.2.0.)
 
 `.env` only holds bootstrap values the app needs before it can reach the DB:
-`APP_ENV`, `APP_SECRET_KEY`, `APP_CORS_ORIGINS`, `DATABASE_URL`, `POSTGRES_POOL_SIZE`, `POSTGRES_MAX_OVERFLOW`, `REDIS_PASSWORD`, `REDIS_URL`.
+`APP_ENV`, `APP_SECRET_KEY`, `APP_SECRET_KEY_PREV`, `APP_CORS_ORIGINS`, `DATABASE_URL`, `POSTGRES_POOL_SIZE`, `POSTGRES_MAX_OVERFLOW`, `REDIS_PASSWORD`, `REDIS_URL`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUDIENCE`, `TRUSTED_DEV_NETS`.
 
-(`POSTGRES_POOL_SIZE` / `POSTGRES_MAX_OVERFLOW` are here — not in `app_config` — because SQLAlchemy reads them at engine construction, which runs before `ConfigService` can reach the DB. `REDIS_PASSWORD` is split out from `REDIS_URL` so docker-compose can interpolate it into `redis-server --requirepass ${REDIS_PASSWORD}`.)
+(`POSTGRES_POOL_SIZE` / `POSTGRES_MAX_OVERFLOW` are here — not in `app_config` — because SQLAlchemy reads them at engine construction, which runs before `ConfigService` can reach the DB. `REDIS_PASSWORD` is split out from `REDIS_URL` so docker-compose can interpolate it into `redis-server --requirepass ${REDIS_PASSWORD}`. `APP_SECRET_KEY_PREV` is set only during rotation windows — MultiFernet decrypts ciphertexts written under the old key and re-encrypts on next write.)
 
-Everything else (broker hosts, Ollama URLs, Telegram tokens, API keys, WoL MAC, Schwab OAuth, etc.) will live in two tables from Phase 2 onward:
+Everything else (broker hosts, Ollama URLs, Telegram tokens, API keys, WoL MAC, Schwab OAuth, etc.) lives in two tables:
 
 - `app_config` — plain-text settings, readable by any admin-authed client
-- `app_secrets` — sensitive values encrypted with Fernet (key derived from `APP_SECRET_KEY`)
+- `app_secrets` — sensitive values encrypted with Fernet (key derived from `APP_SECRET_KEY` via HKDF-SHA256)
 
-Both will be edited at runtime via `/api/admin/config` and `/api/admin/secrets`, or programmatically through `app.services.config.config.set()` / `set_secret()`. An in-memory cache is invalidated across all backend workers via Redis pub/sub on every write, so changes take effect immediately.
+Edited at runtime via `POST /api/admin/config` and `POST /api/admin/secrets` (CF Access — Google login for humans, service token for CI). An in-memory cache is invalidated across all backend workers via Redis pub/sub on every write, so changes take effect immediately.
 
-**Do not add new values to `.env` beyond the bootstrap list.** When writing code that needs a setting, read it via the `config` service (from Phase 2 onward) and fall back to a sensible default:
+**Do not add new values to `.env` beyond the bootstrap list.** When writing code that needs a setting, read it via the `get_config()` FastAPI dependency or the `ConfigService` singleton and fall back to a sensible default:
 
-    from app.services.config import config
-    heavy_url = await config.get("ollama.heavy_url", "http://10.10.0.3:11434")
-    bot_token = await config.get_secret("telegram.bot_token")
+    from app.core.deps import get_config
+    svc = get_config()
+    heavy_url = await svc.get("ollama", "heavy_url", default="http://10.10.0.3:11434")
+    bot_token = await svc.reveal_secret("telegram", "bot_token")
 
-Rotating `APP_SECRET_KEY` invalidates all encrypted secrets — treat it as permanent.
+Typed accessors (`get_int`, `get_bool`, `get_json`, `reveal_secret_int`, etc.) raise `ConfigTypeError` if the stored `value_type` does not match the accessor. Secret plaintext is only ever returned by `reveal_secret*`; `GET /api/admin/secrets/...` returns metadata only (namespace, key, value_type, timestamps). Every `reveal_secret*` hit increments `admin_secret_reveal_total` with the actor kind label.
+
+Rotating `APP_SECRET_KEY` invalidates all encrypted secrets — treat it as permanent. Plan a maintenance window and pre-set `APP_SECRET_KEY_PREV` to the outgoing key so reads keep working while the backend re-encrypts on each write.
 
 ## Network Topology
 
