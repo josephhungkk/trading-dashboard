@@ -27,8 +27,24 @@
 - [x] Playwright smoke test passes via CF Access service token
 - [x] v0.1.0 tagged and pushed
 
-## Phase 2 — Auth + DB-backed config service (app_config, app_secrets)  *(next)*
-## Phase 3 — Frontend shell (mocks)
+## Phase 2 — Auth + DB-backed config service (app_config, app_secrets)  *(complete — v0.2.0 · 2026-04-23)*
+- [x] Pydantic Settings: +4 bootstrap keys (`APP_SECRET_KEY_PREV`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUDIENCE`, `TRUSTED_DEV_NETS`)
+- [x] Fernet + HKDF-SHA256 key derivation, MultiFernet for rotation (`app.core.crypto`)
+- [x] CFAccessVerifier + `require_admin_jwt` dep with prometheus result labels + dev-bypass double-gate
+- [x] Alembic migration 0001: `app_config` + `app_secrets` with CHECK constraints (value exclusivity + value_type enum)
+- [x] ConfigCache: in-memory TTL + Redis pub/sub invalidation with backoff reconnect
+- [x] ConfigService: typed CRUD + encrypted secrets + typed accessors that raise ConfigTypeError
+- [x] Admin router `/api/admin/{config,secrets}` with idempotent DELETE + 422 on body↔URL mismatch
+- [x] Reveal endpoint with `Cache-Control: no-store`, audit log, `admin_secret_reveal_total` metric
+- [x] `/metrics` endpoint gated by admin auth
+- [x] main.py lifespan wires ConfigService singleton + Redis listener tasks
+- [x] backend entrypoint.sh runs `alembic upgrade head` before uvicorn
+- [x] Test coverage 85 tests (crypto 6 · cf_access 17 · cache 8 · service 20 · admin api 22 · admin auth 6 · metrics 1 · migration 4 · models 2)
+- [x] CI: redis:7-alpine service + opt-in real-redis pub/sub fidelity test
+- [x] Playwright smoke extended with admin config + secret reveal round-trips
+- [x] v0.2.0 tagged
+
+## Phase 3 — Frontend shell (mocks)  *(next)*
 ## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)
 ## Phase 5 — Trade execution (IBKR)
 ## Phase 6 — Futu adapter + CJK font polish
