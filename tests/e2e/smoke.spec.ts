@@ -69,3 +69,43 @@ test.describe('Phase 1 smoke', () => {
     expect(delResp.status()).toBe(204);
   });
 });
+
+test.describe('Phase 3 frontend shell', () => {
+  test('loads in paper mode by default', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('body[data-mode="paper"]')).toBeAttached();
+  });
+
+  test('paper→live shows confirm dialog; cancel returns to paper', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('switch', { name: /mode/i }).click();
+    await expect(page.getByRole('dialog', { name: /switch to live/i })).toBeVisible();
+    await page.getByRole('button', { name: /^cancel$/i }).click();
+    await expect(page.locator('body[data-mode="paper"]')).toBeAttached();
+  });
+
+  test('cmd+k opens palette and / prefix navigates', async ({ page }) => {
+    await page.goto('/overview');
+    await page.keyboard.press('Meta+k');
+    await expect(page.getByRole('dialog', { name: /command palette/i })).toBeVisible();
+    await page.keyboard.type('/orders');
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/orders/);
+  });
+
+  test('watchlist column customizer opens and applies', async ({ page }) => {
+    await page.goto('/watchlist');
+    await page.getByRole('button', { name: /customize columns/i }).click();
+    await expect(page.getByRole('dialog', { name: /customize columns/i })).toBeVisible();
+    await page.getByRole('button', { name: /^apply$/i }).click();
+    await expect(page.getByRole('dialog', { name: /customize columns/i })).not.toBeVisible();
+  });
+
+  test('mobile viewport renders BottomTabBar + navigates to positions', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto('/overview');
+    await expect(page.getByRole('tablist', { name: /primary/i })).toBeVisible();
+    await page.getByRole('tab', { name: /positions/i }).click();
+    await expect(page).toHaveURL(/\/positions/);
+  });
+});
