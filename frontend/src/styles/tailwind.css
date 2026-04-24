@@ -41,7 +41,7 @@
 
   /* Radii */
   --radius-sm: 0.25rem; --radius-md: 0.5rem; --radius-lg: 0.75rem;
-  --radius-full: 624.9375rem;
+  --radius-full: 9999rem;
 
   /* Motion */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
