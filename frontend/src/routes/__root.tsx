@@ -1,5 +1,6 @@
-import { Outlet, createRootRoute } from '@tanstack/react-router';
+import { createRootRoute } from '@tanstack/react-router';
 import * as React from 'react';
+import { AppShell } from '@/components/layout/AppShell';
 
 function RootErrorBoundary({ error }: { error: Error }): React.JSX.Element {
   return (
@@ -12,6 +13,6 @@ function RootErrorBoundary({ error }: { error: Error }): React.JSX.Element {
 }
 
 export const Route = createRootRoute({
-  component: () => <Outlet />,
+  component: AppShell,
   errorComponent: RootErrorBoundary,
 });
