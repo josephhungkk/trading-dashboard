@@ -1,0 +1,58 @@
+import type { Account } from '../types';
+
+export const ACCOUNTS: Account[] = [
+  {
+    id: 'ibkr-live-1',
+    broker: 'ibkr',
+    mode: 'live',
+    alias: 'IBKR Live 1',
+    accountNumber: 'U1234567',
+    nlv: 312_450.28,
+    baseCurrency: 'USD',
+  },
+  {
+    id: 'ibkr-paper-1',
+    broker: 'ibkr',
+    mode: 'paper',
+    alias: 'IBKR Paper 1',
+    accountNumber: 'DU9876543',
+    nlv: 100_000.0,
+    baseCurrency: 'USD',
+  },
+  {
+    id: 'futu-live-1',
+    broker: 'futu',
+    mode: 'live',
+    alias: 'Futu Live 1',
+    accountNumber: 'FT28173922',
+    nlv: 486_221.5,
+    baseCurrency: 'HKD',
+  },
+  {
+    id: 'futu-paper-1',
+    broker: 'futu',
+    mode: 'paper',
+    alias: 'Futu Paper 1',
+    accountNumber: 'FTPAPER001',
+    nlv: 250_000.0,
+    baseCurrency: 'HKD',
+  },
+  {
+    id: 'schwab-live-1',
+    broker: 'schwab',
+    mode: 'live',
+    alias: 'Schwab Live 1',
+    accountNumber: 'SCH55512345',
+    nlv: 178_906.12,
+    baseCurrency: 'USD',
+  },
+  {
+    id: 'schwab-paper-1',
+    broker: 'schwab',
+    mode: 'paper',
+    alias: 'Schwab Paper 1',
+    accountNumber: 'SCHPAPER99',
+    nlv: 75_500.0,
+    baseCurrency: 'USD',
+  },
+];
