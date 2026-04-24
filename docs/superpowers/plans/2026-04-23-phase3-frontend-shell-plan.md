@@ -47,13 +47,14 @@ frontend/
       api.ts ws.ts lang.ts         # existing; lang.ts gets real mapping
       types.ts                     # NEW — Mode, Account, Order, Position, ...
       accounts.ts positions.ts orders.ts quotes.ts
-      watchlists.ts commands.ts connected.ts
+      watchlists.ts commands.ts connected.ts quote-feeds.ts
       registry.ts                  # getServices() + resetServices()
       fixtures/
-        brokers.ts accounts.ts symbols.ts positions.ts orders.ts watchlists.ts index.ts
+        brokers.ts accounts.ts symbols.ts positions.ts orders.ts watchlists.ts
+        quote-feeds.ts index.ts
     stores/
       global/
-        mode.ts theme.ts commands.ts connected.ts
+        mode.ts theme.ts commands.ts connected.ts quote-feeds.ts
       scoped/
         account-store.ts positions-store.ts orders-store.ts watchlists-store.ts
         types.ts                   # phantom Scoped<M, T>
@@ -68,7 +69,7 @@ frontend/
       use-commands-effect.ts
     components/
       primitives/                  # 16 primitives — see Chunk E
-      patterns/                    # 11 patterns — see Chunk F
+      patterns/                    # 12 patterns — see Chunk F (incl. QuoteFeedDropdown)
       layout/
         AppShell/
         Topbar/
@@ -708,9 +709,27 @@ export interface Watchlist {
 }
 
 export interface ConnectedStatus {
-  assetClass: AssetClass; source: string;
-  state: 'live' | 'delayed' | 'down';
-  latencyMs: number | null;
+  broker: BrokerId;             // 'ibkr' | 'futu' | 'schwab'
+  mode?: Mode;                  // 'live' | 'paper' — set for IBKR (2 live + 2 paper gateways); omitted for single-stack brokers
+  gatewayId: string;            // unique gateway instance id, e.g. 'ibkr-live-gw-1'
+  alias: string;                // human label, e.g. 'IBKR Live Gateway 1'
+  backendOk: boolean;           // backend can reach gateway endpoint
+  gatewayOk: boolean;           // gateway logged in + streaming
+  latencyMs: number | null;     // last ping ms, null if down
+}
+
+// Derived tone per row:
+//   green  = backendOk && gatewayOk
+//   yellow = backendOk XOR gatewayOk (one side up)
+//   red    = !backendOk && !gatewayOk
+
+export type QuoteFeedType = 'realtime' | 'delayed' | 'none';
+
+export interface QuoteFeedStatus {
+  assetClass: AssetClass;       // group label ('stock', 'options', 'futures', 'forex', 'crypto', ...)
+  exchange?: string;            // optional sub-row; when omitted the row lives at asset-class level
+  feedType: QuoteFeedType;
+  level?: 1 | 2;                // optional — distinguishes Level I / Level II
 }
 
 export interface Command {
@@ -1098,11 +1117,12 @@ export interface ConnectedService {
 }
 
 const SEED: ConnectedStatus[] = [
-  { assetClass: 'stock',   source: 'IBKR TWS',     state: 'live',    latencyMs: 120 },
-  { assetClass: 'stock',   source: 'Schwab Stream',state: 'delayed', latencyMs: 15_000 },
-  { assetClass: 'forex',   source: 'IBKR TWS',     state: 'live',    latencyMs: 80 },
-  { assetClass: 'crypto',  source: 'Coinbase WS',  state: 'live',    latencyMs: 200 },
-  { assetClass: 'futures', source: 'IBKR TWS',     state: 'down',    latencyMs: null },
+  { broker: 'ibkr',   mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true,  gatewayOk: true,  latencyMs: 120 },
+  { broker: 'ibkr',   mode: 'live',  gatewayId: 'ibkr-live-gw-2',  alias: 'IBKR Live Gateway 2',  backendOk: true,  gatewayOk: false, latencyMs: 240 },
+  { broker: 'ibkr',   mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true,  gatewayOk: true,  latencyMs: 140 },
+  { broker: 'ibkr',   mode: 'paper', gatewayId: 'ibkr-paper-gw-2', alias: 'IBKR Paper Gateway 2', backendOk: true,  gatewayOk: true,  latencyMs: 160 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true,  gatewayOk: true,  latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: false, gatewayOk: false, latencyMs: null },
 ];
 
 export class MockConnectedService implements ConnectedService {
@@ -1136,6 +1156,49 @@ export class MockConnectedService implements ConnectedService {
   }
 }
 ```
+
+- [ ] **Step 11.2b: `quote-feeds.ts`** (fixture + service)
+
+Fixture `frontend/src/services/fixtures/quote-feeds.ts`:
+
+```ts
+import type { QuoteFeedStatus } from '../types';
+export const QUOTE_FEEDS: QuoteFeedStatus[] = [
+  { assetClass: 'stock',   exchange: 'NYSE',   feedType: 'realtime' },
+  { assetClass: 'stock',   exchange: 'NASDAQ', feedType: 'realtime' },
+  { assetClass: 'stock',   exchange: 'AMEX',   feedType: 'realtime' },
+  { assetClass: 'stock',   exchange: 'NYSE',   feedType: 'delayed', level: 2 },
+  { assetClass: 'options',                      feedType: 'delayed' },
+  { assetClass: 'futures', exchange: 'CME',    feedType: 'realtime' },
+  { assetClass: 'futures', exchange: 'CFE',    feedType: 'realtime' },
+  { assetClass: 'forex',                        feedType: 'realtime' },
+  { assetClass: 'crypto',                       feedType: 'realtime' },
+];
+```
+
+Service `frontend/src/services/quote-feeds.ts`:
+
+```ts
+import type { QuoteFeedStatus } from './types';
+import { QUOTE_FEEDS } from './fixtures/quote-feeds';
+
+export interface QuoteFeedService {
+  snapshot(): QuoteFeedStatus[];
+  subscribe(cb: (feeds: QuoteFeedStatus[]) => void): () => void;
+}
+
+export class MockQuoteFeedService implements QuoteFeedService {
+  private feeds: QuoteFeedStatus[] = QUOTE_FEEDS;
+  private listeners = new Set<(f: QuoteFeedStatus[]) => void>();
+  snapshot() { return this.feeds; }
+  subscribe(cb: (f: QuoteFeedStatus[]) => void) {
+    this.listeners.add(cb);
+    return () => { this.listeners.delete(cb); };
+  }
+}
+```
+
+No ticking timer — feed subscriptions rarely change. Barrel: add `export { QUOTE_FEEDS } from './quote-feeds';` to `fixtures/index.ts`.
 
 - [ ] **Step 11.3: `commands.ts`**
 
@@ -1182,6 +1245,7 @@ import type { OrdersService } from './orders';
 import type { QuotesService } from './quotes';
 import type { WatchlistsService } from './watchlists';
 import type { ConnectedService } from './connected';
+import type { QuoteFeedService } from './quote-feeds';
 import type { CommandRegistry } from './commands';
 import { MockAccountsService } from './accounts';
 import { MockPositionsService } from './positions';
@@ -1189,6 +1253,7 @@ import { MockOrdersService } from './orders';
 import { MockQuotesService } from './quotes';
 import { LocalStorageWatchlistService } from './watchlists';
 import { MockConnectedService } from './connected';
+import { MockQuoteFeedService } from './quote-feeds';
 import { InMemoryCommandRegistry } from './commands';
 
 export interface Services {
@@ -1198,6 +1263,7 @@ export interface Services {
   quotes: QuotesService;
   watchlists: WatchlistsService;
   connected: ConnectedService;
+  quoteFeeds: QuoteFeedService;
   commands: CommandRegistry;
 }
 
@@ -1223,6 +1289,7 @@ export function getServices(): Services {
     watchlists: new LocalStorageWatchlistService(
       typeof window !== 'undefined' ? window.localStorage : new MemoryStorage()),
     connected:  new MockConnectedService(),
+    quoteFeeds: new MockQuoteFeedService(),
     commands:   new InMemoryCommandRegistry(),
   };
   return _services;
@@ -1349,6 +1416,20 @@ export const useConnectedStore = create<{ statuses: ConnectedStatus[] }>((set) =
   const svc = getServices().connected;
   svc.subscribe(statuses => set({ statuses }));
   return { statuses: svc.snapshot() };
+});
+```
+
+- [ ] **Step 12.4b: `quote-feeds.ts`**
+
+```ts
+import { create } from 'zustand';
+import { getServices } from '@/services/registry';
+import type { QuoteFeedStatus } from '@/services/types';
+
+export const useQuoteFeedStore = create<{ feeds: QuoteFeedStatus[] }>((set) => {
+  const svc = getServices().quoteFeeds;
+  svc.subscribe(feeds => set({ feeds }));
+  return { feeds: svc.snapshot() };
 });
 ```
 
@@ -2129,33 +2210,82 @@ Commit: `feat(patterns): accountpicker grouped by broker with nlv + initials`.
 
 **Files:** `components/patterns/ConnectedDropdown/*`
 
-DropdownMenu + Badge. Reads from `useConnectedStore`.
+DropdownMenu + Badge — shows per-broker connection health (backend side × gateway side). IBKR has 4 gateways (2 live + 2 paper) that aggregate into 2 rows ("IBKR Live", "IBKR Paper"). Futu and Schwab are single-stack (1 row each). Four rows total.
+
+**Row-tone derivation** (per individual `ConnectedStatus`):
+- green  = `backendOk && gatewayOk`
+- yellow = `backendOk XOR gatewayOk` (one side up)
+- red    = `!backendOk && !gatewayOk`
+
+**Group aggregation**: group statuses by `(broker, mode)`. Row tone is the worst-of the group (red > yellow > green). Trigger badge tone is the worst-of across all groups.
 
 ```tsx
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/primitives/DropdownMenu';
+import * as React from 'react';
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+} from '@/components/primitives/DropdownMenu';
 import { Button } from '@/components/primitives/Button';
 import { Badge } from '@/components/primitives/Badge';
 import { useConnectedStore } from '@/stores/global/connected';
+import { BROKERS } from '@/services/fixtures';
+import type { ConnectedStatus, BrokerId, Mode } from '@/services/types';
 
-const VARIANT_MAP = { live: 'up', delayed: 'warn', down: 'down' } as const;
+type Tone = 'green' | 'yellow' | 'red';
+const TONE_VARIANT: Record<Tone, 'up' | 'warn' | 'down'> = { green: 'up', yellow: 'warn', red: 'down' };
+const TONE_RANK: Record<Tone, number> = { green: 0, yellow: 1, red: 2 };
 
-export function ConnectedDropdown() {
-  const { statuses } = useConnectedStore();
-  const worst = statuses.some(s => s.state === 'down') ? 'down' : statuses.some(s => s.state === 'delayed') ? 'delayed' : 'live';
+function rowTone(s: ConnectedStatus): Tone {
+  if (s.backendOk && s.gatewayOk) return 'green';
+  if (s.backendOk || s.gatewayOk) return 'yellow';
+  return 'red';
+}
+function worstOf(rows: ConnectedStatus[]): Tone {
+  return rows.map(rowTone).reduce<Tone>((a, b) => (TONE_RANK[b] > TONE_RANK[a] ? b : a), 'green');
+}
+
+interface Group { broker: BrokerId; brokerName: string; mode?: Mode; label: string; rows: ConnectedStatus[]; tone: Tone; }
+
+function groupStatuses(statuses: ConnectedStatus[]): Group[] {
+  const out: Group[] = [];
+  for (const b of BROKERS) {
+    const mine = statuses.filter(s => s.broker === b.id);
+    if (mine.length === 0) continue;
+    const modes = new Set(mine.map(s => s.mode).filter((m): m is Mode => m != null));
+    if (modes.size > 0) {
+      for (const m of modes) {
+        const rows = mine.filter(s => s.mode === m);
+        out.push({ broker: b.id, brokerName: b.name, mode: m, label: `${b.name} ${m === 'live' ? 'Live' : 'Paper'}`, rows, tone: worstOf(rows) });
+      }
+    } else {
+      out.push({ broker: b.id, brokerName: b.name, label: b.name, rows: mine, tone: worstOf(mine) });
+    }
+  }
+  return out;
+}
+
+export function ConnectedDropdown(): React.JSX.Element {
+  const statuses = useConnectedStore(s => s.statuses);
+  const groups = groupStatuses(statuses);
+  const worst = groups.map(g => g.tone).reduce<Tone>((a, b) => (TONE_RANK[b] > TONE_RANK[a] ? b : a), 'green');
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline">
-          <Badge variant={VARIANT_MAP[worst]}>Connected</Badge>
+        <Button variant="outline" aria-label="connection health">
+          <Badge variant={TONE_VARIANT[worst]}>Connected</Badge>
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent>
-        {statuses.map(s => (
-          <DropdownMenuItem key={`${s.assetClass}-${s.source}`} className="flex items-center justify-between gap-4">
-            <span className="capitalize">{s.assetClass}</span>
-            <span className="text-fg-muted text-xs">{s.source}</span>
-            <Badge variant={VARIANT_MAP[s.state]}>{s.state}</Badge>
-            <span className="text-xs">{s.latencyMs == null ? '—' : `${s.latencyMs.toFixed(0)} ms`}</span>
+      <DropdownMenuContent align="end" className="w-80">
+        {groups.map(g => (
+          <DropdownMenuItem
+            key={`${g.broker}-${g.mode ?? 'default'}`}
+            className="flex items-center justify-between gap-3"
+          >
+            <span className="flex-1">{g.label}</span>
+            <span className="text-xs text-fg-muted">
+              {g.rows.length} gw · {g.rows.filter(r => r.backendOk).length}/{g.rows.length} backend · {g.rows.filter(r => r.gatewayOk).length}/{g.rows.length} gateway
+            </span>
+            <Badge variant={TONE_VARIANT[g.tone]}>{g.tone}</Badge>
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -2164,7 +2294,44 @@ export function ConnectedDropdown() {
 }
 ```
 
-Stories + tests. Commit: `feat(patterns): connecteddropdown — per-asset-class source health`.
+Stories: all-green, ibkr-live-yellow (one gateway down), schwab-red. Tests: opens menu, renders 4 rows (2 IBKR + 1 Futu + 1 Schwab), worst-of badge tone reflects worst group.
+
+Commit: `feat(patterns): connecteddropdown — per-broker gateway health grouped by mode`.
+
+---
+
+### Task 28.5: QuoteFeedDropdown
+
+**Files:** `components/patterns/QuoteFeedDropdown/*` + type `QuoteFeedStatus` (already in Task 7 types) + fixture `services/fixtures/quote-feeds.ts` + service `services/quote-feeds.ts` (MockQuoteFeedService added to registry) + store `stores/global/quote-feeds.ts` (useQuoteFeedStore).
+
+Per-asset-class × exchange quote-feed status (realtime/delayed/none). Answers "what quote subscriptions do I have for this exchange?" — distinct from the ConnectedDropdown's per-broker wire health.
+
+**Fixture seed** (`quote-feeds.ts`):
+
+```ts
+import type { QuoteFeedStatus } from '../types';
+export const QUOTE_FEEDS: QuoteFeedStatus[] = [
+  { assetClass: 'stock',     exchange: 'NYSE',   feedType: 'realtime' },
+  { assetClass: 'stock',     exchange: 'NASDAQ', feedType: 'realtime' },
+  { assetClass: 'stock',     exchange: 'AMEX',   feedType: 'realtime' },
+  { assetClass: 'options',                       feedType: 'delayed' },
+  { assetClass: 'futures',   exchange: 'CME',    feedType: 'realtime' },
+  { assetClass: 'futures',   exchange: 'CFE',    feedType: 'realtime' },
+  { assetClass: 'forex',                         feedType: 'realtime' },
+  { assetClass: 'crypto',                        feedType: 'realtime' },
+  { assetClass: 'stock',     exchange: 'NYSE',   feedType: 'delayed', level: 2 },
+];
+```
+
+**Service** (`services/quote-feeds.ts`): `MockQuoteFeedService` mirrors `MockConnectedService` shape (`snapshot()` + `subscribe(cb)`). No ticking timer — realtime→delayed flips are rare. Added to `Services` interface + `getServices()` in `services/registry.ts`.
+
+**Store** (`stores/global/quote-feeds.ts`): `useQuoteFeedStore` mirrors `useConnectedStore` — `{ feeds: QuoteFeedStatus[] }`. Subscribes to service on first use.
+
+**Pattern** `QuoteFeedDropdown.tsx` — DropdownMenu grouped by `assetClass`; each group shows DropdownMenuLabel + per-exchange rows (or inline when no exchange sub-rows). Badge tone: realtime=up, delayed=warn, none=down. Trigger label: worst-of all feeds.
+
+Stories: all-realtime, some-delayed (options), level-2-separate. Tests: opens menu, renders grouped rows, worst-of trigger.
+
+Commit: `feat(patterns): quotefeeddropdown — per-exchange realtime feed status`.
 
 ---
 

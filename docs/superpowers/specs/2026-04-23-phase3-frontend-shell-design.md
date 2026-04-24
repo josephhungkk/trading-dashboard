@@ -11,7 +11,7 @@ Ship the v2 UI shell end-to-end with realistic mocks: routing, state, theming, t
 - Phase 0 scaffold landed the component-boundary ESLint rules (`tokens → primitives → patterns → layout → features`, plus `services`, `stores`, `hooks`, `lib`) with only `Button` as a primitive.
 - Phase 1 put the prod HTTP stack behind CF Tunnel + CF Access.
 - Phase 2 shipped CF Access JWT verification + `app_config` / `app_secrets` DB-backed runtime config with the `/api/admin/*` + `/metrics` routes.
-- The operator locked visual direction in memory `dashboard_v2_redesign.md` on 2026-04-19: strict live|paper mode separation, three-panel desktop layout (left summary + watchlist split by draggable slidebar, main, right orders + positions), Connected dropdown for per-asset-class quote-source status, multi-watchlist with fully-customizable columns in a modal, Noto Sans UI + Noto Mono numbers + `langForMarket()` CJK routing, delayed-quote background tint, invisible scrollbars with hover reveal.
+- The operator locked visual direction in memory `dashboard_v2_redesign.md` on 2026-04-19: strict live|paper mode separation, three-panel desktop layout (left summary + watchlist split by draggable slidebar, main, right orders + positions), Connected dropdown for per-broker gateway health + QuoteFeedDropdown for per-exchange quote feed status, multi-watchlist with fully-customizable columns in a modal, Noto Sans UI + Noto Mono numbers + `langForMarket()` CJK routing, delayed-quote background tint, invisible scrollbars with hover reveal.
 - Phase 9 will swap the plaintext `DATABASE_URL` password for PG client-cert auth over WireGuard (out of scope here).
 
 ## 3. Architecture decisions
@@ -126,6 +126,7 @@ export function getServices(): Services {
     quotes: new MockQuotesService(),          // no timer yet
     watchlists: new LocalStorageWatchlistService(localStorage),
     connected: new MockConnectedService(),
+    quoteFeeds: new MockQuoteFeedService(),
     commands: new CommandRegistry(),
   };
   return _services;
@@ -146,7 +147,8 @@ Boundary compliance: `services → lib` only. Fixtures live under `services/fixt
 | `useModeStore` | `mode: 'live'\|'paper'`, `pendingMode`, `status: 'idle'\|'switching'`, `setMode`, `requestModeSwitch(target)` | `requestModeSwitch('live')` triggers confirm dialog path. `status='switching'` during mid-flight hydrate (C2). Resets to `paper` + `status='idle'` on page load (not persisted). |
 | `useThemeStore` | `theme: 'dark'` (light stubbed) | No-op for Phase 3 light toggle. |
 | `useCommandStore` | `open`, `setOpen`, `commands: Command[]`, `register`, `unregister` | Features self-register via `useCommandsEffect`. |
-| `useConnectedStore` | `statuses: ConnectedStatus[]` | Ticks health changes every few seconds (mocked). |
+| `useConnectedStore` | `statuses: ConnectedStatus[]` | Per-broker × gateway health (backend + gateway flags). IBKR: 4 gateways (2 live + 2 paper) aggregate into 2 rows. Ticks latency every 4s (mocked). |
+| `useQuoteFeedStore` | `feeds: QuoteFeedStatus[]` | Per-asset-class × exchange quote feed type (realtime / delayed / none). Static seed — real subscription state lands in Phase 4/6/8 per broker. |
 
 **Panel state** — no dedicated store. `react-resizable-panels` persists via `autoSaveId={\`shell-${viewport}\`}` so desktop ↔ mobile rotation doesn't clobber each other's sizes (H4). Since H3 makes the shell a single subtree with responsive-hidden mobile/desktop branches, the panels only mount inside the desktop branch — collapsing the issue surface further.
 
@@ -254,7 +256,8 @@ Structural invariant: no singleton export of any scoped store; only the `live` +
 | `CommandPalette` | `cmdk` `Command.Dialog` | Cmd+K palette with prefix routing. Uses `cmdk`'s built-in dialog (NOT Radix Dialog) to avoid focus-trap + scroll-lock double-owner bugs (M1) |
 | `ModeToggle` | Switch + Badge | Paper↔Live with `requestModeSwitch` on paper→live |
 | `AccountPicker` | DropdownMenu + Avatar | Grouped by broker; alias + NLV; selected highlight |
-| `ConnectedDropdown` | DropdownMenu + Badge | Per-asset-class source health |
+| `ConnectedDropdown` | DropdownMenu + Badge | Per-broker connection health (backend + gateway). IBKR: 4 gateways → 2 grouped rows (Live / Paper). Green = both ok, yellow = one side up, red = both down |
+| `QuoteFeedDropdown` | DropdownMenu + Badge | Per-asset-class × exchange quote feed type (realtime / delayed / none). Distinct from ConnectedDropdown — answers "what quote subscriptions do I have?" not "is the pipe up?" |
 | `ResizablePanelFrame` | react-resizable-panels | Adds caret-collapse button + keyboard shortcut |
 | `CollapsibleDrawer` | Dialog | Mobile swipe-in drawer |
 | `BottomTabBar` | Tabs + Icon + Badge | Mobile nav |
@@ -263,7 +266,7 @@ Structural invariant: no singleton export of any scoped store; only the `live` +
 ### 8.3 Layout (4) — boundary: `tokens + primitives + patterns + layout + lib`
 
 - `AppShell` — **ONE subtree** (H3). Uses Tailwind responsive classes (`hidden md:flex`, `md:hidden`) to show/hide desktop vs mobile chrome. Both mobile drawers + bottom-tab-bar AND desktop resizable panels are always in the DOM tree; visibility controlled by CSS. Rotating across `md` does NOT unmount — local state, table scroll position, and open drawers survive. Handles first-mount hydration of the active scope. Mounts `<CommandPalette>` + `<Toaster>` + top-level `<ErrorBoundary>`.
-- `Topbar` — single row at `≥ md`, two rows at `< md` (logo+mode+account / navigation). Composes ModeToggle + AccountPicker + ConnectedDropdown + navigation tabs + Find symbol (opens palette). Tabs hidden below `md` (BottomTabBar takes over).
+- `Topbar` — single row at `≥ md`, two rows at `< md` (logo+mode+account / navigation). Composes ModeToggle + AccountPicker + ConnectedDropdown + QuoteFeedDropdown + navigation tabs + Find symbol (opens palette). Tabs hidden below `md` (BottomTabBar takes over).
 - `LeftPanel` — rendered only in the desktop branch of the AppShell tree (mobile uses `CollapsibleDrawer` with the same content). Nested vertical `PanelGroup`: account summary (top) + watchlist compact (bottom), draggable separator. Uses `autoSaveId="shell-left-desktop"` (H4).
 - `RightPanel` — same pattern: desktop-only, `autoSaveId="shell-right-desktop"`. Nested vertical `PanelGroup`: open orders (top) + positions (bottom).
 
@@ -411,7 +414,8 @@ Partial in Phase 3:
 - Paint throttled to `requestAnimationFrame` — batch multiple 500 ms ticks that collide with a single frame
 - Storybook includes a `DataTable/StressPerf` story rendering 30 cols × 500 rows × 500 ms ticking; asserts 60 fps via a PerformanceObserver marker
 - Delayed-quote tint on `isDelayed: true` rows via `--color-delayed-*` vars
-- `ConnectedDropdown` shows mocked per-asset-class source health
+- `ConnectedDropdown` shows mocked per-broker gateway health (IBKR: 4 gateways → 2 aggregate rows; Futu / Schwab: 1 row each)
+- `QuoteFeedDropdown` shows mocked per-exchange quote feed type (realtime / delayed / none)
 
 **Deferred to broker-adapter phases:**
 - Real market-data subscriptions — IBKR TWS (Phase 4), Futu OpenD (Phase 6), Schwab streamer (Phase 8)
