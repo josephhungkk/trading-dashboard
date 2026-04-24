@@ -18,6 +18,22 @@ class ResizeObserverStub {
 }
 (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
 
+// jsdom doesn't implement matchMedia — the compact feature stubs embed
+// DataTable, which calls useMediaQuery for its mobile breakpoint.
+function mkMql(matches: boolean, q: string): MediaQueryList {
+  return {
+    matches,
+    media: q,
+    onchange: null,
+    addListener: () => { /* noop */ },
+    removeListener: () => { /* noop */ },
+    addEventListener: () => { /* noop */ },
+    removeEventListener: () => { /* noop */ },
+    dispatchEvent: () => false,
+  } as unknown as MediaQueryList;
+}
+window.matchMedia = (q: string) => mkMql(q.includes('min-width'), q);
+
 function SizedWrapper({ children }: { children: React.ReactNode }): React.JSX.Element {
   return <div className="h-[40rem] w-72">{children}</div>;
 }

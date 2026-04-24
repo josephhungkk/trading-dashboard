@@ -30,6 +30,22 @@ class ResizeObserverStub {
 }
 (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
 
+// jsdom doesn't implement matchMedia — DataTable inside RightPanel's compact
+// feature views reads useMediaQuery for its mobile breakpoint.
+function mkMql(matches: boolean, q: string): MediaQueryList {
+  return {
+    matches,
+    media: q,
+    onchange: null,
+    addListener: () => { /* noop */ },
+    removeListener: () => { /* noop */ },
+    addEventListener: () => { /* noop */ },
+    removeEventListener: () => { /* noop */ },
+    dispatchEvent: () => false,
+  } as unknown as MediaQueryList;
+}
+window.matchMedia = (q: string) => mkMql(q.includes('min-width'), q);
+
 function stubJsdomPointer(): void {
   const proto = Element.prototype as unknown as Record<string, unknown>;
   if (typeof proto['hasPointerCapture'] !== 'function') proto['hasPointerCapture'] = () => false;
