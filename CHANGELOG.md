@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-24
+### Added
+- TanStack Router file-based routing with 11 routes (`/`, `/overview`, `/orders`, `/positions`, `/watchlist`, `/watchlist/$id`, `/admin`, `/admin/config`, `/admin/secrets`, `/settings`, `/trade`, `/alerts`). `routeTree.gen.ts` is gitignored and regenerated via `pnpm tsr generate` (wired into the `typecheck` and `test` scripts).
+- Tailwind v4 `@theme` design tokens (rem-only, OKLCH dark palette) + Noto Sans / Noto Sans CJK font subsets (TC, SC, HK, JP, KR) wired via `unicode-range` + `langForMarket(exchange)` helper.
+- Scoped store factory with phantom types — `useActiveStores()` returns the live or paper bundle based on the current mode store; features must never import `@/stores/scoped/*` directly (enforced by an ESLint boundaries rule).
+- Mocked services layer: `accounts`, `positions`, `orders`, `quotes` (refcounted lazy ticker via `requestAnimationFrame`), `watchlists`, `commands`, `connected`, `quote-feeds`, plus a lazy `getServices()` registry. Storybook decorators + tests call `setTickingEnabled(false)` to keep the ticker quiet.
+- 16 primitives: `Button`, `Input` (with numeric variant + memoed `NumericCell`), `Checkbox`, `Radio`, `Switch`, `Select`, `Dialog`, `Popover`, `Tooltip`, `DropdownMenu`, `Tabs`, `Icon` (Lucide wrapper), `Badge`, `Avatar`, `Toast` + `useToast`, `ErrorBoundary`.
+- 11 patterns: `EmptyState`, `ResizablePanelFrame`, `ModeToggle` + `ModeSwitchConfirmDialog`, `AccountPicker` (grouped by broker), `ConnectedDropdown` (per-broker gateway health), `QuoteFeedDropdown` (per-exchange feed status), `DataTable` (TanStack Table + virtualizer) + `MobileCardRow`, `ColumnCustomizerDialog` (30-col reorder), `CommandPalette` (cmdk + prefix routing + global Cmd+K), `BottomTabBar` (mobile-only), `CollapsibleDrawer` (mobile-only side drawer).
+- 4 layout components: `Topbar` (mode + account + connected + nav + palette trigger), `LeftPanel` + `RightPanel` (nested vertical PanelGroups), `AppShell` (single subtree, Tailwind-responsive, hydrate-on-mode, sets `<body data-mode>`).
+- 8 feature pages: `OverviewPage` + `AccountSummary`, `OrdersPage` + compact, `PositionsPage` + compact, `WatchlistPage` + `WatchlistCompact` + `useTickingQuotes` rAF-throttled hook, `AdminPage` (Tabs shell) + `AdminConfigPage` + `AdminSecretsPage` (CRUD via CF-Access-gated `/api/admin`), `SettingsPage` (density + sound localStorage + about), `TradeStubPage` + `AlertsStubPage`.
+- Playwright frontend smoke × 5 (paper-default body attr, paper→live confirm + cancel, Cmd+K palette → `/orders`, watchlist customize-columns dialog open/apply, mobile BottomTabBar navigates to `/positions`).
+- DataTable stress story: 500 rows × 30 NumericCell columns + `PerformanceObserver` warning on >16ms frames; play function asserts the virtualizer keeps rendered row count well under the data length.
+- Test coverage: 218 vitest tests across 52 files (primitives + patterns + layout + services + stores + hook).
+
+### Changed
+- ESLint flat config gained an `eslint-plugin-boundaries` rule enforcing the 5-layer dependency direction (tokens → primitives → patterns → layout → features) plus a `no-restricted-imports` block stopping features from reaching into `@/stores/scoped/*` outside the registry.
+- `.gitignore` switched from blanket `.claude/` ignore to a selective allowlist (`!.claude/settings.json`, `!.claude/hooks/**`) so team-wide settings ship in git.
+
+### Tooling
+- Project-scope `.claude/settings.json` lands with team-wide pnpm/uv/docker/gh permissions and one PostToolUse hook (`.claude/hooks/post-edit-reminder.sh`) that emits silent reminders on Alembic migrations, lockfiles, docker-compose, `BrokerAdapter` base, CLAUDE.md, TASKS.md, eslint config, `.env.example`.
+- Codex (`codex@1.0.4`) plugin authorized for source-code authoring via `codex:rescue`. Claude Code retains tests, stories, verification, and commits per the delegation rule recorded in `TASKS.md` Phase 3 header.
+
 ## [0.2.0] — 2026-04-23
 ### Added
 - `CFAccessVerifier` — RS256 JWT verification via PyJWKClient with kid-miss retry, team-domain/audience enforcement, identity extraction from `email` or `common_name` (covers Google login + CF Access service token).

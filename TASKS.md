@@ -44,7 +44,18 @@
 - [x] Playwright smoke extended with admin config + secret reveal round-trips
 - [x] v0.2.0 tagged
 
-## Phase 3 — Frontend shell (mocks)  *(in progress — Chunks A-H done (Tasks 1-42); Chunk I (tests) + Chunk J (close-out) remaining)*
+## Phase 3 — Frontend shell (mocks)  *(complete — v0.3.0 · 2026-04-24)*
+
+- [x] Chunk A — Foundations: dependencies, Tailwind @theme tokens, Noto fonts + langForMarket, Vite config (Tasks 1-4)
+- [x] Chunk B — Router: TanStack Router bootstrap + 11 route stubs (Tasks 5-6)
+- [x] Chunk C — Services: types, fixtures, accounts/positions/orders services, refcounted Quotes ticker, lazy registry (Tasks 7-11)
+- [x] Chunk D — Stores: global stores, scoped factory + phantom types, registry + useActiveStores, ESLint boundary rule (Tasks 12-15)
+- [x] Chunk E — Primitives × 16: Input/NumericCell, Checkbox/Radio/Switch, Select, Dialog/Popover/Tooltip, DropdownMenu/Tabs, Icon/Badge/Avatar, Toast, ErrorBoundary (Tasks 16-23)
+- [x] Chunk F — Patterns × 11: EmptyState, ResizablePanelFrame, ModeToggle + ConfirmDialog, AccountPicker, ConnectedDropdown, QuoteFeedDropdown, DataTable + MobileCardRow, ColumnCustomizerDialog, CommandPalette, BottomTabBar, CollapsibleDrawer (Tasks 24-33)
+- [x] Chunk G — Layout × 4: Topbar, LeftPanel + RightPanel, AppShell single-subtree (Tasks 34-36)
+- [x] Chunk H — Features × 8: Overview + AccountSummary, Orders + compact, Positions + compact, Watchlist + Compact + ticking hook, Admin (Page + Config + Secrets), Settings, Trade + Alerts stubs (Tasks 37-42)
+- [x] Chunk I — Tests: Playwright frontend smoke × 5, DataTable 500×30 stress story with frame-budget observer (Tasks 43-44)
+- [x] Chunk J — Close-out: docs + pre-flight sweep + tag (Tasks 45-48)
 
 ### Delegation rule (active from 2026-04-24)
 
@@ -62,7 +73,7 @@ Claude Code keeps:
 - Override: user can say "use Frontend Developer" / "use general-purpose" / "do it yourself" to route around Codex per-task.
 
 
-## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)
+## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)  *(next)*
 ## Phase 5 — Trade execution (IBKR)
 ## Phase 6 — Futu adapter + CJK font polish
 
