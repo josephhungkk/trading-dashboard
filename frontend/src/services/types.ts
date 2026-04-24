@@ -80,6 +80,15 @@ export interface ConnectedStatus {
   latencyMs: number | null;     // last ping ms, null if down
 }
 
+export type QuoteFeedType = 'realtime' | 'delayed' | 'none';
+
+export interface QuoteFeedStatus {
+  assetClass: AssetClass;       // group label
+  exchange?: string;            // optional sub-row; when omitted the row lives at asset-class level
+  feedType: QuoteFeedType;
+  level?: 1 | 2;                // optional — distinguishes Level I / Level II
+}
+
 export interface Command {
   id: string; label: string;
   prefix?: '>' | '@' | '/' | '?';

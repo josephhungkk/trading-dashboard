@@ -4,6 +4,7 @@ import type { OrdersService } from './orders';
 import type { QuotesService } from './quotes';
 import type { WatchlistsService } from './watchlists';
 import type { ConnectedService } from './connected';
+import type { QuoteFeedService } from './quote-feeds';
 import type { CommandRegistry } from './commands';
 import { MockAccountsService } from './accounts';
 import { MockPositionsService } from './positions';
@@ -11,6 +12,7 @@ import { MockOrdersService } from './orders';
 import { MockQuotesService } from './quotes';
 import { LocalStorageWatchlistService } from './watchlists';
 import { MockConnectedService } from './connected';
+import { MockQuoteFeedService } from './quote-feeds';
 import { InMemoryCommandRegistry } from './commands';
 
 export interface Services {
@@ -20,6 +22,7 @@ export interface Services {
   quotes: QuotesService;
   watchlists: WatchlistsService;
   connected: ConnectedService;
+  quoteFeeds: QuoteFeedService;
   commands: CommandRegistry;
 }
 
@@ -45,6 +48,7 @@ export function getServices(): Services {
     watchlists: new LocalStorageWatchlistService(
       typeof window !== 'undefined' ? window.localStorage : new MemoryStorage()),
     connected:  new MockConnectedService(),
+    quoteFeeds: new MockQuoteFeedService(),
     commands:   new InMemoryCommandRegistry(),
   };
   return _services;
