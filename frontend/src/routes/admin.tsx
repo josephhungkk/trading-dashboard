@@ -1,9 +1,4 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { AdminPage } from '@/features/admin/AdminPage';
 
-export const Route = createFileRoute('/admin')({
-  component: () => (
-    <div style={{ padding: '2rem' }}>
-      <h2>Admin (stub — Task 40)</h2>
-    </div>
-  ),
-});
+export const Route = createFileRoute('/admin')({ component: AdminPage });
