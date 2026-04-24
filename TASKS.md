@@ -48,6 +48,8 @@
 ## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)
 ## Phase 5 — Trade execution (IBKR)
 ## Phase 6 — Futu adapter + CJK font polish
+
+- [ ] JP kanji routing: split JP @font-face into its own `font-family: "Noto Sans JP"` and select via `:lang(ja)` (or use `font-language-override: "JAN"`). Currently the TC face owns U+4E00-9FFF and precedes the JP face in source order, so Japanese kanji render from TC glyphs. Cosmetic at the Phase 3 ~10-char whitelist scale (forms coincide) but becomes user-visible once real JP tickers ship. Context: flagged by code-quality review during Phase 3 Task 3 (commit bbe97b9), 2026-04-24.
 ## Phase 7 — Alerts + Telegram + AI router (Ollama light + heavy-box WoL)
 ## Phase 8 — Schwab adapter
 ## Phase 2.x — follow-ups discovered during v0.2.0 verify

@@ -3,3 +3,16 @@ SC: 腾讯 阿里 美团 比亚迪 工商银行 招商银行 中国平安
 HK: 騰訊 阿里 恒生 美團 港交所 匯豐
 JP: トヨタ ソニー 任天堂 三菱 日立 ホンダ 富士 三菱UFJ
 KR: 삼성 현대 LG SK 카카오 네이버 포스코 하이닉스
+
+# Notes
+# - SC and HK .subset.woff2 are retained on disk for future per-locale font-family
+#   selection but are not currently referenced in global.css. TC's unicode-range
+#   (U+3400-4DBF + U+4E00-9FFF) covers the simplified and traditional Han
+#   characters for all three regions at the MVP whitelist scale.
+# - JP kanji codepoints in the whitelist (e.g. 三菱, 任天堂) fall inside the TC
+#   face's unicode-range and will render from the TC subset glyphs because the
+#   TC @font-face precedes the JP @font-face in global.css. CJK unification
+#   means TC vs JP glyph shapes differ for some characters; for the current
+#   10-char whitelist the forms coincide. Phase 6 follow-up: split JP into its
+#   own font-family ("Noto Sans JP") and select via :lang(ja) when real
+#   Japanese tickers ship.
