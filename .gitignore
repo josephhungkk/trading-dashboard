@@ -18,6 +18,9 @@ htmlcov/
 .pytest_cache/
 .DS_Store
 .remember/
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/hooks/**
 scripts/cloudflare/.state/
 !scripts/cloudflare/.state/.gitkeep

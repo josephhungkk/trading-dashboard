@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(cd frontend && pnpm test:*)",
+      "Bash(cd frontend && pnpm test)",
+      "Bash(cd frontend && pnpm typecheck)",
+      "Bash(cd frontend && pnpm lint)",
+      "Bash(cd frontend && pnpm lint:*)",
+      "Bash(cd frontend && pnpm stylelint)",
+      "Bash(cd frontend && pnpm stylelint:*)",
+      "Bash(cd frontend && pnpm storybook)",
+      "Bash(cd frontend && pnpm tsr generate)",
+      "Bash(cd frontend && pnpm dev)",
+      "Bash(cd frontend && pnpm build)",
+      "Bash(cd backend && uv run pytest:*)",
+      "Bash(cd backend && uv run pytest)",
+      "Bash(cd backend && uv run ruff check:*)",
+      "Bash(cd backend && uv run ruff format:*)",
+      "Bash(cd backend && uv run mypy:*)",
+      "Bash(cd backend && uv run mypy app)",
+      "Bash(cd backend && uv run alembic:*)",
+      "Bash(cd backend && uv run uvicorn:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker compose exec backend:*)",
+      "Bash(docker compose exec backend pytest:*)",
+      "Bash(docker compose exec backend alembic:*)",
+      "Bash(docker compose logs:*)",
+      "Bash(docker compose ps)",
+      "Bash(docker compose ps:*)",
+      "Bash(docker compose up:*)",
+      "Bash(docker compose down)",
+      "Bash(docker compose down:*)",
+      "Bash(docker compose restart:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run watch:*)",
+      "Bash(gh search code:*)",
+      "Bash(gh search repos:*)",
+      "Bash(git status)",
+      "Bash(git status --short)",
+      "Bash(git status --short:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git stash list)",
+      "Skill(codex:rescue)",
+      "Skill(codex:setup)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

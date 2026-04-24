@@ -92,7 +92,7 @@ Rotating `APP_SECRET_KEY` invalidates all encrypted secrets — treat it as perm
 | Heavy AI box | Large Ollama + ML training (on-demand, WoL) | 192.168.50.30 | 10.10.0.3 |
 | Router | | 192.168.50.1 | 10.10.0.254 |
 
-**The NUC is the dev host.** Claude Code runs in WSL2 on the NUC; `/mnt/c/dashboard` is the NUC's own `C:\dashboard`. There is no separate Windows dev box. Docker runs as docker-ce inside WSL (not Docker Desktop).
+**The NUC is the dev host.** Claude Code runs in WSL2 on the NUC at `/home/joseph/dashboard` (native Linux ext4). The project lived at `C:\dashboard` (Windows-mounted, accessed via `/mnt/c/dashboard`) until the 2026-04-24 move to native Linux for faster filesystem semantics and reliable HMR. There is no separate Windows dev box. Docker runs as docker-ce inside WSL (not Docker Desktop).
 
 SSH to VPS: `ssh -p 2222 trader@88.208.197.219` (key in `.ssh/`).
 
@@ -106,7 +106,7 @@ Containers inside WSL Docker reach PG at `10.10.0.2:5432` (WG-interface IP), NOT
 
 ## Project Paths
 
-- **NUC (dev host):** `C:\dashboard` — where `claude`, `pnpm dev`, `docker compose`, and (Phase 1+) `scripts/deploy.sh` all run. Reachable from WSL as `/mnt/c/dashboard`.
+- **NUC (dev host):** `/home/joseph/dashboard` — where `claude`, `pnpm dev`, `docker compose`, and `scripts/deploy.sh` all run. Native WSL2 (Linux ext4) path. The project was previously at `C:\dashboard` / `/mnt/c/dashboard` until 2026-04-24.
 - **VPS (prod host):** `/home/trader/trading-dashboard` — the rsync destination for Phase 1+. Docker Compose runs here for the prod stack.
 
 Both trees contain the same repo. Deploy script rsyncs from the NUC to the VPS.
@@ -122,7 +122,7 @@ Installed on the NUC via their own installers:
 | PostgreSQL 18 | `C:\Program Files\PostgreSQL\18\` | Windows service, own data dir |
 | Ollama | `%LOCALAPPDATA%\Programs\Ollama\` | Auto-updating binary + model cache |
 
-Ops glue (PowerShell + VBS helpers for broker auto-start, TOTP fill, window hiding, watchdog, daily restart) runs directly from the repo at `C:\dashboard\deploy\nuc\*`. Scheduled tasks reference those paths. Not part of the Docker build and not rsync'd to the VPS.
+Ops glue (PowerShell + VBS helpers for broker auto-start, TOTP fill, window hiding, watchdog, daily restart) runs from a Windows-side copy of the `deploy/nuc/` subdir, expected at `C:\dashboard\deploy\nuc\*` so Windows Scheduled Tasks can invoke the `.ps1`/`.vbs` files directly. Scheduled tasks reference those Windows paths. Not part of the Docker build and not rsync'd to the VPS. **Phase 4+ work item:** wire a sync step (or symlink/share) from `/home/joseph/dashboard/deploy/nuc/` → `C:\dashboard\deploy\nuc\` so the WSL-side dev edits stay in step with the Windows-side ops surface.
 
 ## Directory Layout
 
