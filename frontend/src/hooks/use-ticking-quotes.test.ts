@@ -57,7 +57,7 @@ describe('useTickingQuotes', () => {
     const nextLast = (original?.last ?? 100) + 5;
     expect(lastCallback).not.toBeNull();
     if (!lastCallback) return;
-    const emit = lastCallback;
+    const emit = lastCallback as (q: Quote) => void;
 
     act(() => {
       emit({ ...(original as Quote), symbol: 'AAPL', last: nextLast });
