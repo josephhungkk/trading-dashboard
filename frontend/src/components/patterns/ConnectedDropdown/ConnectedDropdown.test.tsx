@@ -13,62 +13,79 @@ function stubRadixPointer(): void {
   if (typeof proto['scrollIntoView'] !== 'function') proto['scrollIntoView'] = () => { /* jsdom stub */ };
 }
 
-const liveOnly: ConnectedStatus[] = [
-  { assetClass: 'stock',  source: 'IBKR TWS',    state: 'live', latencyMs: 120 },
-  { assetClass: 'forex',  source: 'IBKR TWS',    state: 'live', latencyMs: 80 },
+// Full SEED analog: 4 IBKR gateways (2 live + 2 paper) + Futu + Schwab all green.
+const allGreen: ConnectedStatus[] = [
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true, gatewayOk: true, latencyMs: 120 },
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-2',  alias: 'IBKR Live Gateway 2',  backendOk: true, gatewayOk: true, latencyMs: 130 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true, gatewayOk: true, latencyMs: 140 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-2', alias: 'IBKR Paper Gateway 2', backendOk: true, gatewayOk: true, latencyMs: 160 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true, gatewayOk: true, latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: true, gatewayOk: true, latencyMs: 200 },
 ];
 
-const withDelayed: ConnectedStatus[] = [
-  { assetClass: 'stock', source: 'IBKR TWS',     state: 'live',    latencyMs: 120 },
-  { assetClass: 'stock', source: 'Schwab Stream',state: 'delayed', latencyMs: 15_000 },
+// One IBKR live gateway has gatewayOk=false → IBKR Live aggregate row is yellow (backendOk XOR gatewayOk).
+const mixedYellow: ConnectedStatus[] = [
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true, gatewayOk: true,  latencyMs: 120 },
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-2',  alias: 'IBKR Live Gateway 2',  backendOk: true, gatewayOk: false, latencyMs: 240 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true, gatewayOk: true,  latencyMs: 140 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-2', alias: 'IBKR Paper Gateway 2', backendOk: true, gatewayOk: true,  latencyMs: 160 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true, gatewayOk: true, latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: true, gatewayOk: true, latencyMs: 200 },
 ];
 
-const withDown: ConnectedStatus[] = [
-  { assetClass: 'stock',   source: 'IBKR TWS', state: 'live', latencyMs: 120 },
-  { assetClass: 'futures', source: 'IBKR TWS', state: 'down', latencyMs: null },
+// Schwab both flags false → red row → red worst-state on trigger.
+const schwabDown: ConnectedStatus[] = [
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true,  gatewayOk: true,  latencyMs: 120 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true,  gatewayOk: true,  latencyMs: 140 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true,  gatewayOk: true,  latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: false, gatewayOk: false, latencyMs: null },
 ];
 
 describe('ConnectedDropdown', () => {
   beforeEach(() => { stubRadixPointer(); });
 
   it('renders a trigger labeled connection health', () => {
-    useConnectedStore.setState({ statuses: liveOnly });
+    useConnectedStore.setState({ statuses: allGreen });
     render(<ConnectedDropdown />);
     expect(screen.getByRole('button', { name: /connection health/i })).toBeInTheDocument();
   });
 
-  it('opens menu on click and lists each status row', async () => {
+  it('opens menu on click and lists 4 aggregate rows (IBKR Live, IBKR Paper, Futu, Schwab)', async () => {
     const user = userEvent.setup();
-    useConnectedStore.setState({ statuses: liveOnly });
+    useConnectedStore.setState({ statuses: allGreen });
     render(<ConnectedDropdown />);
     await user.click(screen.getByRole('button', { name: /connection health/i }));
     const items = screen.getAllByRole('menuitem');
-    expect(items).toHaveLength(liveOnly.length);
+    expect(items).toHaveLength(4);
+    expect(screen.getByText(/Interactive Brokers Live/i)).toBeInTheDocument();
+    expect(screen.getByText(/Interactive Brokers Paper/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Futu Securities$/)).toBeInTheDocument();
+    expect(screen.getByText(/^Charles Schwab$/)).toBeInTheDocument();
   });
 
-  it('renders em-dash when latencyMs is null', async () => {
+  it('renders all green rows when every gateway is ok', async () => {
     const user = userEvent.setup();
-    useConnectedStore.setState({ statuses: withDown });
+    useConnectedStore.setState({ statuses: allGreen });
     render(<ConnectedDropdown />);
     await user.click(screen.getByRole('button', { name: /connection health/i }));
-    expect(screen.getByText('—')).toBeInTheDocument();
+    const greenBadges = screen.getAllByText('green');
+    // 4 aggregate rows × 1 badge each = 4 green row badges.
+    expect(greenBadges).toHaveLength(4);
   });
 
-  it('reflects worst-state classification in trigger badge text', () => {
-    // All live -> 'live' classification; the word "Connected" is static,
-    // so we verify badge tone indirectly via class containing 'up'.
-    useConnectedStore.setState({ statuses: liveOnly });
-    const { container, rerender } = render(<ConnectedDropdown />);
-    // Just check the trigger button still renders — the badge's CSS variant
-    // is compiled into a class; asserting the exact class set is brittle.
-    expect(container.querySelector('button')).toBeInTheDocument();
+  it('renders a yellow row when a gateway has backendOk XOR gatewayOk', async () => {
+    const user = userEvent.setup();
+    useConnectedStore.setState({ statuses: mixedYellow });
+    render(<ConnectedDropdown />);
+    await user.click(screen.getByRole('button', { name: /connection health/i }));
+    expect(screen.getAllByText('yellow').length).toBeGreaterThanOrEqual(1);
+  });
 
-    useConnectedStore.setState({ statuses: withDelayed });
-    rerender(<ConnectedDropdown />);
-    expect(container.querySelector('button')).toBeInTheDocument();
-
-    useConnectedStore.setState({ statuses: withDown });
-    rerender(<ConnectedDropdown />);
-    expect(container.querySelector('button')).toBeInTheDocument();
+  it('renders a red row when a group has both flags false', async () => {
+    const user = userEvent.setup();
+    useConnectedStore.setState({ statuses: schwabDown });
+    render(<ConnectedDropdown />);
+    await user.click(screen.getByRole('button', { name: /connection health/i }));
+    expect(screen.getAllByText('red').length).toBeGreaterThanOrEqual(1);
   });
 });

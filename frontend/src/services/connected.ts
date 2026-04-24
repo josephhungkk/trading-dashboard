@@ -6,11 +6,12 @@ export interface ConnectedService {
 }
 
 const SEED: ConnectedStatus[] = [
-  { assetClass: 'stock',   source: 'IBKR TWS',     state: 'live',    latencyMs: 120 },
-  { assetClass: 'stock',   source: 'Schwab Stream',state: 'delayed', latencyMs: 15_000 },
-  { assetClass: 'forex',   source: 'IBKR TWS',     state: 'live',    latencyMs: 80 },
-  { assetClass: 'crypto',  source: 'Coinbase WS',  state: 'live',    latencyMs: 200 },
-  { assetClass: 'futures', source: 'IBKR TWS',     state: 'down',    latencyMs: null },
+  { broker: 'ibkr',   mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true,  gatewayOk: true,  latencyMs: 120 },
+  { broker: 'ibkr',   mode: 'live',  gatewayId: 'ibkr-live-gw-2',  alias: 'IBKR Live Gateway 2',  backendOk: true,  gatewayOk: false, latencyMs: 240 },
+  { broker: 'ibkr',   mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true,  gatewayOk: true,  latencyMs: 140 },
+  { broker: 'ibkr',   mode: 'paper', gatewayId: 'ibkr-paper-gw-2', alias: 'IBKR Paper Gateway 2', backendOk: true,  gatewayOk: true,  latencyMs: 160 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true,  gatewayOk: true,  latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: false, gatewayOk: false, latencyMs: null },
 ];
 
 export class MockConnectedService implements ConnectedService {

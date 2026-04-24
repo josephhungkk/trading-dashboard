@@ -11,21 +11,31 @@ function Seed({ statuses, children }: { statuses: ConnectedStatus[]; children: R
   return <>{children}</>;
 }
 
-const allLive: ConnectedStatus[] = [
-  { assetClass: 'stock',  source: 'IBKR TWS',    state: 'live',    latencyMs: 120 },
-  { assetClass: 'forex',  source: 'IBKR TWS',    state: 'live',    latencyMs: 80 },
-  { assetClass: 'crypto', source: 'Coinbase WS', state: 'live',    latencyMs: 200 },
+const allGreen: ConnectedStatus[] = [
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true, gatewayOk: true, latencyMs: 120 },
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-2',  alias: 'IBKR Live Gateway 2',  backendOk: true, gatewayOk: true, latencyMs: 130 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true, gatewayOk: true, latencyMs: 140 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-2', alias: 'IBKR Paper Gateway 2', backendOk: true, gatewayOk: true, latencyMs: 160 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true, gatewayOk: true, latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: true, gatewayOk: true, latencyMs: 200 },
 ];
 
-const someDelayed: ConnectedStatus[] = [
-  { assetClass: 'stock',  source: 'IBKR TWS',     state: 'live',    latencyMs: 120 },
-  { assetClass: 'stock',  source: 'Schwab Stream',state: 'delayed', latencyMs: 15_000 },
-  { assetClass: 'forex',  source: 'IBKR TWS',     state: 'live',    latencyMs: 80 },
+const mixedYellow: ConnectedStatus[] = [
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true, gatewayOk: true,  latencyMs: 120 },
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-2',  alias: 'IBKR Live Gateway 2',  backendOk: true, gatewayOk: false, latencyMs: 240 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true, gatewayOk: true,  latencyMs: 140 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-2', alias: 'IBKR Paper Gateway 2', backendOk: true, gatewayOk: true,  latencyMs: 160 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true, gatewayOk: true, latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: true, gatewayOk: true, latencyMs: 200 },
 ];
 
-const someDown: ConnectedStatus[] = [
-  { assetClass: 'stock',   source: 'IBKR TWS',   state: 'live',    latencyMs: 120 },
-  { assetClass: 'futures', source: 'IBKR TWS',   state: 'down',    latencyMs: null },
+const schwabDown: ConnectedStatus[] = [
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-1',  alias: 'IBKR Live Gateway 1',  backendOk: true,  gatewayOk: true,  latencyMs: 120 },
+  { broker: 'ibkr', mode: 'live',  gatewayId: 'ibkr-live-gw-2',  alias: 'IBKR Live Gateway 2',  backendOk: true,  gatewayOk: true,  latencyMs: 130 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-1', alias: 'IBKR Paper Gateway 1', backendOk: true,  gatewayOk: true,  latencyMs: 140 },
+  { broker: 'ibkr', mode: 'paper', gatewayId: 'ibkr-paper-gw-2', alias: 'IBKR Paper Gateway 2', backendOk: true,  gatewayOk: true,  latencyMs: 160 },
+  { broker: 'futu',   gatewayId: 'futu-od-1',    alias: 'Futu OpenD',  backendOk: true,  gatewayOk: true,  latencyMs: 80 },
+  { broker: 'schwab', gatewayId: 'schwab-api-1', alias: 'Schwab API',  backendOk: false, gatewayOk: false, latencyMs: null },
 ];
 
 const meta = {
@@ -37,6 +47,6 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const AllLive: Story = { render: () => <Seed statuses={allLive}><ConnectedDropdown /></Seed> };
-export const SomeDelayed: Story = { render: () => <Seed statuses={someDelayed}><ConnectedDropdown /></Seed> };
-export const SomeDown: Story = { render: () => <Seed statuses={someDown}><ConnectedDropdown /></Seed> };
+export const AllGreen: Story = { render: () => <Seed statuses={allGreen}><ConnectedDropdown /></Seed> };
+export const MixedYellow: Story = { render: () => <Seed statuses={mixedYellow}><ConnectedDropdown /></Seed> };
+export const SchwabDown: Story = { render: () => <Seed statuses={schwabDown}><ConnectedDropdown /></Seed> };

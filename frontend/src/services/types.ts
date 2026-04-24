@@ -71,9 +71,13 @@ export interface Watchlist {
 }
 
 export interface ConnectedStatus {
-  assetClass: AssetClass; source: string;
-  state: 'live' | 'delayed' | 'down';
-  latencyMs: number | null;
+  broker: BrokerId;             // 'ibkr' | 'futu' | 'schwab'
+  mode?: Mode;                  // 'live' | 'paper' for IBKR; omitted for single-stack brokers
+  gatewayId: string;            // unique gateway instance id, e.g. 'ibkr-live-gw-1'
+  alias: string;                // human label, e.g. 'IBKR Live Gateway 1'
+  backendOk: boolean;           // backend can reach gateway endpoint
+  gatewayOk: boolean;           // gateway logged in + streaming
+  latencyMs: number | null;     // last ping ms, null if down
 }
 
 export interface Command {
