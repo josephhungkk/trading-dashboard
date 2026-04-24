@@ -44,7 +44,24 @@
 - [x] Playwright smoke extended with admin config + secret reveal round-trips
 - [x] v0.2.0 tagged
 
-## Phase 3 — Frontend shell (mocks)  *(next)*
+## Phase 3 — Frontend shell (mocks)  *(in progress — Chunks A-G done + H 37-38)*
+
+### Delegation rule (active from 2026-04-24)
+
+**Coding only** is delegated to **Codex** (`codex:rescue` → `codex:codex-rescue` subagent). Codex writes/edits source files (components, hooks, services, stores, routes, feature pages). Codex does **not** author tests, stories, or make commits.
+
+Claude Code keeps:
+- Reading plans/specs + drafting Codex prompts
+- Writing tests + Storybook stories
+- Running typecheck/lint/test verification
+- Staging + committing (conventional commits, commitlint, gitleaks)
+- Updating TASKS.md / CHANGELOG.md / CLAUDE.md
+
+- Rationale: user-initiated 2026-04-24 after `codex login`; narrowed 2026-04-24 ("just coding, not tests and commits").
+- Scope: remainder of Phase 3 (Tasks 39-48) + Phases 4-9 unless user says otherwise.
+- Override: user can say "use Frontend Developer" / "use general-purpose" / "do it yourself" to route around Codex per-task.
+
+
 ## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)
 ## Phase 5 — Trade execution (IBKR)
 ## Phase 6 — Futu adapter + CJK font polish
