@@ -47,7 +47,7 @@ Five layers with one-way dependencies. Enforced by `eslint-plugin-boundaries`; v
 | `design-tokens/` | `src/design-tokens/**` | — (leaf) |
 | `components/primitives/` | `src/components/primitives/**` | tokens, lib |
 | `components/patterns/` | `src/components/patterns/**` | tokens, primitives, patterns, lib |
-| `components/layout/` | `src/components/layout/**` | tokens, primitives, patterns, layout, lib |
+| `components/layout/` | `src/components/layout/**` | tokens, primitives, patterns, layout, features, lib |
 | `features/` | `src/features/**` | everything |
 
 Rules:

@@ -56,7 +56,7 @@ export default tsEslint.config(
             { from: 'tokens',     allow: [] },
             { from: 'primitives', allow: ['tokens', 'lib'] },
             { from: 'patterns',   allow: ['tokens', 'primitives', 'patterns', 'lib'] },
-            { from: 'layout',     allow: ['tokens', 'primitives', 'patterns', 'layout', 'lib'] },
+            { from: 'layout',     allow: ['tokens', 'primitives', 'patterns', 'layout', 'features', 'lib'] },
             { from: 'features',   allow: ['tokens', 'primitives', 'patterns', 'layout', 'features', 'services', 'stores', 'hooks', 'lib'] },
             { from: 'services',   allow: ['lib'] },
             { from: 'stores',     allow: ['services', 'lib', 'factory'] },
