@@ -1,9 +1,18 @@
-/**
- * Map an exchange code to the correct Noto CJK variant lang tag.
- * Phase 3 populates the real mapping; Phase 0 returns 'en' for everything
- * since no stock names render yet.
- */
-export function langForMarket(_exchange: string): string {
-  void _exchange;
-  return 'en';
+export type Exchange =
+  | 'NYSE' | 'NASDAQ' | 'AMEX' | 'ARCA' | 'CBOE' | 'CME'
+  | 'SEHK' | 'TSE' | 'KRX' | 'TWSE' | 'SSE' | 'SZSE'
+  | 'LSE' | 'EURONEXT' | 'XETRA'
+  | 'FX' | 'CRYPTO'
+  | (string & {});
+
+const MAP: Record<string, string> = {
+  NYSE: 'en', NASDAQ: 'en', AMEX: 'en', ARCA: 'en', CBOE: 'en', CME: 'en',
+  SEHK: 'zh-HK', TSE: 'ja', KRX: 'ko', TWSE: 'zh-TW',
+  SSE: 'zh-CN', SZSE: 'zh-CN',
+  LSE: 'en', EURONEXT: 'en', XETRA: 'en',
+  FX: 'en', CRYPTO: 'en',
+};
+
+export function langForMarket(exchange: Exchange): string {
+  return MAP[exchange] ?? 'en';
 }

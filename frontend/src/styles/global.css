@@ -1,5 +1,65 @@
 @import "./tailwind.css";
 
-body {
-  font-family: var(--font-sans);
+@font-face { font-family: "Noto Sans";
+  font-weight: 400; font-style: normal;
+
+ font-display: swap; src: url("/fonts/NotoSans-400.woff2") format("woff2");
+  unicode-range: U+0000-007F, U+00A0-00FF, U+0100-017F, U+0180-024F; }
+
+@font-face { font-family: "Noto Sans";
+  font-weight: 500; font-style: normal;
+
+ font-display: swap; src: url("/fonts/NotoSans-500.woff2") format("woff2"); }
+
+@font-face { font-family: "Noto Sans";
+  font-weight: 700; font-style: normal;
+
+ font-display: swap; src: url("/fonts/NotoSans-700.woff2") format("woff2"); }
+
+@font-face { font-family: "Noto Sans Mono";
+  font-weight: 400; font-style: normal;
+
+ font-display: swap; src: url("/fonts/NotoSansMono-400.woff2") format("woff2"); }
+
+@font-face { font-family: "Noto Sans";
+  font-weight: 400; font-style: normal;
+
+ font-display: swap; src: url("/fonts/NotoSansCJK-TC-400.subset.woff2") format("woff2");
+  unicode-range: U+3000-303F, U+3100-312F, U+31A0-31BF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF; }
+
+@font-face { font-family: "Noto Sans";
+  font-weight: 400; font-style: normal;
+
+ font-display: swap; src: url("/fonts/NotoSansCJK-JP-400.subset.woff2") format("woff2");
+  unicode-range: U+3040-309F, U+30A0-30FF, U+31F0-31FF; }
+
+@font-face { font-family: "Noto Sans";
+  font-weight: 400; font-style: normal;
+
+ font-display: swap; src: url("/fonts/NotoSansCJK-KR-400.subset.woff2") format("woff2");
+  unicode-range: U+1100-11FF, U+3130-318F, U+A960-A97F, U+AC00-D7AF, U+D7B0-D7FF; }
+
+html { font-synthesis: weight style; }
+
+* {
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+*:hover {
+  scrollbar-width: thin;
+}
+
+*:hover::-webkit-scrollbar {
+  width: 0.5rem;
+  height: 0.5rem;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 0.25rem;
+  background: var(--color-border);
 }
