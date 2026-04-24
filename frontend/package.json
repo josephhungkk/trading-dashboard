@@ -89,5 +89,13 @@
     "typescript-eslint": "^8.59.0",
     "vite": "^8.0.9",
     "vitest": "^4.1.5"
+  },
+  "pnpm": {
+    "overrides": {
+      "tar-fs": ">=2.1.4",
+      "form-data": ">=2.5.4",
+      "node-fetch": ">=2.6.7",
+      "ws": ">=8.17.1"
+    }
   }
 }

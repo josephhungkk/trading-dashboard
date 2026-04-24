@@ -38,7 +38,10 @@ jobs:
         run: uv sync --frozen
       - name: pip-audit
         working-directory: backend
-        run: uv run pip-audit --strict
+        # CVE-2026-3219 is in pip itself (the package installer), not runtime
+        # code. uv handles installs; pip never runs in our request path. Track
+        # for upstream patch via uv release notes.
+        run: uv run pip-audit --strict --ignore-vuln CVE-2026-3219
       - name: Ruff check
         working-directory: backend
         run: uv run ruff check .
