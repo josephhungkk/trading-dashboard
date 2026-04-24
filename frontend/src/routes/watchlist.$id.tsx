@@ -1,14 +1,14 @@
+import * as React from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-
-export const Route = createFileRoute('/watchlist/$id')({
-  component: WatchlistId,
-});
-
-function WatchlistId() {
+import { WatchlistPage } from '@/features/watchlist/WatchlistPage';
+ 
+import { useActiveStores } from '@/stores/registry';
+export const Route = createFileRoute('/watchlist/$id')({ component: WatchlistRoute });
+function WatchlistRoute(): React.JSX.Element {
   const { id } = Route.useParams();
-  return (
-    <div style={{ padding: '2rem' }}>
-      <h2>Watchlist {id} (stub — Task 39)</h2>
-    </div>
-  );
+  const stores = useActiveStores();
+  React.useEffect(() => {
+    stores.useWatchlists.getState().setActive(id);
+  }, [id, stores]);
+  return <WatchlistPage />;
 }
