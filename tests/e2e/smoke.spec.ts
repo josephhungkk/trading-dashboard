@@ -86,10 +86,11 @@ test.describe('Phase 3 frontend shell', () => {
   test('command palette opens via topbar trigger and / prefix navigates', async ({ page }) => {
     await page.goto('/overview');
     await page.waitForLoadState('networkidle');
-    // Open via the topbar trigger button (aria-label set in Topbar.tsx) so we
-    // are not racing the global keydown listener mount or hitting the
-    // headless-Chromium Meta-key inconsistency.
-    await page.getByRole('button', { name: /open command palette/i }).click();
+    // Open via the topbar trigger button. Match on the visible "⌘K" label
+    // (more distinctive in prod than the aria-label, which our Button
+    // primitive may not surface as the computed accessible name through
+    // the icon + span children).
+    await page.locator('header button:has-text("⌘K")').first().click();
     // cmdk's Command.Dialog renders with visibility:hidden until first measure,
     // so toBeVisible() flakes; assert DOM presence + open state instead.
     const dialog = page.getByRole('dialog', { name: /command palette/i });
