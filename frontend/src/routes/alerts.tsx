@@ -1,9 +1,4 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { AlertsStubPage } from '@/features/alerts/AlertsStubPage';
 
-export const Route = createFileRoute('/alerts')({
-  component: () => (
-    <div style={{ padding: '2rem' }}>
-      <h2>Alerts (stub — Task 42)</h2>
-    </div>
-  ),
-});
+export const Route = createFileRoute('/alerts')({ component: AlertsStubPage });

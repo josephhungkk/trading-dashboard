@@ -1,9 +1,4 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { TradeStubPage } from '@/features/trade/TradeStubPage';
 
-export const Route = createFileRoute('/trade')({
-  component: () => (
-    <div style={{ padding: '2rem' }}>
-      <h2>Trade (stub — Task 42)</h2>
-    </div>
-  ),
-});
+export const Route = createFileRoute('/trade')({ component: TradeStubPage });
