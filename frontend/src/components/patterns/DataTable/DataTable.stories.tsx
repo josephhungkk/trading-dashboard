@@ -1,7 +1,10 @@
+import * as React from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import type { ColumnDef } from '@tanstack/react-table';
+import { expect, within } from 'storybook/test';
 import { DataTable } from './DataTable';
 import { MobileCardRow } from '../MobileCardRow/MobileCardRow';
+import { NumericCell } from '../../primitives/NumericCell/NumericCell';
 
 interface Row {
   id: string;
@@ -93,5 +96,90 @@ export const Empty: Story = {
     columns,
     data: [],
     rowKey: (r) => r.id,
+  },
+};
+
+interface WideRow {
+  id: string;
+  symbol: string;
+  metrics: number[];
+}
+
+const STRESS_ROW_COUNT = 500;
+const STRESS_COL_COUNT = 30;
+
+const stressData: WideRow[] = Array.from({ length: STRESS_ROW_COUNT }, (_, i) => ({
+  id: String(i + 1).padStart(4, '0'),
+  symbol: `SYM${String(i + 1).padStart(4, '0')}`,
+  metrics: Array.from({ length: STRESS_COL_COUNT }, () => (Math.random() - 0.5) * 200),
+}));
+
+const stressColumns: ColumnDef<WideRow>[] = [
+  { accessorKey: 'symbol', header: 'Symbol' },
+  ...Array.from({ length: STRESS_COL_COUNT }, (_, c) => ({
+    id: `m${c}`,
+    header: `M${c}`,
+    cell: ({ row }) => {
+      const v = row.original.metrics[c] ?? 0;
+      return <NumericCell value={v} digits={2} emphasis={v >= 0 ? 'up' : 'down'} />;
+    },
+  })) satisfies ColumnDef<WideRow>[],
+];
+
+function StressPerfHarness(): React.JSX.Element {
+  const slowFramesRef = React.useRef(0);
+
+  React.useEffect(() => {
+    if (typeof PerformanceObserver === 'undefined') return undefined;
+    const obs = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.duration > 16) {
+          slowFramesRef.current += 1;
+          console.warn(`[stress-perf] frame budget exceeded: ${entry.duration.toFixed(1)}ms`);
+        }
+      }
+    });
+    try {
+      obs.observe({ entryTypes: ['measure', 'longtask'] });
+    } catch {
+      // entryTypes unsupported in test env — silently ignore
+    }
+    return () => {
+      obs.disconnect();
+    };
+  }, []);
+
+  return (
+    <DataTable<WideRow>
+      columns={stressColumns}
+      data={stressData}
+      rowKey={(r) => r.id}
+    />
+  );
+}
+
+export const StressPerf: Story = {
+  // args required by the Row-bound Story type even though render ignores them.
+  args: {
+    columns: [],
+    data: [],
+    rowKey: () => '',
+  },
+  render: () => <StressPerfHarness />,
+  parameters: {
+    a11y: { disable: true },
+    docs: {
+      description: {
+        story: `${STRESS_ROW_COUNT} rows × ${STRESS_COL_COUNT + 1} columns of NumericCell. PerformanceObserver in the harness emits a console warning per frame >16ms; the play function asserts virtualization keeps the rendered DOM bounded so 500 rows do not all materialize at once.`,
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // The virtualizer must keep the rendered row count well below the data
+    // length, otherwise we are not actually virtualizing under load.
+    const rows = await canvas.findAllByRole('row');
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThan(STRESS_ROW_COUNT / 2);
   },
 };
