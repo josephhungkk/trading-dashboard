@@ -44,7 +44,7 @@
 - [x] Playwright smoke extended with admin config + secret reveal round-trips
 - [x] v0.2.0 tagged
 
-## Phase 3 — Frontend shell (mocks)  *(in progress — Chunks A-G done + H 37-38)*
+## Phase 3 — Frontend shell (mocks)  *(in progress — Chunks A-H done (Tasks 1-42); Chunk I (tests) + Chunk J (close-out) remaining)*
 
 ### Delegation rule (active from 2026-04-24)
 
