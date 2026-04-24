@@ -1,1 +1,58 @@
 @import "tailwindcss";
+
+@theme {
+  /* Surfaces — dark-only */
+  --color-bg:           oklch(15% 0.01 240);
+  --color-panel:        oklch(20% 0.01 240);
+  --color-elevated:     oklch(24% 0.01 240);
+  --color-border:       oklch(30% 0.01 240);
+  --color-fg:           oklch(96% 0.01 240);
+  --color-fg-muted:     oklch(65% 0.01 240);
+  --color-fg-subtle:    oklch(45% 0.01 240);
+
+  /* Semantic */
+  --color-primary:        oklch(70% 0.12 230);
+  --color-primary-fg:     oklch(15% 0.01 240);
+  --color-destructive:    oklch(62% 0.19 25);
+  --color-destructive-fg: oklch(96% 0.01 240);
+  --color-positive:       oklch(70% 0.17 145);
+  --color-negative:       oklch(62% 0.19 25);
+  --color-warn:           oklch(78% 0.15 75);
+  --color-info:           oklch(70% 0.12 230);
+  --color-muted:          oklch(30% 0.01 240);
+
+  /* Mode accents */
+  --color-accent-live:   oklch(58% 0.20 25);
+  --color-accent-paper:  oklch(72% 0.18 75);
+  --color-accent-active: var(--color-accent-paper);
+
+  /* Status tints */
+  --color-delayed-bg: oklch(22% 0.02 240);
+  --color-delayed-fg: oklch(60% 0.02 240);
+
+  /* Fonts */
+  --font-sans: "Noto Sans", system-ui, sans-serif;
+  --font-mono: "Noto Sans Mono", ui-monospace, monospace;
+
+  /* Type scale */
+  --text-xs: 0.75rem;  --text-sm: 0.875rem; --text-base: 1rem;
+  --text-lg: 1.125rem; --text-xl: 1.25rem;  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+
+  /* Radii */
+  --radius-sm: 0.25rem; --radius-md: 0.5rem; --radius-lg: 0.75rem;
+  --radius-full: 624.9375rem;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+}
+
+body {
+  color: var(--color-fg);
+  background: var(--color-bg);
+}
+body[data-mode="live"]  { --color-accent-active: var(--color-accent-live); }
+body[data-mode="paper"] { --color-accent-active: var(--color-accent-paper); }
