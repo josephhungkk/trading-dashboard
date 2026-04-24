@@ -79,6 +79,11 @@ services:
     cap_drop: ["ALL"]
     cap_add: ["NET_BIND_SERVICE"]
     read_only: true
+    # Mount the SPA-routing config over the stock default.conf so client-side
+    # routes (/overview, /watchlist, etc.) fall back to /index.html instead of
+    # 404. Without this, only `/` works and TanStack Router can't take over.
+    volumes:
+      - ./nginx/spa.conf:/etc/nginx/conf.d/default.conf:ro
     tmpfs:
       - "/var/cache/nginx:size=20m,mode=1777"
       - "/var/run:size=1m,mode=1777"
