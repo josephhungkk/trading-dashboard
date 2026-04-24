@@ -4,16 +4,17 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview",
+    "dev": "pnpm tsr generate && vite",
+    "build": "pnpm tsr generate && tsc --noEmit && vite build",
+    "test": "pnpm tsr generate && vitest run",
+    "test:watch": "pnpm tsr generate && vitest",
+    "typecheck": "pnpm tsr generate && tsc --noEmit",
+    "tsr": "tsr",
+    "storybook": "pnpm tsr generate && storybook dev -p 6006",
+    "build-storybook": "pnpm tsr generate && storybook build",
     "lint": "eslint src",
     "stylelint": "stylelint \"src/**/*.{css,tsx}\"",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
