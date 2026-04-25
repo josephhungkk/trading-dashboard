@@ -572,6 +572,19 @@ $targetMenus = @{
     @{ Label = 'Restart normal-paper'; Action = { Invoke-RestartTasks @('IBGateway-normal-paper') 'normal-paper' } }
     @{ Label = 'Restart BOTH paper';   Action = { Invoke-RestartTasks @('IBGateway-isa-paper','IBGateway-normal-paper') 'both-paper' } }
   )
+  # Phase 4 sidecar triangles. Restart options mirror the IBKR Live/Paper
+  # split, but kick the IBKRSidecar-<label> scheduled tasks (registered by
+  # deploy/nuc/register-ibkr-sidecar.ps1) instead of the gateway tasks.
+  'Sidecar Live' = @(
+    @{ Label = 'Restart sidecar isa-live';    Action = { Invoke-RestartTasks @('IBKRSidecar-isa-live')    'sidecar-isa-live' } }
+    @{ Label = 'Restart sidecar normal-live'; Action = { Invoke-RestartTasks @('IBKRSidecar-normal-live') 'sidecar-normal-live' } }
+    @{ Label = 'Restart BOTH live sidecars';  Action = { Invoke-RestartTasks @('IBKRSidecar-isa-live','IBKRSidecar-normal-live') 'sidecar-both-live' } }
+  )
+  'Sidecar Paper' = @(
+    @{ Label = 'Restart sidecar isa-paper';    Action = { Invoke-RestartTasks @('IBKRSidecar-isa-paper')    'sidecar-isa-paper' } }
+    @{ Label = 'Restart sidecar normal-paper'; Action = { Invoke-RestartTasks @('IBKRSidecar-normal-paper') 'sidecar-normal-paper' } }
+    @{ Label = 'Restart BOTH paper sidecars';  Action = { Invoke-RestartTasks @('IBKRSidecar-isa-paper','IBKRSidecar-normal-paper') 'sidecar-both-paper' } }
+  )
 }
 
 function New-ContextMenu {
