@@ -30,14 +30,27 @@ Info "WG IP: $WgIp"
 Info "Sidecar ports: $($Ports -join ', ')"
 Write-Host ""
 
-# (a) WireGuard service running
+# (a) WireGuard service running.
+# Try the explicit name first; if not found, enumerate WireGuardTunnel* and pick a running one.
 $svc = Get-Service -Name $WgServiceName -ErrorAction SilentlyContinue
+if (-not $svc) {
+    $candidates = @(Get-Service -Name 'WireGuardTunnel*' -ErrorAction SilentlyContinue)
+    $running = @($candidates | Where-Object { $_.Status -eq 'Running' })
+    if ($running.Count -ge 1) {
+        $svc = $running[0]
+        $WgServiceName = $svc.Name
+        Info "Auto-detected WireGuard service: $WgServiceName"
+    } elseif ($candidates.Count -ge 1) {
+        $svc = $candidates[0]
+        $WgServiceName = $svc.Name
+    }
+}
 if ($svc -and $svc.Status -eq 'Running') {
     Pass "WireGuard service '$WgServiceName' is running"
 } elseif ($svc) {
     Fail "WireGuard service '$WgServiceName' exists but is not running (Status=$($svc.Status))"
 } else {
-    Fail "WireGuard service '$WgServiceName' missing. Install WG-for-Windows + import the wg0 tunnel."
+    Fail "No WireGuard service found (looked for '$WgServiceName' + 'WireGuardTunnel*'). Install WG-for-Windows + import the wg0 tunnel."
 }
 
 # (b) 10.10.0.2 on a Windows interface
