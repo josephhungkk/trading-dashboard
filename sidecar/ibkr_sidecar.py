@@ -210,11 +210,15 @@ async def run(args: argparse.Namespace) -> None:
         await ib.connectAsync("127.0.0.1", args.gateway_port, clientId=client_id, timeout=30)
         log.info("ibkr_connected", clientId=client_id, gateway_port=args.gateway_port)
 
-        accounts = list(await ib.reqManagedAccountsAsync())  # type: ignore[attr-defined]
-        await ib.reqAccountSummaryAsync(  # type: ignore[call-arg]
-            group="All",
-            tags="NetLiquidation,TotalCashValue,RealizedPnL,UnrealizedPnL,BuyingPower,BASE",
-        )
+        # ib_async populates managedAccounts() during connectAsync; modern API
+        # has no reqManagedAccountsAsync(). Brief sleep ensures the initial
+        # accountList message has been parsed before we read.
+        await asyncio.sleep(0.5)
+        accounts = list(ib.managedAccounts())
+        # No-arg reqAccountSummaryAsync() — modern ib_async dropped the
+        # group/tags kwargs; the default subscription includes the tags the
+        # handlers care about (NetLiquidation, TotalCashValue, BASE, etc.).
+        await ib.reqAccountSummaryAsync()
 
         server = grpc.aio.server(options=server_options_for_tls13())
         creds = build_grpc_server_credentials(cert_pem, key_pem, ca_bundle_pem, crl_pem)

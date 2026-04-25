@@ -51,6 +51,14 @@ class FakeIB:
     def client(self) -> FakeIBClient:
         return FakeIBClient(server_version=self.server_version)
 
+    def managedAccounts(self) -> list[str]:  # noqa: N802
+        # Modern ib_async surface: sync, populated during connectAsync.
+        # Production handler calls this; the async variant below is kept only
+        # for any test that still pokes at the old API.
+        if self.raise_on_managed:
+            raise RuntimeError("api timeout")
+        return list(self.managed_accounts)
+
     async def reqManagedAccountsAsync(self) -> list[str]:  # noqa: N802
         if self.raise_on_managed:
             raise RuntimeError("api timeout")

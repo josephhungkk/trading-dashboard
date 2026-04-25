@@ -159,7 +159,9 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         account_values: list[object] = []
 
         try:
-            raw_accounts: object = await self.ib.reqManagedAccountsAsync()  # type: ignore[attr-defined]
+            # ib_async populates managedAccounts() synchronously during
+            # connectAsync; modern API has no reqManagedAccountsAsync().
+            raw_accounts: object = self.ib.managedAccounts()
             managed_accounts: Iterable[object] = cast("Iterable[object]", raw_accounts)
             account_numbers = [str(account) for account in managed_accounts]
         except Exception as exc:
