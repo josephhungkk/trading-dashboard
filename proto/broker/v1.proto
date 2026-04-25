@@ -1,0 +1,171 @@
+// proto/broker/v1.proto
+// Broker adapter contract — Phase 4 (read-only IBKR), reused by Phases 5-8.
+// Spec: docs/superpowers/specs/2026-04-25-phase4-ibkr-adapter-design.md §4.1.
+//
+// Invariants:
+// - All monetary values are Money (decimal-as-string + currency). Never float.
+// - All quantities are decimal-as-string. Fractional shares supported.
+// - Position.unrealized_pnl comes from IB.reqPnLSingle(), not naive math.
+// - UK-listed-stock pence quotes are normalized to pounds inside the sidecar.
+// - Account.gateway_label and Account.account_number are sidecar->backend
+//   internal; backend's AccountResponse strips both at the REST boundary.
+
+syntax = "proto3";
+package broker.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service Broker {
+  rpc Health(HealthRequest)             returns (HealthResponse);
+  rpc ListManagedAccounts(Empty)        returns (AccountsResponse);
+  rpc GetAccountSummary(AccountRef)     returns (SummaryResponse);
+  rpc GetPositions(AccountRef)          returns (PositionsResponse);
+  rpc GetOrders(AccountRef)             returns (OrdersResponse);
+  rpc GetContract(ContractRef)          returns (ContractResponse);
+}
+
+enum BrokerId {
+  BROKER_UNSPECIFIED = 0;
+  IBKR               = 1;
+  FUTU               = 2;
+  SCHWAB             = 3;
+}
+
+enum TradingMode {
+  MODE_UNSPECIFIED = 0;
+  LIVE             = 1;
+  PAPER            = 2;
+}
+
+enum AssetClass {
+  ASSET_UNSPECIFIED = 0;
+  STOCK             = 1;
+  ETF               = 2;
+  OPTION            = 3;
+  FUTURE            = 4;
+  FOREX             = 5;
+  CRYPTO            = 6;
+  BOND              = 7;
+  MUTUAL_FUND       = 8;
+  WARRANT           = 9;
+}
+
+enum OrderSide {
+  SIDE_UNSPECIFIED = 0;
+  BUY              = 1;
+  SELL             = 2;
+}
+
+enum OrderType {
+  TYPE_UNSPECIFIED = 0;
+  MARKET           = 1;
+  LIMIT            = 2;
+  STOP             = 3;
+  STOP_LIMIT       = 4;
+}
+
+enum TimeInForce {
+  TIF_UNSPECIFIED = 0;
+  DAY             = 1;
+  GTC             = 2;
+  IOC             = 3;
+  FOK             = 4;
+}
+
+enum OrderStatus {
+  STATUS_UNSPECIFIED = 0;
+  PENDING            = 1;
+  SUBMITTED          = 2;
+  PARTIAL            = 3;
+  FILLED             = 4;
+  CANCELLED          = 5;
+  REJECTED           = 6;
+}
+
+message Empty {}
+
+message HealthRequest {}
+message HealthResponse {
+  // "isa-live", "isa-paper", "normal-live", "normal-paper"
+  string label = 1;
+  // ib_async.isConnected()
+  bool gateway_connected = 2;
+  // str(ib.client.serverVersion()) when connected, "" otherwise
+  string gateway_version = 3;
+  // useful for staleness detection (last broker-side tick observed)
+  google.protobuf.Timestamp last_tick_at = 4;
+  // git SHA at sidecar build time; lets the watchdog detect drift
+  string sidecar_version = 5;
+}
+
+// gateway_label and account_number are sidecar->backend internal.
+// AccountResponse (Pydantic, in backend/app/brokers/base.py) strips both
+// before serializing to REST callers.
+message Account {
+  string      account_number = 1;
+  TradingMode mode           = 2;
+  string      gateway_label  = 3;
+  // Sourced from accountSummary BASE tag (e.g., "USD", "GBP"). NOT defaulted.
+  string      currency_base  = 4;
+}
+message AccountsResponse { repeated Account accounts = 1; }
+message AccountRef       { string account_number = 1; }
+
+// Decimal-as-string. Never float across the wire.
+message Money {
+  string value    = 1;
+  string currency = 2;
+}
+
+message Summary {
+  Money net_liquidation = 1;
+  Money total_cash      = 2;
+  Money realized_pnl    = 3;
+  Money unrealized_pnl  = 4;
+  Money buying_power    = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+message SummaryResponse { Summary summary = 1; }
+
+message Contract {
+  string     symbol       = 1;
+  string     exchange     = 2;
+  string     currency     = 3;
+  AssetClass asset_class  = 4;
+  // IBKR contract id, as string
+  string     conid        = 5;
+  string     local_symbol = 6;
+}
+message ContractRef      { string conid = 1; }
+message ContractResponse { Contract contract = 1; }
+
+message Position {
+  Contract contract           = 1;
+  // decimal-as-string
+  string   quantity           = 2;
+  Money    avg_cost           = 3;
+  Money    market_price       = 4;
+  Money    market_value       = 5;
+  // Sourced from IB.reqPnLSingle(); NEVER computed naively per stock_splits.md.
+  Money    unrealized_pnl     = 6;
+  Money    realized_pnl_today = 7;
+  Money    daily_pnl          = 8;
+}
+message PositionsResponse { repeated Position positions = 1; }
+
+message Order {
+  string      order_id        = 1;
+  Contract    contract        = 2;
+  OrderSide   side            = 3;
+  OrderType   order_type      = 4;
+  string      quantity        = 5;
+  Money       limit_price     = 6;
+  Money       stop_price      = 7;
+  TimeInForce time_in_force   = 8;
+  OrderStatus status          = 9;
+  string      quantity_filled = 10;
+  Money       avg_fill_price  = 11;
+  google.protobuf.Timestamp submitted_at = 12;
+  google.protobuf.Timestamp updated_at   = 13;
+}
+message OrdersResponse { repeated Order orders = 1; }

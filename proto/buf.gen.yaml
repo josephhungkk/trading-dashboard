@@ -1,0 +1,14 @@
+version: v2
+plugins:
+  - remote: buf.build/grpc/python:v1.66.0
+    out: ../backend/app/brokers/_generated
+  - remote: buf.build/grpc/python:v1.66.0
+    out: ../sidecar/_generated
+  - remote: buf.build/protocolbuffers/python:v28.2
+    out: ../backend/app/brokers/_generated
+  - remote: buf.build/protocolbuffers/python:v28.2
+    out: ../sidecar/_generated
+  - remote: buf.build/bufbuild/es:v2.2.2
+    out: ../frontend/src/proto-gen
+    opt:
+      - target=ts
