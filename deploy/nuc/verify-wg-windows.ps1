@@ -1,12 +1,12 @@
-# deploy/nuc/verify-wg-windows.ps1
-# §0 prerequisite verifier for Phase 4 IBKR sidecars.
+﻿# deploy/nuc/verify-wg-windows.ps1
+# Section 0 prerequisite verifier for Phase 4 IBKR sidecars.
 # Halts the phase if WireGuard isn't on the Windows side or sidecar ports cannot bind.
 #
 # Run with:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File verify-wg-windows.ps1
 #
 # Idempotent (creates the firewall rule if missing). Exits 0 on success, 1 on any failure.
-# If FAIL, halt the phase and re-brainstorm — the sidecar topology assumes Windows-native
+# If FAIL, halt the phase and re-brainstorm. The sidecar topology assumes Windows-native
 # binding to 10.10.0.2; if WireGuard is on the WSL side, sidecars must be redesigned.
 
 [CmdletBinding()]
@@ -64,7 +64,7 @@ if ($existingRule) {
     }
 }
 
-# (d) Test bind on port 18001 — start a tiny TCP listener, probe locally, kill it.
+# (d) Test bind on port 18001: start a tiny TCP listener, probe locally, kill it.
 $testPort = $Ports[0]
 $tcp = $null
 try {
@@ -74,14 +74,15 @@ try {
 
     $client = [System.Net.Sockets.TcpClient]::new()
     $task = $client.ConnectAsync($WgIp, $testPort)
+    $endpoint = "$($WgIp):$($testPort)"
     if ($task.Wait([TimeSpan]::FromSeconds(3))) {
-        Pass "Test bind succeeded: ${WgIp}:${testPort} (listener accepted local probe)"
+        Pass "Test bind succeeded: $endpoint (listener accepted local probe)"
         $client.Close()
     } else {
-        Fail "Test bind FAILED: ${WgIp}:${testPort} — listener started but local probe could not connect."
+        Fail "Test bind FAILED: $endpoint - listener started but local probe could not connect."
     }
 } catch {
-    Fail "Test bind FAILED: ${WgIp}:${testPort} — $($_.Exception.Message)"
+    Fail "Test bind FAILED on port $testPort - $($_.Exception.Message)"
 } finally {
     if ($tcp) { try { $tcp.Stop() } catch { } }
 }
