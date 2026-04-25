@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -22,8 +22,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Protocol
 
-    from ib_async import (  # type: ignore[import-untyped, unused-ignore]
+    from ib_async import (
         IB,
+    )
+    from ib_async import (  # type: ignore[import-untyped, unused-ignore]
+        Contract as IbContract,
     )
 
     class _IbContract(Protocol):
@@ -40,6 +43,45 @@ if TYPE_CHECKING:
         marketPrice: object  # noqa: N815
         avgCost: object  # noqa: N815
         position: object
+
+    class _IbOrder(Protocol):
+        account: str
+        action: str
+        auxPrice: float | Decimal | None  # noqa: N815
+        lmtPrice: float | Decimal | None  # noqa: N815
+        orderId: int  # noqa: N815
+        orderType: str  # noqa: N815
+        permId: int  # noqa: N815
+        tif: str
+        totalQuantity: float  # noqa: N815
+
+    class _IbOrderStatus(Protocol):
+        avgFillPrice: float  # noqa: N815
+        filled: float
+        status: str
+
+    class _IbTradeLogEntry(Protocol):
+        time: datetime
+
+    class _IbTrade(Protocol):
+        contract: _IbContract
+        log: list[_IbTradeLogEntry]
+        order: _IbOrder
+        orderStatus: _IbOrderStatus  # noqa: N815
+
+    class _IbExecution(Protocol):
+        acctNumber: str  # noqa: N815
+        avgPrice: float  # noqa: N815
+        cumQty: float  # noqa: N815
+        permId: int  # noqa: N815
+        price: float
+        side: str
+        time: datetime
+
+    class _IbFill(Protocol):
+        contract: _IbContract
+        execution: _IbExecution
+        time: datetime
 
 
 logger = structlog.get_logger(__name__)
@@ -245,14 +287,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
             response_positions.append(
                 broker_pb2.Position(
-                    contract=broker_pb2.Contract(
-                        symbol=str(contract.symbol),
-                        exchange=exchange,
-                        currency=currency,
-                        asset_class=self._asset_class(str(contract.secType)),
-                        conid=str(conid),
-                        local_symbol=str(contract.localSymbol),
-                    ),
+                    contract=self._proto_contract(contract),
                     quantity=decimal_str(quantity_decimal),
                     avg_cost=to_money_proto(avg_cost, currency),
                     market_price=to_money_proto(market_price, currency),
@@ -264,6 +299,131 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             )
 
         return broker_pb2.PositionsResponse(positions=response_positions)
+
+    async def GetOrders(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: object,
+    ) -> broker_pb2.OrdersResponse:
+        del context
+
+        account_number: str = str(request.account_number)
+
+        try:
+            raw_open_trades: object = self.ib.openTrades()  # type: ignore[attr-defined, unused-ignore]
+            raw_fills: object = self.ib.fills()  # type: ignore[attr-defined, unused-ignore]
+            open_trades: list[_IbTrade] = [
+                cast("_IbTrade", trade)
+                for trade in cast("Iterable[object]", raw_open_trades)
+                if str(getattr(getattr(trade, "order", None), "account", "")) == account_number
+            ]
+            today = datetime.now(tz=UTC).date()
+            fills: list[_IbFill] = []
+            for fill in cast("Iterable[object]", raw_fills):
+                ib_fill: _IbFill = cast("_IbFill", fill)
+                if ib_fill.time.date() == today and ib_fill.execution.acctNumber == account_number:
+                    fills.append(ib_fill)
+            open_perm_ids: set[int] = {trade.order.permId for trade in open_trades}
+
+            orders: list[broker_pb2.Order] = [
+                self._proto_order_from_trade(trade) for trade in open_trades
+            ]
+            orders.extend(
+                self._proto_order_from_fill(fill)
+                for fill in fills
+                if fill.execution.permId not in open_perm_ids
+            )
+        except Exception as exc:
+            logger.exception(
+                "ibkr_orders_failed",
+                label=self.label,
+                account_number=account_number,
+                error=str(exc),
+            )
+            return broker_pb2.OrdersResponse(orders=[])
+
+        return broker_pb2.OrdersResponse(orders=orders)
+
+    async def GetContract(  # noqa: N802
+        self,
+        request: broker_pb2.ContractRef,
+        context: object,
+    ) -> broker_pb2.ContractResponse:
+        del context
+
+        try:
+            from ib_async import (
+                Contract as RuntimeIbContract,  # type: ignore[import-untyped, unused-ignore]
+            )
+
+            contract: IbContract = RuntimeIbContract(conId=int(request.conid))
+            raw_qualified: object = await self.ib.qualifyContractsAsync(contract)  # type: ignore[attr-defined, unused-ignore]
+            qualified: list[object] = list(cast("Iterable[object]", raw_qualified))
+            proto_contract: broker_pb2.Contract = self._proto_contract(
+                cast("_IbContract", qualified[0])
+            )
+        except Exception as exc:
+            logger.exception(
+                "ibkr_contract_failed",
+                label=self.label,
+                conid=str(request.conid),
+                error=str(exc),
+            )
+            return broker_pb2.ContractResponse()
+
+        return broker_pb2.ContractResponse(contract=proto_contract)
+
+    def _proto_contract(self, ib_contract: _IbContract) -> broker_pb2.Contract:
+        return broker_pb2.Contract(
+            symbol=str(ib_contract.symbol),
+            exchange=str(ib_contract.exchange),
+            currency=str(ib_contract.currency),
+            asset_class=self._asset_class(str(ib_contract.secType)),
+            conid=str(ib_contract.conId),
+            local_symbol=str(ib_contract.localSymbol),
+        )
+
+    def _proto_order_from_trade(self, trade: _IbTrade) -> broker_pb2.Order:
+        currency: str = str(trade.contract.currency)
+        order: broker_pb2.Order = broker_pb2.Order(
+            order_id=str(trade.order.permId or trade.order.orderId or ""),
+            contract=self._proto_contract(trade.contract),
+            side=self._order_side(trade.order.action),
+            order_type=self._order_type(trade.order.orderType),
+            quantity=decimal_str(trade.order.totalQuantity),
+            limit_price=broker_pb2.Money(value=str(trade.order.lmtPrice), currency=currency),
+            stop_price=broker_pb2.Money(value=str(trade.order.auxPrice), currency=currency),
+            time_in_force=self._time_in_force(trade.order.tif),
+            status=self._order_status(trade.orderStatus.status),
+            quantity_filled=decimal_str(trade.orderStatus.filled),
+            avg_fill_price=broker_pb2.Money(
+                value=str(trade.orderStatus.avgFillPrice),
+                currency=currency,
+            ),
+        )
+        if trade.log:
+            order.submitted_at.FromDatetime(trade.log[0].time)
+            order.updated_at.FromDatetime(trade.log[-1].time)
+        return order
+
+    def _proto_order_from_fill(self, fill: _IbFill) -> broker_pb2.Order:
+        currency: str = str(fill.contract.currency)
+        order: broker_pb2.Order = broker_pb2.Order(
+            order_id=str(fill.execution.permId or ""),
+            contract=self._proto_contract(fill.contract),
+            side=self._order_side(fill.execution.side),
+            quantity=decimal_str(fill.execution.cumQty),
+            limit_price=broker_pb2.Money(value=str(fill.execution.price), currency=currency),
+            status=broker_pb2.FILLED,
+            quantity_filled=decimal_str(fill.execution.cumQty),
+            avg_fill_price=broker_pb2.Money(
+                value=str(fill.execution.avgPrice),
+                currency=currency,
+            ),
+        )
+        order.submitted_at.FromDatetime(fill.execution.time)
+        order.updated_at.FromDatetime(fill.execution.time)
+        return order
 
     def _last_tick_timestamp(self) -> Timestamp | None:
         tick_at: datetime | None = self.last_tick_ref.get("t")
@@ -312,6 +472,43 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             value = Decimal("0")
 
         return to_money_proto(value, currency)
+
+    def _order_side(self, side: str) -> broker_pb2.OrderSide:
+        sides: dict[str, broker_pb2.OrderSide] = {
+            "BUY": broker_pb2.BUY,
+            "SELL": broker_pb2.SELL,
+        }
+        return sides.get(side, broker_pb2.SIDE_UNSPECIFIED)
+
+    def _order_type(self, order_type: str) -> broker_pb2.OrderType:
+        order_types: dict[str, broker_pb2.OrderType] = {
+            "MKT": broker_pb2.MARKET,
+            "LMT": broker_pb2.LIMIT,
+            "STP": broker_pb2.STOP,
+            "STP LMT": broker_pb2.STOP_LIMIT,
+        }
+        return order_types.get(order_type, broker_pb2.TYPE_UNSPECIFIED)
+
+    def _time_in_force(self, time_in_force: str) -> broker_pb2.TimeInForce:
+        time_in_forces: dict[str, broker_pb2.TimeInForce] = {
+            "DAY": broker_pb2.DAY,
+            "GTC": broker_pb2.GTC,
+            "IOC": broker_pb2.IOC,
+            "FOK": broker_pb2.FOK,
+        }
+        return time_in_forces.get(time_in_force, broker_pb2.TIF_UNSPECIFIED)
+
+    def _order_status(self, status: str) -> broker_pb2.OrderStatus:
+        statuses: dict[str, broker_pb2.OrderStatus] = {
+            "Submitted": broker_pb2.SUBMITTED,
+            "PendingSubmit": broker_pb2.SUBMITTED,
+            "PreSubmitted": broker_pb2.PENDING,
+            "Filled": broker_pb2.FILLED,
+            "Cancelled": broker_pb2.CANCELLED,
+            "ApiCancelled": broker_pb2.CANCELLED,
+            "Inactive": broker_pb2.REJECTED,
+        }
+        return statuses.get(status, broker_pb2.STATUS_UNSPECIFIED)
 
     def _asset_class(self, sec_type: str) -> broker_pb2.AssetClass:
         asset_classes: dict[str, broker_pb2.AssetClass] = {
