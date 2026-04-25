@@ -31,15 +31,7 @@ Set-Location "$PSScriptRoot/.."
 
 Write-Host "[build] sidecar build starting..." -ForegroundColor Cyan
 
-# 1. Regenerate proto bindings before bundling.
-$bash = (Get-Command bash -ErrorAction SilentlyContinue)
-if (-not $bash) {
-    throw "bash not found on PATH; install Git Bash or enable WSL so proto-gen.sh can run."
-}
-
-# proto-gen.sh calls `uv run python -m grpc_tools.protoc`, but bash on Windows
-# does not always inherit the same PATH the parent PowerShell sees. Resolve uv
-# directly and prepend its directory to $env:PATH so the spawned bash finds it.
+# 1. Resolve uv (needed for proto codegen and the pyinstaller build below).
 $uv = Get-Command uv -ErrorAction SilentlyContinue
 if (-not $uv) {
     $candidates = @(
@@ -59,23 +51,35 @@ if (-not $uv) {
     }
     $uv = Get-Command $uvPath
 }
-$uvDir = Split-Path -Parent $uv.Source
-if ($env:PATH -notlike "*$uvDir*") {
-    $env:PATH = "$uvDir;$env:PATH"
-    Write-Host "[build] prepended uv dir to PATH: $uvDir" -ForegroundColor DarkGray
+Write-Host "[build] uv: $($uv.Source)" -ForegroundColor DarkGray
+
+# 2. Regenerate proto bindings inline in PowerShell. proto-gen.sh did the same
+# thing via bash, but WSL bash on Windows runs in its own root filesystem and
+# can't see Windows-installed uv even when uv is on the parent's PATH. Call
+# uv directly here so the build is bash-free.
+New-Item -ItemType Directory -Force -Path '_generated/broker/v1' | Out-Null
+foreach ($init in '_generated/__init__.py', '_generated/broker/__init__.py', '_generated/broker/v1/__init__.py') {
+    if (-not (Test-Path $init)) { New-Item -ItemType File -Path $init | Out-Null }
+}
+& $uv.Source run python -m grpc_tools.protoc `
+    --proto_path=../proto `
+    --python_out=_generated `
+    --grpc_python_out=_generated `
+    --pyi_out=_generated `
+    broker/v1/broker.proto
+if ($LASTEXITCODE -ne 0) {
+    throw "grpc_tools.protoc failed with exit code $LASTEXITCODE"
 }
 
-# Use a RELATIVE path. Absolute Windows paths cause two different breakages
-# depending on which bash is on PATH:
-#   - WSL bash needs /mnt/c/... (Windows form C:/... fails to resolve).
-#   - Git Bash mingw can take C:/... but eats backslashes if any slip through.
-# Both flavours inherit cwd from the parent PowerShell process, and we already
-# Set-Location to the sidecar root above, so 'scripts/proto-gen.sh' resolves
-# regardless of bash flavour.
-& $bash.Source 'scripts/proto-gen.sh'
-if ($LASTEXITCODE -ne 0) {
-    throw "proto-gen.sh failed with exit code $LASTEXITCODE"
-}
+# grpc_tools emits `from broker.v1 import broker_pb2` which doesn't resolve
+# under the sidecar._generated.broker.v1 package layout. Rewrite to fully
+# qualified so the bindings work wherever they're imported.
+$grpcPath = '_generated/broker/v1/broker_pb2_grpc.py'
+$content = Get-Content -Raw $grpcPath
+$content = $content -replace '(?m)^from broker\.v1 import broker_pb2', 'from sidecar._generated.broker.v1 import broker_pb2'
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText((Resolve-Path $grpcPath).Path, $content, $utf8NoBom)
+Write-Host "[build] proto codegen complete (grpc_tools.protoc, native PS)" -ForegroundColor Green
 
 # 2. Resolve dependencies (and pyinstaller) into the project venv.
 & uv sync --extra dev
