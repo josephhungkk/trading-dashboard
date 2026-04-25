@@ -45,3 +45,12 @@ rsync -a --delete \
     --exclude '*.egg-info/' \
     "$SIDECAR_SRC" "$SIDECAR_DST"
 echo "[sync] sidecar -> $(find "$SIDECAR_DST" -type f | wc -l) files"
+
+# 3. proto/ - gRPC contract source consumed by sidecar/scripts/build-windows.ps1
+#    (uv run python -m grpc_tools.protoc --proto_path=../proto ...). The build
+#    script runs from C:\dashboard\sidecar\, so it expects ../proto = C:\dashboard\proto.
+PROTO_SRC="/home/joseph/dashboard/proto/"
+PROTO_DST="/mnt/c/dashboard/proto/"
+mkdir -p "$PROTO_DST"
+rsync -a --delete "$PROTO_SRC" "$PROTO_DST"
+echo "[sync] proto -> $(find "$PROTO_DST" -type f | wc -l) files"
