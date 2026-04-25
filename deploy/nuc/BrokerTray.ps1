@@ -415,7 +415,48 @@ $targets = @(
       return @{ Status = $status; Tip = ("IBKR Paper {0}" -f $detail) }
     }
   }
+  # ---- Phase 4 sidecar dots (Task 28). Status sourced from
+  #      C:\dashboard\state\sidecar-<label>.health, written by Probe-Sidecar.ps1
+  #      under BrokerWatchdog. Reuses Draw-Circle; the per-icon tooltip
+  #      disambiguates visually.
+  @{
+    Name = 'Sidecar isa-live'; Shape = { param($s) Draw-Circle $s }
+    Probe = { Read-SidecarHealth -Label 'isa-live' }
+  }
+  @{
+    Name = 'Sidecar isa-paper'; Shape = { param($s) Draw-Circle $s }
+    Probe = { Read-SidecarHealth -Label 'isa-paper' }
+  }
+  @{
+    Name = 'Sidecar normal-live'; Shape = { param($s) Draw-Circle $s }
+    Probe = { Read-SidecarHealth -Label 'normal-live' }
+  }
+  @{
+    Name = 'Sidecar normal-paper'; Shape = { param($s) Draw-Circle $s }
+    Probe = { Read-SidecarHealth -Label 'normal-paper' }
+  }
 )
+
+function Read-SidecarHealth {
+  param([Parameter(Mandatory)][string]$Label)
+  $healthFile = "C:\dashboard\state\sidecar-$Label.health"
+  if (-not (Test-Path $healthFile)) {
+    return @{ Status = 'gray'; Tip = "Sidecar $Label : no health file yet" }
+  }
+  try {
+    $h = Get-Content -Raw $healthFile | ConvertFrom-Json
+  } catch {
+    return @{ Status = 'down'; Tip = "Sidecar $Label : malformed .health file" }
+  }
+  $trayStatus = switch ($h.status) {
+    'up'       { 'up' }
+    'degraded' { 'partial' }
+    'down'     { 'down' }
+    default    { 'gray' }
+  }
+  $tip = "Sidecar $Label : $($h.status) (probed $($h.last_probe_at))"
+  return @{ Status = $trayStatus; Tip = $tip }
+}
 
 # ---------- context menu actions ----------
 

@@ -298,4 +298,74 @@ if (-not $hiderRunning) {
   }
 }
 
-# (BACKLOG: extend with sidecar probes -- see Phase 4 Task 28)
+# ---------- Adapt-SidecarHealth (Phase 4 Task 28) ----------
+# Probes the four IBKR sidecars over mTLS gRPC via Probe-Sidecar.ps1 and
+# restarts (Stop-ScheduledTask + Start-ScheduledTask on IBKRSidecar-<label>)
+# any sidecar that reports BAD on two consecutive cycles.
+#
+# Skipped during the IBKR weekend reset window (Fri 23:00 ET -> Sat 03:00
+# ET) because the underlying gateway is down by design and probing churns
+# logs without adding signal. Daily resets do NOT trigger a skip — they're
+# short enough that a real outage during one shouldn't be masked.
+
+if (-not $inWeekend) {
+  $sidecarLabels = @('isa-live', 'isa-paper', 'normal-live', 'normal-paper')
+  foreach ($sLabel in $sidecarLabels) {
+    if ($paused -contains "sidecar-$sLabel") {
+      WLog ("SKIP  sidecar-{0} paused (paused-labels.txt)" -f $sLabel)
+      continue
+    }
+
+    $probeScript = 'C:\dashboard\deploy\nuc\Probe-Sidecar.ps1'
+    if (-not (Test-Path $probeScript)) {
+      WLog ("SKIP  sidecar-{0} Probe-Sidecar.ps1 not found at {1}" -f $sLabel, $probeScript)
+      continue
+    }
+    & $probeScript -Label $sLabel | Out-Null
+    $probeExit = $LASTEXITCODE
+
+    $badCountFile = "C:\dashboard\state\sidecar-$sLabel.badcount"
+    if (Test-Path $badCountFile) {
+      $bad = [int](Get-Content -Raw $badCountFile).Trim()
+    } else {
+      $bad = 0
+    }
+
+    if ($probeExit -eq 0) {
+      if ($bad -ne 0) {
+        WLog ("OK    sidecar-{0,-12} (badcount cleared)" -f $sLabel)
+        Remove-Item -Force -ErrorAction SilentlyContinue $badCountFile
+      } else {
+        WLog ("OK    sidecar-{0,-12}" -f $sLabel)
+      }
+      continue
+    }
+
+    $bad = $bad + 1
+    [System.IO.File]::WriteAllText($badCountFile, [string]$bad)
+
+    # 2 consecutive bad ticks outside reset window -> restart. The sidecar's
+    # own self-throttled backoff prevents a tight loop if relaunch keeps
+    # failing.
+    if ($bad -ge 2) {
+      $taskName = "IBKRSidecar-$sLabel"
+      WLog ("BAD   sidecar-{0,-12} 2 consecutive bad ticks -> restarting {1}" -f $sLabel, $taskName)
+      if (-not $DryRun) {
+        try {
+          Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        } catch {
+          WLog ("      Stop-ScheduledTask {0} failed: {1}" -f $taskName, $_.Exception.Message)
+        }
+        Start-Sleep -Seconds 2
+        try {
+          Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+          Remove-Item -Force -ErrorAction SilentlyContinue $badCountFile
+        } catch {
+          WLog ("      Start-ScheduledTask {0} failed: {1}" -f $taskName, $_.Exception.Message)
+        }
+      }
+    } else {
+      WLog ("BAD   sidecar-{0,-12} probe failed (count={1})" -f $sLabel, $bad)
+    }
+  }
+}
