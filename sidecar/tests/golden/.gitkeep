@@ -1,0 +1,5 @@
+# Golden-trace fixtures land here from sidecar/scripts/record-golden-traces.ps1
+# (Phase 4 Task 17). The operator runs the recorder against paper Gateway 4002
+# on the NUC; Task 18 replay tests load these JSON fixtures into FakeIB to
+# guard the proto shape against regressions without needing a live gateway
+# in CI. Real fixtures will land in this directory once Task 17.3 is run.
