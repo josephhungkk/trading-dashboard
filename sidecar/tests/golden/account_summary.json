@@ -1,0 +1,1577 @@
+[
+  {
+    "account": "DFA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "AccountType",
+    "value": "INDIVIDUAL"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "Cushion",
+    "value": "1"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "LookAheadNextChange",
+    "value": "0"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AvailableFunds",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "BuyingPower",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "EquityWithLoanValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "ExcessLiquidity",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullAvailableFunds",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullExcessLiquidity",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "GrossPositionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "InitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadAvailableFunds",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadExcessLiquidity",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetLiquidation",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "PreviousDayEquityWithLoanValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTEquity",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTMargin",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "SMA",
+    "value": "0.00"
+  },
+  {
+    "account": "DFA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TotalCashValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "AccountType",
+    "value": "INDIVIDUAL"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "Cushion",
+    "value": "1"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemaining",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+1",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+2",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+3",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+4",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "",
+    "modelCode": "",
+    "tag": "LookAheadNextChange",
+    "value": "0"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "621.61"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "BuyingPower",
+    "value": "4000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "EquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "ExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "GrossPositionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "InitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetLiquidation",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "PreviousDayEquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTEquity",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTMargin",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "SMA",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000000",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TotalCashValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "AccountType",
+    "value": "INDIVIDUAL"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "Cushion",
+    "value": "1"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemaining",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+1",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+2",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+3",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+4",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "",
+    "modelCode": "",
+    "tag": "LookAheadNextChange",
+    "value": "0"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "621.61"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "BuyingPower",
+    "value": "4000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "EquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "ExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "GrossPositionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "InitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetLiquidation",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "PreviousDayEquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTEquity",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTMargin",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "SMA",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000001",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TotalCashValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "AccountType",
+    "value": "INDIVIDUAL"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "Cushion",
+    "value": "1"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemaining",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+1",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+2",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+3",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+4",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "",
+    "modelCode": "",
+    "tag": "LookAheadNextChange",
+    "value": "0"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "621.61"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "BuyingPower",
+    "value": "4000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "EquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "ExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "GrossPositionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "InitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetLiquidation",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "PreviousDayEquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTEquity",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTMargin",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "SMA",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000002",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TotalCashValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "AccountType",
+    "value": "INDIVIDUAL"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "Cushion",
+    "value": "1"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemaining",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+1",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+2",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+3",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+4",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "",
+    "modelCode": "",
+    "tag": "LookAheadNextChange",
+    "value": "0"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "621.61"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "BuyingPower",
+    "value": "4000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "EquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "ExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "GrossPositionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "InitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetLiquidation",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "PreviousDayEquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTEquity",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTMargin",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "SMA",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000003",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TotalCashValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "AccountType",
+    "value": "INDIVIDUAL"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "Cushion",
+    "value": "1"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemaining",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+1",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+2",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+3",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "DayTradesRemainingT+4",
+    "value": "-1"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "",
+    "modelCode": "",
+    "tag": "LookAheadNextChange",
+    "value": "0"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "621.61"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "BuyingPower",
+    "value": "4000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "EquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "ExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FullMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "GrossPositionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "InitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadAvailableFunds",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadExcessLiquidity",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadInitMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "LookAheadMaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MaintMarginReq",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetLiquidation",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "PreviousDayEquityWithLoanValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTEquity",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RegTMargin",
+    "value": "0.00"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "SMA",
+    "value": "1000621.61"
+  },
+  {
+    "account": "DUA0000004",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TotalCashValue",
+    "value": "1000000.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "Currency",
+    "value": "GBP"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "CashBalance",
+    "value": "5000000.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TotalCashBalance",
+    "value": "5000000.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "3108.05"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "StockMarketValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "OptionMarketValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FutureOptionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FuturesPNL",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetLiquidationByCurrency",
+    "value": "5003108.05"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "UnrealizedPnL",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RealizedPnL",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "ExchangeRate",
+    "value": "1.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FundValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "NetDividend",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MutualFundValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "MoneyMarketFundValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "CorporateBondValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TBondValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "TBillValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "WarrantValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "FxCashBalance",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "AccountOrGroup",
+    "value": "All"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "RealCurrency",
+    "value": "GBP"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "IssuerOptionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "GBP",
+    "modelCode": "",
+    "tag": "Cryptocurrency",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "Currency",
+    "value": "BASE"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "CashBalance",
+    "value": "5000000.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "TotalCashBalance",
+    "value": "5000000.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "AccruedCash",
+    "value": "3108.05"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "StockMarketValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "OptionMarketValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "FutureOptionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "FuturesPNL",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "NetLiquidationByCurrency",
+    "value": "5003108.05"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "UnrealizedPnL",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "RealizedPnL",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "ExchangeRate",
+    "value": "1.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "FundValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "NetDividend",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "MutualFundValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "MoneyMarketFundValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "CorporateBondValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "TBondValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "TBillValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "WarrantValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "FxCashBalance",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "AccountOrGroup",
+    "value": "All"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "RealCurrency",
+    "value": "BASE"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "IssuerOptionValue",
+    "value": "0.00"
+  },
+  {
+    "account": "All",
+    "currency": "BASE",
+    "modelCode": "",
+    "tag": "Cryptocurrency",
+    "value": "0.00"
+  }
+]

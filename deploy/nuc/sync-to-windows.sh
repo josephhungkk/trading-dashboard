@@ -14,15 +14,34 @@
 
 set -euo pipefail
 
-SRC="/home/joseph/dashboard/deploy/nuc/"
-DST="/mnt/c/dashboard/deploy/nuc/"
-
 if [ ! -d "/mnt/c/dashboard" ]; then
     echo "[sync] /mnt/c/dashboard does not exist — Windows-side dir not present, nothing to sync."
     echo "[sync] If you genuinely want a Windows-side copy, mkdir it first."
     exit 0
 fi
 
-mkdir -p "$DST"
-rsync -a --delete "$SRC" "$DST"
-echo "[sync] $(ls "$DST" | wc -l) files now in $DST"
+# 1. deploy/nuc/ — Phase 1 broker ops glue (Scheduled Tasks invoke .ps1/.vbs by absolute path).
+DEPLOY_SRC="/home/joseph/dashboard/deploy/nuc/"
+DEPLOY_DST="/mnt/c/dashboard/deploy/nuc/"
+mkdir -p "$DEPLOY_DST"
+rsync -a --delete "$DEPLOY_SRC" "$DEPLOY_DST"
+echo "[sync] deploy/nuc -> $(find "$DEPLOY_DST" -type f | wc -l) files"
+
+# 2. sidecar/ — Phase 4 IBKR sidecar (PyInstaller build, golden-trace recorder, Scheduled
+#    Task launchers all run from C:\dashboard\sidecar\). Exclude Linux-built artifacts so
+#    we don't push WSL binaries/caches to a Windows path.
+SIDECAR_SRC="/home/joseph/dashboard/sidecar/"
+SIDECAR_DST="/mnt/c/dashboard/sidecar/"
+mkdir -p "$SIDECAR_DST"
+rsync -a --delete \
+    --exclude '_generated/' \
+    --exclude '__pycache__/' \
+    --exclude '.pytest_cache/' \
+    --exclude '.mypy_cache/' \
+    --exclude '.ruff_cache/' \
+    --exclude '.venv/' \
+    --exclude 'build/' \
+    --exclude 'dist/' \
+    --exclude '*.egg-info/' \
+    "$SIDECAR_SRC" "$SIDECAR_DST"
+echo "[sync] sidecar -> $(find "$SIDECAR_DST" -type f | wc -l) files"

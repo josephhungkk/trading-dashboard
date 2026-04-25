@@ -40,11 +40,13 @@ def serialize(value: object) -> Any:
         return {str(serialize(key)): serialize(item) for key, item in value.items()}
     if isinstance(value, set | frozenset):
         return sorted((serialize(item) for item in value), key=_sort_key)
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [serialize(item) for item in value]
+    # NamedTuples must be checked before Sequence: they ARE sequences, but the
+    # field-name-preserving _asdict() representation is what the replay tests need.
     if hasattr(value, "_asdict"):
         asdict_value = value._asdict()
         return serialize(asdict_value)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [serialize(item) for item in value]
     if is_dataclass(value) and not isinstance(value, type):
         return {field.name: serialize(getattr(value, field.name)) for field in fields(value)}
     if hasattr(value, "__dict__"):
@@ -112,20 +114,20 @@ async def run() -> int:
         connected = True
 
         async def managed_accounts() -> Any:
-            result = await ib_api.reqManagedAccountsAsync()
+            # ib_async populates managedAccounts() during connectAsync; brief sleep
+            # ensures the initial account list message has been parsed before we read.
+            await asyncio.sleep(0.5)
+            result = ib_api.managedAccounts()
             if args.account is None and isinstance(result, Sequence) and result:
                 args.account = str(result[0])
             return result
 
         async def account_summary() -> Any:
-            await ib_api.reqAccountSummaryAsync(
-                group="All",
-                tags=(
-                    "NetLiquidation,TotalCashValue,RealizedPnL,UnrealizedPnL,"
-                    "BuyingPower,BASE"
-                ),
-            )
-            return ib_api.accountValues()
+            # accountSummaryAsync() is the async-safe, high-level API on ib_async:
+            # it lazily issues reqAccountSummary on first call and returns the cached
+            # list. The lower-level reqAccountSummaryAsync wraps a sync helper that
+            # spins its own loop, which clashes with our outer loop.
+            return await ib_api.accountSummaryAsync(account="")
 
         async def positions() -> Any:
             return await ib_api.reqPositionsAsync()
