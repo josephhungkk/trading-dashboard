@@ -63,6 +63,15 @@ Replace Phase 3's mocked `accounts`/`positions`/`orders` services with **real, r
   4× IB Gateway java processes (already running, no change in Phase 4)
 ```
 
+**Canonical port map** (referenced everywhere downstream — registrar scripts, sidecar `--gateway-port` / `--grpc-port` flags, BrokerWatchdog probes, backend `BrokerRegistry`):
+
+| Label          | IB Gateway API port | Sidecar gRPC port |
+|----------------|---------------------|-------------------|
+| `isa-live`     | 4001                | 18001             |
+| `isa-paper`    | 4002                | 18002             |
+| `normal-live`  | 4003                | 18003             |
+| `normal-paper` | 4004                | 18004             |
+
 Sidecars are **pure protocol translators**: gRPC request → `ib_async` call → gRPC response. They hold no broker credentials of their own — IBC has already authenticated the Gateway socket on the same machine.
 
 Backend talks to *all 4* sidecars; aggregation (e.g., "positions across all live accounts") happens in the FastAPI service layer, not in any sidecar. Partial fleet failure is **fail-open**: a single dead sidecar marks its accounts as `degraded` in the response envelope; the other three continue serving.

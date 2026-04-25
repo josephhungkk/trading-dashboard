@@ -129,9 +129,11 @@ $headers = @{
 foreach ($fenceName in $keyMap.Keys) {
     $key = $keyMap[$fenceName]
     $url = "$ApiBaseUrl/api/admin/secrets/broker/$key"
+    # Backend's ValueType is Literal["str","int","bool","json"] — must be "str"
+    # not "string" or Pydantic returns 422 Unprocessable Entity.
     $body = @{
         value      = $pems[$fenceName]
-        value_type = 'string'
+        value_type = 'str'
     } | ConvertTo-Json -Depth 3 -Compress
 
     Write-Host "[publish] PUT $url" -ForegroundColor Cyan
