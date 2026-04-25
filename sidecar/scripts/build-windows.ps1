@@ -17,7 +17,7 @@
 
 .NOTES
     Requires `uv` on PATH (winget install astral.uv) and `bash` (Git Bash or
-    WSL) so the proto-gen.sh fallback can run. PowerShell 5.1 compatible — we
+    WSL) so the proto-gen.sh fallback can run. PowerShell 5.1 compatible - we
     avoid Unicode em-dashes and the file is saved UTF-8 + BOM + CRLF
     (matches memory note ps1_nuc_bom_crlf.md).
 #>
@@ -36,7 +36,11 @@ $bash = (Get-Command bash -ErrorAction SilentlyContinue)
 if (-not $bash) {
     throw "bash not found on PATH; install Git Bash or enable WSL so proto-gen.sh can run."
 }
-& $bash.Source "$PSScriptRoot/proto-gen.sh"
+# bash on Windows (Git Bash, WSL) interprets backslashes as escape characters
+# when received as a positional argument, so "C:\dashboard\..." arrives as
+# "C:dashboard...". Convert to forward slashes before invoking.
+$protoGenScript = (Resolve-Path "$PSScriptRoot/proto-gen.sh").Path -replace '\\', '/'
+& $bash.Source $protoGenScript
 if ($LASTEXITCODE -ne 0) {
     throw "proto-gen.sh failed with exit code $LASTEXITCODE"
 }
