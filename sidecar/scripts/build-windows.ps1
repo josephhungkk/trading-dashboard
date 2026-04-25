@@ -36,11 +36,14 @@ $bash = (Get-Command bash -ErrorAction SilentlyContinue)
 if (-not $bash) {
     throw "bash not found on PATH; install Git Bash or enable WSL so proto-gen.sh can run."
 }
-# bash on Windows (Git Bash, WSL) interprets backslashes as escape characters
-# when received as a positional argument, so "C:\dashboard\..." arrives as
-# "C:dashboard...". Convert to forward slashes before invoking.
-$protoGenScript = (Resolve-Path "$PSScriptRoot/proto-gen.sh").Path -replace '\\', '/'
-& $bash.Source $protoGenScript
+# Use a RELATIVE path. Absolute Windows paths cause two different breakages
+# depending on which bash is on PATH:
+#   - WSL bash needs /mnt/c/... (Windows form C:/... fails to resolve).
+#   - Git Bash mingw can take C:/... but eats backslashes if any slip through.
+# Both flavours inherit cwd from the parent PowerShell process, and we already
+# Set-Location to the sidecar root above, so 'scripts/proto-gen.sh' resolves
+# regardless of bash flavour.
+& $bash.Source 'scripts/proto-gen.sh'
 if ($LASTEXITCODE -ne 0) {
     throw "proto-gen.sh failed with exit code $LASTEXITCODE"
 }
