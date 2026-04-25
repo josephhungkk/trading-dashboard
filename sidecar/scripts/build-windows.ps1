@@ -36,6 +36,35 @@ $bash = (Get-Command bash -ErrorAction SilentlyContinue)
 if (-not $bash) {
     throw "bash not found on PATH; install Git Bash or enable WSL so proto-gen.sh can run."
 }
+
+# proto-gen.sh calls `uv run python -m grpc_tools.protoc`, but bash on Windows
+# does not always inherit the same PATH the parent PowerShell sees. Resolve uv
+# directly and prepend its directory to $env:PATH so the spawned bash finds it.
+$uv = Get-Command uv -ErrorAction SilentlyContinue
+if (-not $uv) {
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\uv\uv.exe",
+        "$env:LOCALAPPDATA\Microsoft\WinGet\Links\uv.exe",
+        "$env:USERPROFILE\.cargo\bin\uv.exe"
+    )
+    $wingetPkgs = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    if (Test-Path $wingetPkgs) {
+        $found = Get-ChildItem -Path $wingetPkgs -Recurse -Filter uv.exe -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+        if ($found) { $candidates += $found.FullName }
+    }
+    $uvPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $uvPath) {
+        throw "uv not found. Install with: winget install astral-sh.uv (then restart shell)."
+    }
+    $uv = Get-Command $uvPath
+}
+$uvDir = Split-Path -Parent $uv.Source
+if ($env:PATH -notlike "*$uvDir*") {
+    $env:PATH = "$uvDir;$env:PATH"
+    Write-Host "[build] prepended uv dir to PATH: $uvDir" -ForegroundColor DarkGray
+}
+
 # Use a RELATIVE path. Absolute Windows paths cause two different breakages
 # depending on which bash is on PATH:
 #   - WSL bash needs /mnt/c/... (Windows form C:/... fails to resolve).
