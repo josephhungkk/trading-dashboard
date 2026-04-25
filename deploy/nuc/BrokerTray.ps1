@@ -17,6 +17,11 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Sidecar health helpers (Read-SidecarHealth, Read-SidecarPair) live in
+# lib/SidecarLib.ps1 so deploy/nuc/tests/SidecarLib.Tests.ps1 (Pester) can
+# load + exercise them in isolation without firing Application.Run.
+. (Join-Path $PSScriptRoot 'lib\SidecarLib.ps1')
+
 $logDir = 'C:\IBC\Logs\tray'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
 $logFile = Join-Path $logDir ("tray-{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
@@ -469,55 +474,9 @@ $targets = @(
   }
 )
 
-function Read-SidecarHealth {
-  param([Parameter(Mandatory)][string]$Label)
-  $healthFile = "C:\dashboard\state\sidecar-$Label.health"
-  if (-not (Test-Path $healthFile)) {
-    return @{ Status = 'gray'; Tip = "Sidecar $Label : no health file yet" }
-  }
-  try {
-    $h = Get-Content -Raw $healthFile | ConvertFrom-Json
-  } catch {
-    return @{ Status = 'down'; Tip = "Sidecar $Label : malformed .health file" }
-  }
-  $trayStatus = switch ($h.status) {
-    'up'       { 'up' }
-    'degraded' { 'partial' }
-    'down'     { 'down' }
-    default    { 'gray' }
-  }
-  $tip = "Sidecar $Label : $($h.status) (probed $($h.last_probe_at))"
-  return @{ Status = $trayStatus; Tip = $tip }
-}
-
-# Aggregate two sidecars (e.g. isa-live + normal-live) into one tray status.
-# Logic mirrors the IBKR Live / Paper rollup:
-#   both up                 -> green
-#   one up, one not-up      -> partial (yellow)
-#   both down               -> down (red)
-#   either gray and the other not 'up' -> gray (not yet probed)
-# Tip lists both sub-statuses so hovering the icon shows what's actually wrong.
-function Read-SidecarPair {
-  param(
-    [Parameter(Mandatory)][string[]]$Labels,
-    [Parameter(Mandatory)][string]$Mode
-  )
-  $sub = $Labels | ForEach-Object { Read-SidecarHealth -Label $_ }
-  $statuses = $sub | ForEach-Object { $_.Status }
-  $up = @($statuses | Where-Object { $_ -eq 'up' }).Count
-  $down = @($statuses | Where-Object { $_ -eq 'down' }).Count
-  $gray = @($statuses | Where-Object { $_ -eq 'gray' }).Count
-
-  $rollup = if ($up -eq $Labels.Count) { 'up' }
-            elseif ($down -eq $Labels.Count) { 'down' }
-            elseif ($gray -gt 0 -and $up -eq 0) { 'gray' }
-            else { 'partial' }
-
-  $detail = for ($i = 0; $i -lt $Labels.Count; $i++) {
-    "{0}={1}" -f $Labels[$i], $statuses[$i]
-  }
-  return @{ Status = $rollup; Tip = ("Sidecar {0}: {1}" -f $Mode, ($detail -join ' ')) }
-}
+# Read-SidecarHealth + Read-SidecarPair are provided by lib/SidecarLib.ps1
+# (dot-sourced near the top of this file). Pester tests for both live in
+# deploy/nuc/tests/SidecarLib.Tests.ps1.
 
 # ---------- context menu actions ----------
 

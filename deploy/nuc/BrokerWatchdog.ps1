@@ -14,9 +14,14 @@ $logFile = Join-Path $logDir ("watchdog-{0}.log" -f (Get-Date -Format 'yyyyMMdd'
 $stateFile = Join-Path $logDir 'state.json'
 function WLog { param([string]$msg) Add-Content -Path $logFile -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg) }
 
+# Test-InResetWindow + sidecar health helpers live in lib/SidecarLib.ps1
+# so deploy/nuc/tests/SidecarLib.Tests.ps1 (Pester) can load them in
+# isolation without firing the watchdog main loop.
+. (Join-Path $PSScriptRoot 'lib\SidecarLib.ps1')
+
 # Per-label reconnect backoff. First few probe failures retry every
 # tick so a blip recovers fast; persistent failures skip progressively
-# longer (60s → 1800s cap) so a server that's really down doesn't
+# longer (60s -> 1800s cap) so a server that's really down doesn't
 # trigger a restart storm.
 # State file survives scheduled-task reinvocation; it's just a small
 # JSON map of label -> { fails, skip_until_utc }.
@@ -30,7 +35,7 @@ function Load-WatchdogState {
     $raw = Get-Content $stateFile -Raw -ErrorAction Stop
     if (-not $raw.Trim()) { return @{} }
     $obj = $raw | ConvertFrom-Json -ErrorAction Stop
-    # Convert PSCustomObject → hashtable for easy mutation.
+    # Convert PSCustomObject -> hashtable for easy mutation.
     $h = @{}
     foreach ($p in $obj.PSObject.Properties) { $h[$p.Name] = $p.Value }
     return $h
@@ -49,65 +54,8 @@ function Save-WatchdogState {
   }
 }
 
-# Converts "now" into three reference timezones and reports whether
-# the current instant falls inside any published IBKR reset window.
-# During a reset, the gateway's API socket is expected to be zombie /
-# down; probing it triggers a kill-+-relaunch cycle that produces 5-min
-# restart storms for the whole window. This function lets the main loop
-# skip silently instead.
-#
-# Sources: IBKR published schedule (Nov 2024).
-#   Weekend reset:  Fri 23:00 ET → Sat 03:00 ET — ALL regions.
-#   Daily reset (Sun-Fri):
-#     North America: 00:15-01:45 ET
-#     Europe:        06:25-07:45 CET (CEST in summer)
-#     APAC (HK):     04:45-06:05 HKT  (1st)
-#                    20:15-21:15 HKT  (2nd)
-function Test-InResetWindow {
-  $utc = (Get-Date).ToUniversalTime()
-  try {
-    $et  = [System.TimeZoneInfo]::ConvertTimeFromUtc($utc,
-            [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time'))
-    $cet = [System.TimeZoneInfo]::ConvertTimeFromUtc($utc,
-            [System.TimeZoneInfo]::FindSystemTimeZoneById('Central European Standard Time'))
-    $hkt = [System.TimeZoneInfo]::ConvertTimeFromUtc($utc,
-            [System.TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time'))
-  } catch {
-    # If the TZ DB is missing an ID this machine is fundamentally
-    # broken — just return $false so the watchdog falls back to its
-    # normal behaviour and we notice by other means.
-    return @($false, 'tz-lookup-failed')
-  }
-
-  # Weekend window is ET-local. Fri 23:00 → Sat 03:00.
-  if (($et.DayOfWeek -eq [DayOfWeek]::Friday   -and $et.Hour -ge 23) -or
-      ($et.DayOfWeek -eq [DayOfWeek]::Saturday -and $et.Hour -lt  3)) {
-    return @($true, 'weekend')
-  }
-
-  # Daily windows run Sun-Fri in each region's LOCAL time (not ET).
-  # Saturday is the only day without a daily reset.
-  $minutesOf = { param($d) $d.Hour * 60 + $d.Minute }
-
-  # North America, ET
-  if ($et.DayOfWeek -ne [DayOfWeek]::Saturday) {
-    $m = & $minutesOf $et
-    if ($m -ge (0*60+15) -and $m -le (1*60+45)) { return @($true, 'daily-NA') }
-  }
-  # Europe, CET
-  if ($cet.DayOfWeek -ne [DayOfWeek]::Saturday) {
-    $m = & $minutesOf $cet
-    if ($m -ge (6*60+25) -and $m -le (7*60+45)) { return @($true, 'daily-EU') }
-  }
-  # APAC, HKT — two windows
-  if ($hkt.DayOfWeek -ne [DayOfWeek]::Saturday) {
-    $m = & $minutesOf $hkt
-    if ($m -ge (4*60+45) -and $m -le (6*60+ 5)) { return @($true, 'daily-APAC-1') }
-    if ($m -ge (20*60+15) -and $m -le (21*60+15)) { return @($true, 'daily-APAC-2') }
-  }
-
-  return @($false, '')
-}
+# Test-InResetWindow is provided by lib/SidecarLib.ps1 (dot-sourced near the
+# top of this file). Pester tests for it live in deploy/nuc/tests/SidecarLib.Tests.ps1.
 
 function Test-Port {
   param([int]$Port)
@@ -124,7 +72,7 @@ function Test-Port {
 
 # Deeper check for IBKR Gateway: does the API socket actually respond to the
 # TWS version handshake? A Gateway that lost its upstream connection to IBKR's
-# servers typically keeps listening but stops responding — "zombie" state.
+# servers typically keeps listening but stops responding - "zombie" state.
 # Returns 'up' / 'zombie' / 'down'.
 function Test-IBKRHandshake {
   param([int]$Port)
@@ -146,17 +94,17 @@ function Test-IBKRHandshake {
   finally { $client.Close() }
 }
 
-# FutuOpenD is a proprietary protobuf protocol — skip the handshake and instead
+# FutuOpenD is a proprietary protobuf protocol - skip the handshake and instead
 # verify (1) the local port listens and (2) the FutuOpenD.exe process has at
 # least one established OUTBOUND connection to a non-LAN address on port 443.
 # When OpenD loses its link to Futu's servers, it keeps the local 11111 socket
-# open but all remote 443 connections drop — a perfect zombie signature.
+# open but all remote 443 connections drop - a perfect zombie signature.
 # Returns 'up' / 'zombie' / 'down'.
 function Test-FutuConnected {
   if (-not (Test-Port 11111)) { return 'down' }
   $futu = @(Get-Process -Name 'FutuOpenD' -ErrorAction SilentlyContinue)
   if ($futu.Count -eq 0) { return 'down' }
-  # Check every FutuOpenD.exe — during a relaunch there can be two briefly
+  # Check every FutuOpenD.exe - during a relaunch there can be two briefly
   # (old zombie + new starting-up). Return 'up' if ANY has outbound 443.
   foreach ($f in $futu) {
     $outbound = @(Get-NetTCPConnection -OwningProcess $f.Id -ErrorAction SilentlyContinue |
@@ -178,7 +126,7 @@ $targets = @(
   @{ Label='FutuOpenD';    Port=11111; Task='FutuOpenDAutoStart';     ProcMatch='FutuOpenD\.exe';       Probe={ Test-FutuConnected             } }
 )
 
-# Opt-out list — pause-paper-brokers.ps1 writes one label per line to
+# Opt-out list - pause-paper-brokers.ps1 writes one label per line to
 # `C:\IBC\paused-labels.txt` while a paper gateway is being
 # reconfigured. The watchdog reads the file on every tick (so changes
 # take effect within 5 minutes without a restart) and leaves matching
@@ -191,7 +139,7 @@ if (Test-Path $pausedPath) {
             Where-Object { $_ -and -not $_.StartsWith('#') }
 }
 
-# IBKR scheduled maintenance — only the WEEKEND reset (Fri 23:00 ET →
+# IBKR scheduled maintenance - only the WEEKEND reset (Fri 23:00 ET ->
 # Sat 03:00 ET, 4h, every region) warrants a skip. The daily resets are
 # short enough (~1h20m) that the retry storm isn't worth quieting, and
 # skipping them would also mask a genuine outage that happened to land
@@ -200,13 +148,13 @@ $resetCheck = Test-InResetWindow
 $resetName  = $resetCheck[1]
 $inWeekend  = $resetCheck[0] -and $resetName -eq 'weekend'
 if ($inWeekend) {
-  WLog ('RESET ibkr skipping probes — in weekend maintenance window')
+  WLog ('RESET ibkr skipping probes - in weekend maintenance window')
 }
 
 $wdState = Load-WatchdogState
 $nowUtc  = (Get-Date).ToUniversalTime()
 
-# Strict: any state other than 'up' triggers a kill + relaunch immediately —
+# Strict: any state other than 'up' triggers a kill + relaunch immediately -
 # a single 'zombie' reading is enough. No grace period or consecutive-miss
 # counter; the at-logon task re-launches cleanly with TOTP + hiding.
 foreach ($t in $targets) {
@@ -220,7 +168,7 @@ foreach ($t in $targets) {
     continue
   }
 
-  # Honor per-label backoff — persistently failing labels have a
+  # Honor per-label backoff - persistently failing labels have a
   # `skip_until_utc` timestamp in state.json. Before the deadline,
   # silently skip without probing / killing / restarting.
   $s = $wdState[$t.Label]
@@ -229,7 +177,7 @@ foreach ($t in $targets) {
               [System.Globalization.DateTimeStyles]::RoundtripKind)
     if ($nowUtc -lt $until) {
       $remaining = [int]($until - $nowUtc).TotalSeconds
-      WLog ("BACK  {0,-14} backing off — {1}s remaining (fails={2})" -f
+      WLog ("BACK  {0,-14} backing off - {1}s remaining (fails={2})" -f
             $t.Label, $remaining, $s.fails)
       continue
     }
@@ -305,7 +253,7 @@ if (-not $hiderRunning) {
 #
 # Skipped during the IBKR weekend reset window (Fri 23:00 ET -> Sat 03:00
 # ET) because the underlying gateway is down by design and probing churns
-# logs without adding signal. Daily resets do NOT trigger a skip — they're
+# logs without adding signal. Daily resets do NOT trigger a skip - they're
 # short enough that a real outage during one shouldn't be masked.
 
 if (-not $inWeekend) {
