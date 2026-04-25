@@ -14,7 +14,8 @@
     "build-storybook": "pnpm tsr generate && storybook build",
     "lint": "eslint src",
     "stylelint": "stylelint \"src/**/*.{css,tsx}\"",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "proto:gen": "cd ../proto && buf generate"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
@@ -44,6 +45,8 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@bufbuild/protobuf": "^2.2.2",
+    "@bufbuild/protoc-gen-es": "^2.2.2",
     "@chromatic-com/storybook": "^5.1.2",
     "@commitlint/cli": "^20.5.0",
     "@commitlint/config-conventional": "^20.5.0",
