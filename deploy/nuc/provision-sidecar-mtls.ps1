@@ -214,6 +214,11 @@ Invoke-OpenSSL -OpenSSLArgs @('ca', '-config', $caConfigPath, '-gencrl', '-out',
 # 5. ACL hardening: SYSTEM:F + Administrators:F + current user:RW. Disable
 # inheritance so anything dropped on the parent dir's ACL list (e.g. Users
 # read-all) doesn't leak to private keys.
+#
+# Set-Acl needs SeSecurityPrivilege which requires elevation. When the
+# script is run from a non-elevated shell we emit a warning and continue
+# rather than aborting, because the cert material itself is still on disk
+# and gitignored. Operators should re-run elevated to harden in place.
 Write-Host "[mtls] tightening ACL on $OutDir (SYSTEM + Administrators + $env:USERNAME only)..." -ForegroundColor Cyan
 $acl = New-Object System.Security.AccessControl.DirectorySecurity
 $acl.SetAccessRuleProtection($true, $false)
@@ -226,7 +231,13 @@ $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRul
 $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
     "$env:USERDOMAIN\$env:USERNAME", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'
 )))
-Set-Acl -Path $OutDir -AclObject $acl
+try {
+    Set-Acl -Path $OutDir -AclObject $acl
+} catch [System.Security.AccessControl.PrivilegeNotHeldException] {
+    Write-Warning "[mtls] ACL hardening skipped: not running elevated (SeSecurityPrivilege not held). Re-run as admin to lock down $OutDir."
+} catch {
+    Write-Warning "[mtls] ACL hardening failed: $($_.Exception.Message). Re-run as admin if this is a security boundary."
+}
 
 # 6. Summary + client material echo for provision-and-publish.ps1 to capture.
 Write-Host ""
@@ -235,15 +246,19 @@ Get-ChildItem -Path $OutDir -File | ForEach-Object {
     Write-Host ("  {0,-30} {1,8} bytes" -f $_.Name, $_.Length)
 }
 
-Write-Host ""
-Write-Host "==BEGIN CLIENT_CERT_PEM=="
-Get-Content $clientCrt -Raw
-Write-Host "==END CLIENT_CERT_PEM=="
-Write-Host ""
-Write-Host "==BEGIN CLIENT_KEY_PEM=="
-Get-Content $clientKey -Raw
-Write-Host "==END CLIENT_KEY_PEM=="
-Write-Host ""
-Write-Host "==BEGIN CA_BUNDLE_PEM=="
-Get-Content $caCertPath -Raw
-Write-Host "==END CA_BUNDLE_PEM=="
+# Emit fenced PEM blocks on the success stream (NOT Write-Host) so the wrapper
+# script provision-and-publish.ps1 can capture them via `$x = & ./this.ps1`.
+# Get-Content (no -Raw) emits one line per pipeline item so the wrapper's
+# line-by-line regex matches the ==BEGIN==/==END== markers correctly.
+Write-Output ''
+Write-Output '==BEGIN CLIENT_CERT_PEM=='
+Get-Content $clientCrt
+Write-Output '==END CLIENT_CERT_PEM=='
+Write-Output ''
+Write-Output '==BEGIN CLIENT_KEY_PEM=='
+Get-Content $clientKey
+Write-Output '==END CLIENT_KEY_PEM=='
+Write-Output ''
+Write-Output '==BEGIN CA_BUNDLE_PEM=='
+Get-Content $caCertPath
+Write-Output '==END CA_BUNDLE_PEM=='
