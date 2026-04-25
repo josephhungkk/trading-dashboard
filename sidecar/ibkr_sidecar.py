@@ -8,26 +8,40 @@ import logging
 import os
 import re
 import signal
+import socket
 import sys
+import time
 from collections.abc import Callable
+from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
+import grpc.aio  # type: ignore[import-untyped]
 import structlog
 
 from sidecar import __version__
+from sidecar._generated.broker.v1 import broker_pb2_grpc
 from sidecar.backoff import (
     apply_startup_backoff,
     clear_failure,
     read_previous_delay,
     record_failure,
 )
-from sidecar.tls import assert_key_file_permissions
+from sidecar.handlers import BrokerHandlers
+from sidecar.pnl_cache import PnLCache
+from sidecar.tls import (
+    assert_key_file_permissions,
+    build_grpc_server_credentials,
+    server_options_for_tls13,
+    start_crl_reloader,
+)
 
 SIDECAR_VERSION = __version__
 _REDACT_KEY = re.compile(r"^(password|secret|token|tls_key|private_key|api_key)$")
 _REDACTED = "[REDACTED]"
+_LOG = structlog.get_logger(__name__)
 
 
 def _env(name: str) -> str | None:
@@ -145,33 +159,124 @@ def _is_client_id_in_use_str(exc: BaseException) -> bool:
     return "clientid" in message and "in use" in message
 
 
-async def run(args: argparse.Namespace) -> None:
-    """Task 11-14 will replace this lifecycle stub with IBKR + gRPC wiring.
+def _fnv1a32(data: bytes) -> int:
+    h = 0x811C9DC5
+    for byte in data:
+        h ^= byte
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return h
 
-    TODO(task14): IB disconnection watchdog per spec §4.2 — exit 64 if
-        IB.isConnected() stays false for >30s.
-    TODO(task14): grpc.aio.server(options=tls.server_options_for_tls13())
-        for TLS 1.3 minimum (CR-4 / spec §7 M23).
-    TODO(task14): per-peer 5-failure -> 30s sleep handshake throttle
-        (anti-flood gate, spec §7).
-    """
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
 
-    def _request_stop() -> None:
-        stop.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, _request_stop)
-        except (NotImplementedError, RuntimeError):
-            signal.signal(sig, _sync_signal_handler(stop))
-
+async def _disconnect_watchdog(ib: Any, stop: asyncio.Event) -> None:
+    last_connected = time.time()
     while not stop.is_set():
         try:
-            await asyncio.wait_for(stop.wait(), timeout=3600)
+            if ib.isConnected():
+                last_connected = time.time()
+            elif time.time() - last_connected > 30:
+                _LOG.warning("disconnect_watchdog_timeout")
+                sys.exit(64)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=1.0)
         except TimeoutError:
             continue
+        return
+
+
+async def run(args: argparse.Namespace) -> None:
+    log = structlog.get_logger(__name__).bind(label=args.label)
+
+    cert_pem = args.tls_cert_pem.read_bytes()
+    key_pem = args.tls_key_pem.read_bytes()
+    ca_bundle_pem = args.tls_ca_bundle_pem.read_bytes()
+    crl_pem = args.tls_crl_pem.read_bytes()
+
+    from ib_async import IB  # type: ignore[import-untyped, unused-ignore]
+
+    client_id = (_fnv1a32((socket.gethostname() + "|" + args.label).encode()) % 900) + 100
+
+    ib = IB()
+    pnl_cache = PnLCache(ib)
+    last_tick_ref: dict[str, datetime] = {}
+    accounts: list[str] = []
+
+    server: grpc.aio.Server | None = None
+    watchdog_task: asyncio.Task[None] | None = None
+    crl_task: asyncio.Task[None] | None = None
+
+    try:
+        await ib.connectAsync("127.0.0.1", args.gateway_port, clientId=client_id, timeout=30)
+        log.info("ibkr_connected", clientId=client_id, gateway_port=args.gateway_port)
+
+        accounts = list(await ib.reqManagedAccountsAsync())  # type: ignore[attr-defined]
+        await ib.reqAccountSummaryAsync(  # type: ignore[call-arg]
+            group="All",
+            tags="NetLiquidation,TotalCashValue,RealizedPnL,UnrealizedPnL,BuyingPower,BASE",
+        )
+
+        server = grpc.aio.server(options=server_options_for_tls13())
+        creds = build_grpc_server_credentials(cert_pem, key_pem, ca_bundle_pem, crl_pem)
+        bind_addr = f"10.10.0.2:{args.grpc_port}"
+        port = server.add_secure_port(bind_addr, creds)
+        if port == 0:
+            raise RuntimeError(f"failed to bind {bind_addr}")
+        broker_pb2_grpc.add_BrokerServicer_to_server(
+            BrokerHandlers(
+                ib=ib,
+                pnl_cache=pnl_cache,
+                label=args.label,
+                version=SIDECAR_VERSION,
+                last_tick_ref=last_tick_ref,
+            ),
+            server,
+        )
+
+        crl_task = await start_crl_reloader(args.tls_crl_pem, ca_bundle_pem, server)
+
+        await server.start()
+        log.info("grpc_server_started", bind=bind_addr, accounts=len(accounts))
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except (NotImplementedError, RuntimeError):
+                signal.signal(sig, lambda _sig, _frame: stop.set())
+
+        watchdog_task = asyncio.create_task(
+            _disconnect_watchdog(ib, stop), name="ibkr-watchdog"
+        )
+
+        await stop.wait()
+
+    finally:
+        log.info("shutdown_start")
+        try:
+            await pnl_cache.cancel_all()
+        except Exception as exc:
+            log.error("pnl_cancel_failed", error=str(exc))
+        for account in accounts:
+            try:
+                ib.cancelAccountSummary(account)  # type: ignore[attr-defined]
+            except Exception as exc:
+                log.error("summary_cancel_failed", account=account, error=str(exc))
+        try:
+            ib.disconnect()
+        except Exception as exc:
+            log.error("ib_disconnect_failed", error=str(exc))
+        if server is not None:
+            try:
+                await server.stop(grace=5)
+            except Exception as exc:
+                log.error("grpc_drain_failed", error=str(exc))
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+        if crl_task is not None:
+            crl_task.cancel()
+        log.info("shutdown_complete")
 
 
 def _sync_signal_handler(stop: asyncio.Event) -> Callable[[int, FrameType | None], None]:
