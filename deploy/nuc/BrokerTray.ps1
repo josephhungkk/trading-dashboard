@@ -95,6 +95,43 @@ function Draw-SquareEmpty {
   return $bmp
 }
 
+# Point-up triangles for the two sidecar fleet icons. Filled = live pair
+# (sidecar-isa-live + sidecar-normal-live), empty = paper pair. Mirrors the
+# IBKR Live (filled square) / IBKR Paper (empty square) convention so live
+# vs paper is visually consistent across the tray.
+function Draw-TriangleFilled {
+  param([string]$status)
+  $bmp = New-Bitmap
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $brush = New-Object System.Drawing.SolidBrush(Get-StatusColor $status)
+  $pts = @(
+    (New-Object System.Drawing.Point  8,  1),
+    (New-Object System.Drawing.Point 14, 14),
+    (New-Object System.Drawing.Point  1, 14)
+  )
+  $g.FillPolygon($brush, $pts)
+  $g.DrawPolygon([System.Drawing.Pens]::Black, $pts)
+  $brush.Dispose(); $g.Dispose()
+  return $bmp
+}
+
+function Draw-TriangleEmpty {
+  param([string]$status)
+  $bmp = New-Bitmap
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $pen = New-Object System.Drawing.Pen ((Get-StatusColor $status), 2.5)
+  $pts = @(
+    (New-Object System.Drawing.Point  8,  1),
+    (New-Object System.Drawing.Point 14, 14),
+    (New-Object System.Drawing.Point  1, 14)
+  )
+  $g.DrawPolygon($pen, $pts)
+  $pen.Dispose(); $g.Dispose()
+  return $bmp
+}
+
 # ---------- probes ----------
 
 function Test-Port {
@@ -107,7 +144,7 @@ function Test-Port {
   } catch { return $false } finally { $conn.Close() }
 }
 
-# Deeper IBKR check — perform the TWS API version handshake.
+# Deeper IBKR check - perform the TWS API version handshake.
 # Returns 'up' if Gateway responds, 'zombie' if TCP accepts but API is unresponsive,
 # 'down' if the port isn't even listening.
 #
@@ -146,7 +183,7 @@ function Test-IBKRHandshake {
   finally { $client.Close() }
 }
 
-# FutuOpenD upstream probe — mirrors BrokerWatchdog's Test-FutuConnected.
+# FutuOpenD upstream probe - mirrors BrokerWatchdog's Test-FutuConnected.
 # Returns 'up'/'zombie'/'down' so the tray can show yellow on lost upstream
 # instead of falsely flashing green when the local port is still listening.
 function Test-FutuConnected {
@@ -167,8 +204,8 @@ function Test-FutuConnected {
 
 # Fetch the authoritative per-adapter connection status from the backend.
 # The BrokerRegistry on the VPS owns the actual ib_async connections, so
-# its `connected` flag is what ends up on the user's screen — exactly
-# what we want the tray to reflect. Hits the same WG → nginx → backend
+# its `connected` flag is what ends up on the user's screen - exactly
+# what we want the tray to reflect. Hits the same WG -> nginx -> backend
 # path the user's browser uses, so the tray is honest about whether the
 # dashboard is actually working.
 #
@@ -193,7 +230,7 @@ function Classify-HttpError {
   if ($probe -is [Net.WebException]) { $Exception = $probe }
   if ($Exception -is [Net.WebException]) {
     $status = $Exception.Status
-    # TCP / DNS / timeout — VPS or nginx really unreachable.
+    # TCP / DNS / timeout - VPS or nginx really unreachable.
     switch ($status) {
       'ConnectFailure'       { return @{ Kind = 'unreachable'; Tip = 'VPS unreachable (TCP connect failed)' } }
       'NameResolutionFailure'{ return @{ Kind = 'unreachable'; Tip = 'VPS unreachable (DNS failure)' } }
@@ -219,14 +256,14 @@ function Classify-HttpError {
       }
     }
   }
-  # Catchall — walk to the innermost exception so users see the real cause,
+  # Catchall - walk to the innermost exception so users see the real cause,
   # not "Exception calling 'GetResponse' with '0' argument(s)...".
   $deepest = $Exception
   for ($i = 0; $i -lt 5 -and $deepest.InnerException -ne $null; $i++) {
     $deepest = $deepest.InnerException
   }
   $msg = $deepest.Message
-  if ($msg.Length -gt 80) { $msg = $msg.Substring(0, 80) + '…' }
+  if ($msg.Length -gt 80) { $msg = $msg.Substring(0, 80) + '...' }
   return @{ Kind = 'unknown'; Tip = $msg }
 }
 
@@ -265,12 +302,12 @@ function Get-BrokerAccounts {
 function Test-Schwab {
   # Hit the VPS nginx directly over WireGuard (10.10.0.1) with a Host header
   # so nginx routes to the dashboard vhost. Cert CN=dashboard.kiusinghung.com
-  # won't match 10.10.0.1 — we accept any cert. Cloudflare is NOT in this path.
+  # won't match 10.10.0.1 - we accept any cert. Cloudflare is NOT in this path.
   #
   # Reachable vs. Configured are separate dimensions. When the VPS is
   # unreachable (WireGuard not up yet post-boot, nginx restarting, ...)
   # the tray used to flatten that into "not configured", which is a
-  # misleading message — the secrets are fine, we just can't see them.
+  # misleading message - the secrets are fine, we just can't see them.
   # The caller now distinguishes the two cases and surfaces the right
   # tooltip.
   try {
@@ -312,7 +349,7 @@ $targets = @(
       # Combines the local upstream check (OpenD has its 443 link out
       # to Futu's servers) with the backend-registry view (the Futu
       # trade adapter has successfully unlocked over the encrypted
-      # channel). "Green" requires BOTH — local OpenD alone is not
+      # channel). "Green" requires BOTH - local OpenD alone is not
       # enough to know the dashboard can actually trade.
       $localState = Test-FutuConnected
       $r = Get-BrokerAccounts
@@ -323,16 +360,16 @@ $targets = @(
       }
 
       $futu = @($r.Accounts | Where-Object { $_.broker -eq 'futu' })
-      # Must wrap in @(...) — PowerShell unrolls a single-element Where-Object
+      # Must wrap in @(...) - PowerShell unrolls a single-element Where-Object
       # result to a scalar PSCustomObject, whose .Count returns $null (not 1),
       # so `$null -gt 0` is $false and we'd falsely flag backend as disconnected.
       $backendConnected = ($futu.Count -gt 0) -and (@($futu | Where-Object { $_.connected }).Count -gt 0)
 
       # 4 combos of (local, backend):
-      #   up + backendConnected → green, fully trading
-      #   up + NOT backend     → partial, trade adapter not yet ready
-      #   zombie + anything    → partial, local link broken
-      #   down + anything      → red
+      #   up + backendConnected -> green, fully trading
+      #   up + NOT backend     -> partial, trade adapter not yet ready
+      #   zombie + anything    -> partial, local link broken
+      #   down + anything      -> red
       if ($localState -eq 'up' -and $backendConnected) {
         return @{ Status = 'up'; Tip = 'FutuOpenD: UP (local + backend trade ctx connected)' }
       }
@@ -353,7 +390,7 @@ $targets = @(
     Probe = {
       $r = Test-Schwab
       # Reachable==false means WireGuard down, VPS unreachable, or
-      # nginx restarting — NOT a missing secret. Show partial (yellow)
+      # nginx restarting - NOT a missing secret. Show partial (yellow)
       # with a tooltip that points at the real cause so the user
       # doesn't chase a ghost OAuth issue.
       if (-not $r.Reachable) {
@@ -415,25 +452,20 @@ $targets = @(
       return @{ Status = $status; Tip = ("IBKR Paper {0}" -f $detail) }
     }
   }
-  # ---- Phase 4 sidecar dots (Task 28). Status sourced from
-  #      C:\dashboard\state\sidecar-<label>.health, written by Probe-Sidecar.ps1
-  #      under BrokerWatchdog. Reuses Draw-Circle; the per-icon tooltip
-  #      disambiguates visually.
+  # ---- Phase 4 sidecar fleet (Task 28). Two icons aggregate the four
+  #      sidecars by mode: live pair (filled triangle) = isa-live + normal-
+  #      live, paper pair (empty triangle) = isa-paper + normal-paper.
+  #      Mirrors the IBKR Live / Paper filled-vs-empty convention so the
+  #      live/paper distinction is visually consistent across the tray.
+  #      Status sourced from C:\dashboard\state\sidecar-<label>.health,
+  #      written by Probe-Sidecar.ps1 under BrokerWatchdog.
   @{
-    Name = 'Sidecar isa-live'; Shape = { param($s) Draw-Circle $s }
-    Probe = { Read-SidecarHealth -Label 'isa-live' }
+    Name = 'Sidecar Live'; Shape = { param($s) Draw-TriangleFilled $s }
+    Probe = { Read-SidecarPair -Labels @('isa-live', 'normal-live') -Mode 'Live' }
   }
   @{
-    Name = 'Sidecar isa-paper'; Shape = { param($s) Draw-Circle $s }
-    Probe = { Read-SidecarHealth -Label 'isa-paper' }
-  }
-  @{
-    Name = 'Sidecar normal-live'; Shape = { param($s) Draw-Circle $s }
-    Probe = { Read-SidecarHealth -Label 'normal-live' }
-  }
-  @{
-    Name = 'Sidecar normal-paper'; Shape = { param($s) Draw-Circle $s }
-    Probe = { Read-SidecarHealth -Label 'normal-paper' }
+    Name = 'Sidecar Paper'; Shape = { param($s) Draw-TriangleEmpty $s }
+    Probe = { Read-SidecarPair -Labels @('isa-paper', 'normal-paper') -Mode 'Paper' }
   }
 )
 
@@ -456,6 +488,35 @@ function Read-SidecarHealth {
   }
   $tip = "Sidecar $Label : $($h.status) (probed $($h.last_probe_at))"
   return @{ Status = $trayStatus; Tip = $tip }
+}
+
+# Aggregate two sidecars (e.g. isa-live + normal-live) into one tray status.
+# Logic mirrors the IBKR Live / Paper rollup:
+#   both up                 -> green
+#   one up, one not-up      -> partial (yellow)
+#   both down               -> down (red)
+#   either gray and the other not 'up' -> gray (not yet probed)
+# Tip lists both sub-statuses so hovering the icon shows what's actually wrong.
+function Read-SidecarPair {
+  param(
+    [Parameter(Mandatory)][string[]]$Labels,
+    [Parameter(Mandatory)][string]$Mode
+  )
+  $sub = $Labels | ForEach-Object { Read-SidecarHealth -Label $_ }
+  $statuses = $sub | ForEach-Object { $_.Status }
+  $up = @($statuses | Where-Object { $_ -eq 'up' }).Count
+  $down = @($statuses | Where-Object { $_ -eq 'down' }).Count
+  $gray = @($statuses | Where-Object { $_ -eq 'gray' }).Count
+
+  $rollup = if ($up -eq $Labels.Count) { 'up' }
+            elseif ($down -eq $Labels.Count) { 'down' }
+            elseif ($gray -gt 0 -and $up -eq 0) { 'gray' }
+            else { 'partial' }
+
+  $detail = for ($i = 0; $i -lt $Labels.Count; $i++) {
+    "{0}={1}" -f $Labels[$i], $statuses[$i]
+  }
+  return @{ Status = $rollup; Tip = ("Sidecar {0}: {1}" -f $Mode, ($detail -join ' ')) }
 }
 
 # ---------- context menu actions ----------
