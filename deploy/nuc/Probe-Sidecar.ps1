@@ -32,7 +32,7 @@
     Where to write sidecar-<label>.health. Defaults to C:\dashboard\state.
 
 .PARAMETER TimeoutSec
-    Probe timeout. Defaults to 5s — generous enough for the sidecar to
+    Probe timeout. Defaults to 5s - generous enough for the sidecar to
     handshake mTLS + answer Health, tight enough to keep the watchdog
     cycle responsive.
 
@@ -99,10 +99,13 @@ foreach ($p in $caPem, $clientCrt, $clientKey) {
 }
 
 # Run the probe. Capture stdout+stderr so the .health file shows what the
-# probe-sidecar.exe binary said — useful for diagnosing handshake failures.
+# probe-sidecar.exe binary said - useful for diagnosing handshake failures.
 $probeArgs = @(
     '--label', $Label,
-    '--host', '127.0.0.1',
+    # Sidecars bind to the WG-interface IP (10.10.0.2) per spec section 4.x
+    # so the backend on the VPS reaches them over WireGuard. The cert SAN is
+    # IP:10.10.0.2, so 127.0.0.1 wouldn't TLS-verify even if it were reachable.
+    '--host', '10.10.0.2',
     '--port', $grpcPort,
     '--client-cert', $clientCrt,
     '--client-key', $clientKey,

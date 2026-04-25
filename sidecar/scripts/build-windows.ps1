@@ -81,39 +81,48 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText((Resolve-Path $grpcPath).Path, $content, $utf8NoBom)
 Write-Host "[build] proto codegen complete (grpc_tools.protoc, native PS)" -ForegroundColor Green
 
-# 2. Resolve dependencies (and pyinstaller) into the project venv.
-& uv sync --extra dev
-if ($LASTEXITCODE -ne 0) {
-    throw "uv sync failed with exit code $LASTEXITCODE"
+# Helper: run a native command (uv / pyinstaller) without letting its stderr
+# progress lines (e.g. uv's "Resolved 36 packages") trigger PowerShell's
+# Stop-preference auto-throw. Exit code is the source of truth.
+function Invoke-Native {
+    param([Parameter(Mandatory)][scriptblock]$Block, [string]$Label)
+    $previousPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Block }
+    finally { $ErrorActionPreference = $previousPref }
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label failed with exit code $LASTEXITCODE"
+    }
 }
 
+# 2. Resolve dependencies (and pyinstaller) into the project venv.
+Invoke-Native -Label 'uv sync' -Block { & $uv.Source sync --extra dev }
+
 # 3. Build the long-running sidecar bundle.
-& uv run pyinstaller `
-    --onedir `
-    --noconfirm `
-    --name ibkr-sidecar `
-    --distpath $OutDir `
-    --paths . `
-    --hidden-import grpc `
-    --hidden-import ib_async `
-    --collect-data ib_async `
-    ibkr_sidecar.py
-if ($LASTEXITCODE -ne 0) {
-    throw "pyinstaller (ibkr-sidecar) failed with exit code $LASTEXITCODE"
+Invoke-Native -Label 'pyinstaller (ibkr-sidecar)' -Block {
+    & $uv.Source run pyinstaller `
+        --onedir `
+        --noconfirm `
+        --name ibkr-sidecar `
+        --distpath $OutDir `
+        --paths . `
+        --hidden-import grpc `
+        --hidden-import ib_async `
+        --collect-data ib_async `
+        ibkr_sidecar.py
 }
 
 # 4. Build the probe-only client bundle (separate so the watchdog can ship
 #    independently and so cold-start time stays small).
-& uv run pyinstaller `
-    --onedir `
-    --noconfirm `
-    --name probe-sidecar `
-    --distpath $OutDir `
-    --paths . `
-    --hidden-import grpc `
-    probe.py
-if ($LASTEXITCODE -ne 0) {
-    throw "pyinstaller (probe-sidecar) failed with exit code $LASTEXITCODE"
+Invoke-Native -Label 'pyinstaller (probe-sidecar)' -Block {
+    & $uv.Source run pyinstaller `
+        --onedir `
+        --noconfirm `
+        --name probe-sidecar `
+        --distpath $OutDir `
+        --paths . `
+        --hidden-import grpc `
+        probe.py
 }
 
 # 5. Surface the produced .exe paths so the operator can sanity-check.
