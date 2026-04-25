@@ -9,6 +9,7 @@ import pytest
 
 from sidecar._generated.broker.v1 import broker_pb2
 from sidecar.handlers import BrokerHandlers
+from sidecar.pnl_cache import PnLCache
 
 
 @dataclass
@@ -64,6 +65,7 @@ class FakeIB:
 def _handlers(ib: FakeIB, last_tick_ref: dict[str, datetime] | None = None) -> BrokerHandlers:
     return BrokerHandlers(
         ib=ib,  # type: ignore[arg-type]
+        pnl_cache=PnLCache(ib),  # type: ignore[arg-type] — PnLCache only invoked via .snapshot in GetPositions; Health/ListManaged/Summary don't touch it.
         label="ibgw_live_us",
         version="0.4.0+test",
         last_tick_ref=last_tick_ref or {},

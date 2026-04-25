@@ -4,20 +4,42 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import structlog
 from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
 
 from sidecar._generated.broker.v1 import broker_pb2, broker_pb2_grpc
-from sidecar.normalize import decimal_str, to_money_proto
+from sidecar.normalize import (
+    decimal_str,
+    normalize_avg_cost,
+    normalize_quote_currency,
+    to_money_proto,
+)
+from sidecar.pnl_cache import PnLCache
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Protocol
 
     from ib_async import (  # type: ignore[import-untyped, unused-ignore]
         IB,
     )
+
+    class _IbContract(Protocol):
+        conId: object  # noqa: N815
+        currency: object
+        exchange: object
+        symbol: object
+        localSymbol: object  # noqa: N815
+        secType: object  # noqa: N815
+
+    class _IbPosition(Protocol):
+        account: object
+        contract: _IbContract
+        marketPrice: object  # noqa: N815
+        avgCost: object  # noqa: N815
+        position: object
 
 
 logger = structlog.get_logger(__name__)
@@ -32,11 +54,13 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
     def __init__(
         self,
         ib: IB,
+        pnl_cache: PnLCache,
         label: str,
         version: str,
         last_tick_ref: dict[str, datetime],
     ) -> None:
         self.ib: IB = ib
+        self.pnl_cache: PnLCache = pnl_cache
         self.label: str = label
         self.version: str = version
         self.last_tick_ref: dict[str, datetime] = last_tick_ref
@@ -165,6 +189,82 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         )
         return broker_pb2.SummaryResponse(summary=summary)
 
+    async def GetPositions(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: object,
+    ) -> broker_pb2.PositionsResponse:
+        del context
+
+        account_number: str = str(request.account_number)
+
+        try:
+            raw_positions: object = await self.ib.reqPositionsAsync()  # type: ignore[attr-defined, unused-ignore]
+            positions: list[object] = list(cast("Iterable[object]", raw_positions))
+        except Exception as exc:
+            logger.exception(
+                "ibkr_positions_failed",
+                label=self.label,
+                account_number=account_number,
+                error=str(exc),
+            )
+            return broker_pb2.PositionsResponse(positions=[])
+
+        account_positions: list[object] = [
+            position
+            for position in positions
+            if str(getattr(position, "account", "")) == account_number
+        ]
+        dropped_rows: int = len(positions) - len(account_positions)
+        if dropped_rows > 0:
+            logger.warning(
+                "ibkr_positions_filtered_rows",
+                account_number=account_number,
+                dropped_rows=dropped_rows,
+            )
+
+        response_positions: list[broker_pb2.Position] = []
+        for position in account_positions:
+            ib_position: _IbPosition = cast("_IbPosition", position)
+            contract: _IbContract = ib_position.contract
+            conid: int = int(str(contract.conId))
+            currency: str = str(contract.currency)
+            exchange: str = str(contract.exchange)
+
+            unrealized, realized, daily = self.pnl_cache.snapshot(account_number, conid)
+
+            raw_market_price: Decimal = Decimal(str(ib_position.marketPrice))
+            market_price: Decimal = normalize_quote_currency(raw_market_price, currency, exchange)
+            raw_avg_cost: Decimal = Decimal(str(ib_position.avgCost))
+            # TODO(task14): wire ConfigService.get(
+            #     "broker", f"{account_number}.avg_cost_unit", default="pounds"
+            # ) once sidecar can reach ConfigService
+            config_unit: Literal["pounds", "pence"] = "pounds"
+            avg_cost: Decimal = normalize_avg_cost(raw_avg_cost, account_number, config_unit)
+            quantity_decimal: Decimal = Decimal(str(ib_position.position))
+
+            response_positions.append(
+                broker_pb2.Position(
+                    contract=broker_pb2.Contract(
+                        symbol=str(contract.symbol),
+                        exchange=exchange,
+                        currency=currency,
+                        asset_class=self._asset_class(str(contract.secType)),
+                        conid=str(conid),
+                        local_symbol=str(contract.localSymbol),
+                    ),
+                    quantity=decimal_str(quantity_decimal),
+                    avg_cost=to_money_proto(avg_cost, currency),
+                    market_price=to_money_proto(market_price, currency),
+                    market_value=to_money_proto(quantity_decimal * market_price, currency),
+                    unrealized_pnl=to_money_proto(unrealized or Decimal("0"), currency),
+                    realized_pnl_today=to_money_proto(realized or Decimal("0"), currency),
+                    daily_pnl=to_money_proto(daily or Decimal("0"), currency),
+                )
+            )
+
+        return broker_pb2.PositionsResponse(positions=response_positions)
+
     def _last_tick_timestamp(self) -> Timestamp | None:
         tick_at: datetime | None = self.last_tick_ref.get("t")
         if tick_at is None:
@@ -212,3 +312,17 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             value = Decimal("0")
 
         return to_money_proto(value, currency)
+
+    def _asset_class(self, sec_type: str) -> broker_pb2.AssetClass:
+        asset_classes: dict[str, broker_pb2.AssetClass] = {
+            "STK": broker_pb2.STOCK,
+            "ETF": broker_pb2.ETF,
+            "OPT": broker_pb2.OPTION,
+            "FUT": broker_pb2.FUTURE,
+            "CASH": broker_pb2.FOREX,
+            "CRYPTO": broker_pb2.CRYPTO,
+            "BOND": broker_pb2.BOND,
+            "FUND": broker_pb2.MUTUAL_FUND,
+            "WAR": broker_pb2.WARRANT,
+        }
+        return asset_classes.get(sec_type, broker_pb2.ASSET_UNSPECIFIED)
