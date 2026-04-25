@@ -39,7 +39,14 @@ markers = [
 
 [tool.coverage.run]
 source = ["sidecar"]
-omit = ["sidecar/_generated/*", "sidecar/scripts/*"]
+# Glob matches both repo-rooted and sidecar-rooted invocations of pytest.
+omit = [
+  "sidecar/_generated/*",
+  "sidecar/scripts/*",
+  "_generated/*",
+  "scripts/*",
+  "*/_generated/*",
+]
 
 [tool.ruff]
 line-length = 100
@@ -56,3 +63,12 @@ quote-style = "double"
 python_version = "3.14"
 strict = true
 exclude = ["_generated", "tests"]
+
+# Generated proto stubs aren't strict-clean; the excludes above stop mypy
+# from analyzing those .py files, but their .pyi stubs are still consulted
+# when source modules import broker_pb2. This override silences the
+# transitive errors as a unit.
+[[tool.mypy.overrides]]
+module = "sidecar._generated.*"
+ignore_errors = true
+follow_imports = "skip"

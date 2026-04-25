@@ -7,7 +7,11 @@ from math import isinf, isnan
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from sidecar._generated.broker.v1 import broker_pb2  # type: ignore[import-not-found]
+    # The generated proto module may not exist before scripts/proto-gen.sh
+    # has run; tolerate either state without a flapping mypy diagnostic.
+    from sidecar._generated.broker.v1 import (
+        broker_pb2,  # type: ignore[import-not-found, unused-ignore]
+    )
 
 # UK exchanges where IBKR returns GBP-denominated quotes in pence (GBX).
 # CR-1: IBIS is Frankfurt/Xetra (EUR, NOT pence); excluding it from this set
