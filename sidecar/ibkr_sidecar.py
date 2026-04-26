@@ -223,8 +223,10 @@ async def run(args: argparse.Namespace) -> None:
         # BASE (account base currency) is delivered via the updateAccountValue
         # stream, not accountSummary. Subscribe per-account so ib.accountValues()
         # populates with BASE — the discoverer reads it for currency_base.
+        # ib_async's IB.reqAccountUpdates(account="") takes the account string
+        # only; the legacy bool subscribe-flag was dropped.
         for account in accounts:
-            ib.reqAccountUpdates(True, account)
+            ib.reqAccountUpdates(account)
         # Brief settle so the initial updateAccountValue burst lands before
         # the gRPC server starts answering ListManagedAccounts.
         await asyncio.sleep(0.5)
@@ -271,11 +273,13 @@ async def run(args: argparse.Namespace) -> None:
             await pnl_cache.cancel_all()
         except Exception as exc:
             log.error("pnl_cancel_failed", error=str(exc))
-        for account in accounts:
-            try:
-                ib.cancelAccountSummary(account)  # type: ignore[attr-defined]
-            except Exception as exc:
-                log.error("summary_cancel_failed", account=account, error=str(exc))
+        # ib_async's cancelAccountSummary() takes no args (global cancel)
+        # and there's no per-account variant; ib.disconnect() below tears
+        # the rest down.
+        try:
+            ib.cancelAccountSummary()
+        except Exception as exc:
+            log.error("summary_cancel_failed", error=str(exc))
         try:
             ib.disconnect()
         except Exception as exc:
