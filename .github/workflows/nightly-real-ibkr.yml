@@ -16,6 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: cd proto && buf generate
+      - run: |
+          touch sidecar/_generated/__init__.py \
+                sidecar/_generated/broker/__init__.py \
+                sidecar/_generated/broker/v1/__init__.py
       - run: cd sidecar && uv sync --extra dev --frozen
       - run: cd sidecar && uv run pytest tests/test_handlers_*.py -v -m real_ibkr
       - if: failure()

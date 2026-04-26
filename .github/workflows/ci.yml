@@ -31,6 +31,11 @@ jobs:
       - name: buf generate
         working-directory: proto
         run: buf generate
+      - name: Materialize _generated package markers
+        run: |
+          touch sidecar/_generated/__init__.py \
+                sidecar/_generated/broker/__init__.py \
+                sidecar/_generated/broker/v1/__init__.py
       - name: Install sidecar deps
         working-directory: sidecar
         run: uv sync --extra dev --frozen
@@ -69,6 +74,11 @@ jobs:
       - name: buf generate
         working-directory: proto
         run: buf generate
+      - name: Materialize _generated package markers
+        run: |
+          touch backend/app/_generated/__init__.py \
+                backend/app/_generated/broker/__init__.py \
+                backend/app/_generated/broker/v1/__init__.py
       - name: Install backend deps
         working-directory: backend
         run: uv sync --frozen
