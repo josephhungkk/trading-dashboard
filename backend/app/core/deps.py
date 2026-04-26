@@ -1,10 +1,12 @@
 """FastAPI dependency providers."""
 
+from __future__ import annotations
+
 import logging
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from jwt.exceptions import (
     ExpiredSignatureError,
     InvalidAudienceError,
@@ -24,6 +26,7 @@ from app.core.cf_access import (
 )
 from app.core.config import settings
 from app.core.db import SessionLocal
+from app.services.brokers import AccountService, BrokerRegistry
 
 if TYPE_CHECKING:
     from app.services.config import ConfigService
@@ -39,12 +42,40 @@ _verifier = CFAccessVerifier(
 _verifier.check_startup_config_smell()
 
 _config_service: ConfigService | None = None
+_broker_registry: BrokerRegistry | None = None
+_account_service: AccountService | None = None
 
 
 def set_config_service(svc: ConfigService) -> None:
     """Called by main.py lifespan to wire the live ConfigService singleton."""
     global _config_service
     _config_service = svc
+
+
+def set_broker_registry(reg: BrokerRegistry) -> None:
+    global _broker_registry
+    _broker_registry = reg
+
+
+def get_broker_registry() -> BrokerRegistry:
+    if _broker_registry is None:
+        raise HTTPException(status_code=503, detail="broker layer not yet configured")
+    return _broker_registry
+
+
+def set_account_service(svc: AccountService) -> None:
+    global _account_service
+    _account_service = svc
+
+
+def get_account_service() -> AccountService:
+    if _account_service is None:
+        raise HTTPException(status_code=503, detail="broker layer not yet configured")
+    return _account_service
+
+
+BrokerRegistryDep = Annotated[BrokerRegistry, Depends(get_broker_registry)]
+AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
