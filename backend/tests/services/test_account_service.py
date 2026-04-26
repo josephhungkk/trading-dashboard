@@ -345,21 +345,13 @@ async def test_get_positions_warns_on_avg_cost_unit_mismatch(
     registry = _mock_registry({"isa-live": client}, degraded=[])
     service = AccountService(registry, session_factory)
 
-    captured: list[dict[str, Any]] = []
-
-    def _capture(_logger: object, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-        captured.append(event_dict.copy())
-        return event_dict
-
-    saved_processors = structlog.get_config().get("processors", [])
-    structlog.configure(
-        processors=[_capture, structlog.processors.JSONRenderer()],
-        cache_logger_on_first_use=False,
-    )
-    try:
+    # structlog.testing.capture_logs patches the bind chain so cached
+    # module-level loggers (log = structlog.get_logger(__name__) at import
+    # time) still flow through; the older monkey-patch-the-global-config
+    # approach was order-dependent (broke once any Phase 4 test imported
+    # brokers.py before this test ran).
+    with structlog.testing.capture_logs() as captured:
         positions = await service.get_positions(account_id)
-    finally:
-        structlog.configure(processors=saved_processors)
 
     assert len(positions) == 1
     assert any(e.get("event") == "avg_cost_unit_suspected_wrong" for e in captured), (
