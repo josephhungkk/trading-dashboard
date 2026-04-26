@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import UUID
 
@@ -689,7 +689,13 @@ def _account_row_from_mapping(row: RowMapping) -> _AccountRow:
 def _format_nlv(d: Decimal | None) -> str | None:
     if d is None:
         return None
-    return format(d.quantize(Decimal("1e-8")), "f")
+    if not d.is_finite():
+        return None
+    try:
+        quantized = d.quantize(Decimal("1e-8"))
+    except InvalidOperation:
+        return None
+    return format(quantized, "f")
 
 
 def _account_response_from_row(row: _AccountRow) -> base.AccountResponse:

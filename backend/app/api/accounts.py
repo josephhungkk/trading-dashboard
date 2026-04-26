@@ -70,12 +70,18 @@ async def _classify_sidecar_failure(
     now = datetime.now(UTC)
     maintenance = compute_broker_maintenance(now)
     if maintenance.active:
+        retry_after = (
+            max(1, int((maintenance.until - now).total_seconds()))
+            if maintenance.until is not None
+            else 30
+        )
         return JSONResponse(
             status_code=503,
             content={
                 "detail": f"IBKR {maintenance.window} maintenance window in progress",
                 "broker_maintenance": maintenance.model_dump(mode="json"),
             },
+            headers={"Retry-After": str(retry_after)},
         )
 
     label = getattr(exc, "label", "") or ""

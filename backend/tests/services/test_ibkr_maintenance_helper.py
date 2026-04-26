@@ -7,6 +7,8 @@ opens, exact-second-window-closes, 1s before window closes.
 
 from datetime import UTC, datetime
 
+import pytest
+
 from app.services.ibkr_maintenance import (
     BrokerMaintenance,
     compute_broker_maintenance,
@@ -40,25 +42,17 @@ def test_active_daily_window_returns_until_in_future() -> None:
     assert m.until > now
 
 
-def test_until_strictly_greater_than_now_at_boundary() -> None:
+def test_until_strictly_greater_than_now_at_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     # If `seconds_until_window_ends(now) == 0` for some boundary second,
     # the helper's `max(secs, 1)` floor must keep `until > now`.
     # We synthesize this by patching `seconds_until_window_ends` to 0.
     import app.services.ibkr_maintenance as mod
 
-    original = mod.seconds_until_window_ends
-    mod.seconds_until_window_ends = lambda _now: 0  # type: ignore[assignment]
-    try:
-        # Force in_weekend_reset to return True for our synthesized now.
-        original_weekend = mod.in_weekend_reset
-        mod.in_weekend_reset = lambda _now: True  # type: ignore[assignment]
-        try:
-            now = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
-            m = compute_broker_maintenance(now)
-            assert m.active is True
-            assert m.until is not None
-            assert m.until > now  # min-1s floor preserved (R6)
-        finally:
-            mod.in_weekend_reset = original_weekend
-    finally:
-        mod.seconds_until_window_ends = original
+    monkeypatch.setattr(mod, "seconds_until_window_ends", lambda _now: 0)
+    monkeypatch.setattr(mod, "in_weekend_reset", lambda _now: True)
+
+    now = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
+    m = compute_broker_maintenance(now)
+    assert m.active is True
+    assert m.until is not None
+    assert m.until > now  # min-1s floor preserved (R6)

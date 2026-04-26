@@ -32,10 +32,12 @@ async def session() -> AsyncIterator[AsyncSession]:
     """
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as s:
-        await s.begin()  # outer transaction
-        try:
-            yield s
-        finally:
-            await s.rollback()
-            await engine.dispose()
+    try:
+        async with factory() as s:
+            await s.begin()  # outer transaction
+            try:
+                yield s
+            finally:
+                await s.rollback()
+    finally:
+        await engine.dispose()

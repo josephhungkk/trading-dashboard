@@ -13,7 +13,7 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 RegionName = Literal["na", "eu", "apac-1", "apac-2"]
 
@@ -64,6 +64,12 @@ class BrokerMaintenance(BaseModel):
     active: bool
     window: Literal["weekend", "daily"] | None = None
     until: datetime | None = None
+
+    @model_validator(mode="after")
+    def _check_active_implies_window_and_until(self) -> BrokerMaintenance:
+        if self.active and (self.window is None or self.until is None):
+            raise ValueError("BrokerMaintenance(active=True) requires both window and until")
+        return self
 
 
 @dataclass(frozen=True)
