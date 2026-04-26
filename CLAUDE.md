@@ -269,7 +269,9 @@ Every phase follows this exact sequence:
 | 11 | `everything-claude-code:tdd-guide` or `superpowers:test-driven-development` | when writing new features or tests fail |
 | 12 | `everything-claude-code:pr-test-analyzer` | before merging PR once real test suites exist |
 
-Don't batch reviews to the end of a chunk — catch issues at commit boundaries.
+**Reviews fire at EVERY commit boundary, not batched to the end of a chunk.** Velocity-driven skipping is forbidden — each commit gets at minimum #2 + #3 + the relevant language reviewer (#4) before moving to the next task. Conditional reviewers (#5–#11) fire when their trigger surface is touched. Pre-existing tests passing is NOT a substitute for a fresh reviewer pass — tests prove the wire didn't change, not that the code is well-built or matches the spec.
+
+If a review batch is skipped during a session, **catch up before the next chunk begins** — never carry unreviewed commits into the next layer (Chunk B reads schema written by A; Chunk E reads contract written by B; finding a shape bug after dependents land is much more expensive than at the commit boundary). Spec + code-quality + language reviewers can be dispatched in parallel against the unreviewed range, but the catch-up MUST happen before any new feature work.
 
 **Step 7 — Close-out:** `superpowers:finishing-a-development-branch`; `claude-md-management:claude-md-improver` for CLAUDE.md updates; `everything-claude-code:doc-updater` for README/docs refresh; `commit-commands:*` for structured commits; `gh run view` to watch CI.
 
