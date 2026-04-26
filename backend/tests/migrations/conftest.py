@@ -1,9 +1,10 @@
 """Shared fixtures for Alembic migration tests.
 
-Mirrors Phase 4's test_0002 engine pattern but exposes an
-``async_sessionmaker`` so spec §11 R1+R11 tests can wrap each scenario
-in ``async with session_factory() as s, s.begin():`` for automatic
-rollback isolation.
+Each test runs inside an outer transaction the fixture rolls back on
+teardown — guaranteed isolation even on success paths. Tests that need
+to recover from an IntegrityError must wrap the offending statement in
+``async with session.begin_nested():`` (a savepoint that absorbs the
+error without aborting the outer transaction).
 """
 
 from __future__ import annotations
@@ -21,15 +22,20 @@ from app.core.config import settings
 
 
 @pytest.fixture
-async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Yield an async_sessionmaker bound to a fresh engine.
+async def session() -> AsyncIterator[AsyncSession]:
+    """Yield a session inside an outer transaction that ALWAYS rolls back.
 
-    Each yielded session opens a transaction via ``s.begin()`` in the
-    test body; the ``with`` exit rolls back unless explicitly committed,
-    so test data never leaks between cases.
+    The fixture-driven rollback is the safety net: tests cannot
+    accidentally commit, even on success paths. SQLAlchemy 2.0
+    ``async with s.begin()`` commits on normal exit — never use it in
+    these tests.
     """
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-    try:
-        yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    finally:
-        await engine.dispose()
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        await s.begin()  # outer transaction
+        try:
+            yield s
+        finally:
+            await s.rollback()
+            await engine.dispose()

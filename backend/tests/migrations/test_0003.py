@@ -1,8 +1,9 @@
 """Migration 0003 — broker_accounts_nlv schema constraint tests.
 
 Validates the CHECK constraint behaviour and column defaults documented
-in spec §4 (R1, R11). Uses the live test database — Alembic 0003 must
-have been applied during fixture setup.
+in spec §4 (R1, R11). Each test runs inside an outer transaction that
+the fixture unconditionally rolls back; nested savepoints absorb
+expected IntegrityError / DBAPIError without aborting the outer.
 
 Migration 0002 makes ``mode``, ``gateway_label``, ``currency_base``, and
 ``last_seen_via`` NOT NULL with no server defaults, so each INSERT must
@@ -14,20 +15,17 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
-# Required NOT NULL columns from migration 0002 — every INSERT below
-# must populate these so the CHECK constraint, NUMERIC overflow, and
-# VARCHAR length rules are the only failure modes under test.
 _BASE_COLS = "broker_id, account_number, mode, gateway_label, currency_base, last_seen_via"
 _BASE_VALS = "'ibkr', :acct, 'paper', 'isa-paper', 'USD', 'isa-paper'"
 
 
 @pytest.mark.asyncio
-async def test_last_nlv_currency_rejects_short(session_factory: async_sessionmaker) -> None:
-    async with session_factory() as s, s.begin():
-        with pytest.raises(IntegrityError, match="broker_accounts_last_nlv_currency_iso3"):
-            await s.execute(
+async def test_last_nlv_currency_rejects_short(session: AsyncSession) -> None:
+    with pytest.raises(IntegrityError, match="broker_accounts_last_nlv_currency_iso3"):
+        async with session.begin_nested():
+            await session.execute(
                 text(
                     f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv_currency) "
                     f"VALUES ({_BASE_VALS}, 'US')"
@@ -37,10 +35,10 @@ async def test_last_nlv_currency_rejects_short(session_factory: async_sessionmak
 
 
 @pytest.mark.asyncio
-async def test_last_nlv_currency_rejects_lowercase(session_factory: async_sessionmaker) -> None:
-    async with session_factory() as s, s.begin():
-        with pytest.raises(IntegrityError, match="broker_accounts_last_nlv_currency_iso3"):
-            await s.execute(
+async def test_last_nlv_currency_rejects_lowercase(session: AsyncSession) -> None:
+    with pytest.raises(IntegrityError, match="broker_accounts_last_nlv_currency_iso3"):
+        async with session.begin_nested():
+            await session.execute(
                 text(
                     f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv_currency) "
                     f"VALUES ({_BASE_VALS}, 'usd')"
@@ -50,13 +48,10 @@ async def test_last_nlv_currency_rejects_lowercase(session_factory: async_sessio
 
 
 @pytest.mark.asyncio
-async def test_last_nlv_currency_rejects_padded(session_factory: async_sessionmaker) -> None:
-    async with session_factory() as s, s.begin():
-        with pytest.raises(DBAPIError):
-            # VARCHAR(3) raises ``value too long for type character varying(3)``;
-            # the CHECK regex would also reject 4-char input. Either way the
-            # row must NOT be silently accepted.
-            await s.execute(
+async def test_last_nlv_currency_rejects_padded(session: AsyncSession) -> None:
+    with pytest.raises(DBAPIError):
+        async with session.begin_nested():
+            await session.execute(
                 text(
                     f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv_currency) "
                     f"VALUES ({_BASE_VALS}, 'USDX')"
@@ -66,9 +61,9 @@ async def test_last_nlv_currency_rejects_padded(session_factory: async_sessionma
 
 
 @pytest.mark.asyncio
-async def test_last_nlv_currency_accepts_iso3(session_factory: async_sessionmaker) -> None:
-    async with session_factory() as s, s.begin():
-        await s.execute(
+async def test_last_nlv_currency_accepts_iso3(session: AsyncSession) -> None:
+    async with session.begin_nested():
+        await session.execute(
             text(
                 f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv, last_nlv_currency) "
                 f"VALUES ({_BASE_VALS}, 100, 'USD')"
@@ -76,7 +71,7 @@ async def test_last_nlv_currency_accepts_iso3(session_factory: async_sessionmake
             {"acct": "TEST_OK"},
         )
         row = (
-            await s.execute(
+            await session.execute(
                 text(
                     "SELECT last_nlv, last_nlv_currency FROM broker_accounts "
                     "WHERE account_number = 'TEST_OK'"
@@ -88,10 +83,10 @@ async def test_last_nlv_currency_accepts_iso3(session_factory: async_sessionmake
 
 
 @pytest.mark.asyncio
-async def test_last_nlv_overflow_rejected(session_factory: async_sessionmaker) -> None:
-    async with session_factory() as s, s.begin():
-        with pytest.raises(DBAPIError, match="overflow"):
-            await s.execute(
+async def test_last_nlv_overflow_rejected(session: AsyncSession) -> None:
+    with pytest.raises(DBAPIError, match="overflow"):
+        async with session.begin_nested():
+            await session.execute(
                 text(
                     f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv) "
                     f"VALUES ({_BASE_VALS}, 1e30)"
@@ -101,9 +96,9 @@ async def test_last_nlv_overflow_rejected(session_factory: async_sessionmaker) -
 
 
 @pytest.mark.asyncio
-async def test_last_nlv_max_precision_accepted(session_factory: async_sessionmaker) -> None:
-    async with session_factory() as s, s.begin():
-        await s.execute(
+async def test_last_nlv_max_precision_accepted(session: AsyncSession) -> None:
+    async with session.begin_nested():
+        await session.execute(
             text(
                 f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv, last_nlv_currency) "
                 f"VALUES ({_BASE_VALS}, 999999999999.99999999, 'USD')"
@@ -111,7 +106,7 @@ async def test_last_nlv_max_precision_accepted(session_factory: async_sessionmak
             {"acct": "TEST_PRECISION"},
         )
         row = (
-            await s.execute(
+            await session.execute(
                 text("SELECT last_nlv FROM broker_accounts WHERE account_number = 'TEST_PRECISION'")
             )
         ).first()
