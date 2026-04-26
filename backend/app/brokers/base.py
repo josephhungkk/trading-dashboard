@@ -47,7 +47,11 @@ class Account(BaseModel):
     account_number: str
     mode: TradingMode
     gateway_label: str
-    currency_base: str = Field(min_length=3, max_length=3)
+    # Empty string means "BASE tag not yet cached on the sidecar" - the
+    # discoverer still upserts the row; the AccountResponse layer surfaces
+    # it as "" and the frontend renders a placeholder. Once the sidecar's
+    # ib_async cache catches the BASE tag, subsequent ticks overwrite.
+    currency_base: str = Field(default="", max_length=3)
 
 
 class Money(BaseModel):

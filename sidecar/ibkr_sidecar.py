@@ -220,16 +220,14 @@ async def run(args: argparse.Namespace) -> None:
         # tags the handlers care about (NetLiquidation, TotalCashValue, etc.)
         # but NOT the BASE tag.
         await ib.reqAccountSummaryAsync()
-        # BASE (account base currency) is delivered via the updateAccountValue
-        # stream, not accountSummary. Subscribe per-account so ib.accountValues()
-        # populates with BASE — the discoverer reads it for currency_base.
-        # Modern ib_async's sync IB.reqAccountUpdates() drives its own event
-        # loop; from inside our async startup that raises "This event loop is
-        # already running". Use the async variant.
-        for account in accounts:
-            await ib.reqAccountUpdatesAsync(account)
-        # Brief settle so the initial updateAccountValue burst lands before
-        # the gRPC server starts answering ListManagedAccounts.
+        # We previously subscribed reqAccountUpdates per managed account to
+        # populate ib.accountValues() with the BASE tag, but the IB API only
+        # permits one active reqAccountUpdates subscription at a time on a
+        # connection that already has reqAccountSummary running, and the
+        # second await never resolves -- the sidecar hangs before bind.
+        # Ship without it: handlers fall back to "" for currency_base when
+        # the BASE tag isn't cached, the backend's discover loop treats ""
+        # as "unknown" and still upserts the row.
         await asyncio.sleep(0.5)
 
         server = grpc.aio.server(options=server_options_for_tls13())
