@@ -522,15 +522,25 @@ class BrokerDiscoverer:
         self._tick_lock = asyncio.Lock()
 
     async def discover_loop(self) -> None:
+        # Single-consumer invariant: only this method calls _discover_once,
+        # so the locked()-then-acquire pattern is race-free here. If a
+        # second caller is ever added, replace with wait_for(acquire(), 0).
         while not self._stop_event.is_set():
             if self._tick_lock.locked():
-                log.warning("broker_discover_iteration_skipped_overlap")
+                log.warning(
+                    "broker_discover_iteration_skipped_overlap",
+                    interval_seconds=self._interval,
+                )
             else:
                 async with self._tick_lock:
                     try:
                         await self._discover_once()
-                    except Exception:
-                        log.exception("broker_discover_iteration_failed")
+                    except Exception as exc:
+                        log.exception(
+                            "broker_discover_loop_exception",
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                        )
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
