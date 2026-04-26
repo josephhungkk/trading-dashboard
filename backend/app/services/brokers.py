@@ -41,7 +41,9 @@ class _AccountRow:
 
 
 class BrokerSidecarUnavailable(Exception):  # noqa: N818
-    pass
+    def __init__(self, message: str, *, label: str = "") -> None:
+        super().__init__(message)
+        self.label = label
 
 
 class BrokerSidecarTimeout(Exception):  # noqa: N818
@@ -184,7 +186,8 @@ class BrokerSidecarClient:
                     f"broker sidecar {self.label} {method} timed out"
                 ) from exc
             raise BrokerSidecarUnavailable(
-                f"broker sidecar {self.label} {method} unavailable: {exc.code().name}"
+                f"broker sidecar {self.label} {method} unavailable: {exc.code().name}",
+                label=self.label,
             ) from exc
 
         log.info(
