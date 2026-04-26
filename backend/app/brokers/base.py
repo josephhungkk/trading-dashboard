@@ -109,7 +109,10 @@ class AccountResponse(BaseModel):
     broker_id: Literal["ibkr", "futu", "schwab"]
     alias: str | None
     mode: Literal["live", "paper"]
-    currency_base: str = Field(min_length=3, max_length=3)
+    # "" is allowed (BASE tag not yet cached on the sidecar). Frontend
+    # renders a placeholder until the discoverer overwrites with a real
+    # 3-letter code on a subsequent tick.
+    currency_base: str = Field(default="", max_length=3)
     display_order: int
 
 
