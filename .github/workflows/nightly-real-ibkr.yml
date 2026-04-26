@@ -12,9 +12,11 @@ jobs:
     env:
       CI_USE_REAL_IBKR: '1'
       IBKR_PAPER_PORT: '4002'
-      # Silences the GitHub-Actions Node.js 20 deprecation banner; opts the
-      # JS-action shim into Node 24 ahead of the 2026-06-02 forced default.
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+      # NOTE: NOT opting into FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 yet —
+      # astral-sh/setup-uv@v5 crashes on Node 24 with a libuv assertion
+      # (src\win\async.c:76). Re-enable once setup-uv ships a Node-24
+      # compatible release. The Node-20 deprecation warning is harmless
+      # until 2026-06-02.
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
