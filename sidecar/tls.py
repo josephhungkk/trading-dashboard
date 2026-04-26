@@ -171,7 +171,12 @@ async def start_crl_reloader(
     """
     del server  # accepted for caller-side documentation; not used in the loop
 
-    current_crl_pem: list[bytes] = [await asyncio.to_thread(crl_path.read_bytes)]
+    def _revoked_serial_set(pem: bytes) -> frozenset[int]:
+        crl = x509.load_pem_x509_crl(pem)
+        return frozenset(entry.serial_number for entry in crl)
+
+    initial_pem = await asyncio.to_thread(crl_path.read_bytes)
+    current_revoked: list[frozenset[int]] = [_revoked_serial_set(initial_pem)]
 
     async def _reload_loop() -> None:
         while True:
@@ -179,6 +184,7 @@ async def start_crl_reloader(
             try:
                 next_crl = await asyncio.to_thread(crl_path.read_bytes)
                 _verify_crl(next_crl, ca_bundle_pem)
+                next_revoked = _revoked_serial_set(next_crl)
             except Exception as exc:  # HIGH-6: must catch cryptography.* + OS errors
                 _LOG.error(
                     "crl_reload_failed",
@@ -188,10 +194,16 @@ async def start_crl_reloader(
                 )
                 continue
 
-            if next_crl == current_crl_pem[0]:
+            # Compare the revoked-serial SET, not raw bytes. Re-signing the
+            # CRL with the same revocation list produces different bytes
+            # every time (CRL signatures are time-stamped via lastUpdate /
+            # nextUpdate), which would false-positive a relaunch every time
+            # the operator's mTLS-rotation tooling regenerates the file.
+            # Only an actual revocation change matters.
+            if next_revoked == current_revoked[0]:
                 continue
 
-            current_crl_pem[0] = next_crl
+            current_revoked[0] = next_revoked
             _LOG.warning("crl_changed_relaunching", crl_path=str(crl_path))
             # grpcio has no hot-swap API for server credentials. Exit 64 so
             # Task Scheduler relaunches the sidecar with freshly-built creds
