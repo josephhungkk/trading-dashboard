@@ -36,6 +36,18 @@ async def session_factory(engine):
 
 @pytest.fixture(autouse=True)
 async def clean_tables(session_factory):
+    # Guardrail: refuse to wipe app_secrets / app_config against the prod
+    # NUC database. The original fixture issued a blanket DELETE which
+    # nuked the operator-published broker.mtls.* rows on every local
+    # pytest run (memory feedback_pytest_prod_db_wipe.md). If DATABASE_URL
+    # points at the prod WG IP, raise loudly instead of destroying state.
+    db_url = settings.database_url
+    if "10.10.0.2" in db_url and "localhost" not in db_url:
+        raise RuntimeError(
+            "Refusing to truncate app_config/app_secrets against the prod DB "
+            f"({db_url}). Override DATABASE_URL to a local test PG before "
+            "running pytest in backend/. See memory feedback_pytest_prod_db_wipe.md."
+        )
     async with session_factory() as s:
         await s.execute(text("DELETE FROM app_config"))
         await s.execute(text("DELETE FROM app_secrets"))
