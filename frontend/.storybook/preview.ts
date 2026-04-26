@@ -1,6 +1,10 @@
 import type { Preview } from '@storybook/react-vite';
 import '../src/styles/global.css';
 
+if (typeof import.meta.env !== 'undefined') {
+  (import.meta.env as Record<string, string>).VITE_USE_MOCKS = 'true';
+}
+
 const preview: Preview = {
   parameters: {
     controls: {
