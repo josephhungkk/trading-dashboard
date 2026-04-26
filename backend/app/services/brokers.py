@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime, tzinfo
 from typing import Any, Protocol, TypeVar, cast
@@ -254,3 +255,106 @@ def _order_from_proto(order: broker_pb2.Order) -> base.Order:
         submitted_at=_timestamp_from_proto(order.submitted_at),
         updated_at=_timestamp_from_proto(order.updated_at),
     )
+
+
+class BrokerRegistry:
+    """Owns BrokerSidecarClients plus a per-label health cache.
+
+    The FastAPI service layer asks the registry for get_client(label)
+    or healthy_clients().
+    """
+
+    def __init__(
+        self,
+        clients: dict[str, BrokerSidecarClient],
+        *,
+        freshness_seconds: float = 90.0,
+        probe_interval_healthy: float = 60.0,
+        probe_interval_unhealthy: float = 5.0,
+    ) -> None:
+        self._clients = clients
+        self._freshness_seconds = freshness_seconds
+        self._probe_interval_healthy = probe_interval_healthy
+        self._probe_interval_unhealthy = probe_interval_unhealthy
+        self._health_cache: dict[str, tuple[bool, float, base.HealthResponse | None]] = {}
+        self._lock = asyncio.Lock()
+        self._stop_event = asyncio.Event()
+
+    async def get_client(self, label: str) -> BrokerSidecarClient:
+        return self._clients[label]
+
+    async def healthy_clients(self) -> list[BrokerSidecarClient]:
+        healthy_labels = await self._healthy_labels()
+        return [client for label, client in self._clients.items() if label in healthy_labels]
+
+    async def degraded_labels(self) -> list[str]:
+        healthy_labels = await self._healthy_labels()
+        return [label for label in self._clients if label not in healthy_labels]
+
+    async def probe_once(self) -> None:
+        await asyncio.gather(
+            *(self._probe_client(label, client) for label, client in self._clients.items())
+        )
+
+    async def health_probe_loop(self) -> None:
+        while not self._stop_event.is_set():
+            await self.probe_once()
+            degraded_labels = await self.degraded_labels()
+            interval = (
+                self._probe_interval_unhealthy if degraded_labels else self._probe_interval_healthy
+            )
+            log.debug(
+                "broker_registry_loop_tick",
+                degraded_labels=degraded_labels,
+                next_probe_seconds=interval,
+            )
+            await self._sleep_until_stopped(interval)
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+
+    async def close(self) -> None:
+        await asyncio.gather(*(client.close() for client in self._clients.values()))
+
+    async def _probe_client(self, label: str, client: BrokerSidecarClient) -> None:
+        try:
+            health = await client.health()
+        except (BrokerSidecarUnavailable, BrokerSidecarTimeout, Exception) as exc:
+            await self._mark_health(label, ok=False, health=None)
+            log.debug(
+                "broker_registry_probe_failed",
+                label=label,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return
+
+        await self._mark_health(label, ok=True, health=health)
+        log.debug("broker_registry_probe_ok", label=label)
+
+    async def _mark_health(
+        self,
+        label: str,
+        *,
+        ok: bool,
+        health: base.HealthResponse | None,
+    ) -> None:
+        async with self._lock:
+            self._health_cache[label] = (ok, time.monotonic(), health)
+
+    async def _healthy_labels(self) -> set[str]:
+        now = time.monotonic()
+        async with self._lock:
+            return {
+                label
+                for label, (ok, probed_at, _health) in self._health_cache.items()
+                if ok and now - probed_at <= self._freshness_seconds
+            }
+
+    async def _sleep_until_stopped(self, interval: float) -> None:
+        sleep_until = time.monotonic() + interval
+        while not self._stop_event.is_set():
+            remaining = sleep_until - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 0.5))
