@@ -114,6 +114,15 @@ class AccountResponse(BaseModel):
     # 3-letter code on a subsequent tick.
     currency_base: str = Field(default="", max_length=3)
     display_order: int
+    # Phase 5a additions (spec section 3.1):
+    nlv: str | None = Field(default=None)
+    nlv_currency: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=3,
+        pattern=r"^[A-Z]{3}$",
+    )
+    nlv_at: datetime | None = Field(default=None)
 
 
 class AccountListResponse(BaseModel):
