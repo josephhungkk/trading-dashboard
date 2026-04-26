@@ -51,10 +51,15 @@ strict = true
 warn_unused_ignores = true
 warn_return_any = true
 no_implicit_reexport = true
+exclude = '(^|/)_generated/'
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "app._generated.*"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

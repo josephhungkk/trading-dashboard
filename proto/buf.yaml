@@ -1,10 +1,16 @@
 version: v2
 modules:
-  - path: .
+  - path: broker
 lint:
   use:
     - STANDARD
   except:
+    # Module root is `broker/`, file lives at `broker/v1/broker.proto` with
+    # package `broker.v1` — buf wants the file at `broker/v1/...` relative to
+    # the module root (i.e. one extra `broker/` on disk). Restructuring would
+    # break the generated import path `from broker.v1 import broker_pb2`
+    # that sidecar/ibkr_sidecar.py and backend/app/services/brokers.py use.
+    - PACKAGE_DIRECTORY_MATCH
     # The service is intentionally named `Broker` (not `BrokerService`); mTLS
     # callers and four cross-language stubs pin that name. Renaming would
     # cascade through backend tests, sidecar handlers, and the PowerShell
