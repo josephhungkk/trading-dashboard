@@ -4,21 +4,40 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
-from typing import Any, Protocol, TypeVar, cast
+from decimal import Decimal
+from typing import Any, Literal, Protocol, TypeVar, cast
+from uuid import UUID
 
 import grpc  # type: ignore[import-untyped]
 import structlog
 from sqlalchemy import bindparam, text
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from app.brokers import base
+from app.core import metrics
 
 log = structlog.get_logger(__name__)
 
 RequestT = TypeVar("RequestT", contravariant=True)
 ResponseT = TypeVar("ResponseT", covariant=True)
+BrokerId = Literal["ibkr", "futu", "schwab"]
+TradingMode = Literal["live", "paper"]
+
+
+@dataclass(frozen=True)
+class _AccountRow:
+    id: UUID
+    broker_id: BrokerId
+    account_number: str
+    alias: str | None
+    mode: TradingMode
+    gateway_label: str
+    currency_base: str
+    display_order: int
 
 
 class BrokerSidecarUnavailable(Exception):  # noqa: N818
@@ -27,6 +46,10 @@ class BrokerSidecarUnavailable(Exception):  # noqa: N818
 
 class BrokerSidecarTimeout(Exception):  # noqa: N818
     pass
+
+
+class AccountNotFound(Exception):  # noqa: N818
+    """Raised by AccountService when the uuid doesn't resolve."""
 
 
 class _UnaryUnary(Protocol[RequestT, ResponseT]):
@@ -362,6 +385,114 @@ class BrokerRegistry:
             await asyncio.sleep(min(remaining, 0.5))
 
 
+class AccountService:
+    """Orchestrates uuid->tuple resolution + sidecar fan-out for the
+    /api/accounts/* REST routes. The single backend chokepoint that
+    translates the frontend's account_id (UUID) into the (broker_id,
+    gateway_label, account_number) the sidecar needs.
+    All methods read broker_accounts WHERE deleted_at IS NULL."""
+
+    def __init__(
+        self,
+        registry: BrokerRegistry,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        self._registry = registry
+        self._session_factory = session_factory
+
+    async def list_accounts(self) -> base.AccountListResponse:
+        """Returns AccountListResponse with accounts populated from
+        broker_accounts WHERE deleted_at IS NULL ORDER BY display_order,
+        account_number. degraded_sidecars from registry.degraded_labels()."""
+        stmt = text(
+            """
+            SELECT id, broker_id, account_number, alias, mode, gateway_label,
+                   currency_base, display_order
+              FROM broker_accounts
+             WHERE deleted_at IS NULL
+             ORDER BY display_order, account_number;
+            """
+        )
+        async with self._session_factory() as session:
+            result = await session.execute(stmt)
+            rows = [_account_row_from_mapping(row) for row in result.mappings().all()]
+
+        degraded_sidecars = await self._registry.degraded_labels()
+        return base.AccountListResponse(
+            accounts=[_account_response_from_row(row) for row in rows],
+            degraded_sidecars=degraded_sidecars,
+        )
+
+    async def get_summary(self, account_id: UUID) -> base.Summary:
+        """Resolve uuid -> (gateway_label, account_number), fetch via
+        registry.get_client(gateway_label).get_account_summary()."""
+        row = await self._resolve_account(account_id)
+        client = await self._registry.get_client(row.gateway_label)
+        return await client.get_account_summary(row.account_number)
+
+    async def get_positions(self, account_id: UUID) -> list[base.Position]:
+        """Resolve uuid -> (gateway_label, account_number), fetch positions
+        AND summary in parallel (asyncio.gather), run H11 invariant check,
+        return positions."""
+        row = await self._resolve_account(account_id)
+        client = await self._registry.get_client(row.gateway_label)
+        positions, summary = await asyncio.gather(
+            client.get_positions(row.account_number),
+            client.get_account_summary(row.account_number),
+        )
+        _check_avg_cost_unit_invariant(account_id, positions, summary)
+        return positions
+
+    async def get_orders(self, account_id: UUID) -> list[base.Order]:
+        """Resolve uuid -> (gateway_label, account_number), fetch orders
+        via registry.get_client(gateway_label).get_orders()."""
+        row = await self._resolve_account(account_id)
+        client = await self._registry.get_client(row.gateway_label)
+        return await client.get_orders(row.account_number)
+
+    async def update_alias(
+        self,
+        account_id: UUID,
+        update: base.AccountAliasUpdate,
+    ) -> base.AccountResponse:
+        """UPDATE broker_accounts SET alias=:alias, updated_at=now()
+        WHERE id=:id AND deleted_at IS NULL.
+        Raises AccountNotFound if row doesn't exist or is soft-deleted."""
+        stmt = text(
+            """
+            UPDATE broker_accounts
+               SET alias = :alias,
+                   updated_at = now()
+             WHERE id = :id AND deleted_at IS NULL
+            RETURNING id, broker_id, account_number, alias, mode, gateway_label,
+                      currency_base, display_order;
+            """
+        )
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(stmt, {"id": account_id, "alias": update.alias})
+            row = result.mappings().one_or_none()
+
+        if row is None:
+            raise AccountNotFound(f"account {account_id} not found")
+        return _account_response_from_row(_account_row_from_mapping(row))
+
+    async def _resolve_account(self, account_id: UUID) -> _AccountRow:
+        stmt = text(
+            """
+            SELECT id, broker_id, account_number, alias, mode, gateway_label,
+                   currency_base, display_order
+              FROM broker_accounts
+             WHERE id = :id AND deleted_at IS NULL;
+            """
+        )
+        async with self._session_factory() as session:
+            result = await session.execute(stmt, {"id": account_id})
+            row = result.mappings().one_or_none()
+        if row is None:
+            raise AccountNotFound(f"account {account_id} not found")
+        return _account_row_from_mapping(row)
+
+
 class BrokerDiscoverer:
     """Polls each healthy sidecar's ListManagedAccounts every N seconds and
     upserts broker_accounts rows. Soft-deletes rows that healthy sidecars
@@ -528,3 +659,48 @@ class BrokerDiscoverer:
         if isinstance(mode, str):
             return mode.lower()
         return mode.value.lower()
+
+
+def _account_row_from_mapping(row: RowMapping) -> _AccountRow:
+    return _AccountRow(
+        id=cast(UUID, row["id"]),
+        broker_id=cast("BrokerId", row["broker_id"]),
+        account_number=cast(str, row["account_number"]),
+        alias=cast(str | None, row["alias"]),
+        mode=cast("TradingMode", row["mode"]),
+        gateway_label=cast(str, row["gateway_label"]),
+        currency_base=cast(str, row["currency_base"]),
+        display_order=cast(int, row["display_order"]),
+    )
+
+
+def _account_response_from_row(row: _AccountRow) -> base.AccountResponse:
+    return base.AccountResponse(
+        id=row.id,
+        broker_id=row.broker_id,
+        alias=row.alias,
+        mode=row.mode,
+        currency_base=row.currency_base,
+        display_order=row.display_order,
+    )
+
+
+def _check_avg_cost_unit_invariant(
+    account_id: UUID,
+    positions: list[base.Position],
+    summary: base.Summary,
+) -> None:
+    total_cost = sum(
+        Decimal(position.quantity) * Decimal(position.avg_cost.value) for position in positions
+    )
+    nlv = Decimal(summary.net_liquidation.value)
+    if total_cost > Decimal("1.5") * nlv:
+        ratio = Decimal("Infinity") if nlv == Decimal("0") else total_cost / nlv
+        log.warning(
+            "avg_cost_unit_suspected_wrong",
+            account_id=str(account_id),
+            total_cost=str(total_cost),
+            nlv=str(nlv),
+            ratio=str(ratio),
+        )
+        metrics.avg_cost_unit_suspected_wrong_total.labels(account_id=str(account_id)).inc()

@@ -52,3 +52,10 @@ admin_secret_reveal_total = Counter(
     labelnames=["actor_kind"],
     registry=registry,
 )
+
+avg_cost_unit_suspected_wrong_total = Counter(
+    "avg_cost_unit_suspected_wrong_total",
+    "Positions where avg_cost appears to be in wrong currency unit (GBX vs GBP)",
+    labelnames=["account_id"],
+    registry=registry,
+)
