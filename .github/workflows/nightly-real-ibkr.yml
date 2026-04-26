@@ -15,12 +15,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: cd proto && buf generate
-      - run: |
-          touch sidecar/_generated/__init__.py \
-                sidecar/_generated/broker/__init__.py \
-                sidecar/_generated/broker/v1/__init__.py
       - run: cd sidecar && uv sync --extra dev --frozen
+      - run: |
+          cd sidecar
+          mkdir -p _generated/broker/v1
+          : > _generated/__init__.py
+          : > _generated/broker/__init__.py
+          : > _generated/broker/v1/__init__.py
+          uv run python -m grpc_tools.protoc \
+            --proto_path=../proto \
+            --python_out=_generated \
+            --grpc_python_out=_generated \
+            --pyi_out=_generated \
+            broker/v1/broker.proto
+          sed -i 's|^from broker\.v1 import broker_pb2|from sidecar._generated.broker.v1 import broker_pb2|' \
+            _generated/broker/v1/broker_pb2_grpc.py
       - run: cd sidecar && uv run pytest tests/test_handlers_*.py -v -m real_ibkr
       - if: failure()
         run: echo "::error::Nightly real-IBKR contract tests failed. Check ib_async release notes and the paper Gateway 4002 status on the NUC."

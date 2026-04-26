@@ -32,18 +32,24 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.14'
-      - name: buf generate
-        working-directory: proto
-        run: buf generate
-      - name: Materialize _generated package markers
-        run: |
-          mkdir -p sidecar/_generated/broker/v1
-          touch sidecar/_generated/__init__.py \
-                sidecar/_generated/broker/__init__.py \
-                sidecar/_generated/broker/v1/__init__.py
       - name: Install sidecar deps
         working-directory: sidecar
         run: uv sync --extra dev --frozen
+      - name: Generate proto stubs (grpc_tools)
+        working-directory: sidecar
+        run: |
+          mkdir -p _generated/broker/v1
+          : > _generated/__init__.py
+          : > _generated/broker/__init__.py
+          : > _generated/broker/v1/__init__.py
+          uv run python -m grpc_tools.protoc \
+            --proto_path=../proto \
+            --python_out=_generated \
+            --grpc_python_out=_generated \
+            --pyi_out=_generated \
+            broker/v1/broker.proto
+          sed -i 's|^from broker\.v1 import broker_pb2|from sidecar._generated.broker.v1 import broker_pb2|' \
+            _generated/broker/v1/broker_pb2_grpc.py
       - name: Pytest (skip real_ibkr)
         working-directory: sidecar
         run: uv run pytest --cov=sidecar --cov-fail-under=80 -m 'not real_ibkr'
@@ -78,18 +84,24 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.14'
-      - name: buf generate
-        working-directory: proto
-        run: buf generate
-      - name: Materialize _generated package markers
-        run: |
-          mkdir -p backend/app/_generated/broker/v1
-          touch backend/app/_generated/__init__.py \
-                backend/app/_generated/broker/__init__.py \
-                backend/app/_generated/broker/v1/__init__.py
       - name: Install backend deps
         working-directory: backend
         run: uv sync --frozen
+      - name: Generate proto stubs (grpc_tools)
+        working-directory: backend
+        run: |
+          mkdir -p app/_generated/broker/v1
+          : > app/_generated/__init__.py
+          : > app/_generated/broker/__init__.py
+          : > app/_generated/broker/v1/__init__.py
+          uv run python -m grpc_tools.protoc \
+            --proto_path=../proto \
+            --python_out=app/_generated \
+            --grpc_python_out=app/_generated \
+            --pyi_out=app/_generated \
+            broker/v1/broker.proto
+          sed -i 's|^from broker\.v1 import broker_pb2|from app._generated.broker.v1 import broker_pb2|' \
+            app/_generated/broker/v1/broker_pb2_grpc.py
       - name: pip-audit
         working-directory: backend
         # CVE-2026-3219 is in pip itself (the package installer), not runtime
