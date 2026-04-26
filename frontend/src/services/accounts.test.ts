@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { MockAccountsService } from './accounts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  MockAccountsService,
+  listAccounts,
+  type AccountListResponse,
+} from './accounts';
+import { MaintenanceError, SidecarUnreachableError } from './errors';
 
 describe('MockAccountsService', () => {
   const svc = new MockAccountsService();
@@ -29,5 +34,93 @@ describe('MockAccountsService', () => {
     });
     expect(typeof unsub).toBe('function');
     expect(() => unsub()).not.toThrow();
+  });
+});
+
+describe('listAccounts (real-API path)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubFetch(status: number, body: unknown): void {
+    const response = {
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(body),
+    } as unknown as Response;
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(response)));
+  }
+
+  it('returns AccountListResponse on 200', async () => {
+    const expected: AccountListResponse = {
+      accounts: [
+        {
+          id: 'a-1',
+          broker_id: 'ibkr',
+          alias: 'ISA Live',
+          mode: 'live',
+          currency_base: 'USD',
+          display_order: 0,
+        },
+      ],
+      degraded_sidecars: ['normal-paper'],
+    };
+    stubFetch(200, expected);
+
+    await expect(listAccounts()).resolves.toEqual(expected);
+  });
+
+  it('throws MaintenanceError on 503 broker_maintenance (weekend)', async () => {
+    stubFetch(503, {
+      error: 'broker_maintenance',
+      window: 'weekend',
+      until: '2026-05-02T03:00:00+00:00',
+    });
+
+    await expect(listAccounts()).rejects.toMatchObject({
+      name: 'MaintenanceError',
+      window: 'weekend',
+      until: '2026-05-02T03:00:00+00:00',
+    });
+  });
+
+  it('throws MaintenanceError on 503 broker_maintenance (daily)', async () => {
+    stubFetch(503, {
+      error: 'broker_maintenance',
+      window: 'daily',
+      until: '2026-04-26T05:50:00+00:00',
+    });
+
+    const err = await listAccounts().catch(e => e);
+    expect(err).toBeInstanceOf(MaintenanceError);
+    expect((err as MaintenanceError).window).toBe('daily');
+  });
+
+  it('throws SidecarUnreachableError on 503 sidecar_unreachable', async () => {
+    stubFetch(503, {
+      error: 'sidecar_unreachable',
+      label: 'isa-live',
+    });
+
+    const err = await listAccounts().catch(e => e);
+    expect(err).toBeInstanceOf(SidecarUnreachableError);
+    expect((err as SidecarUnreachableError).label).toBe('isa-live');
+  });
+
+  it('throws generic Error on 500', async () => {
+    stubFetch(500, { error: 'internal' });
+
+    await expect(listAccounts()).rejects.toThrow(/accounts 500/);
+  });
+
+  it('throws generic Error when body is not parseable JSON', async () => {
+    const response = {
+      ok: false,
+      status: 503,
+      json: () => Promise.reject(new Error('bad json')),
+    } as unknown as Response;
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(response)));
+
+    await expect(listAccounts()).rejects.toThrow(/accounts 503: unknown/);
   });
 });
