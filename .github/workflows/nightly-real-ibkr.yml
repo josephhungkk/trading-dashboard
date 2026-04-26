@@ -12,6 +12,9 @@ jobs:
     env:
       CI_USE_REAL_IBKR: '1'
       IBKR_PAPER_PORT: '4002'
+      # Silences the GitHub-Actions Node.js 20 deprecation banner; opts the
+      # JS-action shim into Node 24 ahead of the 2026-06-02 forced default.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -43,9 +46,19 @@ jobs:
           [System.IO.File]::WriteAllText((Resolve-Path $grpcPath).Path, $content, $utf8NoBom)
       - name: Pytest (real_ibkr only)
         working-directory: sidecar
+        shell: powershell
         # Pass the test directory + marker filter; PowerShell doesn't expand
         # globs the way bash does so `tests/test_handlers_*.py` ends up as a
         # literal path that pytest can't resolve.
-        run: uv run pytest tests/ -v -m real_ibkr
+        # Pytest exit codes:
+        #   0 = all tests passed
+        #   5 = no tests collected (no @pytest.mark.real_ibkr-marked tests yet)
+        # Treat 5 as success — the cron has nothing to verify until someone
+        # adds real-broker contract tests; that's a Phase 4.x backlog item,
+        # not a runner failure.
+        run: |
+          uv run pytest tests/ -v -m real_ibkr
+          if ($LASTEXITCODE -eq 5) { Write-Host "::notice::No real_ibkr-marked tests yet — treating as success."; exit 0 }
+          exit $LASTEXITCODE
       - if: failure()
         run: echo "::error::Nightly real-IBKR contract tests failed. Check ib_async release notes and the paper Gateway 4002 status on the NUC."
