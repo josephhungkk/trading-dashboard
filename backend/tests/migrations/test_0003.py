@@ -68,13 +68,13 @@ async def test_last_nlv_currency_accepts_iso3(session: AsyncSession) -> None:
                 f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv, last_nlv_currency) "
                 f"VALUES ({_BASE_VALS}, 100, 'USD')"
             ),
-            {"acct": "TEST_OK"},
+            {"acct": "NLV_OK"},
         )
         row = (
             await session.execute(
                 text(
                     "SELECT last_nlv, last_nlv_currency FROM broker_accounts "
-                    "WHERE account_number = 'TEST_OK'"
+                    "WHERE account_number = 'NLV_OK'"
                 )
             )
         ).first()
@@ -103,11 +103,11 @@ async def test_last_nlv_max_precision_accepted(session: AsyncSession) -> None:
                 f"INSERT INTO broker_accounts ({_BASE_COLS}, last_nlv, last_nlv_currency) "
                 f"VALUES ({_BASE_VALS}, 999999999999.99999999, 'USD')"
             ),
-            {"acct": "TEST_PRECISION"},
+            {"acct": "NLV_PRECISION"},
         )
         row = (
             await session.execute(
-                text("SELECT last_nlv FROM broker_accounts WHERE account_number = 'TEST_PRECISION'")
+                text("SELECT last_nlv FROM broker_accounts WHERE account_number = 'NLV_PRECISION'")
             )
         ).first()
         assert row.last_nlv == Decimal("999999999999.99999999")
