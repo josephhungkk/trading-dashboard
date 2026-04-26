@@ -5,6 +5,7 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 import boundaries from 'eslint-plugin-boundaries';
 import globals from 'globals';
+import noUnsafeDecimalArithmetic from './eslint-rules/no-unsafe-decimal-arithmetic.js';
 
 export default tsEslint.config(
   { ignores: ['dist', 'storybook-static', 'coverage', 'node_modules', '**/*.d.ts', 'src/stories/**'] },
@@ -21,6 +22,7 @@ export default tsEslint.config(
       'react-hooks': reactHooks,
       'jsx-a11y': jsxA11y,
       boundaries,
+      local: { rules: { 'no-unsafe-decimal-arithmetic': noUnsafeDecimalArithmetic } },
     },
     settings: {
       react: { version: 'detect' },
@@ -74,6 +76,7 @@ export default tsEslint.config(
           message: 'Do not import scoped stores directly. Use useActiveStores() from @/stores/registry.',
         }],
       }],
+      'local/no-unsafe-decimal-arithmetic': 'error',
     },
   },
   {
