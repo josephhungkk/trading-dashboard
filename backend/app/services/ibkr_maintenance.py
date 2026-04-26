@@ -13,6 +13,8 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from pydantic import BaseModel
+
 RegionName = Literal["na", "eu", "apac-1", "apac-2"]
 
 ET = ZoneInfo("America/New_York")
@@ -51,6 +53,17 @@ APAC_2_START_HOUR_HKT = 20
 APAC_2_START_MINUTE_HKT = 15
 APAC_2_END_HOUR_HKT = 21
 APAC_2_END_MINUTE_HKT = 15
+
+
+class BrokerMaintenance(BaseModel):
+    """Maintenance-window envelope. Single source of truth for both the
+    list endpoint (broker_maintenance field on AccountListResponse) and
+    the legacy 503 envelope used by _classify_sidecar_failure.
+    """
+
+    active: bool
+    window: Literal["weekend", "daily"] | None = None
+    until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,31 @@ def seconds_until_window_ends(now: datetime) -> int:
     local_now = now.astimezone(daily_window.zone)
     local_end = _daily_end(local_now, daily_window)
     return _positive_seconds_until(now, local_end.astimezone(UTC))
+
+
+def compute_broker_maintenance(now: datetime) -> BrokerMaintenance:
+    """Single-evaluation envelope: predicate and until are computed
+    consistently, with a min-1-second floor to ensure active implies
+    until is in the future (avoids the boundary-second flicker where
+    seconds_until_window_ends could return 0 for the exact closing
+    second). Per spec §6 R6.
+    """
+    if in_weekend_reset(now):
+        secs = max(seconds_until_window_ends(now), 1)
+        return BrokerMaintenance(
+            active=True,
+            window="weekend",
+            until=now + timedelta(seconds=secs),
+        )
+    in_daily, _region = in_daily_reset(now)
+    if in_daily:
+        secs = max(seconds_until_window_ends(now), 1)
+        return BrokerMaintenance(
+            active=True,
+            window="daily",
+            until=now + timedelta(seconds=secs),
+        )
+    return BrokerMaintenance(active=False, window=None, until=None)
 
 
 def _require_tz_aware(now: datetime) -> None:
