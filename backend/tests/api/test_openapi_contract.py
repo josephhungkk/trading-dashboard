@@ -42,29 +42,53 @@ async def test_phase4_paths_listed(client):
         assert required in paths, f"missing path {required!r} in OpenAPI"
 
 
+REQUIRED_ACCOUNT_FIELDS = {
+    "id",
+    "broker_id",
+    "alias",
+    "mode",
+    "currency_base",
+    "display_order",
+}
+OPTIONAL_ACCOUNT_FIELDS = {"nlv", "nlv_currency", "nlv_at"}
+FORBIDDEN_ACCOUNT_FIELDS = {"gateway_label", "account_number"}
+
+
 @pytest.mark.asyncio
-async def test_account_response_strips_gateway_and_account_number(client):
+async def test_account_response_shape(client):
     spec = (await client.get("/openapi.json")).json()
     schema = spec["components"]["schemas"]["AccountResponse"]
-    properties = set(schema["properties"].keys())
+    actual = set(schema["properties"].keys())
 
-    assert "gateway_label" not in properties
-    assert "account_number" not in properties
-
-    expected = {"id", "broker_id", "alias", "mode", "currency_base", "display_order"}
-    assert expected.issubset(properties)
+    assert REQUIRED_ACCOUNT_FIELDS.issubset(actual), (
+        f"missing required fields: {REQUIRED_ACCOUNT_FIELDS - actual}"
+    )
+    assert actual.isdisjoint(FORBIDDEN_ACCOUNT_FIELDS), (
+        f"forbidden fields leaked: {actual & FORBIDDEN_ACCOUNT_FIELDS}"
+    )
+    extra = actual - REQUIRED_ACCOUNT_FIELDS - OPTIONAL_ACCOUNT_FIELDS
+    assert not extra, f"unexpected fields: {extra}"
 
 
 @pytest.mark.asyncio
-async def test_account_list_response_has_degraded_sidecars(client):
+async def test_account_list_response_envelope(client):
     spec = (await client.get("/openapi.json")).json()
     schema = spec["components"]["schemas"]["AccountListResponse"]
     properties = schema["properties"]
 
     assert "accounts" in properties
     assert "degraded_sidecars" in properties
+    assert "broker_maintenance" in properties
     assert properties["degraded_sidecars"]["type"] == "array"
     assert properties["degraded_sidecars"]["items"]["type"] == "string"
+
+
+@pytest.mark.asyncio
+async def test_broker_maintenance_shape(client):
+    spec = (await client.get("/openapi.json")).json()
+    schema = spec["components"]["schemas"]["BrokerMaintenance"]
+    props = set(schema["properties"].keys())
+    assert props == {"active", "window", "until"}
 
 
 @pytest.mark.asyncio
