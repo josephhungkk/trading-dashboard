@@ -682,25 +682,20 @@ class BrokerDiscoverer:
         async def _fetch_summary(
             label: str,
             account_number: str,
-        ) -> tuple[str, str, object] | None:
-            client = await self._registry.get_client(label)
+        ) -> tuple[str, str, base.Summary] | None:
             try:
+                client = await self._registry.get_client(label)
                 summary = await asyncio.wait_for(
                     client.get_account_summary(account_number),
                     timeout=10.0,
                 )
                 return (label, account_number, summary)
-            except TimeoutError, BrokerSidecarUnavailable, BrokerSidecarTimeout:
+            except TimeoutError, BrokerSidecarUnavailable, BrokerSidecarTimeout, KeyError:
                 return None
 
-        results: list[tuple[str, str, object] | None | BaseException] = list(
-            await asyncio.gather(
-                *(
-                    _fetch_summary(label, account_number)
-                    for (label, account_number) in summary_targets
-                ),
-                return_exceptions=True,
-            )
+        results: list[tuple[str, str, base.Summary] | None | BaseException] = await asyncio.gather(
+            *(_fetch_summary(label, account_number) for (label, account_number) in summary_targets),
+            return_exceptions=True,
         )
         log.debug("broker_discover_summary_fanout_done", result_count=len(results))
 
