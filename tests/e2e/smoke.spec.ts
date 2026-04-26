@@ -126,3 +126,57 @@ test.describe('Phase 3 frontend shell', () => {
     await expect(page).toHaveURL(/\/positions/);
   });
 });
+
+test.describe('Phase 4 broker accounts', () => {
+  test('GET /api/accounts returns AccountListResponse without internal fields', async ({ request }) => {
+    const r = await request.get('/api/accounts');
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    expect(Array.isArray(body.accounts)).toBe(true);
+    expect(body).toHaveProperty('degraded_sidecars');
+    expect(Array.isArray(body.degraded_sidecars)).toBe(true);
+    for (const acc of body.accounts) {
+      expect(acc).not.toHaveProperty('gateway_label');
+      expect(acc).not.toHaveProperty('account_number');
+      expect(typeof acc.id).toBe('string');
+      expect(['ibkr', 'futu', 'schwab']).toContain(acc.broker_id);
+      expect(['live', 'paper']).toContain(acc.mode);
+    }
+  });
+
+  test('GET /api/accounts/{id}/positions returns proto-shaped JSON with Decimal-string Money', async ({ request }) => {
+    const list = await (await request.get('/api/accounts')).json();
+    if (list.accounts.length === 0) test.skip(true, 'no broker accounts present in DB');
+    const id = list.accounts[0].id;
+    const r = await request.get(`/api/accounts/${id}/positions`);
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    expect(Array.isArray(body)).toBe(true);
+    for (const pos of body) {
+      expect(typeof pos.avg_cost.value).toBe('string');
+      expect(typeof pos.avg_cost.currency).toBe('string');
+      expect(pos.avg_cost.currency).toMatch(/^[A-Z]{3}$/);
+    }
+  });
+
+  test('GET /api/accounts/{id}/summary returns Money with currency', async ({ request }) => {
+    const list = await (await request.get('/api/accounts')).json();
+    if (list.accounts.length === 0) test.skip(true, 'no broker accounts present in DB');
+    const id = list.accounts[0].id;
+    const r = await request.get(`/api/accounts/${id}/summary`);
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    expect(body.net_liquidation.currency).toMatch(/^[A-Z]{3}$/);
+    expect(typeof body.net_liquidation.value).toBe('string');
+  });
+
+  test('GET /api/accounts/{id}/orders returns array (possibly empty)', async ({ request }) => {
+    const list = await (await request.get('/api/accounts')).json();
+    if (list.accounts.length === 0) test.skip(true, 'no broker accounts present in DB');
+    const id = list.accounts[0].id;
+    const r = await request.get(`/api/accounts/${id}/orders`);
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    expect(Array.isArray(body)).toBe(true);
+  });
+});
