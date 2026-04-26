@@ -28,6 +28,6 @@ scripts/cloudflare/.state/
 !scripts/cloudflare/.state/.gitkeep
 
 # Phase 4 — proto codegen artifacts (regenerated via `buf generate`)
-backend/app/brokers/_generated/
+backend/app/_generated/
 sidecar/_generated/
 frontend/src/proto-gen/
