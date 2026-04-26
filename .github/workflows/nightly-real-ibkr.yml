@@ -20,23 +20,27 @@ jobs:
         run: uv sync --extra dev --frozen
       - name: Generate proto stubs (grpc_tools)
         working-directory: sidecar
-        # Force bash; the runner is Windows so the default shell is
-        # PowerShell 5.1 which doesn't accept `&&`, here-empty redirects,
-        # or `sed -i`. Bash is shipped via Git for Windows on the NUC.
-        shell: bash
+        # Native PowerShell — bash isn't on the self-hosted runner's PATH.
+        # Mirrors sidecar/scripts/build-windows.ps1's codegen block so dev
+        # + CI emit the same files in the same place.
+        shell: powershell
         run: |
-          mkdir -p _generated/broker/v1
-          : > _generated/__init__.py
-          : > _generated/broker/__init__.py
-          : > _generated/broker/v1/__init__.py
-          uv run python -m grpc_tools.protoc \
-            --proto_path=../proto \
-            --python_out=_generated \
-            --grpc_python_out=_generated \
-            --pyi_out=_generated \
+          New-Item -ItemType Directory -Force -Path '_generated/broker/v1' | Out-Null
+          foreach ($init in '_generated/__init__.py', '_generated/broker/__init__.py', '_generated/broker/v1/__init__.py') {
+            if (-not (Test-Path $init)) { New-Item -ItemType File -Path $init | Out-Null }
+          }
+          uv run python -m grpc_tools.protoc `
+            --proto_path=../proto `
+            --python_out=_generated `
+            --grpc_python_out=_generated `
+            --pyi_out=_generated `
             broker/v1/broker.proto
-          sed -i 's|^from broker\.v1 import broker_pb2|from sidecar._generated.broker.v1 import broker_pb2|' \
-            _generated/broker/v1/broker_pb2_grpc.py
+          if ($LASTEXITCODE -ne 0) { throw "grpc_tools.protoc failed with exit code $LASTEXITCODE" }
+          $grpcPath = '_generated/broker/v1/broker_pb2_grpc.py'
+          $content = Get-Content -Raw $grpcPath
+          $content = $content -replace '(?m)^from broker\.v1 import broker_pb2', 'from sidecar._generated.broker.v1 import broker_pb2'
+          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText((Resolve-Path $grpcPath).Path, $content, $utf8NoBom)
       - name: Pytest (real_ibkr only)
         working-directory: sidecar
         run: uv run pytest tests/test_handlers_*.py -v -m real_ibkr
