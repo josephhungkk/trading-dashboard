@@ -43,6 +43,9 @@ jobs:
           [System.IO.File]::WriteAllText((Resolve-Path $grpcPath).Path, $content, $utf8NoBom)
       - name: Pytest (real_ibkr only)
         working-directory: sidecar
-        run: uv run pytest tests/test_handlers_*.py -v -m real_ibkr
+        # Pass the test directory + marker filter; PowerShell doesn't expand
+        # globs the way bash does so `tests/test_handlers_*.py` ends up as a
+        # literal path that pytest can't resolve.
+        run: uv run pytest tests/ -v -m real_ibkr
       - if: failure()
         run: echo "::error::Nightly real-IBKR contract tests failed. Check ib_async release notes and the paper Gateway 4002 status on the NUC."
