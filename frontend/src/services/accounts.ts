@@ -69,3 +69,41 @@ export class MockAccountsService implements AccountsService {
     };
   }
 }
+
+/** Maps the wire-shape AccountResponse (boundary-stripped, currency
+ *  may be "") onto the display Account shape the existing stores +
+ *  components consume. account_number isn't exposed by the backend
+ *  (M22) so we fall back to the UUID prefix; nlv requires the
+ *  /summary endpoint and is filled in lazily by the positions/account
+ *  detail flows — placeholder 0 here so the picker can render. */
+function toDisplayAccount(r: AccountResponse): Account {
+  type DisplayCurrency = Account['baseCurrency'];
+  const allowed: DisplayCurrency[] = ['USD', 'HKD', 'GBP', 'JPY', 'KRW'];
+  const baseCurrency: DisplayCurrency =
+    (allowed as readonly string[]).includes(r.currency_base)
+      ? (r.currency_base as DisplayCurrency)
+      : 'USD';
+  return {
+    id: r.id,
+    broker: r.broker_id,
+    mode: r.mode,
+    alias: r.alias ?? '',
+    accountNumber: r.id.slice(0, 8),
+    nlv: 0,
+    baseCurrency,
+  };
+}
+
+export class RealAccountsService implements AccountsService {
+  async list(mode: Mode): Promise<Account[]> {
+    const res = await listAccounts();
+    return res.accounts.filter(a => a.mode === mode).map(toDisplayAccount);
+  }
+  subscribe(mode: Mode, cb: (accounts: Account[]) => void): () => void {
+    void mode;
+    void cb;
+    return () => {
+      /* polling/ws subscription is a Phase 5 follow-up */
+    };
+  }
+}

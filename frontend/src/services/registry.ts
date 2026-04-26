@@ -6,7 +6,7 @@ import type { WatchlistsService } from './watchlists';
 import type { ConnectedService } from './connected';
 import type { QuoteFeedService } from './quote-feeds';
 import type { CommandRegistry } from './commands';
-import { MockAccountsService } from './accounts';
+import { MockAccountsService, RealAccountsService } from './accounts';
 import { MockPositionsService } from './positions';
 import { MockOrdersService } from './orders';
 import { MockQuotesService } from './quotes';
@@ -38,10 +38,16 @@ class MemoryStorage implements Storage {
 
 let _services: Services | null = null;
 
+const USE_MOCKS = (import.meta.env.VITE_USE_MOCKS as string | undefined) === 'true';
+
 export function getServices(): Services {
   if (_services) return _services;
   _services = {
-    accounts:   new MockAccountsService(),
+    // RealAccountsService fetches from /api/accounts and maps the wire
+    // shape (M22 boundary-stripped) onto the display Account shape.
+    // Storybook + Vitest pin VITE_USE_MOCKS=true so they keep the
+    // synthetic ACCOUNTS fixtures.
+    accounts:   USE_MOCKS ? new MockAccountsService() : new RealAccountsService(),
     positions:  new MockPositionsService(),
     orders:     new MockOrdersService(),
     quotes:     new MockQuotesService(),
