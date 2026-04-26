@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from app.brokers import base
 from app.core import metrics
+from app.services.ibkr_maintenance import compute_broker_maintenance
 
 log = structlog.get_logger(__name__)
 
@@ -38,6 +39,9 @@ class _AccountRow:
     gateway_label: str
     currency_base: str
     display_order: int
+    last_nlv: Decimal | None = None
+    last_nlv_currency: str | None = None
+    last_nlv_at: datetime | None = None
 
 
 class BrokerSidecarUnavailable(Exception):  # noqa: N818
@@ -410,7 +414,8 @@ class AccountService:
         stmt = text(
             """
             SELECT id, broker_id, account_number, alias, mode, gateway_label,
-                   currency_base, display_order
+                   currency_base, display_order, last_nlv, last_nlv_currency,
+                   last_nlv_at
               FROM broker_accounts
              WHERE deleted_at IS NULL
              ORDER BY display_order, account_number;
@@ -424,6 +429,7 @@ class AccountService:
         return base.AccountListResponse(
             accounts=[_account_response_from_row(row) for row in rows],
             degraded_sidecars=degraded_sidecars,
+            broker_maintenance=compute_broker_maintenance(datetime.now(UTC)),
         )
 
     async def get_summary(self, account_id: UUID) -> base.Summary:
@@ -674,7 +680,16 @@ def _account_row_from_mapping(row: RowMapping) -> _AccountRow:
         gateway_label=cast(str, row["gateway_label"]),
         currency_base=cast(str, row["currency_base"]),
         display_order=cast(int, row["display_order"]),
+        last_nlv=cast(Decimal | None, row.get("last_nlv")),
+        last_nlv_currency=cast(str | None, row.get("last_nlv_currency")),
+        last_nlv_at=cast(datetime | None, row.get("last_nlv_at")),
     )
+
+
+def _format_nlv(d: Decimal | None) -> str | None:
+    if d is None:
+        return None
+    return format(d.quantize(Decimal("1e-8")), "f")
 
 
 def _account_response_from_row(row: _AccountRow) -> base.AccountResponse:
@@ -685,6 +700,9 @@ def _account_response_from_row(row: _AccountRow) -> base.AccountResponse:
         mode=row.mode,
         currency_base=row.currency_base,
         display_order=row.display_order,
+        nlv=_format_nlv(row.last_nlv),
+        nlv_currency=row.last_nlv_currency,
+        nlv_at=row.last_nlv_at,
     )
 
 

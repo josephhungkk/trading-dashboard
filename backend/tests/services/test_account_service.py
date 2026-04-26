@@ -9,6 +9,7 @@ ibkr_uk_pence_units.md).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -131,15 +132,20 @@ async def _seed_account(
     gateway_label: str,
     mode: str = "paper",
     deleted: bool = False,
+    last_nlv: Decimal | None = None,
+    last_nlv_currency: str | None = None,
+    with_last_nlv_at: bool = False,
 ) -> UUID:
     insert = text(
         """
         INSERT INTO broker_accounts
         (broker_id, account_number, mode, gateway_label, currency_base,
-         last_seen_via, deleted_at)
+         last_seen_via, deleted_at, last_nlv, last_nlv_currency, last_nlv_at)
         VALUES (CAST(:b AS broker_id_enum), :a,
                 CAST(:m AS trading_mode_enum), :g, :c, :v,
-                CASE WHEN :d THEN now() ELSE NULL END)
+                CASE WHEN :d THEN now() ELSE NULL END, :last_nlv,
+                :last_nlv_currency,
+                CASE WHEN :with_last_nlv_at THEN now() ELSE NULL END)
         RETURNING id
         """
     )
@@ -154,6 +160,9 @@ async def _seed_account(
                 "c": "USD",
                 "v": gateway_label,
                 "d": deleted,
+                "last_nlv": last_nlv,
+                "last_nlv_currency": last_nlv_currency,
+                "with_last_nlv_at": with_last_nlv_at,
             },
         )
         return UUID(str(result.scalar_one()))
@@ -183,7 +192,14 @@ async def test_list_accounts_excludes_soft_deleted_includes_degraded(
     cleanup_test_rows: None,
 ) -> None:
     await _seed_account(db_engine, account_number="UTEST_ACCSVC_A", gateway_label="isa-paper")
-    await _seed_account(db_engine, account_number="UTEST_ACCSVC_B", gateway_label="normal-paper")
+    await _seed_account(
+        db_engine,
+        account_number="UTEST_ACCSVC_B",
+        gateway_label="normal-paper",
+        last_nlv=Decimal("100"),
+        last_nlv_currency="USD",
+        with_last_nlv_at=True,
+    )
     await _seed_account(
         db_engine,
         account_number="UTEST_ACCSVC_DEL",
@@ -224,6 +240,11 @@ async def test_list_accounts_excludes_soft_deleted_includes_degraded(
     assert active_ids.issubset(response_ids)
     assert deleted_ids.isdisjoint(response_ids)
     assert "normal-paper" in response.degraded_sidecars
+    assert isinstance(response.broker_maintenance, base.BrokerMaintenance)
+    cached = next(a for a in response.accounts if str(a.id) in active_ids and a.nlv is not None)
+    assert cached.nlv == "100.00000000"
+    assert cached.nlv_currency == "USD"
+    assert cached.nlv_at is not None
 
 
 # ---------- get_summary / get_orders / update_alias --------------------------

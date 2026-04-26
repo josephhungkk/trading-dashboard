@@ -36,6 +36,7 @@ class _StubAccountService:
         return base.AccountListResponse(
             accounts=list(self._by_id.values()),
             degraded_sidecars=list(self._degraded),
+            broker_maintenance=base.BrokerMaintenance(active=False, window=None, until=None),
         )
 
     async def update_alias(
@@ -94,8 +95,9 @@ async def test_list_returns_accounts_and_degraded_labels(client_with_stub):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert {"accounts", "degraded_sidecars"} == set(body.keys())
+    assert {"accounts", "degraded_sidecars", "broker_maintenance"} == set(body.keys())
     assert body["degraded_sidecars"] == ["normal-paper"]
+    assert body["broker_maintenance"] == {"active": False, "window": None, "until": None}
     assert len(body["accounts"]) == 2
 
 
@@ -115,6 +117,9 @@ async def test_list_strips_gateway_label_and_account_number(client_with_stub):
             "mode",
             "currency_base",
             "display_order",
+            "nlv",
+            "nlv_currency",
+            "nlv_at",
         } == set(account.keys())
 
 
