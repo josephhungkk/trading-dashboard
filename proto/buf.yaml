@@ -1,9 +1,23 @@
 version: v2
 modules:
-  - path: broker
+  - path: .
 lint:
   use:
-    - DEFAULT
+    - STANDARD
+  except:
+    # The service is intentionally named `Broker` (not `BrokerService`); mTLS
+    # callers and four cross-language stubs pin that name. Renaming would
+    # cascade through backend tests, sidecar handlers, and the PowerShell
+    # probe — out of scope for v0.4.0 (spec §4.1).
+    - SERVICE_SUFFIX
+    # `AccountRef` and `Empty` are intentionally shared across RPCs (they
+    # carry only `account_number` / nothing). Pulling them apart into N
+    # `<RPC>Request` types would duplicate the same field for no contract
+    # benefit; revisit when an RPC actually needs request-type-specific
+    # fields beyond the shared ref.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
 breaking:
   use:
     - FILE
