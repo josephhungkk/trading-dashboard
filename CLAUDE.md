@@ -64,6 +64,16 @@ Rules:
 - **Mode toggle:** paper → live requires the confirmation dialog (`Switch to LIVE mode?`); live → paper is direct. Default mode on cold load is `paper`. The active mode is reflected on `<body data-mode="...">` so design tokens can branch.
 - **Vite dev proxy:** `/api` and `/health` proxy to `http://10.10.0.2:8000` (NUC backend over WireGuard) so the local dev shell can hit CF-Access-protected endpoints via the dev-bypass network.
 
+## Broker Adapter Notes (Phase 4+)
+
+- **Sidecar topology:** one PyInstaller-frozen Python sidecar per IBKR gateway on the NUC at `10.10.0.2:18001-18004` (isa-live=18001, isa-paper=18002, normal-live=18003, normal-paper=18004; gateways themselves on 4001-4004). Backend reaches them over WireGuard with mTLS; CRL at `C:\dashboard\secrets\crl.pem` reloaded every 60s.
+- **Read-only in v0.4.0:** trade execution lands in Phase 5. No order placement / modify / cancel from the dashboard.
+- **avg_cost unit:** `broker.<account_number>.avg_cost_unit` config key (default `pounds`) per `app_config`. Sanity invariant `Σ(qty × avg_cost) > 1.5 × NLV` triggers `avg_cost_unit_suspected_wrong{account}` metric.
+- **Maintenance windows:** `app/services/ibkr_maintenance.py` is the source of truth; backend returns `503 + Retry-After` during reset windows; watchdog skips probes during weekend reset; tolerates daily-reset BAD reads without kill+restart.
+- **Boundary stripping (M22):** `AccountResponse` to the frontend has `id, broker_id, alias, mode, currency_base, display_order` — never `gateway_label` or `account_number`. The frontend's `account_id` UUID is the only handle; backend's `AccountService._resolve_account` is the single chokepoint that maps it back to `(gateway_label, account_number)`.
+- **C1 race-free soft-delete:** `BrokerDiscoverer` only soft-deletes `broker_accounts` rows whose `last_seen_via` matches a label that is healthy THIS tick (`last_seen_via = ANY(:healthy_labels)`). When all sidecars are unhealthy, the predicate is empty and zero rows are soft-deleted.
+- **NUC ops surface:** `deploy/nuc/` contains all PowerShell + VBS launchers + watchdog. `provision-and-publish.ps1` is the one-shot mTLS rotation flow; `revoke-cert.ps1 -Serial <serial>` revokes; `renew-sidecar-mtls.ps1` rolls one sidecar at a time. Pester suite at `deploy/nuc/tests/SidecarLib.Tests.ps1` (21 tests) covers the reset-window + sidecar-health helpers extracted to `deploy/nuc/lib/SidecarLib.ps1`.
+
 ## Configuration Storage
 
 **The app keeps runtime settings in the database, not in `.env`.** (Active as of v0.2.0.)

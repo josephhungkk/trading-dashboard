@@ -73,8 +73,19 @@ Claude Code keeps:
 - Override: user can say "use Frontend Developer" / "use general-purpose" / "do it yourself" to route around Codex per-task.
 
 
-## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)  *(next)*
-## Phase 5 — Trade execution (IBKR)
+## Phase 4 — IBKR adapter (read-only, BrokerAdapter base lands here)  *(complete — v0.4.0 · 2026-04-26)*
+- [x] Chunk A — Prerequisites + scaffold (verify-wg-windows.ps1 §0 gate, proto contract, buf wiring, codegen)
+- [x] Chunk B — Sidecar core (entrypoint, handlers, normalize, pnl_cache, probe.py)
+- [x] Chunk C — Sidecar packaging (PyInstaller --onedir build, golden-trace recording)
+- [x] Chunk D — mTLS provisioning (provision-sidecar-mtls.ps1, provision-and-publish.ps1, revoke-cert.ps1, RUNBOOK-mtls-recovery.md)
+- [x] Chunk E — NUC ops glue (BrokerWatchdog/Tray/DailyRestart, sidecar probe + tray dots, register-ibkr-sidecar.ps1, Launch-IBKRSidecar.vbs, gsudo + admin trampolines, Pester suite)
+- [x] Chunk F — Backend service layer (Alembic 0002, brokers.py registry+client, ibkr_maintenance.py, AccountService, lifespan wiring, tzdata Dockerfile layer)
+- [x] Chunk G — REST routes (`/api/accounts` list+patch, `/{id}/{summary,positions,orders}` with 503+Retry-After error envelope, OpenAPI smoke)
+- [x] Chunk H — Frontend wiring (decimal.ts safeParseDecimal + custom ESLint rule, MaintenanceError/SidecarUnreachableError, listAccounts/Positions/Orders behind VITE_USE_MOCKS, useFleetHealth + degraded pill, Storybook mocks-pinned)
+- [x] Chunk I — Tests + smoke (in-process gRPC discover-loop e2e, Playwright Phase 4 smoke × 4, nightly-real-ibkr.yml + self-hosted runner runbook, CI proto + sidecar jobs)
+- [x] Chunk J — Close-out (CHANGELOG/TASKS/CLAUDE.md updates, pre-flight gates, USER GATE for push + tag v0.4.0)
+
+## Phase 5 — Trade execution (IBKR)  *(next)*
 ## Phase 6 — Futu adapter + CJK font polish
 
 - [ ] JP kanji routing: split JP @font-face into its own `font-family: "Noto Sans JP"` and select via `:lang(ja)` (or use `font-language-override: "JAN"`). Currently the TC face owns U+4E00-9FFF and precedes the JP face in source order, so Japanese kanji render from TC glyphs. Cosmetic at the Phase 3 ~10-char whitelist scale (forms coincide) but becomes user-visible once real JP tickers ship. Context: flagged by code-quality review during Phase 3 Task 3 (commit bbe97b9), 2026-04-24.
