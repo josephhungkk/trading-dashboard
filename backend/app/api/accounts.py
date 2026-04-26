@@ -30,6 +30,36 @@ router = APIRouter(
     dependencies=[Depends(require_admin_jwt)],
 )
 
+_NOT_FOUND_RESPONSE = {
+    "description": "Account uuid unknown or soft-deleted",
+    "content": {
+        "application/json": {"example": {"error": "not_found", "detail": "account <uuid>"}}
+    },
+}
+
+_SIDECAR_503_RESPONSE = {
+    "description": (
+        "Sidecar unreachable (Retry-After: 30) OR inside an IBKR maintenance "
+        "window (Retry-After: <seconds_until_window_ends>)"
+    ),
+    "content": {
+        "application/json": {
+            "examples": {
+                "sidecar_unreachable": {
+                    "value": {"error": "sidecar_unreachable", "label": "isa-live"}
+                },
+                "broker_maintenance": {
+                    "value": {
+                        "error": "broker_maintenance",
+                        "window": "weekend",
+                        "until": "2026-05-02T03:00:00+00:00",
+                    }
+                },
+            }
+        }
+    },
+}
+
 
 def _not_found_response(account_id: UUID) -> JSONResponse:
     return JSONResponse(
@@ -67,7 +97,11 @@ async def list_accounts(svc: AccountServiceDep) -> base.AccountListResponse:
     return await svc.list_accounts()
 
 
-@router.get("/{account_id}/summary", response_model=base.Summary)
+@router.get(
+    "/{account_id}/summary",
+    response_model=base.Summary,
+    responses={404: _NOT_FOUND_RESPONSE, 503: _SIDECAR_503_RESPONSE},
+)
 async def get_account_summary(
     account_id: UUID,
     svc: AccountServiceDep,
@@ -80,7 +114,11 @@ async def get_account_summary(
         return await _classify_sidecar_failure(exc)
 
 
-@router.get("/{account_id}/positions", response_model=list[base.Position])
+@router.get(
+    "/{account_id}/positions",
+    response_model=list[base.Position],
+    responses={404: _NOT_FOUND_RESPONSE, 503: _SIDECAR_503_RESPONSE},
+)
 async def get_account_positions(
     account_id: UUID,
     svc: AccountServiceDep,
@@ -93,7 +131,11 @@ async def get_account_positions(
         return await _classify_sidecar_failure(exc)
 
 
-@router.get("/{account_id}/orders", response_model=list[base.Order])
+@router.get(
+    "/{account_id}/orders",
+    response_model=list[base.Order],
+    responses={404: _NOT_FOUND_RESPONSE, 503: _SIDECAR_503_RESPONSE},
+)
 async def get_account_orders(
     account_id: UUID,
     svc: AccountServiceDep,
@@ -106,7 +148,11 @@ async def get_account_orders(
         return await _classify_sidecar_failure(exc)
 
 
-@router.patch("/{account_id}", response_model=base.AccountResponse)
+@router.patch(
+    "/{account_id}",
+    response_model=base.AccountResponse,
+    responses={404: _NOT_FOUND_RESPONSE},
+)
 async def update_account_alias(
     account_id: UUID,
     body: base.AccountAliasUpdate,
