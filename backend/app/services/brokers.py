@@ -9,6 +9,8 @@ from typing import Any, Protocol, TypeVar, cast
 
 import grpc  # type: ignore[import-untyped]
 import structlog
+from sqlalchemy import bindparam, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from app.brokers import base
@@ -358,3 +360,171 @@ class BrokerRegistry:
             if remaining <= 0:
                 return
             await asyncio.sleep(min(remaining, 0.5))
+
+
+class BrokerDiscoverer:
+    """Polls each healthy sidecar's ListManagedAccounts every N seconds and
+    upserts broker_accounts rows. Soft-deletes rows that healthy sidecars
+    failed to report — ONLY when the sidecar that owns the row is actually
+    healthy this tick (C1 race-free guarantee)."""
+
+    def __init__(
+        self,
+        registry: BrokerRegistry,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        interval_seconds: float = 30.0,
+    ) -> None:
+        self._registry = registry
+        self._session_factory = session_factory
+        self._interval = interval_seconds
+        self._stop_event = asyncio.Event()
+
+    async def discover_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await self._discover_once()
+            except Exception as exc:
+                log.exception(
+                    "broker_discover_loop_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
+            except TimeoutError:
+                continue
+
+    async def _discover_once(self) -> None:
+        healthy_clients = await self._registry.healthy_clients()
+        healthy = [(client, client.label) for client in healthy_clients]
+        healthy_labels = [label for _client, label in healthy]
+
+        log.info("broker_discover_iteration_start", healthy_labels=healthy_labels)
+
+        account_results = await asyncio.gather(
+            *(client.list_managed_accounts() for client, _label in healthy),
+            return_exceptions=True,
+        )
+
+        rows_seen: list[tuple[str, base.Account]] = []
+        for (_client, label), result in zip(healthy, account_results, strict=True):
+            if isinstance(result, BaseException):
+                log.warning(
+                    "broker_discover_iteration_failed",
+                    label=label,
+                    error=str(result),
+                    error_type=type(result).__name__,
+                )
+                continue
+            rows_seen.extend((label, account) for account in result)
+
+        upsert_stmt = text(
+            """
+            INSERT INTO broker_accounts (
+                broker_id,
+                account_number,
+                mode,
+                gateway_label,
+                currency_base,
+                last_seen_via,
+                last_seen_at,
+                deleted_at,
+                updated_at
+            )
+            VALUES (
+                CAST(:broker_id AS broker_id_enum),
+                :account_number,
+                CAST(:mode AS trading_mode_enum),
+                :gateway_label,
+                :currency_base,
+                :last_seen_via,
+                now(),
+                NULL,
+                now()
+            )
+            ON CONFLICT (broker_id, account_number) DO UPDATE
+               SET mode = EXCLUDED.mode,
+                   gateway_label = EXCLUDED.gateway_label,
+                   currency_base = EXCLUDED.currency_base,
+                   last_seen_via = EXCLUDED.last_seen_via,
+                   last_seen_at = EXCLUDED.last_seen_at,
+                   deleted_at = NULL,
+                   updated_at = now()
+            """
+        )
+
+        rows_seen_keys = [("ibkr", account.account_number) for _label, account in rows_seen]
+        soft_delete_count = 0
+
+        async with self._session_factory() as session, session.begin():
+            for label, account in rows_seen:
+                await session.execute(
+                    upsert_stmt,
+                    {
+                        "broker_id": "ibkr",
+                        "account_number": account.account_number,
+                        "mode": self._mode_value(account.mode),
+                        "gateway_label": label,
+                        "currency_base": account.currency_base,
+                        "last_seen_via": label,
+                    },
+                )
+
+            if healthy_labels:
+                # healthy_labels is passed as a single Postgres TEXT[] (not an
+                # expanding placeholder) so asyncpg can hand it to ANY(...) as
+                # one array parameter. rows_seen_keys remains expanding=True
+                # because (broker_id, account_number) NOT IN (...) needs the
+                # row-tuple list unrolled into N tuples.
+                if rows_seen_keys:
+                    soft_delete_stmt = text(
+                        """
+                        UPDATE broker_accounts
+                           SET deleted_at = now(),
+                               updated_at = now()
+                         WHERE deleted_at IS NULL
+                           AND last_seen_via = ANY(:healthy_labels)
+                           AND (broker_id, account_number) NOT IN :rows_seen_keys
+                           AND last_seen_at < now() - INTERVAL '30 minutes';
+                        """
+                    ).bindparams(
+                        bindparam("rows_seen_keys", expanding=True),
+                    )
+                    soft_delete_params = {
+                        "healthy_labels": healthy_labels,
+                        "rows_seen_keys": rows_seen_keys,
+                    }
+                else:
+                    soft_delete_stmt = text(
+                        """
+                        UPDATE broker_accounts
+                           SET deleted_at = now(),
+                               updated_at = now()
+                         WHERE deleted_at IS NULL
+                           AND last_seen_via = ANY(:healthy_labels)
+                           AND last_seen_at < now() - INTERVAL '30 minutes';
+                        """
+                    )
+                    soft_delete_params = {"healthy_labels": healthy_labels}
+
+                soft_delete_result = await session.execute(soft_delete_stmt, soft_delete_params)
+                # SQLAlchemy 2.0's typed Result protocol omits `rowcount`,
+                # but the asyncpg-backed CursorResult exposes it at runtime.
+                soft_delete_count = getattr(soft_delete_result, "rowcount", 0) or 0
+
+        log.info(
+            "broker_discover_iteration_ok",
+            upsert_count=len(rows_seen),
+            soft_delete_count=soft_delete_count,
+        )
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+
+    @staticmethod
+    def _mode_value(mode: base.TradingMode) -> str:
+        if isinstance(mode, str):
+            return mode.lower()
+        return mode.value.lower()

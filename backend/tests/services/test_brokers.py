@@ -1,19 +1,31 @@
-"""Tests for BrokerRegistry (Phase 4 Task 32).
+"""Tests for BrokerRegistry (Phase 4 Task 32) and BrokerDiscoverer (Task 33).
 
-Uses 4 mock BrokerSidecarClients (one per gateway label) with overridable
-health() return values + a monkey-patched time.monotonic() so freshness
-expiry assertions are deterministic.
+Tasks 32 use 4 mock BrokerSidecarClients (one per gateway label) with
+overridable health() return values + a monkey-patched time.monotonic() so
+freshness expiry assertions are deterministic.
+
+Task 33 (C1 invariant tests) uses a real Postgres connection and the live
+broker_accounts schema (the conftest autouse fixture runs migrations to
+head) plus mock clients that return canned ListManagedAccounts results.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.brokers import base
+from app.core.config import settings
 from app.services.brokers import (
+    BrokerDiscoverer,
     BrokerRegistry,
     BrokerSidecarTimeout,
     BrokerSidecarUnavailable,
@@ -231,3 +243,273 @@ async def test_close_closes_every_client(
     reg, mocks = registry
     await reg.close()
     assert all(m.closed for m in mocks.values())
+
+
+# === BrokerDiscoverer (Task 33) — C1 race-free soft-delete invariants ========
+
+
+class _DiscoverableMockClient(_MockClient):
+    """Adds list_managed_accounts() to the mock so BrokerDiscoverer can
+    exercise the upsert/soft-delete path."""
+
+    def __init__(self, label: str, accounts: list[base.Account] | Exception) -> None:
+        super().__init__(label)
+        self._accounts = accounts
+
+    def set_accounts(self, accounts: list[base.Account] | Exception) -> None:
+        self._accounts = accounts
+
+    async def list_managed_accounts(self) -> list[base.Account]:
+        if isinstance(self._accounts, Exception):
+            raise self._accounts
+        return list(self._accounts)
+
+
+def _account(account_number: str, *, mode: str = "PAPER", currency: str = "USD") -> base.Account:
+    return base.Account(
+        account_number=account_number,
+        mode=mode,  # type: ignore[arg-type]
+        gateway_label="",
+        currency_base=currency,
+    )
+
+
+@pytest.fixture
+async def db_engine() -> AsyncIterator[AsyncEngine]:
+    eng = create_async_engine(settings.database_url, pool_pre_ping=True)
+    try:
+        yield eng
+    finally:
+        await eng.dispose()
+
+
+@pytest.fixture
+async def session_factory(
+    db_engine: AsyncEngine,
+) -> async_sessionmaker[Any]:
+    return async_sessionmaker(db_engine, expire_on_commit=False)
+
+
+@pytest.fixture
+async def cleanup_test_rows(db_engine: AsyncEngine) -> AsyncIterator[None]:
+    """Removes any UTEST_DISCOVER_* rows before + after each test so
+    consecutive runs are independent and the live DB stays clean."""
+    cleanup_sql = text("DELETE FROM broker_accounts WHERE account_number LIKE 'UTEST_DISCOVER_%'")
+    async with db_engine.begin() as conn:
+        await conn.execute(cleanup_sql)
+    yield
+    async with db_engine.begin() as conn:
+        await conn.execute(cleanup_sql)
+
+
+def _build_registry_with_known_health(
+    clients: dict[str, _DiscoverableMockClient],
+    *,
+    healthy_labels: set[str],
+) -> BrokerRegistry:
+    """Build a real BrokerRegistry but pre-populate its _health_state so
+    healthy_clients() returns exactly the labels in `healthy_labels`."""
+    import time as _time
+
+    reg = BrokerRegistry(
+        clients={label: _as_any(c) for label, c in clients.items()},
+        freshness_seconds=900.0,  # large so manual ts doesn't expire mid-test
+    )
+    now = _time.monotonic()
+    for label in clients:
+        ok = label in healthy_labels
+        reg._health_cache[label] = (ok, now, None)
+    return reg
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_fires_when_sidecar_healthy_and_account_missing(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    """Pre-seed 2 accounts owned by isa-live (last_seen_at = 31min ago).
+    Run _discover_once where isa-live is healthy but reports neither →
+    both rows get deleted_at set."""
+    seed_sql = text(
+        "INSERT INTO broker_accounts "
+        "(broker_id, account_number, mode, gateway_label, currency_base, "
+        " last_seen_via, last_seen_at) "
+        "VALUES (CAST(:b AS broker_id_enum), :a, "
+        "        CAST(:m AS trading_mode_enum), :g, :c, :v, "
+        "        now() - INTERVAL '31 minutes')"
+    )
+    async with db_engine.begin() as conn:
+        for acct in ("UTEST_DISCOVER_A", "UTEST_DISCOVER_B"):
+            await conn.execute(
+                seed_sql,
+                {
+                    "b": "ibkr",
+                    "a": acct,
+                    "m": "live",
+                    "g": "isa-live",
+                    "c": "USD",
+                    "v": "isa-live",
+                },
+            )
+
+    clients = {"isa-live": _DiscoverableMockClient("isa-live", accounts=[])}
+    registry = _build_registry_with_known_health(clients, healthy_labels={"isa-live"})
+
+    discoverer = BrokerDiscoverer(registry, session_factory)
+    await discoverer._discover_once()
+
+    async with db_engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT account_number, deleted_at FROM broker_accounts "
+                    "WHERE account_number LIKE 'UTEST_DISCOVER_%' ORDER BY account_number"
+                )
+            )
+        ).all()
+    assert len(rows) == 2
+    assert all(r.deleted_at is not None for r in rows), (
+        f"both rows should have deleted_at set; got {rows}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_skipped_when_all_sidecars_unhealthy(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    """Pre-seed 4 accounts across 4 sidecars. ALL 4 sidecars unhealthy →
+    healthy_labels is empty → no soft-delete fires; all 4 still active."""
+    seed_sql = text(
+        "INSERT INTO broker_accounts "
+        "(broker_id, account_number, mode, gateway_label, currency_base, "
+        " last_seen_via, last_seen_at) "
+        "VALUES (CAST(:b AS broker_id_enum), :a, "
+        "        CAST(:m AS trading_mode_enum), :g, :c, :v, "
+        "        now() - INTERVAL '31 minutes')"
+    )
+    labels = ["isa-live", "isa-paper", "normal-live", "normal-paper"]
+    async with db_engine.begin() as conn:
+        for label in labels:
+            await conn.execute(
+                seed_sql,
+                {
+                    "b": "ibkr",
+                    "a": f"UTEST_DISCOVER_{label.upper()}",
+                    "m": "live" if "live" in label else "paper",
+                    "g": label,
+                    "c": "USD",
+                    "v": label,
+                },
+            )
+
+    clients = {label: _DiscoverableMockClient(label, accounts=[]) for label in labels}
+    registry = _build_registry_with_known_health(clients, healthy_labels=set())
+
+    discoverer = BrokerDiscoverer(registry, session_factory)
+    await discoverer._discover_once()
+
+    async with db_engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT account_number, deleted_at FROM broker_accounts "
+                    "WHERE account_number LIKE 'UTEST_DISCOVER_%' ORDER BY account_number"
+                )
+            )
+        ).all()
+    assert len(rows) == 4
+    assert all(r.deleted_at is None for r in rows), (
+        f"no row should be soft-deleted when all sidecars unhealthy; got {rows}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discover_loop_survives_iteration_failure(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    """One client raises on list_managed_accounts. _discover_once must
+    log + skip that client without raising and still upsert the rest."""
+    good = _DiscoverableMockClient(
+        "isa-live", accounts=[_account("UTEST_DISCOVER_GOOD", mode="LIVE")]
+    )
+    bad = _DiscoverableMockClient(
+        "isa-paper",
+        accounts=BrokerSidecarUnavailable("isa-paper down"),
+    )
+    clients = {"isa-live": good, "isa-paper": bad}
+    registry = _build_registry_with_known_health(clients, healthy_labels={"isa-live", "isa-paper"})
+
+    discoverer = BrokerDiscoverer(registry, session_factory)
+    # Must not raise.
+    await discoverer._discover_once()
+
+    async with db_engine.connect() as conn:
+        good_row = (
+            await conn.execute(
+                text(
+                    "SELECT account_number FROM broker_accounts "
+                    "WHERE account_number = 'UTEST_DISCOVER_GOOD'"
+                )
+            )
+        ).first()
+    assert good_row is not None, "the good client's account should still upsert"
+
+
+@pytest.mark.asyncio
+async def test_reappearance_clears_deleted_at(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    """Account marked deleted_at = past. Same sidecar reports it again →
+    deleted_at cleared, last_seen_at bumped."""
+    seed_sql = text(
+        "INSERT INTO broker_accounts "
+        "(broker_id, account_number, mode, gateway_label, currency_base, "
+        " last_seen_via, last_seen_at, deleted_at) "
+        "VALUES (CAST(:b AS broker_id_enum), :a, "
+        "        CAST(:m AS trading_mode_enum), :g, :c, :v, "
+        "        now() - INTERVAL '1 hour', "
+        "        now() - INTERVAL '5 minutes')"
+    )
+    async with db_engine.begin() as conn:
+        await conn.execute(
+            seed_sql,
+            {
+                "b": "ibkr",
+                "a": "UTEST_DISCOVER_REAPPEAR",
+                "m": "live",
+                "g": "isa-live",
+                "c": "USD",
+                "v": "isa-live",
+            },
+        )
+
+    client = _DiscoverableMockClient(
+        "isa-live", accounts=[_account("UTEST_DISCOVER_REAPPEAR", mode="LIVE")]
+    )
+    registry = _build_registry_with_known_health({"isa-live": client}, healthy_labels={"isa-live"})
+
+    discoverer = BrokerDiscoverer(registry, session_factory)
+    await discoverer._discover_once()
+
+    async with db_engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT deleted_at, last_seen_at FROM broker_accounts "
+                    "WHERE account_number = 'UTEST_DISCOVER_REAPPEAR'"
+                )
+            )
+        ).first()
+    assert row is not None
+    assert row.deleted_at is None, "deleted_at must clear on reappearance"
+    # last_seen_at bumped to ~now (was 1h ago); just check it's recent.
+    from datetime import UTC, datetime, timedelta
+
+    assert datetime.now(UTC) - row.last_seen_at < timedelta(seconds=10)
