@@ -671,6 +671,39 @@ class BrokerDiscoverer:
             soft_delete_count=soft_delete_count,
         )
 
+        # Phase 5a (spec section 5): GetAccountSummary fan-out for per-account NLV cache.
+        # Each call is bounded by wait_for(timeout=10.0); gather collects results
+        # with return_exceptions=True so one slow/dead sidecar cannot taint the
+        # others. C3 + C4 will consume results to skip-write + UPDATE.
+        summary_targets: list[tuple[str, str]] = [
+            (label, account.account_number) for label, account in rows_seen
+        ]
+
+        async def _fetch_summary(
+            label: str,
+            account_number: str,
+        ) -> tuple[str, str, object] | None:
+            client = await self._registry.get_client(label)
+            try:
+                summary = await asyncio.wait_for(
+                    client.get_account_summary(account_number),
+                    timeout=10.0,
+                )
+                return (label, account_number, summary)
+            except TimeoutError, BrokerSidecarUnavailable, BrokerSidecarTimeout:
+                return None
+
+        results: list[tuple[str, str, object] | None | BaseException] = list(
+            await asyncio.gather(
+                *(
+                    _fetch_summary(label, account_number)
+                    for (label, account_number) in summary_targets
+                ),
+                return_exceptions=True,
+            )
+        )
+        log.debug("broker_discover_summary_fanout_done", result_count=len(results))
+
     async def stop(self) -> None:
         self._stop_event.set()
 
