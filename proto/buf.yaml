@@ -18,6 +18,14 @@ lint:
     - RPC_REQUEST_STANDARD_NAME
     - RPC_RESPONSE_STANDARD_NAME
     - RPC_REQUEST_RESPONSE_UNIQUE
+    # Enum values use bare names (LIVE, PAPER, IBKR, STOCK, BUY, SELL, ...)
+    # rather than enum-name-prefixed (TRADING_MODE_LIVE, BROKER_ID_IBKR, ...).
+    # Generated Python references them as broker_pb2.LIVE / broker_pb2.IBKR
+    # in 5+ source files (backend brokers.py, sidecar handlers, normalize.py,
+    # in-process gRPC e2e harness, golden-trace replay tests). Renaming would
+    # cascade everywhere — defer to a Phase 4.x proto-style sweep.
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
 breaking:
   use:
     - FILE
