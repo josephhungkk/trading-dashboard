@@ -82,6 +82,15 @@ class _GoldenFakeIB:
             return list(self._values)
         return [v for v in self._values if getattr(v, "account", "") == account]
 
+    def accountSummary(self, account: str = "") -> list[object]:  # noqa: N802
+        # ib_async exposes accountSummary as a separate cache populated by
+        # reqAccountSummary; the sidecar's startup subscribes to it for the
+        # BASE tag. The golden fixture's account_summary.json carries those
+        # rows already, so alias to the same list for replay-test parity.
+        if not account:
+            return list(self._values)
+        return [v for v in self._values if getattr(v, "account", "") == account]
+
     async def reqPositionsAsync(self) -> list[object]:  # noqa: N802
         return list(self._positions)
 

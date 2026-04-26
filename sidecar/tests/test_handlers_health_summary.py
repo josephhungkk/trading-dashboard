@@ -69,6 +69,13 @@ class FakeIB:
             raise RuntimeError("subscription not ready")
         return list(self.values)
 
+    def accountSummary(self) -> list[FakeAccountValue]:  # noqa: N802
+        # Mirrors accountValues so ListManagedAccounts (which now reads from
+        # the accountSummary stream) still sees the test's BASE tags.
+        if self.raise_on_values:
+            raise RuntimeError("subscription not ready")
+        return list(self.values)
+
 
 def _handlers(ib: FakeIB, last_tick_ref: dict[str, datetime] | None = None) -> BrokerHandlers:
     return BrokerHandlers(
