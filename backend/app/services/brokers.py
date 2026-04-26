@@ -519,22 +519,23 @@ class BrokerDiscoverer:
         self._session_factory = session_factory
         self._interval = interval_seconds
         self._stop_event = asyncio.Event()
+        self._tick_lock = asyncio.Lock()
 
     async def discover_loop(self) -> None:
         while not self._stop_event.is_set():
-            try:
-                await self._discover_once()
-            except Exception as exc:
-                log.exception(
-                    "broker_discover_loop_failed",
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
+            if self._tick_lock.locked():
+                log.warning("broker_discover_iteration_skipped_overlap")
+            else:
+                async with self._tick_lock:
+                    try:
+                        await self._discover_once()
+                    except Exception:
+                        log.exception("broker_discover_iteration_failed")
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
             except TimeoutError:
-                continue
+                pass
 
     async def _discover_once(self) -> None:
         healthy_clients = await self._registry.healthy_clients()
