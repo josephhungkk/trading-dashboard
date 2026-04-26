@@ -9,6 +9,8 @@ import { Button } from '@/components/primitives/Button';
 import { Badge } from '@/components/primitives/Badge';
 // eslint-disable-next-line boundaries/element-types -- live connection-health store is a global ambient source
 import { useConnectedStore } from '@/stores/global/connected';
+// eslint-disable-next-line boundaries/element-types -- fleet health is a global ambient source like connected
+import { useFleetHealth } from '@/stores/global/fleet-health';
 // eslint-disable-next-line boundaries/element-types -- broker label metadata
 import { BROKERS } from '@/services/fixtures';
 // eslint-disable-next-line boundaries/element-types -- type-only import from services/types for ConnectedStatus shape
@@ -73,6 +75,7 @@ function groupStatuses(statuses: ConnectedStatus[]): Group[] {
 
 export function ConnectedDropdown(): React.JSX.Element {
   const statuses = useConnectedStore(s => s.statuses);
+  const fleetHealth = useFleetHealth();
   const groups = groupStatuses(statuses);
   const worst = groups.reduce<Tone>((acc, g) => (TONE_RANK[g.tone] > TONE_RANK[acc] ? g.tone : acc), 'green');
 
@@ -81,6 +84,11 @@ export function ConnectedDropdown(): React.JSX.Element {
       <DropdownMenuTrigger asChild>
         <Button variant="outline" aria-label="connection health">
           <Badge variant={TONE_VARIANT[worst]}>Connected</Badge>
+          {!fleetHealth.ok && (
+            <Badge variant="warn" data-testid="fleet-degraded-pill">
+              {fleetHealth.count} broker{fleetHealth.count === 1 ? '' : 's'} degraded
+            </Badge>
+          )}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">

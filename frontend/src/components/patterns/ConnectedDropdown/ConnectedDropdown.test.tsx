@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ConnectedDropdown } from './ConnectedDropdown';
 import { useConnectedStore } from '@/stores/global/connected';
+import { useFleetHealthStore } from '@/stores/global/fleet-health';
 import type { ConnectedStatus } from '@/services/types';
 
 function stubRadixPointer(): void {
@@ -42,7 +43,10 @@ const schwabDown: ConnectedStatus[] = [
 ];
 
 describe('ConnectedDropdown', () => {
-  beforeEach(() => { stubRadixPointer(); });
+  beforeEach(() => {
+    stubRadixPointer();
+    useFleetHealthStore.setState({ degraded_sidecars: [] });
+  });
 
   it('renders a trigger labeled connection health', () => {
     useConnectedStore.setState({ statuses: allGreen });
@@ -87,5 +91,29 @@ describe('ConnectedDropdown', () => {
     render(<ConnectedDropdown />);
     await user.click(screen.getByRole('button', { name: /connection health/i }));
     expect(screen.getAllByText('red').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('hides the fleet-degraded pill when degraded_sidecars is empty', () => {
+    useConnectedStore.setState({ statuses: allGreen });
+    useFleetHealthStore.setState({ degraded_sidecars: [] });
+    render(<ConnectedDropdown />);
+    expect(screen.queryByTestId('fleet-degraded-pill')).toBeNull();
+  });
+
+  it('shows the fleet-degraded pill with singular label when one sidecar is degraded', () => {
+    useConnectedStore.setState({ statuses: allGreen });
+    useFleetHealthStore.setState({ degraded_sidecars: ['isa-live'] });
+    render(<ConnectedDropdown />);
+    const pill = screen.getByTestId('fleet-degraded-pill');
+    expect(pill).toBeInTheDocument();
+    expect(pill).toHaveTextContent(/^1 broker degraded$/);
+  });
+
+  it('shows the fleet-degraded pill with plural label when multiple sidecars are degraded', () => {
+    useConnectedStore.setState({ statuses: allGreen });
+    useFleetHealthStore.setState({ degraded_sidecars: ['isa-live', 'normal-paper'] });
+    render(<ConnectedDropdown />);
+    const pill = screen.getByTestId('fleet-degraded-pill');
+    expect(pill).toHaveTextContent(/^2 brokers degraded$/);
   });
 });
