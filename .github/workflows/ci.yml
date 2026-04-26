@@ -37,7 +37,6 @@ jobs:
         run: buf generate
       - name: Materialize _generated package markers
         run: |
-          ls -laR sidecar/_generated/ || true
           mkdir -p sidecar/_generated/broker/v1
           touch sidecar/_generated/__init__.py \
                 sidecar/_generated/broker/__init__.py \
@@ -84,7 +83,6 @@ jobs:
         run: buf generate
       - name: Materialize _generated package markers
         run: |
-          ls -laR backend/app/_generated/ || true
           mkdir -p backend/app/_generated/broker/v1
           touch backend/app/_generated/__init__.py \
                 backend/app/_generated/broker/__init__.py \

@@ -1,13 +1,19 @@
 version: v2
+# `out` is ../<dst>/_generated/broker (not just ../<dst>/_generated) so the
+# remote python plugins — which emit relative to the buf module root
+# `broker/` and the proto's module-relative file path `v1/broker.proto` —
+# produce `<dst>/_generated/broker/v1/broker_pb2.py`. That path matches
+# what the local grpc_tools.protoc-based proto-gen scripts output and
+# what `from <pkg>._generated.broker.v1 import broker_pb2` resolves to.
 plugins:
   - remote: buf.build/grpc/python:v1.66.0
-    out: ../backend/app/_generated
+    out: ../backend/app/_generated/broker
   - remote: buf.build/grpc/python:v1.66.0
-    out: ../sidecar/_generated
+    out: ../sidecar/_generated/broker
   - remote: buf.build/protocolbuffers/python:v28.2
-    out: ../backend/app/_generated
+    out: ../backend/app/_generated/broker
   - remote: buf.build/protocolbuffers/python:v28.2
-    out: ../sidecar/_generated
+    out: ../sidecar/_generated/broker
   - remote: buf.build/bufbuild/es:v2.2.2
     out: ../frontend/src/proto-gen
     opt:
