@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.services.ibkr_maintenance import BrokerMaintenance
+
 TradingMode = Literal["MODE_UNSPECIFIED", "LIVE", "PAPER"]
 AssetClass = Literal[
     "ASSET_UNSPECIFIED",
@@ -128,6 +130,7 @@ class AccountResponse(BaseModel):
 class AccountListResponse(BaseModel):
     accounts: list[AccountResponse]
     degraded_sidecars: list[str]
+    broker_maintenance: BrokerMaintenance  # New in 5a (spec §3.2)
 
 
 class AccountAliasUpdate(BaseModel):
