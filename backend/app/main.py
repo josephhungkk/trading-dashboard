@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.metrics import router as metrics_router
 from app.core.config import settings
@@ -99,6 +100,7 @@ app.add_middleware(
 )
 
 app.include_router(admin_router)
+app.include_router(accounts_router)
 app.include_router(metrics_router)
 
 
