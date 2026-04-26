@@ -172,12 +172,10 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             )
 
         try:
-            # accountSummary() not accountValues() - the sidecar's startup
-            # only subscribes via reqAccountSummaryAsync(); accountValues()
-            # is a separate stream that needs reqAccountUpdates and would be
-            # empty here. The BASE tag we need for currency_base lives on
-            # the accountSummary stream.
-            raw_values: object = self.ib.accountSummary()
+            # ibkr_sidecar startup subscribes via reqAccountUpdates(True, acct)
+            # for each managed account so ib.accountValues() carries the BASE
+            # tag (currency base) - accountSummary doesn't include BASE.
+            raw_values: object = self.ib.accountValues()
             values: Iterable[object] = cast("Iterable[object]", raw_values)
             account_values = list(values)
         except Exception as exc:

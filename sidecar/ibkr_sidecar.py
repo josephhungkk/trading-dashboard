@@ -216,9 +216,18 @@ async def run(args: argparse.Namespace) -> None:
         await asyncio.sleep(0.5)
         accounts = list(ib.managedAccounts())
         # No-arg reqAccountSummaryAsync() — modern ib_async dropped the
-        # group/tags kwargs; the default subscription includes the tags the
-        # handlers care about (NetLiquidation, TotalCashValue, BASE, etc.).
+        # group/tags kwargs; the default subscription includes most of the
+        # tags the handlers care about (NetLiquidation, TotalCashValue, etc.)
+        # but NOT the BASE tag.
         await ib.reqAccountSummaryAsync()
+        # BASE (account base currency) is delivered via the updateAccountValue
+        # stream, not accountSummary. Subscribe per-account so ib.accountValues()
+        # populates with BASE — the discoverer reads it for currency_base.
+        for account in accounts:
+            ib.reqAccountUpdates(True, account)
+        # Brief settle so the initial updateAccountValue burst lands before
+        # the gRPC server starts answering ListManagedAccounts.
+        await asyncio.sleep(0.5)
 
         server = grpc.aio.server(options=server_options_for_tls13())
         creds = build_grpc_server_credentials(cert_pem, key_pem, ca_bundle_pem, crl_pem)
