@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -14,11 +14,7 @@ from app.brokers import base
 from app.core.cf_access import AdminIdentity
 from app.core.deps import AccountServiceDep, require_admin_jwt
 from app.services.brokers import AccountNotFound, BrokerSidecarTimeout, BrokerSidecarUnavailable
-from app.services.ibkr_maintenance import (
-    in_daily_reset,
-    in_weekend_reset,
-    seconds_until_window_ends,
-)
+from app.services.ibkr_maintenance import compute_broker_maintenance
 
 IdentityDep = Annotated[AdminIdentity, Depends(require_admin_jwt)]
 
@@ -38,10 +34,7 @@ _NOT_FOUND_RESPONSE = {
 }
 
 _SIDECAR_503_RESPONSE = {
-    "description": (
-        "Sidecar unreachable (Retry-After: 30) OR inside an IBKR maintenance "
-        "window (Retry-After: <seconds_until_window_ends>)"
-    ),
+    "description": ("Sidecar unreachable (Retry-After: 30) OR inside an IBKR maintenance window"),
     "content": {
         "application/json": {
             "examples": {
@@ -50,9 +43,12 @@ _SIDECAR_503_RESPONSE = {
                 },
                 "broker_maintenance": {
                     "value": {
-                        "error": "broker_maintenance",
-                        "window": "weekend",
-                        "until": "2026-05-02T03:00:00+00:00",
+                        "detail": "IBKR weekend maintenance window in progress",
+                        "broker_maintenance": {
+                            "active": True,
+                            "window": "weekend",
+                            "until": "2026-05-02T03:00:00+00:00",
+                        },
                     }
                 },
             }
@@ -72,16 +68,14 @@ async def _classify_sidecar_failure(
     exc: BrokerSidecarUnavailable | BrokerSidecarTimeout,
 ) -> JSONResponse:
     now = datetime.now(UTC)
-    in_weekend = in_weekend_reset(now)
-    in_daily, _region = in_daily_reset(now)
-    if in_weekend or in_daily:
-        seconds = seconds_until_window_ends(now)
-        until = (now + timedelta(seconds=seconds)).isoformat()
-        window = "weekend" if in_weekend else "daily"
+    maintenance = compute_broker_maintenance(now)
+    if maintenance.active:
         return JSONResponse(
             status_code=503,
-            content={"error": "broker_maintenance", "window": window, "until": until},
-            headers={"Retry-After": str(seconds)},
+            content={
+                "detail": f"IBKR {maintenance.window} maintenance window in progress",
+                "broker_maintenance": maintenance.model_dump(mode="json"),
+            },
         )
 
     label = getattr(exc, "label", "") or ""

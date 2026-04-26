@@ -85,9 +85,11 @@ async def test_detail_routes_document_503_envelope(client):
 
         assert unreachable["error"] == "sidecar_unreachable"
         assert "label" in unreachable
-        assert maintenance["error"] == "broker_maintenance"
-        assert maintenance["window"] in {"weekend", "daily"}
-        assert "until" in maintenance
+        assert "maintenance window in progress" in maintenance["detail"]
+        broker_maintenance = maintenance["broker_maintenance"]
+        assert broker_maintenance["active"] is True
+        assert broker_maintenance["window"] in {"weekend", "daily"}
+        assert "until" in broker_maintenance
 
 
 @pytest.mark.asyncio

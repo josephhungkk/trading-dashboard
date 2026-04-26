@@ -1,10 +1,8 @@
 """Tests for GET /api/accounts/{id}/{summary,positions,orders}.
 
 AccountService is overridden with an in-memory stub. The maintenance
-helpers (`in_weekend_reset`, `in_daily_reset`, `seconds_until_window_ends`)
-are monkeypatched on the accounts module to force deterministic
-classification — the handler reads them via direct import, so the patch
-target is `app.api.accounts.<name>`, not `app.services.ibkr_maintenance.<name>`.
+classifier is monkeypatched on the accounts module to force deterministic
+classification.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ from app.services.brokers import (
     BrokerSidecarTimeout,
     BrokerSidecarUnavailable,
 )
+from app.services.ibkr_maintenance import BrokerMaintenance
 
 
 def _money(value: str = "0", currency: str = "USD") -> base.Money:
@@ -133,10 +132,11 @@ async def detail_client() -> AsyncIterator[tuple[AsyncClient, _StubAccountServic
 @pytest.fixture(autouse=True)
 def _force_outside_reset_window(monkeypatch):
     """Default: never inside any reset window. Tests that need to exercise the
-    maintenance branch override these with their own monkeypatch."""
-    monkeypatch.setattr("app.api.accounts.in_weekend_reset", lambda _now: False)
-    monkeypatch.setattr("app.api.accounts.in_daily_reset", lambda _now: (False, ""))
-    monkeypatch.setattr("app.api.accounts.seconds_until_window_ends", lambda _now: 0)
+    maintenance branch override this with their own monkeypatch."""
+    monkeypatch.setattr(
+        "app.api.accounts.compute_broker_maintenance",
+        lambda _now: BrokerMaintenance(active=False, window=None, until=None),
+    )
 
 
 # ---------------------------------------------------------------- summary 200/404
@@ -195,8 +195,11 @@ async def test_summary_503_timeout_classified_as_unreachable(detail_client):
 
 @pytest.mark.asyncio
 async def test_summary_503_weekend_maintenance(detail_client, monkeypatch):
-    monkeypatch.setattr("app.api.accounts.in_weekend_reset", lambda _now: True)
-    monkeypatch.setattr("app.api.accounts.seconds_until_window_ends", lambda _now: 1800)
+    until = datetime(2026, 5, 2, 3, tzinfo=UTC)
+    monkeypatch.setattr(
+        "app.api.accounts.compute_broker_maintenance",
+        lambda _now: BrokerMaintenance(active=True, window="weekend", until=until),
+    )
 
     client, stub, account_id = detail_client
     stub.raise_exc = BrokerSidecarUnavailable("connect refused", label="isa-live")
@@ -205,16 +208,23 @@ async def test_summary_503_weekend_maintenance(detail_client, monkeypatch):
 
     assert resp.status_code == 503
     body = resp.json()
-    assert body["error"] == "broker_maintenance"
-    assert body["window"] == "weekend"
-    assert "until" in body
-    assert resp.headers["retry-after"] == "1800"
+    assert body == {
+        "detail": "IBKR weekend maintenance window in progress",
+        "broker_maintenance": {
+            "active": True,
+            "window": "weekend",
+            "until": "2026-05-02T03:00:00Z",
+        },
+    }
 
 
 @pytest.mark.asyncio
 async def test_summary_503_daily_maintenance(detail_client, monkeypatch):
-    monkeypatch.setattr("app.api.accounts.in_daily_reset", lambda _now: (True, "na"))
-    monkeypatch.setattr("app.api.accounts.seconds_until_window_ends", lambda _now: 600)
+    until = datetime(2026, 4, 26, 8, 45, tzinfo=UTC)
+    monkeypatch.setattr(
+        "app.api.accounts.compute_broker_maintenance",
+        lambda _now: BrokerMaintenance(active=True, window="daily", until=until),
+    )
 
     client, stub, account_id = detail_client
     stub.raise_exc = BrokerSidecarTimeout("deadline exceeded")
@@ -223,9 +233,14 @@ async def test_summary_503_daily_maintenance(detail_client, monkeypatch):
 
     assert resp.status_code == 503
     body = resp.json()
-    assert body["error"] == "broker_maintenance"
-    assert body["window"] == "daily"
-    assert resp.headers["retry-after"] == "600"
+    assert body == {
+        "detail": "IBKR daily maintenance window in progress",
+        "broker_maintenance": {
+            "active": True,
+            "window": "daily",
+            "until": "2026-04-26T08:45:00Z",
+        },
+    }
 
 
 # ------------------------------------------------------------- positions / orders
