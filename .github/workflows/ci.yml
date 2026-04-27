@@ -52,6 +52,8 @@ jobs:
             _generated/broker/v1/broker_pb2_grpc.py
       - name: Pytest (skip real_ibkr)
         working-directory: sidecar
+        env:
+          REAL_IBKR: ''
         run: uv run pytest --cov=sidecar --cov-fail-under=80 -m 'not real_ibkr'
 
   backend:

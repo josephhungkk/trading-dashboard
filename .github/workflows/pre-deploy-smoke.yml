@@ -1,0 +1,25 @@
+name: Pre-deploy smoke (real IBKR paper)
+on:
+  workflow_dispatch:
+    inputs:
+      gateway:
+        description: 'Gateway label (isa-paper|normal-paper)'
+        required: true
+        default: 'isa-paper'
+jobs:
+  real-ibkr-smoke:
+    runs-on: [self-hosted, nuc]
+    env:
+      REAL_IBKR: "1"
+      IBKR_PAPER_GATEWAY: ${{ inputs.gateway }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.14'
+      - name: Sync sidecar deps
+        working-directory: sidecar
+        run: uv sync
+      - name: Run real-IBKR smoke
+        working-directory: sidecar
+        run: uv run pytest tests/test_real_ibkr_smoke.py -v
