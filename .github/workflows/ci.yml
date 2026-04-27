@@ -176,3 +176,23 @@ jobs:
         if: github.ref == 'refs/heads/main'
         working-directory: frontend
         run: docker build -t trading-dashboard-frontend:ci .
+
+  frontend-types-up-to-date:
+    needs: [proto, backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.14'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Check generated frontend API types
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm check:types-up-to-date

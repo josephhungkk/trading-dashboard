@@ -15,7 +15,9 @@
     "lint": "eslint src",
     "stylelint": "stylelint \"src/**/*.{css,tsx}\"",
     "preview": "vite preview",
-    "proto:gen": "cd ../proto && buf generate"
+    "proto:gen": "cd ../proto && buf generate",
+    "gen:types": "../scripts/gen-types.sh",
+    "check:types-up-to-date": "node scripts/check-generated-types.mjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
@@ -80,6 +82,7 @@
     "globals": "^17.5.0",
     "glyphhanger": "^5.0.0",
     "jsdom": "^29.0.2",
+    "openapi-typescript": "^7.4.0",
     "playwright": "^1.59.1",
     "postcss": "^8.5.10",
     "postcss-html": "^1.8.1",

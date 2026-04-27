@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-echo "gen-types.sh — not yet implemented."
-echo "Phase 2 will generate TS types from the FastAPI OpenAPI schema."
-exit 1
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT/backend"
+uv run python -m app.scripts.dump_openapi > /tmp/openapi.json
+cd "$ROOT/frontend"
+pnpm exec openapi-typescript /tmp/openapi.json -o src/services/api-generated.ts
+echo "Wrote frontend/src/services/api-generated.ts"
