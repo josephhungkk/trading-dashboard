@@ -331,7 +331,7 @@ class PendingSubmitWatchdog:
                             NULL,
                             :now,
                             :now,
-                            :raw_payload::jsonb
+                            CAST(:raw_payload AS jsonb)
                         )
                         """
                     ),
