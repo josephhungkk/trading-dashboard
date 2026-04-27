@@ -11,10 +11,15 @@ head) plus mock clients that return canned ListManagedAccounts results.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+import structlog.testing
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -513,3 +518,222 @@ async def test_reappearance_clears_deleted_at(
     from datetime import UTC, datetime, timedelta
 
     assert datetime.now(UTC) - row.last_seen_at < timedelta(seconds=10)
+
+
+# === Phase 5a (Task C6) — fan-out / skip-write / overlap / resurrect / overflow
+
+
+def _summary(*, currency: str, value: str) -> base.Summary:
+    """Construct a base.Summary populated only on net_liquidation; the
+    other Money fields default to empty (the discoverer only reads
+    net_liquidation in Phase 5a)."""
+    nlv = base.Money(value=value, currency=currency)
+    empty = base.Money(value="", currency="")
+    return base.Summary(
+        net_liquidation=nlv,
+        total_cash=empty,
+        realized_pnl=empty,
+        unrealized_pnl=empty,
+        buying_power=empty,
+        updated_at=datetime.now(UTC),
+    )
+
+
+async def _select_nlv_row(db_engine: AsyncEngine, account_number: str) -> Any:
+    async with db_engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT account_number, last_nlv, last_nlv_currency, last_nlv_at, deleted_at "
+                    "FROM broker_accounts WHERE account_number = :a"
+                ),
+                {"a": account_number},
+            )
+        ).first()
+
+
+@pytest.mark.asyncio
+async def test_fan_out_writes_nlv_for_healthy_clients(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    """Two healthy gateways report one account each → both get NLV written."""
+    a_label, b_label = "isa-live", "isa-paper"
+    a_acct, b_acct = "UTEST_DISCOVER_FAN_A", "UTEST_DISCOVER_FAN_B"
+    a_client = _DiscoverableMockClient(a_label, accounts=[_account(a_acct, mode="LIVE")])
+    b_client = _DiscoverableMockClient(b_label, accounts=[_account(b_acct, mode="PAPER")])
+    a_client.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="USD", value="100.50")
+    )
+    b_client.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="GBP", value="250.25")
+    )
+    registry = _build_registry_with_known_health(
+        {a_label: a_client, b_label: b_client},
+        healthy_labels={a_label, b_label},
+    )
+    await BrokerDiscoverer(registry, session_factory)._discover_once()
+
+    a_row = await _select_nlv_row(db_engine, a_acct)
+    b_row = await _select_nlv_row(db_engine, b_acct)
+    assert a_row is not None and a_row.last_nlv == Decimal("100.50000000")
+    assert a_row.last_nlv_currency == "USD"
+    assert b_row is not None and b_row.last_nlv == Decimal("250.25000000")
+    assert b_row.last_nlv_currency == "GBP"
+
+
+@pytest.mark.asyncio
+async def test_one_timed_out_client_does_not_taint_others(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    slow_label, fast_label = "isa-live", "isa-paper"
+    slow_acct = "UTEST_DISCOVER_SLOW"
+    fast_acct = "UTEST_DISCOVER_FAST"
+    slow = _DiscoverableMockClient(slow_label, accounts=[_account(slow_acct, mode="LIVE")])
+    fast = _DiscoverableMockClient(fast_label, accounts=[_account(fast_acct, mode="PAPER")])
+    slow.get_account_summary = AsyncMock(side_effect=TimeoutError())  # type: ignore[attr-defined]
+    fast.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="EUR", value="42.00")
+    )
+    registry = _build_registry_with_known_health(
+        {slow_label: slow, fast_label: fast},
+        healthy_labels={slow_label, fast_label},
+    )
+    await BrokerDiscoverer(registry, session_factory)._discover_once()
+
+    slow_row = await _select_nlv_row(db_engine, slow_acct)
+    fast_row = await _select_nlv_row(db_engine, fast_acct)
+    assert slow_row is not None and slow_row.last_nlv is None
+    assert fast_row is not None and fast_row.last_nlv == Decimal("42.00000000")
+
+
+@pytest.mark.asyncio
+async def test_skip_write_when_currency_empty(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    label, acct = "normal-live", "UTEST_DISCOVER_EMPTY_CCY"
+    client = _DiscoverableMockClient(label, accounts=[_account(acct, mode="LIVE")])
+    client.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="", value="100")
+    )
+    registry = _build_registry_with_known_health({label: client}, healthy_labels={label})
+    await BrokerDiscoverer(registry, session_factory)._discover_once()
+
+    row = await _select_nlv_row(db_engine, acct)
+    assert row is not None
+    assert row.last_nlv is None
+    assert row.last_nlv_currency is None
+    assert row.last_nlv_at is None
+
+
+@pytest.mark.asyncio
+async def test_skip_write_when_value_empty(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    label, acct = "normal-live", "UTEST_DISCOVER_EMPTY_VAL"
+    client = _DiscoverableMockClient(label, accounts=[_account(acct, mode="LIVE")])
+    client.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="USD", value="")
+    )
+    registry = _build_registry_with_known_health({label: client}, healthy_labels={label})
+    await BrokerDiscoverer(registry, session_factory)._discover_once()
+
+    row = await _select_nlv_row(db_engine, acct)
+    assert row is not None
+    assert row.last_nlv is None
+
+
+@pytest.mark.asyncio
+async def test_overlap_guard_skips_concurrent_tick(
+    session_factory: async_sessionmaker[Any],
+) -> None:
+    """Holding _tick_lock blocks discover_loop's _discover_once invocation
+    and emits broker_discover_iteration_skipped_overlap."""
+    registry = _build_registry_with_known_health({}, healthy_labels=set())
+    discoverer = BrokerDiscoverer(registry, session_factory, interval_seconds=0.01)
+
+    with structlog.testing.capture_logs() as captured:
+        async with discoverer._tick_lock:
+            task = asyncio.create_task(discoverer.discover_loop())
+            await asyncio.sleep(0.05)
+            discoverer._stop_event.set()
+            await task
+
+    assert any(e.get("event") == "broker_discover_iteration_skipped_overlap" for e in captured), (
+        f"expected skipped-overlap log; got events: {[e.get('event') for e in captured]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resurrect_clears_stale_nlv(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    """Soft-deleted row with stale NLV reappears → CASE clears NLV first,
+    then the fresh discover tick repopulates with the new value."""
+    label, acct = "normal-paper", "UTEST_DISCOVER_RESURRECT"
+    seed_sql = text(
+        "INSERT INTO broker_accounts "
+        "(broker_id, account_number, mode, gateway_label, currency_base, "
+        " last_seen_via, last_seen_at, deleted_at, "
+        " last_nlv, last_nlv_currency, last_nlv_at) "
+        "VALUES (CAST(:b AS broker_id_enum), :a, CAST(:m AS trading_mode_enum), "
+        "        :g, :c, :v, now() - INTERVAL '1 hour', now() - INTERVAL '5 minutes', "
+        "        9999, 'USD', now() - INTERVAL '2 weeks')"
+    )
+    async with db_engine.begin() as conn:
+        await conn.execute(
+            seed_sql,
+            {"b": "ibkr", "a": acct, "m": "paper", "g": label, "c": "USD", "v": label},
+        )
+
+    client = _DiscoverableMockClient(label, accounts=[_account(acct, mode="PAPER")])
+    client.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="USD", value="200.00")
+    )
+    registry = _build_registry_with_known_health({label: client}, healthy_labels={label})
+    await BrokerDiscoverer(registry, session_factory)._discover_once()
+
+    row = await _select_nlv_row(db_engine, acct)
+    assert row is not None
+    assert row.deleted_at is None
+    assert row.last_nlv == Decimal("200.00000000")  # fresh value, not stale 9999
+    assert row.last_nlv_currency == "USD"
+
+
+@pytest.mark.asyncio
+async def test_overflow_does_not_taint_other_accounts(
+    db_engine: AsyncEngine,
+    session_factory: async_sessionmaker[Any],
+    cleanup_test_rows: None,
+) -> None:
+    """Savepoint isolation: an over-NUMERIC(20,8) NLV on one account
+    must not block the UPDATE for a healthy sibling account."""
+    big_label, ok_label = "isa-live", "normal-live"
+    big_acct, ok_acct = "UTEST_DISCOVER_OVERFLOW", "UTEST_DISCOVER_OK"
+    big = _DiscoverableMockClient(big_label, accounts=[_account(big_acct, mode="LIVE")])
+    ok = _DiscoverableMockClient(ok_label, accounts=[_account(ok_acct, mode="LIVE")])
+    big.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="USD", value="9" * 30)
+    )
+    ok.get_account_summary = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_summary(currency="USD", value="100")
+    )
+    registry = _build_registry_with_known_health(
+        {big_label: big, ok_label: ok},
+        healthy_labels={big_label, ok_label},
+    )
+    await BrokerDiscoverer(registry, session_factory)._discover_once()
+
+    big_row = await _select_nlv_row(db_engine, big_acct)
+    ok_row = await _select_nlv_row(db_engine, ok_acct)
+    assert big_row is not None and big_row.last_nlv is None  # savepoint rolled back
+    assert ok_row is not None and ok_row.last_nlv == Decimal("100.00000000")
