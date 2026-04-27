@@ -665,12 +665,6 @@ class BrokerDiscoverer:
                 # but the asyncpg-backed CursorResult exposes it at runtime.
                 soft_delete_count = getattr(soft_delete_result, "rowcount", 0) or 0
 
-        log.info(
-            "broker_discover_iteration_ok",
-            upsert_count=len(rows_seen),
-            soft_delete_count=soft_delete_count,
-        )
-
         # Phase 5a (spec section 5): GetAccountSummary fan-out for per-account NLV cache.
         # Each call is bounded by wait_for(timeout=10.0); gather collects results
         # with return_exceptions=True so one slow/dead sidecar cannot taint the
@@ -697,7 +691,66 @@ class BrokerDiscoverer:
             *(_fetch_summary(label, account_number) for (label, account_number) in summary_targets),
             return_exceptions=True,
         )
-        log.debug("broker_discover_summary_fanout_done", result_count=len(results))
+
+        def _is_populated(summary: base.Summary) -> bool:
+            nlv_currency = summary.net_liquidation.currency
+            nlv_value = summary.net_liquidation.value
+            return (
+                len(nlv_currency) == 3
+                and nlv_currency.isascii()
+                and nlv_currency.isupper()
+                and bool(nlv_value)
+            )
+
+        def _format_decimal(s: str) -> str:
+            d = Decimal(s).quantize(Decimal("1e-8"))
+            return format(d, "f")
+
+        nlv_update_stmt = text(
+            """
+            UPDATE broker_accounts
+               SET last_nlv = CAST(:nlv AS NUMERIC(20, 8)),
+                   last_nlv_currency = :currency,
+                   last_nlv_at = now(),
+                   updated_at = now()
+             WHERE broker_id = CAST(:broker_id AS broker_id_enum)
+               AND account_number = :account_number
+               AND deleted_at IS NULL
+            """
+        )
+
+        nlv_update_count = 0
+        async with self._session_factory() as session, session.begin():
+            for r in results:
+                if r is None or isinstance(r, BaseException):
+                    continue
+                _label, account_number, summary = r
+                if not _is_populated(summary):
+                    continue
+                # C4 will replace this naked try with overflow + Prometheus.
+                try:
+                    await session.execute(
+                        nlv_update_stmt,
+                        {
+                            "broker_id": "ibkr",
+                            "account_number": account_number,
+                            "nlv": _format_decimal(summary.net_liquidation.value),
+                            "currency": summary.net_liquidation.currency,
+                        },
+                    )
+                    nlv_update_count += 1
+                except Exception:
+                    log.exception(
+                        "broker_discover_nlv_update_failed",
+                        account_number=account_number,
+                    )
+
+        log.info(
+            "broker_discover_iteration_ok",
+            upsert_count=len(rows_seen),
+            soft_delete_count=soft_delete_count,
+            nlv_update_count=nlv_update_count,
+        )
 
     async def stop(self) -> None:
         self._stop_event.set()
