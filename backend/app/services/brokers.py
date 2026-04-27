@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from decimal import Decimal, InvalidOperation
@@ -164,6 +165,85 @@ class BrokerSidecarClient:
         )
         return _contract_from_proto(response.contract)
 
+    async def place_order(
+        self,
+        account_number: str,
+        client_order_id: str,
+        conid: str,
+        side: str,
+        order_type: str,
+        tif: str,
+        qty: str,
+        limit_price: str = "",
+        stop_price: str = "",
+    ) -> base.PlaceOrderResult:
+        request = broker_pb2.PlaceOrderRequest(
+            account_number=account_number,
+            client_order_id=client_order_id,
+            conid=conid,
+            side=side,
+            order_type=order_type,
+            tif=tif,
+            qty=qty,
+            limit_price=limit_price,
+            stop_price=stop_price,
+        )
+        response = await self._call(
+            method="PlaceOrder",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.PlaceOrderRequest, broker_pb2.PlaceOrderResponse]",
+                self.stub.PlaceOrder,
+            ),
+            request=request,
+        )
+        return base.PlaceOrderResult(
+            broker_order_id=response.broker_order_id,
+            status=response.status,
+        )
+
+    async def cancel_order(self, account_number: str, broker_order_id: str) -> bool:
+        request = broker_pb2.CancelOrderRequest(
+            account_number=account_number,
+            broker_order_id=broker_order_id,
+        )
+        response = await self._call(
+            method="CancelOrder",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.CancelOrderRequest, broker_pb2.CancelOrderResponse]",
+                self.stub.CancelOrder,
+            ),
+            request=request,
+        )
+        return response.accepted
+
+    async def search_contracts(self, query: str, asset_class: str = "") -> list[base.Contract]:
+        request = broker_pb2.SearchContractsRequest(query=query, asset_class=asset_class)
+        response = await self._call(
+            method="SearchContracts",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.SearchContractsRequest, broker_pb2.SearchContractsResponse]",  # noqa: E501
+                self.stub.SearchContracts,
+            ),
+            request=request,
+        )
+        return [_contract_from_proto(contract) for contract in response.contracts]
+
+    async def order_event_stream(
+        self,
+        account_number: str,
+    ) -> AsyncIterator[base.OrderEventMessage]:
+        request = broker_pb2.AccountRef(account_number=account_number)
+        async for msg in self._stream_call("OrderEvent", self.stub.OrderEvent, request):
+            yield base.OrderEventMessage(
+                broker_order_id=msg.broker_order_id,
+                client_order_id=msg.client_order_id,
+                status=msg.status,
+                filled_qty=msg.filled_qty,
+                avg_fill_price=msg.avg_fill_price,
+                broker_event_at=_timestamp_from_proto(msg.event_at),
+                raw_payload=msg.raw_payload,
+            )
+
     async def close(self) -> None:
         await self.channel.close(grace=2.0)
 
@@ -202,6 +282,49 @@ class BrokerSidecarClient:
             latency_ms=_latency_ms(started),
         )
         return response
+
+    async def _stream_call(
+        self,
+        method: str,
+        rpc: Callable[..., Any],
+        request: Any,
+    ) -> AsyncIterator[Any]:
+        started = time.perf_counter()
+        try:
+            async for msg in rpc(request, timeout=self.deadline_seconds):
+                yield msg
+        except asyncio.CancelledError:
+            log.debug(
+                "broker_sidecar_stream_cancelled",
+                label=self.label,
+                method=method,
+                latency_ms=_latency_ms(started),
+            )
+            raise
+        except grpc.aio.AioRpcError as exc:
+            latency_ms = _latency_ms(started)
+            log.info(
+                "broker_sidecar_stream_failed",
+                label=self.label,
+                method=method,
+                latency_ms=latency_ms,
+                grpc_code=exc.code().name,
+            )
+            if exc.code() is grpc.StatusCode.DEADLINE_EXCEEDED:
+                raise BrokerSidecarTimeout(
+                    f"broker sidecar {self.label} {method} timed out"
+                ) from exc
+            raise BrokerSidecarUnavailable(
+                f"broker sidecar {self.label} {method} unavailable: {exc.code().name}",
+                label=self.label,
+            ) from exc
+
+        log.info(
+            "broker_sidecar_stream_closed",
+            label=self.label,
+            method=method,
+            latency_ms=_latency_ms(started),
+        )
 
 
 def _latency_ms(started: float) -> int:

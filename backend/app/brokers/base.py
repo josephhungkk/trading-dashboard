@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -104,6 +105,23 @@ class Order(BaseModel):
     avg_fill_price: Money
     submitted_at: datetime | None
     updated_at: datetime | None
+
+
+@dataclass(frozen=True)
+class PlaceOrderResult:
+    broker_order_id: str
+    status: str
+
+
+@dataclass(frozen=True)
+class OrderEventMessage:
+    broker_order_id: str
+    client_order_id: str
+    status: str
+    filled_qty: str
+    avg_fill_price: str
+    broker_event_at: datetime | None
+    raw_payload: str
 
 
 class AccountResponse(BaseModel):
