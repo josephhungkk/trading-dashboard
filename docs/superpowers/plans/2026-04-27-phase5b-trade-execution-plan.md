@@ -22,6 +22,7 @@ Each task lists an explicit **Owner: Codex | Claude** line:
 
 - **Codex** writes source code (backend Python, sidecar Python, frontend TS) via `codex:codex-rescue` subagent.
 - **Claude Code** writes tests, stories, verification (typecheck/lint/test), and conventional commits.
+- **Codex/Claude fallback (per memory `feedback_codex_fallback.md`):** if Codex hits quota mid-task, Claude finishes the task. Document quota events with a commit footer line `Codex quota exceeded → Claude continued`. Canary back to Codex on the next planned Codex task.
 - **Per-commit review chain:** implementer → spec compliance reviewer → code quality reviewer → language reviewer (`python-reviewer` for backend/sidecar, `typescript-reviewer` for frontend) → conditional: `security-reviewer` (auth/secrets/user-input/crypto, mandatory on D1/D2/D4 + B1/B2 + E2), `database-reviewer` (Alembic/SQL — A1/A2/E1), `silent-failure-hunter` (async paths — E1/E2/E3/E4), `a11y-architect` (frontend UI — G1/G2/G3), `build-error-resolver` (when builds fail), `tdd-guide` (when tests fail).
 - **Conventional commits**, body lines ≤ 100 chars, never `--no-verify`.
 - **Coverage gate:** 80%+ on backend `app/` + sidecar `sidecar/`. CI fails below.
@@ -30,18 +31,104 @@ Each task lists an explicit **Owner: Codex | Claude** line:
 
 ## Critical gates
 
-- **A1 must land green before C+D+E start** — those chunks read/write the new columns.
-- **A3 (proto) must land green before B + D start** — sidecar handlers and backend RPC clients depend on the generated stubs.
-- **Chunk B (sidecar) must land green before E (consumer) starts** — consumer subscribes to OrderEvent stream.
-- **Chunk D (API endpoints) depends on C (Pydantic models + ORM).**
-- **Chunk F (frontend services) depends on D (locked OpenAPI shape).**
+Strict ordering (each gate must land green before its dependents start):
+
+- **A0 (gen-types.sh) must land before F1.** Frontend types are generated from the backend OpenAPI snapshot, not hand-written.
+- **A1 (migration) must land before C+D+E start.** Those chunks read/write the new columns.
+- **A3 (proto) must land before A4 + B + D start.** A4 (sidecar client extension) and sidecar handlers depend on regenerated stubs.
+- **A4 (BrokerSidecarClient extension) must land before D2/D4/D5/D6 + E1/E2/E3.** Backend endpoints + consumer call the new client methods.
+- **A5 (shared mock fixture) must land before D + E test development.** Avoids re-inventing sidecar mocks across 50+ tests.
+- **Chunk B (sidecar handlers) must land before E (consumer) starts.** Consumer subscribes to OrderEvent stream.
+- **Chunk D (API endpoints) depends on C (Pydantic + ORM).**
+- **D6 (SSE) depends on D7 (OpenAPI snapshot)** — schema lock first, SSE replay format pinned by it.
+- **Chunk F (frontend services) depends on D + A0** — wire shape locked.
 - **H4 push + tag is the USER GATE** — operator confirms before tagging v0.5.1; canary rollout (per-account `trade_enabled=true`) is operator-initiated, not part of this plan.
+
+### Parallel-safe pairs (controller may dispatch in parallel sessions, NOT same-session subagents)
+
+The subagent-driven-development skill forbids parallel implementer subagents within one session, but the controller can split work across sessions or use the Codex/Claude alternation:
+
+| Parallel-safe | Why |
+|---|---|
+| A1 ⊥ A3 | migration vs proto are independent inputs |
+| C1 ⊥ C2 ⊥ C3 | Pydantic schemas vs ORM vs config policy don't reference each other |
+| B1 ⊥ B2 ⊥ B4 | different RPCs in `handlers.py`; B3 depends on `_serialize_trade` so serialize first if grouping |
+| D3 ⊥ D5 | distinct routers (orders list vs contracts) |
+| F1 ⊥ F2 | service vs store, no coupling |
+| G1 ⊥ G3 | different components |
 
 ---
 
-## Chunk A — Foundation: Schema + Proto
+## Chunk A — Foundation: Schema + Proto + Tooling + Client extension + Mock fixtures
 
-Lays the database tables + the proto contract additions that every later chunk reads.
+Lays the database tables, proto contract additions, type-generation tooling, and the sidecar-client extension that every later chunk reads.
+
+### Task A0 — Implement `scripts/gen-types.sh` (frontend type generation from OpenAPI)
+
+**Owner: Codex**
+
+**Files:**
+- Modify: `scripts/gen-types.sh` (currently a stub that exits 1)
+- Create: `frontend/scripts/check-generated-types.mjs` (CI snapshot diff)
+- Modify: `frontend/package.json` (add `gen:types` + `check:types-up-to-date` scripts)
+- Modify: `.github/workflows/ci.yml` (CI step that runs `pnpm check:types-up-to-date`)
+- Test: `frontend/src/services/api-generated.test.ts` (smoke import test)
+
+**Spec reference:** CLAUDE.md "When Claude Code Makes Changes" — "Always regenerate types when changing API schemas: see `scripts/gen-types.sh` (Phase 2+)." The script is currently a stub; making it real is a Phase 5b prereq.
+
+- [ ] **Step 1: Implement `scripts/gen-types.sh`**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT/backend"
+# Boot a backend in offline-OpenAPI dump mode (no DB needed)
+uv run python -m app.scripts.dump_openapi > /tmp/openapi.json
+cd "$ROOT/frontend"
+pnpm exec openapi-typescript /tmp/openapi.json -o src/services/api-generated.ts
+echo "Wrote frontend/src/services/api-generated.ts"
+```
+
+Add `backend/app/scripts/dump_openapi.py` — imports the FastAPI app and prints `app.openapi()` as JSON without booting uvicorn (skip lifespan startup; just construct the app).
+
+- [ ] **Step 2: Wire `pnpm gen:types` and `pnpm check:types-up-to-date`**
+
+`frontend/package.json` scripts:
+```json
+"gen:types": "../scripts/gen-types.sh",
+"check:types-up-to-date": "node scripts/check-generated-types.mjs"
+```
+
+`check-generated-types.mjs` regenerates `api-generated.ts` to a temp file, diffs against the committed file, and exits 1 with a helpful "run `pnpm gen:types`" message if drift is detected.
+
+- [ ] **Step 3: Add CI step in `.github/workflows/ci.yml`**
+
+A `frontend-types-up-to-date` job that runs after the backend image builds: `pnpm install && pnpm check:types-up-to-date`.
+
+- [ ] **Step 4: Run + commit**
+
+```bash
+./scripts/gen-types.sh
+cd frontend && pnpm check:types-up-to-date
+```
+
+Expected: writes `frontend/src/services/api-generated.ts` ; CI check passes.
+
+```bash
+git add scripts/gen-types.sh frontend/scripts/check-generated-types.mjs \
+        frontend/package.json frontend/src/services/api-generated.ts \
+        backend/app/scripts/dump_openapi.py .github/workflows/ci.yml
+git commit -m "feat(tooling): implement scripts/gen-types.sh + CI drift gate
+
+CLAUDE.md Phase 2+ promise. Backend OpenAPI dumped via offline
+app.openapi() (no DB / no uvicorn boot). openapi-typescript
+generates frontend/src/services/api-generated.ts. CI fails if
+the committed file drifts from regen — operator runs pnpm
+gen:types to refresh."
+```
+
+---
 
 ### Task A1 — Alembic 0004: orders + order_events tables
 
@@ -73,7 +160,7 @@ Replace `upgrade()` and `downgrade()` to materialize spec §3 verbatim:
 - `order_events` table with `id BIGSERIAL PK`, `order_id UUID NULL FK orders(id)`, `account_id UUID NOT NULL FK broker_accounts(id)`, `broker_order_id TEXT`, `status order_status_enum NOT NULL`, `filled_qty`/`avg_fill_price` (NUMERIC nullable), `broker_event_at TIMESTAMPTZ NOT NULL`, `observed_at TIMESTAMPTZ DEFAULT now()`, `raw_payload JSONB`.
 - 2 indexes on `order_events`: `(order_id, broker_event_at DESC)` and `(account_id, broker_event_at DESC)`.
 
-`downgrade()` drops in reverse order: indexes → tables → enums.
+`downgrade()` drops in reverse order: indexes → tables → **explicit `op.execute("DROP TYPE order_status_enum")` + same for `order_tif_enum`, `order_type_enum`, `order_side_enum`** (Postgres Alembic gotcha — `op.drop_table` does NOT cascade to ENUM types; without explicit DROP TYPE, a downgrade-then-upgrade in the same DB raises `duplicate_object` errors). Architect-review fix P3.
 
 - [ ] **Step 3: Verify upgrade + downgrade round-trip locally**
 
@@ -84,24 +171,16 @@ uv run alembic upgrade head
 psql "$DATABASE_URL" -c "\d orders" | head -50
 psql "$DATABASE_URL" -c "\d order_events" | head -30
 psql "$DATABASE_URL" -c "\dT+ order_status_enum"
+# Repeat the round-trip a second time to verify enum cleanup is idempotent
+uv run alembic downgrade -1
+uv run alembic upgrade head
 ```
 
-Expected: each command exits 0; tables show all columns + CHECK constraints + the 4 indexes; enum lists 8 values.
+Expected: each command exits 0; tables show all columns + CHECK constraints + the 4 indexes; enum lists 8 values; second round-trip succeeds without `duplicate_object`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: DO NOT commit yet — A2 commits A1+A2 together (architect-review P4)**
 
-```bash
-git add backend/alembic/versions/0004_orders_order_events.py
-git commit -m "feat(backend): alembic 0004 — orders + order_events tables
-
-Adds 4 enums (order_side, order_type, order_tif, order_status) and 2
-tables matching spec §3. orders has composite UNIQUE on
-(account_id, client_order_id) + (account_id, broker_order_id WHERE NOT
-NULL) for cross-account dedup safety (R2/R19). 3 CHECK constraints
-guard order_type↔price coherence and filled_qty bounds. order_events
-is the append-only audit log; order_id nullable for TWS-placed audit
-rows (R18). Partial pending_submit index supports the watchdog scan."
-```
+Leave `backend/alembic/versions/0004_orders_order_events.py` staged but uncommitted. Task A2 will write tests, run them green against the migrated DB, and create the single `feat(backend): alembic 0004 + tests` commit covering both. This matches the TDD red-green-commit cycle and avoids a green-CI-but-untested intermediate commit.
 
 ---
 
@@ -114,7 +193,7 @@ rows (R18). Partial pending_submit index supports the watchdog scan."
 
 **Spec reference:** §3 invariants.
 
-- [ ] **Step 1: Write the failing tests** (~8 tests)
+- [ ] **Step 1: Write the failing tests** (~9 tests, architect-review P3+P16 added test 7-tightening + test 9)
 
 Use the outer-rollback `session_factory` fixture pattern from `test_0003.py` (per `feedback_pytest_session_begin_commits.md`). Cover:
 
@@ -124,8 +203,9 @@ Use the outer-rollback `session_factory` fixture pattern from `test_0003.py` (pe
 4. `test_orders_check_stop_requires_stop_price` — INSERT order_type=STOP with `stop_price IS NULL` raises IntegrityError.
 5. `test_orders_unique_account_client_order_id` — second INSERT with same `(account_id, client_order_id)` raises `UniqueViolation`; same `client_order_id` different `account_id` succeeds (R2).
 6. `test_orders_unique_account_broker_order_id_partial` — two rows with `broker_order_id=NULL` for same account succeed (partial index); two rows with same `(account_id, broker_order_id)` not-null raise UniqueViolation (R19).
-7. `test_pending_submit_watchdog_index_exists` — `pg_indexes` lookup confirms `ix_orders_pending_submit_watchdog` is present and partial.
+7. `test_pending_submit_watchdog_index_pinned_to_created_at` — `pg_indexes` lookup confirms `ix_orders_pending_submit_watchdog` is present, partial, AND pinned to the `created_at` column with predicate `(status = 'pending_submit'::order_status_enum)` (architect-review P16: must pin column, not just existence).
 8. `test_order_events_order_id_nullable` — INSERT `order_events` with `order_id=NULL` succeeds (R18).
+9. `test_0004_downgrade_then_upgrade_round_trips_twice` — programmatically run `alembic downgrade -1 → upgrade head → downgrade -1 → upgrade head`; assert no `duplicate_object` error (architect-review P3 — Postgres ENUM lifecycle invariant).
 
 - [ ] **Step 2: Run tests to verify they pass against migrated DB**
 
@@ -133,17 +213,28 @@ Use the outer-rollback `session_factory` fixture pattern from `test_0003.py` (pe
 cd backend && uv run pytest tests/migrations/test_0004.py -v
 ```
 
-Expected: 8 PASS (0004 already applied via Task A1 Step 3). If any fail, fix the migration in A1 (this is the test-first verification of A1's correctness).
+Expected: 9 PASS (0004 already applied via Task A1 Step 3). If any fail, fix the migration in A1 (this is the test-first verification of A1's correctness; A1 is still uncommitted at this point per architect-review P4).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Combined commit (A1 + A2)** — single `feat(backend): alembic 0004 + tests` commit
 
 ```bash
-git add backend/tests/migrations/test_0004.py
-git commit -m "test(backend): alembic 0004 schema + constraint coverage
+git add backend/alembic/versions/0004_orders_order_events.py \
+        backend/tests/migrations/test_0004.py
+git commit -m "feat(backend): alembic 0004 — orders + order_events tables + tests
 
-Validates spec §3 invariants — composite UNIQUE keys, the 3 CHECK
-constraints, partial pending_submit watchdog index, and order_events
-order_id-nullable audit-only path (R2/R18/R19)."
+Adds 4 enums (order_side, order_type, order_tif, order_status) and 2
+tables matching spec §3. orders has composite UNIQUE on
+(account_id, client_order_id) + (account_id, broker_order_id WHERE NOT
+NULL) for cross-account dedup safety (R2/R19). 3 CHECK constraints
+guard order_type↔price coherence and filled_qty bounds. order_events
+is the append-only audit log; order_id nullable for TWS-placed audit
+rows (R18). Partial pending_submit index supports the watchdog scan.
+Downgrade explicitly drops the 4 ENUM types — Postgres Alembic gotcha,
+otherwise downgrade-then-upgrade fails with duplicate_object.
+
+Tests cover composite UNIQUE keys, 3 CHECK constraints, partial
+watchdog index pinned to created_at, order_events.order_id nullable,
+and downgrade-up-down-up idempotency (architect-review P3+P4+P16)."
 ```
 
 ---
@@ -205,6 +296,160 @@ prices, filled_qty, avg_fill_price). PlaceOrderRequest reserves
 fields 10-20 for forward extension (R35). client_order_id is the
 end-to-end dedup key — sidecar will set ib_order.orderRef = it so
 IBKR persists + echoes natively (R5)."
+```
+
+NOTE: `GetOrders(AccountRef) returns (OrdersResponse)` already exists from Phase 4 (proto/broker/v1/broker.proto:23). Both `PendingSubmitWatchdog` (E2) and `BrokerOrderEventConsumer` resync (E3) reuse `BrokerSidecarClient.get_orders()` which already exists at `backend/app/services/brokers.py:145`. No new RPC needed.
+
+---
+
+### Task A4 — Extend `BrokerSidecarClient` with the 4 new RPC methods
+
+**Owner: Codex** (architect-review P1)
+
+**Files:**
+- Modify: `backend/app/services/brokers.py` (add 4 methods + 1 streaming helper)
+- Modify: `backend/app/services/brokers_base.py` (add Pydantic-friendly proxies for the new wire types if not auto-generated)
+- Test: `backend/tests/services/test_brokers_client_orders.py`
+
+**Spec reference:** Spec §6 sidecar contract; Phase 4 client pattern at `backend/app/services/brokers.py` lines 73-167 (existing `health`, `list_managed_accounts`, `get_account_summary`, `get_positions`, `get_orders`, `get_contract`).
+
+- [ ] **Step 1: Write failing tests** (~6 tests)
+
+1. `test_place_order_marshals_request_and_unmarshals_response` — calls `client.place_order(account_number, client_order_id, conid, side, order_type, tif, qty, limit_price, stop_price)`; mock gRPC stub asserts request fields populated correctly (decimal-as-string fixed-point); response demarshalled into `BrokerPlaceOrderResult(broker_order_id, status)`.
+2. `test_place_order_propagates_503_as_BrokerSidecarUnavailable` — gRPC `UNAVAILABLE` → raises `BrokerSidecarUnavailable` with label.
+3. `test_place_order_timeout_raises_BrokerSidecarTimeout` — `wait_for(timeout=10)` exceeded → `BrokerSidecarTimeout`.
+4. `test_cancel_order_marshals_request` — passes `(account_number, broker_order_id)`; response `accepted: bool`.
+5. `test_search_contracts_returns_list` — caches client-side? No — caching is a backend-service concern. Client just demarshals + returns list.
+6. `test_order_event_stream_async_iter_yields_events` — async generator; iterates over server-streaming RPC; cancellation closes the stream cleanly.
+
+- [ ] **Step 2: Implement methods**
+
+Add to `BrokerSidecarClient` class (mirror existing `get_orders` style at line 145):
+
+```python
+async def place_order(
+    self,
+    account_number: str,
+    client_order_id: str,
+    conid: str,
+    side: str,
+    order_type: str,
+    tif: str,
+    qty: str,
+    limit_price: str = "",
+    stop_price: str = "",
+) -> base.PlaceOrderResult:
+    request = broker_pb2.PlaceOrderRequest(...)
+    response = await self._call("place_order", self._stub.PlaceOrder, request)
+    return base.PlaceOrderResult(
+        broker_order_id=response.broker_order_id,
+        status=response.status,
+    )
+
+async def cancel_order(self, account_number: str, broker_order_id: str) -> bool:
+    ...
+
+async def search_contracts(self, query: str, asset_class: str = "") -> list[base.Contract]:
+    ...
+
+async def order_event_stream(
+    self, account_number: str
+) -> AsyncIterator[base.OrderEventMessage]:
+    request = broker_pb2.AccountRef(account_number=account_number)
+    async for msg in self._stub.OrderEvent(request, metadata=self._metadata):
+        yield base.OrderEventMessage(
+            broker_order_id=msg.broker_order_id,
+            client_order_id=msg.client_order_id,
+            status=msg.status,
+            filled_qty=msg.filled_qty,
+            avg_fill_price=msg.avg_fill_price,
+            broker_event_at=_timestamp_from_proto(msg.event_at),
+            raw_payload=msg.raw_payload,
+        )
+```
+
+Reuse existing `_call` / `_timestamp_from_proto` / `BrokerSidecarUnavailable` / `BrokerSidecarTimeout` helpers from the file. Add `PlaceOrderResult`, `OrderEventMessage` to `base.py` (or wherever the dataclass DTOs live).
+
+- [ ] **Step 3: Run + commit**
+
+```bash
+cd backend && uv run pytest tests/services/test_brokers_client_orders.py -v
+```
+
+Expected: 6 PASS.
+
+```bash
+git add backend/app/services/brokers.py backend/app/services/brokers_base.py \
+        backend/tests/services/test_brokers_client_orders.py
+git commit -m "feat(backend): BrokerSidecarClient — place/cancel/search/stream RPCs
+
+Extends the Phase 4 client (existing 6 methods) with 4 new methods
+covering Phase 5b's RPC surface. Reuses the existing _call helper,
+mTLS metadata propagation, BrokerSidecarUnavailable/Timeout taxonomy,
+and decimal-as-string wire format. order_event_stream is an async
+generator wrapping the server-streaming RPC; cancellation closes
+the stream cleanly via grpc.aio. Architect-review P1."
+```
+
+---
+
+### Task A5 — Shared `BrokerSidecarClient` mock fixtures
+
+**Owner: Claude** (architect-review P8)
+
+**Files:**
+- Create: `backend/tests/fixtures/sidecar_mocks.py`
+- Modify: `backend/tests/conftest.py` (re-export the fixtures)
+
+**Spec reference:** N/A — pure test infrastructure. Without this, ~50 tests across D + E will reinvent the mock surface inconsistently.
+
+- [ ] **Step 1: Implement the fixtures**
+
+Provide these pytest fixtures (all `async`):
+
+```python
+@pytest.fixture
+def mock_sidecar_client():
+    """Default-happy-path BrokerSidecarClient mock — all RPCs return canned data."""
+    ...
+
+@pytest.fixture
+def mock_sidecar_with_simulator():
+    """PlaceOrder returns SIM-<uuid7> broker_order_id; placeOrder NEVER called."""
+    ...
+
+@pytest.fixture
+def mock_sidecar_with_timeout():
+    """All RPCs raise BrokerSidecarTimeout — for lost-order recovery tests."""
+    ...
+
+@pytest.fixture
+def mock_sidecar_503():
+    """All RPCs raise BrokerSidecarUnavailable — for maintenance-window tests."""
+    ...
+
+@pytest.fixture
+def fake_order_event_stream():
+    """Programmable async iterator that yields canned OrderEventMessage sequences."""
+    ...
+```
+
+- [ ] **Step 2: Smoke-test the fixtures**
+
+`backend/tests/fixtures/test_sidecar_mocks.py` — 4 tests asserting each fixture's behavior. Just smoke; the real coverage comes when D + E use them.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add backend/tests/fixtures/sidecar_mocks.py \
+        backend/tests/fixtures/test_sidecar_mocks.py \
+        backend/tests/conftest.py
+git commit -m "test(backend): shared BrokerSidecarClient mock fixtures
+
+Architect-review P8: D + E chunks have ~50 tests that mock the
+sidecar client. Centralizing the fixtures (happy / simulator /
+timeout / 503 / streaming) prevents inconsistent mock semantics
+across the suite."
 ```
 
 ---
@@ -439,6 +684,41 @@ scan on both entry and exit, idempotent (R43)."
 
 ---
 
+### Task B6 — CI workflow: gate real-IBKR smoke on REAL_IBKR=1
+
+**Owner: Claude** (architect-review P12)
+
+**Files:**
+- Modify: `.github/workflows/ci.yml`
+- Create: `.github/workflows/pre-deploy-smoke.yml` (workflow_dispatch only)
+- Modify: `deploy/nuc/README.md`
+
+**Spec reference:** §8 line 681-682 references `clientId=998` smoke against paper gateway. Without this gate, default CI either spuriously fails or accidentally hits real gateways.
+
+- [ ] **Step 1: Modify `.github/workflows/ci.yml`**
+
+The `sidecar-tests` job must explicitly set `env: REAL_IBKR: ""` so `@pytest.mark.skipif(not os.getenv("REAL_IBKR"))` skips B5's smoke tests. Existing `pytest` invocation is otherwise unchanged.
+
+- [ ] **Step 2: Create `.github/workflows/pre-deploy-smoke.yml`**
+
+`workflow_dispatch` only (manual). Runs on a self-hosted runner in the NUC's WireGuard network where the paper gateway is reachable. Sets `REAL_IBKR: "1"`. Calls `cd sidecar && uv run pytest tests/test_real_ibkr_smoke.py -v`. Fails the workflow if any smoke fails. Document the dispatch flow in `deploy/nuc/README.md`.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add .github/workflows/ci.yml .github/workflows/pre-deploy-smoke.yml \
+        deploy/nuc/README.md
+git commit -m "ci: gate real-IBKR smoke on REAL_IBKR=1 + add manual dispatch
+
+Architect-review P12: default CI must NOT run real_ibkr smoke
+(requires live paper gateway + clientId=998). New
+pre-deploy-smoke.yml is manual workflow_dispatch only,
+self-hosted runner inside the NUC WireGuard, sets REAL_IBKR=1.
+Documented in deploy/nuc/README.md."
+```
+
+---
+
 ## Chunk C — Backend Pydantic + ORM models
 
 Locks the wire shape that Chunks D + F consume. Pure data structures — no business logic.
@@ -642,6 +922,7 @@ Read C's models, talk to B's sidecar, write to A's tables. The trade-execution w
 5. `test_preview_position_sanity_extreme` — current_qty=10, BUY 200 → status `"extreme"`, `requires_extra_attestation=True` (R13).
 6. `test_preview_daily_cap_status_near_at_81pct` — sums today's `notional` for account; 81% of cap → `daily_cap_status="near"`.
 7. `test_preview_mints_redis_nonce_with_canonicalized_payload` — verify Redis key `nonce:order:<account_id>:<nonce>` exists with TTL 30s and value matches canonicalized request hash.
+8. `test_preview_503_when_fx_cache_cold_and_sidecar_unavailable` — architect-review P17: cold FX cache + sidecar 503 → preview returns 503 (NOT a 1.0 default — pre-trade with stale/no rate is dangerous). Response includes a `Retry-After` header consistent with the maintenance envelope.
 
 - [ ] **Step 2: Implement preview endpoint per spec §4 step ordering**
 
@@ -695,6 +976,7 @@ nonce — payload-locked, cannot be smuggled into POST."
 7. `test_place_idempotent_retry_returns_existing_row` — second POST with same `(account_id, client_order_id)` returns the first's row (R17 `submission_state="idempotent_retry"`).
 8. `test_place_sidecar_timeout_marks_pending_unknown` — sidecar 503/timeout → row stays `pending_submit`, response has `submission_state="pending_unknown"` (R1).
 9. `test_place_kill_switch_flipped_post_sidecar_attempts_cancel` — race: kill switch flipped after sidecar acked; backend best-effort `CancelOrder` (R6).
+10. `test_concurrent_post_with_same_nonce_one_succeeds_one_422` — architect-review P11: `asyncio.gather(*[post_orders(payload, nonce)] * 2)` — exactly one 200, exactly one 422 (Redis GETDEL race-safe).
 
 - [ ] **Step 2: Implement POST /orders**
 
@@ -783,12 +1065,13 @@ context endpoint (caps + simulator + trade_enabled + today's notional)."
 2. `test_cancel_partial_then_cancel_models_correctly` — partial fill in flight, cancel succeeds, status enum is `cancelled` with `filled_qty < qty` (R15).
 3. `test_cancel_idempotent_within_5s_returns_202` — second DELETE inside 5s of `cancel_requested_at` → 202 "already in flight" (R31).
 4. `test_cancel_after_5s_re_forwards_to_sidecar` — 6s later → forward CancelOrder again (R31 cooldown expired).
-5. `test_cancel_uses_for_update_row_lock` — SQL trace shows SELECT FOR UPDATE (test via `monkeypatch` of `session.execute` capturing SQL).
+5. `test_cancel_uses_for_update_nowait_row_lock` — SQL trace shows `SELECT ... FOR UPDATE NOWAIT` (architect-review P20: NOWAIT prevents blocking under contention).
 6. `test_cancel_forwards_account_number_and_broker_order_id` — sidecar mock asserts both fields populated.
+7. `test_cancel_under_lock_contention_returns_423` — architect-review P20: when row is already FOR UPDATE'd by another tx, `NOWAIT` raises `LockNotAvailable`; endpoint returns 423 (Locked) with retry guidance, NOT 500.
 
 - [ ] **Step 2: Implement DELETE endpoint** per spec §4 lines 330–336.
 
-`SELECT ... FOR UPDATE` lock on the row, terminal → 409, `cancel_requested_at` within 5s → 202, else `UPDATE orders SET cancel_requested_at = now()` + forward CancelOrder + return 202.
+`SELECT ... FOR UPDATE NOWAIT` lock on the row (architect-review P20), terminal → 409, `cancel_requested_at` within 5s → 202, else `UPDATE orders SET cancel_requested_at = now()` + forward CancelOrder + return 202. On `LockNotAvailable` from NOWAIT → 423 Locked with `Retry-After: 1`.
 
 - [ ] **Step 3: Run + commit**
 
@@ -865,15 +1148,17 @@ during reset windows."
 
 **Spec reference:** §4 lines 352–359; R10, R25, R26.
 
-- [ ] **Step 1: Write failing tests** (~7 tests)
+- [ ] **Step 1: Write failing tests** (~9 tests, architect-review P14+P15 added 8+9)
 
 1. `test_sse_headers` — `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, `Connection: keep-alive` all set.
 2. `test_sse_emits_id_event_data_format` — output matches `id: <int>\nevent: order.update\ndata: <json>\n\n`.
 3. `test_sse_heartbeat_every_10s` — fake clock; assert `: heartbeat\n\n` emitted at t=10s, t=20s (R10 — was 15s, dropped to 10s for CF Tunnel idle close).
-4. `test_sse_resume_via_last_event_id` — client provides `Last-Event-ID: 100`; backend replays `order_events WHERE id > 100` BEFORE tailing pubsub.
+4. `test_sse_resume_via_last_event_id_HEADER` — architect-review P14: explicitly use `httpx.AsyncClient(headers={"Last-Event-ID": "100"})`; backend reads from HTTP header (matches EventSource auto-reconnect spec). Replays `order_events WHERE id > 100` BEFORE tailing pubsub.
 5. `test_sse_scoped_subscription_account_only` — `?account_id=<uuid>` subscribes to `orders:events:account:<id>`; events for other accounts NOT delivered (R25).
 6. `test_sse_fleet_subscription_when_no_account_id` — no query param → subscribes to `orders:events:fleet`.
 7. `test_sse_closes_on_client_disconnect` — disconnecting client cancels the asyncio task cleanly within 1s.
+8. `test_sse_drops_slow_client_via_per_client_queue` — architect-review P15: per-client `asyncio.Queue(maxsize=1000)` overflows when client doesn't read; backend closes the connection cleanly with a final `event: error\ndata: {"reason":"slow_client"}` and increments `sse_dropped_clients_total`.
+9. `test_sse_decrements_active_gauge_on_disconnect` — `sse_active_connections` gauge increments on connect, decrements on disconnect, even when disconnect path is the slow-client drop.
 
 - [ ] **Step 2: Implement SSE endpoint**
 
@@ -895,15 +1180,89 @@ git commit -m "feat(backend): GET /api/orders/events SSE with Last-Event-ID resu
 10s heartbeat (R10 — CF Tunnel idle-close threshold). Scoped
 subscription via ?account_id= query param routes to either
 orders:events:account:<id> or orders:events:fleet (R25). Replays
-missed events from order_events WHERE id > Last-Event-ID before
-tailing live pubsub. sse_active_connections Prometheus gauge for
+missed events from order_events WHERE id > Last-Event-ID (read from
+the HTTP header per EventSource spec) before tailing live pubsub.
+Per-client asyncio.Queue(maxsize=1000) drops slow clients with a
+clean error event + counter, never starves siblings (architect-
+review P14+P15). sse_active_connections Prometheus gauge for
 capacity awareness (R26). Headers set X-Accel-Buffering: no for
 nginx + CF tunnel buffering off."
 ```
 
 ---
 
+### Task D7 — OpenAPI snapshot lock (5 named models)
+
+**Owner: Claude** (architect-review P6)
+
+**Files:**
+- Create: `backend/tests/api/test_openapi_snapshot.py`
+- Create: `backend/tests/fixtures/openapi-snapshot.json` (committed snapshot)
+
+**Spec reference:** §8 line 675 — "OpenAPI shape locked for OrderResponse + OrderListResponse + PreviewResponse + ContractSummary + PolicyResponse".
+
+- [ ] **Step 1: Generate the initial snapshot**
+
+```bash
+cd backend && uv run python -c "
+from app.main import app
+import json
+spec = app.openapi()
+# Extract just the 5 named models we care about
+models = {k: spec['components']['schemas'][k] for k in [
+    'OrderResponse', 'OrderListResponse', 'PreviewResponse',
+    'ContractSummary', 'PolicyResponse',
+]}
+with open('tests/fixtures/openapi-snapshot.json', 'w') as f:
+    json.dump(models, f, indent=2, sort_keys=True)
+"
+```
+
+- [ ] **Step 2: Write the snapshot diff test**
+
+```python
+def test_openapi_snapshot_unchanged():
+    spec = app.openapi()
+    actual = {k: spec["components"]["schemas"][k] for k in (
+        "OrderResponse", "OrderListResponse", "PreviewResponse",
+        "ContractSummary", "PolicyResponse",
+    )}
+    expected = json.loads(Path("tests/fixtures/openapi-snapshot.json").read_text())
+    if actual != expected:
+        pytest.fail(
+            "OpenAPI shape drift detected. If intentional, regen the snapshot "
+            "with: python -m app.scripts.regen_openapi_snapshot"
+        )
+```
+
+Provide an `app/scripts/regen_openapi_snapshot.py` matching Step 1 so operators have a one-liner to bless drifts.
+
+- [ ] **Step 3: Run + commit**
+
+```bash
+cd backend && uv run pytest tests/api/test_openapi_snapshot.py -v
+```
+
+Expected: 1 PASS.
+
+```bash
+git add backend/tests/api/test_openapi_snapshot.py \
+        backend/tests/fixtures/openapi-snapshot.json \
+        backend/app/scripts/regen_openapi_snapshot.py
+git commit -m "test(backend): OpenAPI snapshot lock for 5b wire models
+
+Architect-review P6: locks OrderResponse, OrderListResponse,
+PreviewResponse, ContractSummary, PolicyResponse so frontend +
+backend can't drift silently. Drift requires explicit
+regen_openapi_snapshot script invocation — intentional schema
+changes get a paper trail in PR diff."
+```
+
+---
+
 ## Chunk E — Background tasks (consumer + watchdog + reconciliation)
+
+**Architect-review P19 ordering note:** within Chunk E, implement E1 → E3 → E2. E2 (watchdog) feeds synthetic events into `_process_event` produced by the same path E3 (resync) uses; building E3 first means E2 lands against a fully-baked consumer, not a moving target.
 
 The async core that turns broker stream events into DB rows + Redis pubsub.
 
@@ -929,8 +1288,9 @@ The async core that turns broker stream events into DB rows + Redis pubsub.
 7. `test_account_added_spawns_new_child_stream` — `BrokerRegistry.account_changed` event with kind=add → new asyncio.Task created (R8).
 8. `test_account_removed_cancels_child_stream` — kind=remove → child task cancelled cleanly (R8).
 9. `test_one_stream_death_doesnt_affect_siblings` — per-account supervisor isolation.
+10. `test_raw_payload_account_field_redacted_in_logs` — architect-review P5: structlog processor scrubs `account`, `account_number`, `acctNumber` keys from any logged `raw_payload`. Use `structlog.testing.capture_logs()`; assert the captured event dicts contain `"<redacted>"` instead of the real account number when `raw_payload` is logged through the consumer's structured logger.
 
-- [ ] **Step 2: Implement consumer**
+- [ ] **Step 2: Implement consumer + structlog redaction (architect-review P5)**
 
 Materialize spec §5 verbatim:
 - `OrderEventConsumer` class with `start()`, `stop()`, `_supervisor()`, `_run_account_stream()`, `_process_event()`.
@@ -939,6 +1299,8 @@ Materialize spec §5 verbatim:
 - `asyncio.Lock` re-entrancy guard.
 - Prom counters: `broker_order_events_received_total{label}`, `broker_order_events_dropped_total{label, reason}`, `broker_order_event_lag_ms` histogram, `broker_order_stream_reconnects_total{label}`, `consumer_alive{label, account_id}` gauge.
 - Circuit breaker: 50 consecutive process_event failures → log + alert (R27).
+
+**Structlog redaction (architect-review P5):** extend `app/core/logging.py` redaction processor to scrub the keys `account`, `account_number`, `acctNumber` from any logged dict (recursively into `raw_payload`). Add a snapshot test that logs a Trade-shape dict and asserts `"<redacted>"` replacement. Document the new keys in `app/core/logging.py` docstring.
 
 Lifespan: after `build_broker_registry()` succeeds, instantiate consumer + `await consumer.start()`; in shutdown, `await consumer.stop()` with 30s graceful drain (R9).
 
@@ -987,6 +1349,7 @@ audit-only (R18 — order_id=NULL)."
 4. `test_watchdog_runs_every_30s` — fake clock, 2 ticks observed.
 5. `test_startup_reconciliation_runs_same_pass` — on lifespan startup, scan executes once before consumer streams open.
 6. `test_watchdog_uses_partial_index` — `EXPLAIN ANALYZE` shows `ix_orders_pending_submit_watchdog` is used.
+7. `test_watchdog_escalation_writes_audit_event_in_same_tx` — architect-review P13: 5-min orphan UPDATE-to-rejected MUST be paired with an `INSERT INTO order_events` row in the same transaction; assert atomicity (commit-or-rollback together) and that the audit row carries `status='rejected'`, `raw_payload.recovery_outcome='broker_no_match_after_5min'`.
 
 - [ ] **Step 2: Implement watchdog**
 
@@ -1092,7 +1455,7 @@ Pure data layer. Boundary discipline (per 5a R12) — services return data, hook
 Mirror backend Pydantic shapes:
 
 1. `test_preview_order_posts_correct_body` — fetch mock asserts JSON body shape.
-2. `test_place_order_generates_client_order_id_uuid4` — `orderService.placeOrder({...})` includes `client_order_id` matching UUID4 regex.
+2. `test_place_order_uses_caller_supplied_client_order_id` — architect-review P10: caller passes a stable `clientOrderId` (UUID4 generated by the modal); service forwards it verbatim. Service does NOT generate it.
 3. `test_cancel_order_posts_delete` — DELETE /api/orders/<id>.
 4. `test_search_contracts_factory_debounces_300ms` — `createDebouncedSearch` factory uses internal debounce timer.
 5. `test_search_contracts_aborts_in_flight_on_new_query` — AbortController cancels old fetch.
@@ -1102,9 +1465,11 @@ Mirror backend Pydantic shapes:
 
 - [ ] **Step 2: Implement service**
 
+**Important: types come from `frontend/src/services/api-generated.ts` (built by Task A0).** Hand-written `types.ts` re-exports the generated types and adds branded types (e.g. `DecimalString = string & { __brand: "DecimalString" }`) for compile-time safety.
+
 `services/orders.ts`:
 - `previewOrder(req: PreviewRequest): Promise<PreviewResponse>`
-- `placeOrder(req: PreviewRequest, nonce: string): Promise<PlaceResult>` — generates `client_order_id = crypto.randomUUID()` internally.
+- `placeOrder(req: PreviewRequest, nonce: string, clientOrderId: string): Promise<PlaceResult>` — **architect-review P10: caller supplies `clientOrderId` so the lifecycle is owned by the modal (stable across retries within one modal instance), NOT auto-generated per-call.**
 - `cancelOrder(id: string): Promise<void>`
 - `getOrders(opts?: {status?: string}): Promise<OrderListResult>` — returns `{orders, brokerMaintenance, killSwitchActive}`.
 - `getOrderById(id: string): Promise<OrderResponse>`
@@ -1314,6 +1679,13 @@ Tests:
 7. `idempotency_on_double_click` — clicking Confirm twice within 1s only calls placeOrder once (button disabled while in-flight).
 8. `503_maintenance_shows_retry_after_countdown` — error toast with countdown.
 9. `mobile_breakpoint_full_screen` — viewport <md → modal renders full-screen with bottom-sheet styles.
+10. `confirm_retry_after_network_error_uses_same_client_order_id` — architect-review P10: simulate network error on first Confirm; user clicks Confirm again; assert `placeOrder` is called twice with the SAME `clientOrderId` (idempotent retry; backend dedups on `(account_id, client_order_id)`).
+11. `escape_closes_modal_returns_focus_to_trigger` — architect-review P18 a11y: focus returns to the Trade button.
+12. `focus_trap_prevents_tab_out` — architect-review P18 a11y: Tab/Shift+Tab cycles within the modal.
+13. `aria_modal_true_on_dialog_container` — architect-review P18 a11y.
+14. `first_focusable_element_focused_on_open` — architect-review P18 a11y.
+
+`use-trade-ticket.ts` Zustand slice tracks `clientOrderId` (generated when modal opens, cleared on close); `TradeTicketModal` reads it on open and passes it to every `placeOrder` invocation within the same modal instance.
 
 Stories: `Empty`, `LimitOrderValid`, `MarketOrderValid`, `StopOrderValid`, `CapNearWarning`, `CapExceeded`, `MaintenanceBlocked`, `KillSwitchBlocked`.
 
@@ -1370,7 +1742,7 @@ Tests:
 5. `kill_switch_active_renders_red_banner` — sticky banner with "Trading paused by operator" copy.
 6. `maintenance_active_renders_amber_banner` — same envelope as 5a.
 
-Stories: `Empty`, `WithActiveOrders`, `WithFilledHistory`, `KillSwitchActive`, `MaintenanceWindow`.
+Stories: `Empty`, `WithActiveOrders`, `WithFilledHistory`, `KillSwitchActive`, `MaintenanceWindow`, `KillSwitchAndMaintenanceBoth` (architect-review P21: both banners stacked, verify z-order + precedence copy).
 
 - [ ] **Step 2: Extend OrdersPage**
 
@@ -1687,10 +2059,44 @@ Operator-driven: flip `app_config.broker.isa-paper.trade_enabled=true` (paper ac
 
 ## Self-review
 
-**Spec coverage:** §1 → covered (decisions baked into chunk wiring); §2 → A3; §3 → A1+A2; §4 → D1-D6; §5 → E1-E3 + H1; §6 → B1-B5; §7 → F1-F3 + G1-G4; §8 → tests embedded in every implementation task; §9 → H2; §10 → handoff in §11 close-out; §11 → R1-R39 traced through tasks (footnotes on each task).
+**Spec coverage:** §1 → covered (decisions baked into chunk wiring); §2 → A3; §3 → A1+A2; §4 → D1-D7; §5 → E1-E3 + H1; §6 → B1-B6; §7 → F1-F3 + G1-G4; §8 → tests embedded in every implementation task + dedicated D7 OpenAPI snapshot; §9 → H2; §10 → handoff in §11 close-out; §11 → R1-R39 traced through tasks; tooling promise in CLAUDE.md (gen-types.sh) addressed by A0; sidecar client extension by A4; shared mocks by A5.
 
 **Placeholder scan:** none. All bash commands are exact; all SQL/code references either inline or cite spec line numbers.
 
-**Type consistency:** `client_order_id` is UUID end-to-end; `broker_order_id` is `str` (IBKR permId); `notional` / `qty` / prices are decimal-as-string fixed-point 8 digits everywhere; `OrderResponse` shape is identical between backend D1-D3 and frontend F1-F2.
+**Type consistency:** `client_order_id` is UUID end-to-end (lifecycle pinned in F1+G2 to modal-instance-stable, NOT per-call); `broker_order_id` is `str` (IBKR permId); `notional` / `qty` / prices are decimal-as-string fixed-point 8 digits everywhere; `OrderResponse` shape is identical between backend D1-D3 and frontend F1-F2 because both consume the same OpenAPI snapshot (D7 lock + A0 generated types).
 
 **Spec gaps:** §10's "external orders" tab is a 5c deferral and not in this plan, matching spec §10. Phase 4.6 hide-flow integration: AccountPicker now needs a Trade button (G4) — added after self-review.
+
+---
+
+## §11 Architect-review applied (plan)
+
+The plan-level architect-review pass (2026-04-27) returned 4 CRITICAL + 8 HIGH + 9 MEDIUM + 3 LOW findings. All CRITICAL + HIGH findings are folded into this revision. MEDIUMs are addressed inline or explicitly noted as deferred. LOWs are deferred or noted.
+
+| ID | Severity | Topic | Resolution |
+|---|---|---|---|
+| P1 | CRITICAL | Missing task: extend `BrokerSidecarClient` with 4 new RPC methods | Inserted **Task A4** between A3 and B with 6 tests + implementation against existing client at `backend/app/services/brokers.py`. Pattern mirrors existing `get_orders` at line 145. |
+| P2 | (was CRITICAL — now resolved) | GetOrders RPC presence | Verified: already exists at `proto/broker/v1/broker.proto:23` and `BrokerSidecarClient.get_orders` at `services/brokers.py:145`. Plan note added after Task A3 confirming reuse, no new RPC needed. |
+| P3 | CRITICAL | A1 downgrade missing explicit `DROP TYPE` for the 4 enums | A1 step 2 now explicitly calls `op.execute("DROP TYPE order_status_enum")` ×4 in downgrade. A2 test 9 (`test_0004_downgrade_then_upgrade_round_trips_twice`) verifies idempotency. |
+| P4 | CRITICAL | A1↔A2 commit boundary contradicted dispatch flow | A1 step 4 changed to "DO NOT commit yet"; A2 step 3 is now a single combined `feat(backend): alembic 0004 + tests` commit. |
+| P5 | HIGH | Missing structlog redaction for `raw_payload.account` | E1 step 2 extends `app/core/logging.py` redaction processor to scrub `account`/`account_number`/`acctNumber`. New E1 test 10. |
+| P6 | HIGH | Missing OpenAPI snapshot lock | Inserted **Task D7** with snapshot fixture + diff test + regen script for the 5 named models. |
+| P7 | HIGH | `scripts/gen-types.sh` is a stub | Inserted **Task A0** to actually implement it + CI drift gate. F1 step 2 now consumes the generated `api-generated.ts`. |
+| P8 | HIGH | Missing shared sidecar mock fixture | Inserted **Task A5** with 5 reusable fixtures (`mock_sidecar_client`, `mock_sidecar_with_simulator`, `mock_sidecar_with_timeout`, `mock_sidecar_503`, `fake_order_event_stream`). |
+| P9 | HIGH | Critical gates omitted parallelism | Critical gates section expanded with explicit ordering rules + a "Parallel-safe pairs" table. |
+| P10 | HIGH | `client_order_id` lifecycle ambiguous | F1 step 2 + G2 test 10 + `use-trade-ticket.ts` slice pin: clientOrderId generated when modal opens, stored in Zustand, passed verbatim to every placeOrder invocation within that modal instance. |
+| P11 | HIGH | Missing concurrent-nonce-race test | D2 step 1 added test 10 (`test_concurrent_post_with_same_nonce_one_succeeds_one_422`). |
+| P12 | HIGH | Missing CI workflow update for real-IBKR gating | Inserted **Task B6** — `ci.yml` sets `REAL_IBKR=""`; new `pre-deploy-smoke.yml` is manual workflow_dispatch on a self-hosted NUC runner. |
+| P13 | MEDIUM | Watchdog escalation must write audit row in same tx | E2 added test 7 (`test_watchdog_escalation_writes_audit_event_in_same_tx`). |
+| P14 | MEDIUM | SSE Last-Event-ID HTTP header path unspecified | D6 test 4 renamed `_HEADER` and explicitly uses `httpx.AsyncClient(headers={...})`. |
+| P15 | MEDIUM | SSE slow-client backpressure unspecified | D6 step 1 added tests 8 + 9; per-client `asyncio.Queue(maxsize=1000)` + clean drop event + `sse_dropped_clients_total` counter. |
+| P16 | MEDIUM | A2 watchdog index test pinned existence only | A2 test 7 renamed `_pinned_to_created_at` and asserts `(created_at) WHERE (status = 'pending_submit'::order_status_enum)`. |
+| P17 | MEDIUM | D1 FX cache miss / sidecar-down fallback unspecified | D1 step 1 added test 8: cold FX cache + sidecar 503 → preview returns 503 (no 1.0 default). |
+| P18 | MEDIUM | G2 a11y missing | G2 step 1 added tests 11–14: focus-trap, escape-returns-focus, aria-modal, first-focusable. Mandatory `a11y-architect` review chain already declared. |
+| P19 | MEDIUM | E2/E3 ordering | Chunk E intro added explicit "implement E1 → E3 → E2" note. |
+| P20 | MEDIUM | D4 SELECT FOR UPDATE blocking risk | D4 step 1 test 5 renamed `_nowait`; new test 7 covers 423 Locked on contention; step 2 implementation switched to `FOR UPDATE NOWAIT`. |
+| P21 | MEDIUM | G3 Storybook combo missing | G3 stories list added `KillSwitchAndMaintenanceBoth`. |
+| P22 | MEDIUM | C1/C2/C3 parallelism implicit | "Parallel-safe pairs" table includes `C1 ⊥ C2 ⊥ C3`. |
+| P23 | LOW | F1/G1 debounce-test redundancy | Acknowledged; both kept (defense-in-depth) — F1 verifies factory contract, G1 verifies wiring. |
+| P24 | LOW | Codex/Claude fallback ownership | Owner & review chain section added explicit fallback line + commit-footer convention. |
+| P25 | LOW | H4 close-out simulator_only seed mention | H4 step 5 expanded under canary section to call out explicit row writes for ops audit-trail (still default-fallback safe). |
