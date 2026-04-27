@@ -28,7 +28,19 @@ interface AccountRowProps {
   account: Account;
   maintenance: FleetMaintenance;
   onSelect: (accountId: string) => void;
+  renderAccountAction?: AccountActionRenderer | undefined;
 }
+
+interface AccountPickerProps {
+  renderAccountAction?: AccountActionRenderer | undefined;
+}
+
+export interface AccountActionArgs {
+  account: Account;
+  maintenance: FleetMaintenance;
+}
+
+type AccountActionRenderer = (args: AccountActionArgs) => React.ReactNode;
 
 function formatCurrency(value: number, currency: string): string {
   return new Intl.NumberFormat(undefined, {
@@ -42,8 +54,10 @@ function AccountRowComponent({
   account,
   maintenance,
   onSelect,
+  renderAccountAction,
 }: AccountRowProps): React.JSX.Element {
   const cell = nlvCellState(account, maintenance);
+  const action = renderAccountAction?.({ account, maintenance });
 
   return (
     <DropdownMenuItem
@@ -68,6 +82,7 @@ function AccountRowComponent({
           ? cell.value
           : formatCurrency(cell.value, account.baseCurrency)}
       </span>
+      {action ? <span onPointerDown={(event) => event.stopPropagation()}>{action}</span> : null}
     </DropdownMenuItem>
   );
 }
@@ -80,10 +95,13 @@ const AccountRow = memo(
     prev.account.nlvAt?.getTime() === next.account.nlvAt?.getTime() &&
     prev.maintenance.active === next.maintenance.active &&
     prev.maintenance.window === next.maintenance.window &&
-    prev.maintenance.until?.getTime() === next.maintenance.until?.getTime(),
+    prev.maintenance.until?.getTime() === next.maintenance.until?.getTime() &&
+    prev.renderAccountAction === next.renderAccountAction,
 );
 
-export function AccountPicker(): React.JSX.Element {
+export function AccountPicker({
+  renderAccountAction,
+}: AccountPickerProps = {}): React.JSX.Element {
   const { useAccounts } = useActiveStores();
   const accounts = useAccounts((s) => s.accounts);
   const selectedAccountId = useAccounts((s) => s.selectedAccountId);
@@ -124,6 +142,7 @@ export function AccountPicker(): React.JSX.Element {
                   account={a}
                   maintenance={maintenance}
                   onSelect={select}
+                  renderAccountAction={renderAccountAction}
                 />
               ))}
             </React.Fragment>

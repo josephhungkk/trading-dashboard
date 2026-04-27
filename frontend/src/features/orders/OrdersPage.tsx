@@ -1,176 +1,488 @@
 import * as React from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
-import { Tabs, TabsList, TabsTrigger } from '@/components/primitives/Tabs';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogTitle,
+} from '@/components/primitives/Dialog';
 import { Badge } from '@/components/primitives/Badge';
-import { NumericCell } from '@/components/primitives/NumericCell';
+import { Button } from '@/components/primitives/Button';
 import { DataTable } from '@/components/patterns/DataTable';
 import { MobileCardRow } from '@/components/patterns/MobileCardRow/MobileCardRow';
-import { useActiveStores } from '@/stores/registry';
-import type { Order, OrderStatus, OrderSide } from '@/services/types';
+import { useToast } from '@/hooks/use-toast';
+import { useOrdersList } from '@/hooks/useOrdersList';
+import { useOrdersStream } from '@/hooks/useOrdersStream';
+import { cancelOrder } from '@/services/orders';
+import {
+  useOrdersStore,
+  type BrokerMaintenance as StoreBrokerMaintenance,
+  type OrderResponse as StoreOrderResponse,
+} from '@/stores/global/orders';
 
-type TabKey = 'open' | 'filled' | 'cancelled' | 'all';
+type UiOrderStatus =
+  | 'pending_submit'
+  | 'pending'
+  | 'submitted'
+  | 'partial'
+  | 'filled'
+  | 'cancelled'
+  | 'rejected'
+  | 'expired'
+  | 'inactive'
+  | 'open';
 
-const TAB_ORDER: readonly TabKey[] = ['open', 'filled', 'cancelled', 'all'] as const;
+interface UiOrder {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL' | 'buy' | 'sell';
+  qty: string;
+  orderType: string;
+  status: UiOrderStatus;
+  filledQty: string;
+  avgFillPrice: string | null;
+  createdAt: string;
+  lastEventAt: string | null;
+}
 
-/**
- * Orders page — 4 tabs (Open / Filled / Cancelled / All) over a virtualized
- * DataTable with a mobile card fallback. Open tab includes both `open` and
- * `partial` order statuses.
- */
-export function OrdersPage(): React.JSX.Element {
-  const { useOrders } = useActiveStores();
-  const orders = useOrders((s) => s.orders);
-  const [tab, setTab] = React.useState<TabKey>('open');
+interface OrdersPageStorySnapshot {
+  orders: StoreOrderResponse[];
+  killSwitchActive?: boolean;
+  brokerMaintenance?: StoreBrokerMaintenance | null;
+}
 
-  const filtered = React.useMemo(() => filterOrdersByTab(orders, tab), [orders, tab]);
+interface OrdersPageProps {
+  storySnapshot?: OrdersPageStorySnapshot;
+}
+
+const ACTIVE_STATUSES = new Set<UiOrderStatus>(['pending_submit', 'pending', 'submitted', 'partial', 'open']);
+const TERMINAL_STATUSES = new Set<UiOrderStatus>(['filled', 'cancelled', 'rejected', 'expired']);
+const HISTORY_PAGE_SIZE = 5;
+
+export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.Element {
+  const { fetchAndSync, isLoading, error } = useOrdersList();
+  useOrdersStream();
+
+  const { toast } = useToast();
+  const ordersById = useOrdersStore((s) => s.orders);
+  const killSwitchActive = useOrdersStore((s) => s.killSwitchActive);
+  const brokerMaintenance = useOrdersStore((s) => s.brokerMaintenance);
+  const [historyPage, setHistoryPage] = React.useState(0);
+  const [orderToCancel, setOrderToCancel] = React.useState<UiOrder | null>(null);
+  const [cancelInFlight, setCancelInFlight] = React.useState(false);
+
+  React.useEffect(() => {
+    if (storySnapshot) {
+      const store = useOrdersStore.getState();
+      store.clear();
+      for (const order of storySnapshot.orders) store.addOrder(order);
+      store.setKillSwitchActive(storySnapshot.killSwitchActive ?? false);
+      store.setBrokerMaintenance(storySnapshot.brokerMaintenance ?? null);
+      return;
+    }
+    void fetchAndSync();
+  }, [fetchAndSync, storySnapshot]);
+
+  const orders = React.useMemo(
+    () => Object.values(ordersById).map(normalizeOrder).sort(compareOrdersDesc),
+    [ordersById],
+  );
+  const activeOrders = React.useMemo(
+    () => orders.filter((order) => ACTIVE_STATUSES.has(order.status)),
+    [orders],
+  );
+  const historyOrders = React.useMemo(
+    () => orders.filter((order) => TERMINAL_STATUSES.has(order.status)),
+    [orders],
+  );
+  const pageCount = Math.max(1, Math.ceil(historyOrders.length / HISTORY_PAGE_SIZE));
+  const clampedHistoryPage = Math.min(historyPage, pageCount - 1);
+  const visibleHistory = historyOrders.slice(
+    clampedHistoryPage * HISTORY_PAGE_SIZE,
+    clampedHistoryPage * HISTORY_PAGE_SIZE + HISTORY_PAGE_SIZE,
+  );
+
+  const columns = React.useMemo(
+    () => createOrderColumns((order) => setOrderToCancel(order)),
+    [],
+  );
+
+  async function handleConfirmCancel(): Promise<void> {
+    if (!orderToCancel) return;
+
+    setCancelInFlight(true);
+    try {
+      await cancelOrder(orderToCancel.id);
+      toast({ title: 'Cancel requested', description: `Order #${orderToCancel.id}`, tone: 'success' });
+      setOrderToCancel(null);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      toast({ title: 'Cancel failed', description: message, tone: 'error' });
+    } finally {
+      setCancelInFlight(false);
+    }
+  }
 
   return (
-    <section className="flex h-full flex-col gap-3 p-4" aria-label="Orders">
+    <section className="flex h-full flex-col gap-4 p-4" aria-label="Orders">
       <header className="flex items-baseline justify-between">
         <h2 className="text-lg font-semibold text-fg">Orders</h2>
-        <p className="text-xs text-fg-muted">{filtered.length} order(s)</p>
+        <p className="text-xs text-fg-muted">
+          {activeOrders.length} active / {historyOrders.length} history
+        </p>
       </header>
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as TabKey)}>
-        <TabsList>
-          {TAB_ORDER.map((k) => (
-            <TabsTrigger key={k} value={k}>
-              {labelForTab(k)}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </Tabs>
+      <BannerStack
+        killSwitchActive={killSwitchActive}
+        maintenanceActive={brokerMaintenance?.active === true}
+        maintenanceWindow={brokerMaintenance?.window ?? null}
+        maintenanceUntil={brokerMaintenance?.until ?? null}
+      />
 
-      <div
-        className="h-[calc(100vh-14rem)] rounded-lg border border-border bg-panel"
-        role="tabpanel"
-        aria-label={`${labelForTab(tab)} orders`}
-      >
-        <DataTable<Order>
-          columns={ORDER_COLUMNS}
-          data={filtered}
-          rowKey={(o) => o.id}
-          mobileRow={(o) => (
-            <MobileCardRow
-              primary={o.symbol}
-              secondary={`${o.orderType} · ${o.side}`}
-              metrics={[
-                { label: 'Qty', value: formatOrderQty(o) },
-                { label: 'Status', value: o.status },
-                { label: 'Time', value: formatTime(o.createdAt) },
-              ]}
-            />
-          )}
+      {error ? (
+        <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-fg" role="alert">
+          {error.message}
+        </p>
+      ) : null}
+
+      <OrderSection
+        title="Active orders"
+        description={isLoading ? 'Loading orders' : `${activeOrders.length} order(s)`}
+        tableLabel="Active orders table"
+        emptyText="No active orders"
+        columns={columns}
+        orders={activeOrders}
+      />
+
+      <section className="flex min-h-0 flex-1 flex-col gap-2" aria-label="Recent history">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-fg">Recent history</h3>
+            <p className="text-xs text-fg-muted">{historyOrders.length} terminal order(s)</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setHistoryPage((page) => Math.max(0, page - 1))}
+              disabled={clampedHistoryPage === 0}
+            >
+              Previous
+            </Button>
+            <span className="min-w-12 text-center text-xs text-fg-muted">
+              {clampedHistoryPage + 1} / {pageCount}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setHistoryPage((page) => Math.min(Math.max(0, pageCount - 1), page + 1))}
+              disabled={clampedHistoryPage >= pageCount - 1}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
+
+        <OrderTable
+          ariaLabel="Recent history table"
+          emptyText="No recent history"
+          columns={columns}
+          orders={visibleHistory}
         />
-      </div>
+      </section>
+
+      <CancelDialog
+        order={orderToCancel}
+        inFlight={cancelInFlight}
+        onOpenChange={(open) => {
+          if (!open && !cancelInFlight) setOrderToCancel(null);
+        }}
+        onConfirm={() => { void handleConfirmCancel(); }}
+      />
     </section>
   );
 }
 
-function labelForTab(k: TabKey): string {
-  if (k === 'open') return 'Open';
-  if (k === 'filled') return 'Filled';
-  if (k === 'cancelled') return 'Cancelled';
-  return 'All';
+function BannerStack({
+  killSwitchActive,
+  maintenanceActive,
+  maintenanceWindow,
+  maintenanceUntil,
+}: {
+  killSwitchActive: boolean;
+  maintenanceActive: boolean;
+  maintenanceWindow: string | null;
+  maintenanceUntil: string | null;
+}): React.JSX.Element | null {
+  if (!killSwitchActive && !maintenanceActive) return null;
+
+  return (
+    <div className="sticky top-0 z-20 flex flex-col gap-2">
+      {killSwitchActive ? (
+        <div className="rounded-md border border-destructive/60 bg-destructive/20 p-3 text-sm font-semibold text-fg" role="alert">
+          Trading paused by operator
+        </div>
+      ) : null}
+      {maintenanceActive ? (
+        <div className="rounded-md border border-warning/60 bg-warning/20 p-3 text-sm font-semibold text-fg" role="status">
+          Broker maintenance active{maintenanceWindow ? `: ${maintenanceWindow}` : ''}
+          {maintenanceUntil ? ` until ${formatDateTime(maintenanceUntil)}` : ''}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
-export function filterOrdersByTab(orders: readonly Order[], tab: TabKey): Order[] {
-  if (tab === 'all') return [...orders];
-  if (tab === 'open') return orders.filter((o) => o.status === 'open' || o.status === 'partial');
-  return orders.filter((o) => o.status === tab);
+function OrderSection({
+  title,
+  description,
+  tableLabel,
+  emptyText,
+  columns,
+  orders,
+}: {
+  title: string;
+  description: string;
+  tableLabel: string;
+  emptyText: string;
+  columns: ColumnDef<UiOrder>[];
+  orders: UiOrder[];
+}): React.JSX.Element {
+  return (
+    <section className="flex min-h-0 flex-1 flex-col gap-2" aria-label={title}>
+      <div>
+        <h3 className="text-sm font-semibold text-fg">{title}</h3>
+        <p className="text-xs text-fg-muted">{description}</p>
+      </div>
+      <OrderTable ariaLabel={tableLabel} emptyText={emptyText} columns={columns} orders={orders} />
+    </section>
+  );
 }
 
-function formatOrderQty(o: Order): string {
-  if (o.status === 'partial') return `${formatNum(o.filledQty)}/${formatNum(o.qty)}`;
-  return formatNum(o.qty);
+function OrderTable({
+  ariaLabel,
+  emptyText,
+  columns,
+  orders,
+}: {
+  ariaLabel: string;
+  emptyText: string;
+  columns: ColumnDef<UiOrder>[];
+  orders: UiOrder[];
+}): React.JSX.Element {
+  return (
+    <div className="min-h-0 flex-1 rounded-lg border border-border bg-panel" aria-label={ariaLabel}>
+      {orders.length === 0 ? (
+        <div className="flex h-full min-h-32 items-center justify-center text-sm text-fg-muted">
+          {emptyText}
+        </div>
+      ) : (
+        <DataTable<UiOrder>
+          columns={columns}
+          data={orders}
+          rowKey={(order) => order.id}
+          mobileRow={(order) => (
+            <MobileCardRow
+              primary={order.symbol}
+              secondary={`${order.orderType} · ${order.side}`}
+              metrics={[
+                { label: 'Qty', value: order.qty },
+                { label: 'Filled', value: order.filledQty },
+                { label: 'Status', value: order.status },
+              ]}
+            />
+          )}
+        />
+      )}
+    </div>
+  );
 }
 
-function formatNum(n: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(n);
+function CancelDialog({
+  order,
+  inFlight,
+  onOpenChange,
+  onConfirm,
+}: {
+  order: UiOrder | null;
+  inFlight: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}): React.JSX.Element {
+  return (
+    <Dialog open={order !== null} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogTitle>Cancel order #{order?.id}?</DialogTitle>
+        <DialogDescription>
+          This sends a cancel request to the broker. The row will update when the order stream confirms the change.
+        </DialogDescription>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button type="button" variant="outline" disabled={inFlight}>Keep order</Button>
+          </DialogClose>
+          <Button type="button" variant="destructive" onClick={onConfirm} disabled={inFlight}>
+            {inFlight ? 'Cancelling' : 'Confirm cancel'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
-function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString();
-  } catch {
-    return iso;
+function createOrderColumns(onCancel: (order: UiOrder) => void): ColumnDef<UiOrder>[] {
+  return [
+    {
+      accessorKey: 'id',
+      header: 'ID',
+      cell: (info) => <span className="font-mono text-xs text-fg">{info.getValue<string>()}</span>,
+    },
+    {
+      accessorKey: 'symbol',
+      header: 'symbol',
+      cell: (info) => <span className="font-mono text-fg">{info.getValue<string>()}</span>,
+    },
+    {
+      accessorKey: 'side',
+      header: 'side',
+      cell: (info) => {
+        const side = info.getValue<UiOrder['side']>();
+        return <Badge variant={sideVariant(side)}>{side}</Badge>;
+      },
+    },
+    {
+      accessorKey: 'qty',
+      header: 'qty',
+      cell: (info) => <span className="font-mono tabular-nums">{info.getValue<string>()}</span>,
+    },
+    {
+      accessorKey: 'orderType',
+      header: 'type',
+      cell: (info) => <span className="text-fg-muted">{info.getValue<string>()}</span>,
+    },
+    {
+      accessorKey: 'status',
+      header: 'status',
+      cell: (info) => {
+        const status = info.getValue<UiOrderStatus>();
+        return <Badge variant={statusVariant(status)}>{status}</Badge>;
+      },
+    },
+    {
+      accessorKey: 'filledQty',
+      header: 'filled_qty',
+      cell: (info) => <span className="font-mono tabular-nums">{info.getValue<string>()}</span>,
+    },
+    {
+      accessorKey: 'avgFillPrice',
+      header: 'avg_fill_price',
+      cell: (info) => {
+        const value = info.getValue<string | null>();
+        return <span className="font-mono tabular-nums text-fg-muted">{value ?? '-'}</span>;
+      },
+    },
+    {
+      id: 'cancel',
+      header: 'Cancel',
+      cell: (info) => {
+        const order = info.row.original;
+        const disabled = TERMINAL_STATUSES.has(order.status);
+        return (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onCancel(order)}
+            disabled={disabled}
+            aria-label={`Cancel order ${order.id}`}
+          >
+            Cancel
+          </Button>
+        );
+      },
+    },
+  ];
+}
+
+function normalizeOrder(order: StoreOrderResponse): UiOrder {
+  return {
+    id: String(order.id),
+    symbol: readString(order, 'symbol', '-'),
+    side: normalizeSide(readString(order, 'side', 'BUY')),
+    qty: readString(order, 'qty', '0'),
+    orderType: readString(order, 'order_type', readString(order, 'orderType', 'MARKET')),
+    status: normalizeStatus(readString(order, 'status', 'submitted')),
+    filledQty: readString(order, 'filled_qty', readString(order, 'filledQty', '0')),
+    avgFillPrice: readNullableString(order, 'avg_fill_price') ?? readNullableString(order, 'avgFillPrice'),
+    createdAt: readString(order, 'created_at', readString(order, 'createdAt', '')),
+    lastEventAt: readNullableString(order, 'last_event_at') ?? readNullableString(order, 'updated_at'),
+  };
+}
+
+function readString(order: StoreOrderResponse, key: string, fallback: string): string {
+  const value = order[key];
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  return fallback;
+}
+
+function readNullableString(order: StoreOrderResponse, key: string): string | null {
+  const value = order[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  return null;
+}
+
+function normalizeSide(value: string): UiOrder['side'] {
+  if (value === 'SELL' || value === 'sell') return value;
+  return value === 'buy' ? 'buy' : 'BUY';
+}
+
+function normalizeStatus(value: string): UiOrderStatus {
+  if (
+    value === 'pending_submit' ||
+    value === 'pending' ||
+    value === 'submitted' ||
+    value === 'partial' ||
+    value === 'filled' ||
+    value === 'cancelled' ||
+    value === 'rejected' ||
+    value === 'expired' ||
+    value === 'inactive' ||
+    value === 'open'
+  ) {
+    return value;
   }
+  return 'submitted';
 }
 
-function sideVariant(side: OrderSide): 'up' | 'down' {
-  return side === 'buy' ? 'up' : 'down';
+function compareOrdersDesc(a: UiOrder, b: UiOrder): number {
+  return orderTime(b) - orderTime(a);
 }
 
-function statusVariant(
-  status: OrderStatus,
-): 'up' | 'down' | 'warn' | 'neutral' {
+function orderTime(order: UiOrder): number {
+  const value = order.lastEventAt ?? order.createdAt;
+  const time = Date.parse(value);
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function sideVariant(side: UiOrder['side']): 'up' | 'down' {
+  return side.toLowerCase() === 'buy' ? 'up' : 'down';
+}
+
+function statusVariant(status: UiOrderStatus): 'up' | 'down' | 'warn' | 'neutral' {
   if (status === 'filled') return 'up';
   if (status === 'cancelled' || status === 'rejected' || status === 'expired') return 'down';
-  if (status === 'partial') return 'warn';
+  if (status === 'partial' || status === 'pending' || status === 'pending_submit') return 'warn';
   return 'neutral';
 }
 
-const ORDER_COLUMNS: ColumnDef<Order>[] = [
-  {
-    accessorKey: 'symbol',
-    header: 'Symbol',
-    enableSorting: true,
-    cell: (info) => (
-      <span className="font-mono text-fg">{info.getValue<string>()}</span>
-    ),
-  },
-  {
-    accessorKey: 'side',
-    header: 'Side',
-    cell: (info) => {
-      const v = info.getValue<OrderSide>();
-      return <Badge variant={sideVariant(v)}>{v}</Badge>;
-    },
-  },
-  {
-    accessorKey: 'qty',
-    header: 'Qty',
-    cell: (info) => (
-      <span className="font-mono tabular-nums text-right inline-block">
-        {formatOrderQty(info.row.original)}
-      </span>
-    ),
-  },
-  {
-    accessorKey: 'orderType',
-    header: 'Type',
-    cell: (info) => <span className="text-fg-muted">{info.getValue<string>()}</span>,
-  },
-  {
-    id: 'limit',
-    header: 'Limit/Stop',
-    cell: (info) => {
-      const o = info.row.original;
-      const v = o.limitPx ?? o.stopPx;
-      if (v == null) return <span className="text-fg-muted">—</span>;
-      return <NumericCell value={v} format="number" digits={2} />;
-    },
-  },
-  {
-    accessorKey: 'status',
-    header: 'Status',
-    cell: (info) => {
-      const v = info.getValue<OrderStatus>();
-      return <Badge variant={statusVariant(v)}>{v}</Badge>;
-    },
-  },
-  {
-    accessorKey: 'createdAt',
-    header: 'Created',
-    cell: (info) => {
-      const v = info.getValue<string>();
-      let text = v;
-      try {
-        text = new Date(v).toLocaleString();
-      } catch {
-        /* keep ISO fallback */
-      }
-      return <span className="text-fg-muted">{text}</span>;
-    },
-  },
-];
+function formatDateTime(iso: string): string {
+  const time = Date.parse(iso);
+  if (Number.isNaN(time)) return iso;
+  return new Date(time).toLocaleString();
+}

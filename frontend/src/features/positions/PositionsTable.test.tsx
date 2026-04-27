@@ -1,18 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import {
-  RouterProvider,
-  createRootRoute,
-  createRoute,
-  createRouter,
-  createMemoryHistory,
-  Outlet,
-} from '@tanstack/react-router';
-import { PositionsPage } from './PositionsPage';
+import { PositionsTable } from './PositionsTable';
 import { useModeStore } from '@/stores/global/mode';
+import { useFleetMaintenance } from '@/stores/global/fleet-maintenance';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
-import { useFleetMaintenance } from '@/stores/global/fleet-maintenance';
 import { ACCOUNTS } from '@/services/fixtures';
 
 class ResizeObserverStub {
@@ -20,6 +12,7 @@ class ResizeObserverStub {
   unobserve(): void { /* noop */ }
   disconnect(): void { /* noop */ }
 }
+
 (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
 
 Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
@@ -51,6 +44,7 @@ function mkMql(matches: boolean, q: string): MediaQueryList {
     dispatchEvent: () => false,
   } as unknown as MediaQueryList;
 }
+
 window.matchMedia = (q: string) => mkMql(q.includes('min-width'), q);
 
 function mockPolicy(enabledByAccount: Record<string, boolean>): void {
@@ -66,22 +60,7 @@ function mockPolicy(enabledByAccount: Record<string, boolean>): void {
   vi.stubGlobal('fetch', fetchPolicy);
 }
 
-function renderPage(): void {
-  const rootRoute = createRootRoute({ component: () => <Outlet /> });
-  const positionsRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: '/positions',
-    component: PositionsPage,
-  });
-  const routeTree = rootRoute.addChildren([positionsRoute]);
-  const router = createRouter({
-    routeTree,
-    history: createMemoryHistory({ initialEntries: ['/positions'] }),
-  });
-  render(<RouterProvider router={router as never} />);
-}
-
-describe('PositionsPage', () => {
+describe('PositionsTable trade entry point', () => {
   beforeEach(async () => {
     mockPolicy({});
     useFleetMaintenance.setState({
@@ -98,32 +77,16 @@ describe('PositionsPage', () => {
     );
   });
 
-  it('renders an account group heading for each paper account', async () => {
-    renderPage();
-    expect(await screen.findByRole('heading', { level: 3, name: /IBKR Paper 1/ })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 3, name: /Futu Paper 1/ })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 3, name: /Schwab Paper 1/ })).toBeInTheDocument();
+  it('renders trade buttons for position rows', async () => {
+    render(<PositionsTable />);
+    expect(await screen.findAllByRole('button', { name: 'Trade' })).not.toHaveLength(0);
   });
 
-  it('renders positions and P&L column header', async () => {
-    renderPage();
-    expect(await screen.findByText(/15 position\(s\) across 3 account\(s\)/)).toBeInTheDocument();
-    expect(screen.getAllByText('P&L (Unreal.)').length).toBeGreaterThan(0);
-  });
-
-  it('applies negative tone class for losers (e.g. AMZN pnlUnrealized -150)', async () => {
-    renderPage();
-    await screen.findByText('GOOGL');
-    const negatives = document.querySelectorAll('.text-negative');
-    expect(negatives.length).toBeGreaterThan(0);
-  });
-
-  it('renders trade buttons and disables them during maintenance', async () => {
-    mockPolicy({});
+  it('disables row trade buttons during maintenance', async () => {
     useFleetMaintenance.setState({
       maintenance: { active: true, window: 'daily', until: null },
     });
-    renderPage();
+    render(<PositionsTable />);
     await waitFor(() => {
       expect(screen.getAllByRole('button', { name: 'Trade' })[0]).toHaveAttribute(
         'title',

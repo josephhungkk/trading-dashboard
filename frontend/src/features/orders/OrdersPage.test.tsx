@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RouterProvider,
   createRootRoute,
@@ -9,11 +9,21 @@ import {
   createMemoryHistory,
   Outlet,
 } from '@tanstack/react-router';
+import { Toaster } from '@/components/primitives/Toast';
+import { useToastStore } from '@/hooks/use-toast';
+import { cancelOrder, getOrders } from '@/services/orders';
+import type { BrokerMaintenance, DecimalString, OrderResponse } from '@/services/types';
+import { useOrdersStore } from '@/stores/global/orders';
 import { OrdersPage } from './OrdersPage';
-import { useModeStore } from '@/stores/global/mode';
-import { getBothScopes } from '@/stores/registry';
-import { getServices, resetServices } from '@/services/registry';
-import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
+
+vi.mock('@/services/orders', async () => {
+  const actual = await vi.importActual<typeof import('@/services/orders')>('@/services/orders');
+  return {
+    ...actual,
+    getOrders: vi.fn(),
+    cancelOrder: vi.fn(),
+  };
+});
 
 class ResizeObserverStub {
   observe(): void { /* noop */ }
@@ -21,6 +31,19 @@ class ResizeObserverStub {
   disconnect(): void { /* noop */ }
 }
 (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
+
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+
+  onerror: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onopen: ((event: Event) => void) | null = null;
+  close = vi.fn();
+
+  constructor(public readonly url: string) {
+    MockEventSource.instances.push(this);
+  }
+}
 
 Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
   configurable: true,
@@ -53,6 +76,59 @@ function mkMql(matches: boolean, q: string): MediaQueryList {
 }
 window.matchMedia = (q: string) => mkMql(q.includes('min-width'), q);
 
+const mockGetOrders = vi.mocked(getOrders);
+const mockCancelOrder = vi.mocked(cancelOrder);
+const originalEventSource = globalThis.EventSource;
+
+function decimal(value: string): DecimalString {
+  return value as DecimalString;
+}
+
+function maintenance(overrides: Partial<BrokerMaintenance> = {}): BrokerMaintenance {
+  return {
+    active: false,
+    window: null,
+    until: null,
+    ...overrides,
+  };
+}
+
+function order(overrides: Partial<OrderResponse> = {}): OrderResponse {
+  return {
+    id: 'ord-1',
+    account_id: 'acct-1',
+    broker_order_id: 'broker-1',
+    symbol: 'AAPL',
+    side: 'BUY',
+    order_type: 'LIMIT',
+    tif: 'DAY',
+    qty: decimal('10'),
+    limit_price: decimal('100'),
+    stop_price: null,
+    status: 'submitted',
+    filled_qty: decimal('0'),
+    avg_fill_price: null,
+    notional: decimal('1000'),
+    created_at: '2026-04-27T08:00:00Z',
+    updated_at: '2026-04-27T08:00:00Z',
+    last_event_at: '2026-04-27T08:00:00Z',
+    submission_state: 'submitted',
+    events: [],
+    ...overrides,
+  };
+}
+
+function mockList(
+  orders: OrderResponse[],
+  opts: { killSwitchActive?: boolean; brokerMaintenance?: BrokerMaintenance } = {},
+): void {
+  mockGetOrders.mockResolvedValue({
+    orders,
+    brokerMaintenance: opts.brokerMaintenance ?? maintenance(),
+    killSwitchActive: opts.killSwitchActive ?? false,
+  });
+}
+
 function renderPage(): void {
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
   const ordersRoute = createRoute({
@@ -65,41 +141,132 @@ function renderPage(): void {
     routeTree,
     history: createMemoryHistory({ initialEntries: ['/orders'] }),
   });
-  render(<RouterProvider router={router as never} />);
+  render(
+    <>
+      <RouterProvider router={router as never} />
+      <Toaster />
+    </>,
+  );
 }
 
 describe('OrdersPage', () => {
-  beforeEach(async () => {
-    resetServices();
-    const { live, paper } = getBothScopes();
-    live.suspend();
-    paper.suspend();
-    useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    MockEventSource.instances = [];
+    globalThis.EventSource = MockEventSource as unknown as typeof EventSource;
+    useOrdersStore.getState().clear();
+    useToastStore.setState({ items: [] });
+    mockCancelOrder.mockResolvedValue(undefined);
   });
 
-  it('renders the four tab triggers', async () => {
+  afterEach(() => {
+    globalThis.EventSource = originalEventSource;
+    useOrdersStore.getState().clear();
+    useToastStore.setState({ items: [] });
+  });
+
+  it('active_orders_table_renders_pending_submitted_partial', async () => {
+    mockList([
+      order({ id: 'ord-pending', symbol: 'MSFT', status: 'pending_submit' }),
+      order({ id: 'ord-submitted', symbol: 'AAPL', status: 'submitted' }),
+      order({ id: 'ord-partial', symbol: 'NVDA', status: 'partial', filled_qty: decimal('2') }),
+      order({ id: 'ord-filled', symbol: 'KO', status: 'filled', filled_qty: decimal('10') }),
+      order({ id: 'ord-cancelled', symbol: 'TSLA', status: 'cancelled' }),
+    ]);
+
     renderPage();
-    expect(await screen.findByRole('tab', { name: 'Open' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Filled' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Cancelled' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument();
+
+    const active = await screen.findByLabelText('Active orders table');
+    expect(within(active).getByText('MSFT')).toBeInTheDocument();
+    expect(within(active).getByText('AAPL')).toBeInTheDocument();
+    expect(within(active).getByText('NVDA')).toBeInTheDocument();
+    expect(within(active).queryByText('KO')).not.toBeInTheDocument();
+    expect(within(active).queryByText('TSLA')).not.toBeInTheDocument();
   });
 
-  it('renders DataTable column headers', async () => {
+  it('cancel_button_disabled_for_terminal_status', async () => {
+    mockList([
+      order({ id: 'ord-filled', symbol: 'FILLED', status: 'filled' }),
+      order({ id: 'ord-cancelled', symbol: 'CANCELLED', status: 'cancelled' }),
+      order({ id: 'ord-rejected', symbol: 'REJECTED', status: 'rejected' }),
+      order({ id: 'ord-expired', symbol: 'EXPIRED', status: 'expired' }),
+    ]);
+
     renderPage();
-    expect(await screen.findByText('Symbol')).toBeInTheDocument();
-    expect(screen.getByText('Side')).toBeInTheDocument();
-    expect(screen.getByText('Status')).toBeInTheDocument();
-    expect(screen.getByText('Created')).toBeInTheDocument();
+
+    await screen.findByLabelText('Recent history table');
+    expect(screen.getByRole('button', { name: 'Cancel order ord-filled' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel order ord-cancelled' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel order ord-rejected' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel order ord-expired' })).toBeDisabled();
   });
 
-  it('filters rows by tab — switching to Filled shows a filled order', async () => {
+  it('cancel_button_calls_DELETE_then_shows_toast', async () => {
     const user = userEvent.setup();
+    mockList([order({ id: 'ord-delete', symbol: 'AAPL', status: 'submitted' })]);
+
     renderPage();
-    const filledTab = await screen.findByRole('tab', { name: 'Filled' });
-    await user.click(filledTab);
-    // Paper-mode filled orders include 'KO' (ord-009) and '7203' (ord-010).
-    expect(await screen.findByText('KO')).toBeInTheDocument();
+
+    await user.click(await screen.findByRole('button', { name: 'Cancel order ord-delete' }));
+    expect(await screen.findByText('Cancel order #ord-delete?')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Confirm cancel' }));
+
+    await waitFor(() => expect(mockCancelOrder).toHaveBeenCalledWith('ord-delete'));
+    expect(await screen.findByText('Cancel requested')).toBeInTheDocument();
+  });
+
+  it('sse_event_updates_row_in_place', async () => {
+    mockList([order({ id: 'ord-stream', symbol: 'AAPL', status: 'submitted', filled_qty: decimal('0') })]);
+
+    renderPage();
+
+    expect(await screen.findByText('submitted')).toBeInTheDocument();
+    expect(screen.getByText('0')).toBeInTheDocument();
+
+    act(() => {
+      MockEventSource.instances[0]?.onmessage?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            id: 'ord-stream',
+            status: 'partial',
+            filled_qty: '4',
+            last_event_at: '2026-04-27T08:01:00Z',
+          }),
+        }),
+      );
+    });
+
+    expect(await screen.findByText('partial')).toBeInTheDocument();
+    expect(screen.getByText('4')).toBeInTheDocument();
+    expect(mockGetOrders).toHaveBeenCalledTimes(1);
+  });
+
+  it('kill_switch_active_renders_red_banner', async () => {
+    mockList([], { killSwitchActive: true });
+
+    renderPage();
+
+    const banner = await screen.findByText('Trading paused by operator');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveClass('bg-destructive/20');
+    expect(banner.parentElement).toHaveClass('sticky');
+  });
+
+  it('maintenance_active_renders_amber_banner', async () => {
+    mockList([], {
+      brokerMaintenance: maintenance({
+        active: true,
+        window: 'daily',
+        until: '2026-04-27T22:00:00Z',
+      }),
+    });
+
+    renderPage();
+
+    const banner = await screen.findByText(/Broker maintenance active/);
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveClass('bg-warning/20');
   });
 });

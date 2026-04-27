@@ -5,7 +5,7 @@ import { AccountPicker } from './AccountPicker';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
-import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
+import { ACCOUNTS } from '@/services/fixtures';
 
 function stubRadixPointer(): void {
   const proto = Element.prototype as unknown as Record<string, unknown>;
@@ -32,7 +32,10 @@ describe('AccountPicker', () => {
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
+    await paper.hydrate(
+      getServices(),
+      async (mode) => ACCOUNTS.filter((account) => account.mode === mode),
+    );
   });
 
   it('renders selected account alias in trigger when hydrated', () => {
@@ -55,6 +58,19 @@ describe('AccountPicker', () => {
     await user.click(screen.getByRole('button'));
     const menuItems = screen.getAllByRole('menuitem');
     expect(menuItems.length).toBeGreaterThan(0);
+  });
+
+  it('renders optional row actions without importing feature controls', async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountPicker
+        renderAccountAction={({ account }) => (
+          <button type="button">Action {account.alias}</button>
+        )}
+      />,
+    );
+    await user.click(screen.getByRole('button'));
+    expect(screen.getAllByRole('button', { name: /^Action / }).length).toBeGreaterThan(0);
   });
 
   it('clicking a menu item updates the selected account', async () => {
