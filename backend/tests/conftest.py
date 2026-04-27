@@ -24,6 +24,8 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 from app.core.config import settings
 from app.main import app
+from tests.fixtures.sidecar_servicer import sidecar_client as sidecar_client
+from tests.fixtures.sidecar_servicer import sidecar_server as sidecar_server
 
 
 @pytest.fixture(scope="session", autouse=True)
