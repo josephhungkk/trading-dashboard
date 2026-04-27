@@ -14,6 +14,10 @@ plugins:
     out: ../backend/app/_generated/broker
   - remote: buf.build/protocolbuffers/python:v28.2
     out: ../sidecar/_generated/broker
+  - remote: buf.build/protocolbuffers/pyi:v28.2
+    out: ../backend/app/_generated/broker
+  - remote: buf.build/protocolbuffers/pyi:v28.2
+    out: ../sidecar/_generated/broker
   - remote: buf.build/bufbuild/es:v2.2.2
     out: ../frontend/src/proto-gen
     opt:

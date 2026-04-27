@@ -22,6 +22,10 @@ service Broker {
   rpc GetPositions(AccountRef) returns (PositionsResponse);
   rpc GetOrders(AccountRef) returns (OrdersResponse);
   rpc GetContract(ContractRef) returns (ContractResponse);
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc OrderEvent(AccountRef) returns (stream OrderEventMessage);
+  rpc SearchContracts(SearchContractsRequest) returns (SearchContractsResponse);
 }
 
 enum BrokerId {
@@ -182,4 +186,50 @@ message Order {
 }
 message OrdersResponse {
   repeated Order orders = 1;
+}
+
+message PlaceOrderRequest {
+  string account_number = 1;
+  string client_order_id = 2; // UUID4 from frontend; sidecar sets ib_order.orderRef = this
+  string conid = 3; // resolved by SearchContracts upstream
+  string side = 4; // "BUY" | "SELL"
+  string order_type = 5; // "MARKET" | "LIMIT" | "STOP"
+  string tif = 6; // "DAY" | "GTC"
+  string qty = 7; // decimal-as-string, fixed-point 8 digits
+  string limit_price = 8; // decimal-as-string, "" for MARKET
+  string stop_price = 9; // decimal-as-string, "" unless STOP
+  reserved 10 to 20; // forward-extension reservations (R35)
+}
+
+message PlaceOrderResponse {
+  string broker_order_id = 1; // ib_async permId, populated within ack window
+  string status = 2; // initial status from ib_async (PendingSubmit etc.)
+}
+
+message CancelOrderRequest {
+  string account_number = 1;
+  string broker_order_id = 2;
+}
+
+message CancelOrderResponse {
+  bool accepted = 1;
+}
+
+message OrderEventMessage {
+  string broker_order_id = 1;
+  string client_order_id = 2; // echoed back if known
+  string status = 3; // PendingSubmit|Submitted|PreSubmitted|Filled|Cancelled|ApiCancelled|Inactive
+  string filled_qty = 4; // decimal-as-string, cumulative
+  string avg_fill_price = 5;
+  google.protobuf.Timestamp event_at = 6;
+  string raw_payload = 7; // jsonb-friendly debug blob (ib_async Trade snapshot)
+}
+
+message SearchContractsRequest {
+  string query = 1; // symbol fragment, e.g. "AAPL", "0700.HK"
+  string asset_class = 2; // "STK" | "FUT" | "OPT" | "" (any)
+}
+
+message SearchContractsResponse {
+  repeated Contract contracts = 1; // existing Contract message reused
 }
