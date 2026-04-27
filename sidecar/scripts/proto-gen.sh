@@ -17,7 +17,18 @@ mkdir -p _generated/broker/v1
 
 if command -v buf >/dev/null 2>&1; then
   ( cd ../proto && buf generate )
-  echo "[ok] sidecar proto codegen complete via buf -> sidecar/_generated/"
+  # `buf generate` writes to BOTH backend/app/_generated/ and sidecar/_generated/
+  # per proto/buf.gen.yaml. Ensure package __init__.py files exist on both
+  # sides and rewrite the broken `from v1 import broker_pb2` import.
+  mkdir -p ../backend/app/_generated/broker/v1
+  : > ../backend/app/_generated/__init__.py
+  : > ../backend/app/_generated/broker/__init__.py
+  : > ../backend/app/_generated/broker/v1/__init__.py
+  sed -i 's|^from v1 import broker_pb2|from app._generated.broker.v1 import broker_pb2|' \
+    ../backend/app/_generated/broker/v1/broker_pb2_grpc.py
+  sed -i 's|^from v1 import broker_pb2|from sidecar._generated.broker.v1 import broker_pb2|' \
+    _generated/broker/v1/broker_pb2_grpc.py
+  echo "[ok] proto codegen complete -> backend/app/_generated/broker/v1/ + sidecar/_generated/broker/v1/"
   exit 0
 fi
 
