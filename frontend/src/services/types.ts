@@ -96,3 +96,97 @@ export interface Command {
   run: () => void | Promise<void>;
   keywords?: string[];
 }
+
+import type { components } from './api-generated';
+
+export type DecimalString = string & { __brand: 'DecimalString' };
+
+export type BrokerMaintenance = components['schemas']['BrokerMaintenance'];
+
+export interface ContractSummary {
+  conid: number;
+  description: string;
+}
+
+export interface PreviewRequest {
+  account_id: string;
+  conid: string;
+  side: 'BUY' | 'SELL';
+  order_type: 'MARKET' | 'LIMIT' | 'STOP';
+  tif: 'DAY' | 'GTC';
+  qty: DecimalString;
+  limit_price?: DecimalString | null;
+  stop_price?: DecimalString | null;
+}
+
+export interface PositionSanityResult {
+  current_qty: DecimalString;
+  new_qty_after_fill: DecimalString;
+  sanity_multiplier: DecimalString;
+  status: 'ok' | 'high' | 'extreme';
+  requires_extra_attestation: boolean;
+}
+
+export interface PreviewResponse {
+  nonce: string;
+  notional: DecimalString;
+  notional_currency: string;
+  notional_filled_today: DecimalString;
+  daily_notional_cap: DecimalString;
+  max_notional_per_order: DecimalString;
+  cap_status: 'ok' | 'near' | 'exceeded';
+  daily_cap_status: 'ok' | 'near' | 'exceeded';
+  position_sanity: PositionSanityResult;
+  contract_summary: ContractSummary;
+  warnings: string[];
+}
+
+export type OrderSubmissionState = 'submitted' | 'pending_unknown' | 'idempotent_retry';
+
+export interface OrderEvent {
+  broker_order_id: string;
+  client_order_id: string;
+  status: 'pending_submit' | 'submitted' | 'partial' | 'filled' | 'cancelled' | 'rejected' | 'expired' | 'inactive';
+  filled_qty: DecimalString;
+  avg_fill_price: DecimalString;
+  broker_event_at: string;
+  raw_payload: string;
+}
+
+export interface OrderResponse {
+  id: string;
+  account_id: string;
+  broker_order_id: string | null;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  order_type: 'MARKET' | 'LIMIT' | 'STOP';
+  tif: 'DAY' | 'GTC';
+  qty: DecimalString;
+  limit_price: DecimalString | null;
+  stop_price: DecimalString | null;
+  status: OrderEvent['status'];
+  filled_qty: DecimalString;
+  avg_fill_price: DecimalString | null;
+  notional: DecimalString;
+  created_at: string;
+  updated_at: string;
+  last_event_at: string | null;
+  submission_state: OrderSubmissionState;
+  events: OrderEvent[];
+}
+
+export interface OrderListResponse {
+  orders: OrderResponse[];
+  broker_maintenance: BrokerMaintenance;
+  kill_switch_active: boolean;
+}
+
+export interface PolicyResponse {
+  account_id: string;
+  max_notional_per_order: DecimalString;
+  daily_notional_cap: DecimalString;
+  notional_filled_today: DecimalString;
+  trade_enabled: boolean;
+  simulator_only: boolean;
+  position_count: number;
+}

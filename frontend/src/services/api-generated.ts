@@ -180,6 +180,119 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/contracts/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Contracts
+         * @description Autocomplete proxy: forward to one healthy sidecar, cache 5 min.
+         */
+        get: operations["search_contracts_api_contracts_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Orders */
+        get: operations["list_orders_api_orders_get"];
+        put?: never;
+        /** Place Order */
+        post: operations["place_order_api_orders_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Order Events
+         * @description Server-Sent Events stream for order updates.
+         *
+         *     Clients may send a ``Last-Event-ID`` HTTP header to replay missed events
+         *     since that event id before tailing the live pubsub channel (P14).
+         */
+        get: operations["stream_order_events_api_orders_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/policy/{account_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Account Policy */
+        get: operations["get_account_policy_api_orders_policy__account_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Order */
+        post: operations["preview_order_api_orders_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/{order_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Order */
+        get: operations["get_order_api_orders__order_id__get"];
+        put?: never;
+        post?: never;
+        /** Cancel Order */
+        delete: operations["cancel_order_api_orders__order_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -347,6 +460,13 @@ export interface components {
             /** Symbol */
             symbol: string;
         };
+        /** ContractSummary */
+        ContractSummary: {
+            /** Conid */
+            conid: number;
+            /** Description */
+            description: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -396,6 +516,129 @@ export interface components {
             /** Updated At */
             updated_at: string | null;
         };
+        /** OrderEvent */
+        OrderEvent: {
+            /** Avg Fill Price */
+            avg_fill_price: string;
+            /**
+             * Broker Event At
+             * Format: date-time
+             */
+            broker_event_at: string;
+            /** Broker Order Id */
+            broker_order_id: string;
+            /** Client Order Id */
+            client_order_id: string;
+            /** Filled Qty */
+            filled_qty: string;
+            /** Raw Payload */
+            raw_payload: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending_submit" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "inactive";
+        };
+        /** OrderListResponse */
+        OrderListResponse: {
+            broker_maintenance: components["schemas"]["BrokerMaintenance"];
+            /** Kill Switch Active */
+            kill_switch_active: boolean;
+            /** Orders */
+            orders: components["schemas"]["OrderResponse"][];
+        };
+        /** OrderResponse */
+        OrderResponse: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Avg Fill Price */
+            avg_fill_price: string | null;
+            /** Broker Order Id */
+            broker_order_id: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Events
+             * @default []
+             */
+            events: components["schemas"]["OrderEvent"][];
+            /** Filled Qty */
+            filled_qty: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Last Event At */
+            last_event_at: string | null;
+            /** Limit Price */
+            limit_price: string | null;
+            /** Notional */
+            notional: string;
+            /**
+             * Order Type
+             * @enum {string}
+             */
+            order_type: "MARKET" | "LIMIT" | "STOP";
+            /** Qty */
+            qty: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "BUY" | "SELL";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending_submit" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "inactive";
+            /** Stop Price */
+            stop_price: string | null;
+            /**
+             * Submission State
+             * @default submitted
+             * @enum {string}
+             */
+            submission_state: "submitted" | "pending_unknown" | "idempotent_retry";
+            /** Symbol */
+            symbol: string;
+            /**
+             * Tif
+             * @enum {string}
+             */
+            tif: "DAY" | "GTC";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** PolicyResponse */
+        PolicyResponse: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Daily Notional Cap */
+            daily_notional_cap: string;
+            /** Max Notional Per Order */
+            max_notional_per_order: string;
+            /** Notional Filled Today */
+            notional_filled_today: string;
+            /** Position Count */
+            position_count: number;
+            /** Simulator Only */
+            simulator_only: boolean;
+            /** Trade Enabled */
+            trade_enabled: boolean;
+        };
         /** Position */
         Position: {
             avg_cost: components["schemas"]["Money"];
@@ -407,6 +650,51 @@ export interface components {
             quantity: string;
             realized_pnl_today: components["schemas"]["Money"];
             unrealized_pnl: components["schemas"]["Money"];
+        };
+        /** PositionSanityResult */
+        PositionSanityResult: {
+            /** Current Qty */
+            current_qty: string;
+            /** New Qty After Fill */
+            new_qty_after_fill: string;
+            /** Requires Extra Attestation */
+            requires_extra_attestation: boolean;
+            /** Sanity Multiplier */
+            sanity_multiplier: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "high" | "extreme";
+        };
+        /** PreviewResponse */
+        PreviewResponse: {
+            /**
+             * Cap Status
+             * @enum {string}
+             */
+            cap_status: "ok" | "near" | "exceeded";
+            contract_summary: components["schemas"]["ContractSummary"];
+            /**
+             * Daily Cap Status
+             * @enum {string}
+             */
+            daily_cap_status: "ok" | "near" | "exceeded";
+            /** Daily Notional Cap */
+            daily_notional_cap: string;
+            /** Max Notional Per Order */
+            max_notional_per_order: string;
+            /** Nonce */
+            nonce: string;
+            /** Notional */
+            notional: string;
+            /** Notional Currency */
+            notional_currency: string;
+            /** Notional Filled Today */
+            notional_filled_today: string;
+            position_sanity: components["schemas"]["PositionSanityResult"];
+            /** Warnings */
+            warnings: string[];
         };
         /** SecretIn */
         SecretIn: {
@@ -1004,6 +1292,205 @@ export interface operations {
                 headers: Record<string, unknown>;
                 content: {
                     "application/json": components["schemas"]["SecretRevealOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_contracts_api_contracts_search_get: {
+        parameters: {
+            query: {
+                q: string;
+                asset_class?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_orders_api_orders_get: {
+        parameters: {
+            query?: {
+                status?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["OrderListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    place_order_api_orders_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["OrderResponse"];
+                };
+            };
+        };
+    };
+    stream_order_events_api_orders_events_get: {
+        parameters: {
+            query?: {
+                account_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_account_policy_api_orders_policy__account_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["PolicyResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_order_api_orders_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["PreviewResponse"];
+                };
+            };
+        };
+    };
+    get_order_api_orders__order_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["OrderResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_order_api_orders__order_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: Record<string, unknown>;
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

@@ -1,108 +1,222 @@
-import { afterEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  MockOrdersService,
-  listOrders,
-  type OrderResponse,
+  BrokerMaintenanceError,
+  cancelOrder,
+  createDebouncedSearch,
+  getOrders,
+  placeOrder,
+  previewOrder,
 } from './orders';
-import { MaintenanceError, SidecarUnreachableError } from './errors';
-import { ACCOUNTS } from './fixtures';
+import type { ContractSummary, OrderListResponse, OrderResponse, PreviewRequest, PreviewResponse } from './types';
 
-describe('MockOrdersService', () => {
-  const svc = new MockOrdersService();
+const previewRequest: PreviewRequest = {
+  account_id: '1f4f0064-e257-4c9d-928e-9ca6c0695a57',
+  conid: '265598',
+  side: 'BUY',
+  order_type: 'LIMIT',
+  tif: 'DAY',
+  qty: '10.00000000' as PreviewRequest['qty'],
+  limit_price: '150.00000000' as PreviewRequest['qty'],
+  stop_price: null,
+};
 
-  it('list(live) returns only orders for live-mode accounts', async () => {
-    const orders = await svc.list('live');
-    const liveAcctIds = new Set(ACCOUNTS.filter(a => a.mode === 'live').map(a => a.id));
-    expect(orders.length).toBeGreaterThan(0);
-    expect(orders.every(o => liveAcctIds.has(o.accountId))).toBe(true);
+const previewResponse: PreviewResponse = {
+  nonce: 'nonce-1',
+  notional: '1500.00000000' as PreviewResponse['notional'],
+  notional_currency: 'USD',
+  notional_filled_today: '0.00000000' as PreviewResponse['notional'],
+  daily_notional_cap: '10000.00000000' as PreviewResponse['notional'],
+  max_notional_per_order: '5000.00000000' as PreviewResponse['notional'],
+  cap_status: 'ok',
+  daily_cap_status: 'ok',
+  position_sanity: {
+    current_qty: '0.00000000' as PreviewResponse['position_sanity']['current_qty'],
+    new_qty_after_fill: '10.00000000' as PreviewResponse['position_sanity']['current_qty'],
+    sanity_multiplier: '10.00000000' as PreviewResponse['position_sanity']['current_qty'],
+    status: 'high',
+    requires_extra_attestation: false,
+  },
+  contract_summary: {
+    conid: 265598,
+    description: 'AAPL NASDAQ',
+  },
+  warnings: [],
+};
+
+const orderResponse: OrderResponse = {
+  id: '1d1f9256-8d1e-45f6-9c92-f1622bb58db6',
+  account_id: previewRequest.account_id,
+  broker_order_id: '100001',
+  symbol: 'AAPL',
+  side: 'BUY',
+  order_type: 'LIMIT',
+  tif: 'DAY',
+  qty: previewRequest.qty,
+  limit_price: '150.00000000' as OrderResponse['limit_price'],
+  stop_price: null,
+  status: 'submitted',
+  filled_qty: '0.00000000' as OrderResponse['filled_qty'],
+  avg_fill_price: null,
+  notional: previewResponse.notional,
+  created_at: '2026-04-27T09:00:00Z',
+  updated_at: '2026-04-27T09:00:00Z',
+  last_event_at: null,
+  submission_state: 'submitted',
+  events: [],
+};
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', ...init.headers },
+    ...init,
   });
+}
 
-  it('list(paper) returns only orders for paper-mode accounts', async () => {
-    const orders = await svc.list('paper');
-    const paperAcctIds = new Set(ACCOUNTS.filter(a => a.mode === 'paper').map(a => a.id));
-    expect(orders.length).toBeGreaterThan(0);
-    expect(orders.every(o => paperAcctIds.has(o.accountId))).toBe(true);
-  });
+function stubFetch(response: Response | Promise<Response>): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(() => Promise.resolve(response));
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
 
-  it('subscribe returns an unsubscribe function', () => {
-    const unsub = svc.subscribe('live', () => {
-      /* noop */
-    });
-    expect(typeof unsub).toBe('function');
-    expect(() => unsub()).not.toThrow();
-  });
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
-describe('listOrders (real-API path)', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
+describe('orders service', () => {
+  it('test_preview_order_posts_correct_body', async () => {
+    const fetchMock = stubFetch(jsonResponse(previewResponse));
+
+    await expect(previewOrder(previewRequest)).resolves.toEqual(previewResponse);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/orders/preview', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(previewRequest),
+    });
   });
 
-  function stubFetch(status: number, body: unknown): void {
-    const response = {
-      ok: status >= 200 && status < 300,
-      status,
-      json: () => Promise.resolve(body),
-    } as unknown as Response;
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(response)));
-  }
+  it('test_place_order_uses_caller_supplied_client_order_id', async () => {
+    const fetchMock = stubFetch(jsonResponse(orderResponse));
+    const clientOrderId = '3e3a35aa-175f-4d62-a3e3-8cf7e618ec7a';
 
-  it('returns OrderResponse[] on 200', async () => {
-    const expected: OrderResponse[] = [
-      {
-        order_id: '42',
-        contract: {
-          symbol: 'AAPL',
-          exchange: 'NASDAQ',
-          currency: 'USD',
-          asset_class: 'STOCK',
-          conid: '265598',
-          local_symbol: 'AAPL',
-        },
-        side: 'BUY',
-        order_type: 'LIMIT',
-        quantity: '100',
-        limit_price: { value: '150', currency: 'USD' },
-        stop_price: { value: '0', currency: 'USD' },
-        time_in_force: 'DAY',
-        status: 'SUBMITTED',
-        quantity_filled: '0',
-        avg_fill_price: { value: '0', currency: 'USD' },
-        submitted_at: '2026-04-26T12:00:00+00:00',
-        updated_at: null,
+    await placeOrder(previewRequest, 'nonce-1', clientOrderId);
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.headers).toEqual({
+      'Content-Type': 'application/json',
+      'X-Nonce': 'nonce-1',
+    });
+    expect(JSON.parse(init?.body as string)).toEqual({
+      ...previewRequest,
+      nonce: 'nonce-1',
+      client_order_id: clientOrderId,
+    });
+  });
+
+  it('test_cancel_order_posts_delete', async () => {
+    const fetchMock = stubFetch(jsonResponse({ status: 'accepted' }, { status: 202 }));
+
+    await cancelOrder('order-1');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/orders/order-1', {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+  });
+
+  it('test_search_contracts_factory_debounces_300ms', async () => {
+    vi.useFakeTimers();
+    const contracts: ContractSummary[] = [{ conid: 265598, description: 'AAPL NASDAQ' }];
+    const fetchMock = stubFetch(jsonResponse({ contracts }));
+    const search = createDebouncedSearch();
+
+    void search('A').catch(() => undefined);
+    void search('AA').catch(() => undefined);
+    void search('AAP').catch(() => undefined);
+    void search('AAPL').catch(() => undefined);
+    void search('AAPL ').catch(() => undefined);
+    const resultPromise = search('AAPL N');
+
+    await vi.advanceTimersByTimeAsync(299);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(resultPromise).resolves.toEqual(contracts);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/contracts?q=AAPL+N', {
+      credentials: 'include',
+      signal: expect.any(AbortSignal) as AbortSignal,
+    });
+  });
+
+  it('test_search_contracts_aborts_in_flight_on_new_query', async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.signal instanceof AbortSignal) signals.push(init.signal);
+      return new Promise<Response>(() => undefined);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const search = createDebouncedSearch();
+
+    void search('AAPL').catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(300);
+
+    void search('MSFT').catch(() => undefined);
+
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it('test_get_orders_maps_broker_maintenance_envelope', async () => {
+    const body: OrderListResponse = {
+      orders: [orderResponse],
+      broker_maintenance: {
+        active: true,
+        window: 'daily',
+        until: '2026-04-27T22:00:00Z',
       },
-    ];
-    stubFetch(200, expected);
+      kill_switch_active: true,
+    };
+    stubFetch(jsonResponse(body));
 
-    await expect(listOrders('a-1')).resolves.toEqual(expected);
-  });
-
-  it('throws MaintenanceError on 503 broker_maintenance', async () => {
-    stubFetch(503, {
-      error: 'broker_maintenance',
-      window: 'daily',
-      until: '2026-04-26T05:50:00+00:00',
+    await expect(getOrders({ status: 'submitted' })).resolves.toEqual({
+      orders: body.orders,
+      brokerMaintenance: body.broker_maintenance,
+      killSwitchActive: true,
     });
-
-    const err = await listOrders('a-1').catch(e => e);
-    expect(err).toBeInstanceOf(MaintenanceError);
-    expect((err as MaintenanceError).window).toBe('daily');
   });
 
-  it('throws SidecarUnreachableError on 503 sidecar_unreachable', async () => {
-    stubFetch(503, {
-      error: 'sidecar_unreachable',
-      label: 'isa-paper',
+  it('test_503_maintenance_throws_typed_error', async () => {
+    stubFetch(jsonResponse({
+      broker_maintenance: {
+        active: true,
+        window: 'weekend',
+        until: '2026-05-02T03:00:00Z',
+      },
+    }, {
+      status: 503,
+      headers: { 'Retry-After': '30' },
+    }));
+
+    const err = await getOrders().catch((caught: unknown) => caught);
+    expect(err).toBeInstanceOf(BrokerMaintenanceError);
+    expect((err as BrokerMaintenanceError).retryAfter).toBe('30');
+  });
+
+  it('test_409_idempotent_retry_returns_existing_order', async () => {
+    const existing = {
+      ...orderResponse,
+      submission_state: 'idempotent_retry',
+    } satisfies OrderResponse;
+    stubFetch(jsonResponse(existing, { status: 409 }));
+
+    await expect(placeOrder(previewRequest, 'nonce-1', 'client-order-id')).resolves.toEqual({
+      order: existing,
+      submissionState: 'idempotent_retry',
     });
-
-    const err = await listOrders('a-1').catch(e => e);
-    expect(err).toBeInstanceOf(SidecarUnreachableError);
-    expect((err as SidecarUnreachableError).label).toBe('isa-paper');
-  });
-
-  it('throws generic Error on 500', async () => {
-    stubFetch(500, { error: 'internal' });
-
-    await expect(listOrders('a-1')).rejects.toThrow(/orders 500/);
   });
 });

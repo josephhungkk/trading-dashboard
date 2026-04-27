@@ -1,109 +1,243 @@
-import type { Order, Mode } from './types';
-import { ORDERS, ACCOUNTS } from './fixtures';
-import { MaintenanceError, SidecarUnreachableError } from './errors';
+import type {
+  BrokerMaintenance,
+  ContractSummary,
+  Mode,
+  Order,
+  OrderListResponse,
+  OrderResponse,
+  PolicyResponse,
+  PreviewRequest,
+  PreviewResponse,
+} from './types';
+import { ACCOUNTS, ORDERS } from './fixtures';
 
-export interface Money {
-  value: string;
-  currency: string;
+export interface PlaceResult {
+  order: OrderResponse;
+  submissionState: OrderResponse['submission_state'];
 }
 
-export interface Contract {
-  symbol: string;
-  exchange: string;
-  currency: string;
-  asset_class: 'ASSET_UNSPECIFIED' | 'STOCK' | 'ETF' | 'OPTION' | 'FUTURE' | 'FOREX' | 'CRYPTO' | 'BOND' | 'MUTUAL_FUND' | 'WARRANT';
-  conid: string;
-  local_symbol: string;
+export interface OrderListResult {
+  orders: OrderResponse[];
+  brokerMaintenance: BrokerMaintenance;
+  killSwitchActive: boolean;
 }
 
-export interface OrderResponse {
-  order_id: string;
-  contract: Contract;
-  side: 'SIDE_UNSPECIFIED' | 'BUY' | 'SELL';
-  order_type: 'TYPE_UNSPECIFIED' | 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT';
-  quantity: string;
-  limit_price: Money;
-  stop_price: Money;
-  time_in_force: 'TIF_UNSPECIFIED' | 'DAY' | 'GTC' | 'IOC' | 'FOK';
-  status: 'STATUS_UNSPECIFIED' | 'PENDING' | 'SUBMITTED' | 'PARTIAL' | 'FILLED' | 'CANCELLED' | 'REJECTED';
-  quantity_filled: string;
-  avg_fill_price: Money;
-  submitted_at: string | null;
-  updated_at: string | null;
+interface LegacyOrderListResult {
+  orders: Order[];
+  brokerMaintenance?: BrokerMaintenance;
+  killSwitchActive?: boolean;
 }
 
-const DEFAULT_CURRENCY = 'USD';
+export class BrokerMaintenanceError extends Error {
+  constructor(
+    public readonly retryAfter: string | null,
+    public readonly brokerMaintenance: BrokerMaintenance | null,
+  ) {
+    super(`broker_maintenance retry_after=${retryAfter ?? 'unknown'}`);
+    this.name = 'BrokerMaintenanceError';
+  }
+}
 
-const money = (value: number | string | null, currency = DEFAULT_CURRENCY): Money => ({
-  value: (value ?? 0).toString(),
-  currency,
-});
+interface ErrorEnvelope {
+  error?: string;
+  detail?: string;
+  message?: string;
+  broker_maintenance?: BrokerMaintenance;
+}
 
-const statusMap: Record<Order['status'], OrderResponse['status']> = {
-  open: 'SUBMITTED',
-  filled: 'FILLED',
-  partial: 'PARTIAL',
-  cancelled: 'CANCELLED',
-  rejected: 'REJECTED',
-  expired: 'CANCELLED',
-};
-
-const orderTypeMap: Record<Order['orderType'], OrderResponse['order_type']> = {
-  market: 'MARKET',
-  limit: 'LIMIT',
-  stop: 'STOP',
-  stop_limit: 'STOP_LIMIT',
-};
-
-const sideMap: Record<Order['side'], OrderResponse['side']> = {
-  buy: 'BUY',
-  sell: 'SELL',
-};
-
-const MOCK_ORDERS: OrderResponse[] = ORDERS.map(order => ({
-  order_id: order.id,
-  contract: {
-    symbol: order.symbol,
-    exchange: 'SMART',
-    currency: DEFAULT_CURRENCY,
-    asset_class: 'STOCK',
-    conid: '0',
-    local_symbol: order.symbol,
-  },
-  side: sideMap[order.side],
-  order_type: orderTypeMap[order.orderType],
-  quantity: order.qty.toString(),
-  limit_price: money(order.limitPx),
-  stop_price: money(order.stopPx),
-  time_in_force: 'TIF_UNSPECIFIED',
-  status: statusMap[order.status],
-  quantity_filled: order.filledQty.toString(),
-  avg_fill_price: money(0),
-  submitted_at: order.createdAt,
-  updated_at: order.updatedAt,
-}));
+interface ContractSearchResponse {
+  contracts: ContractSummary[];
+}
 
 const USE_MOCKS = (import.meta.env.VITE_USE_MOCKS as string | undefined) === 'true';
 
-export async function listOrders(accountId: string): Promise<OrderResponse[]> {
-  if (USE_MOCKS) return MOCK_ORDERS;
-  const r = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/orders`, { credentials: 'include' });
-  if (!r.ok) {
-    const body = (await r.json().catch(() => ({ error: 'unknown' }))) as {
-      error?: string;
-      window?: 'weekend' | 'daily';
-      until?: string;
-      label?: string;
-    };
-    if (r.status === 503 && body.error === 'broker_maintenance') {
-      throw new MaintenanceError(body.window ?? 'daily', body.until ?? '');
-    }
-    if (r.status === 503 && body.error === 'sidecar_unreachable') {
-      throw new SidecarUnreachableError(body.label ?? '');
-    }
-    throw new Error(`orders ${r.status}: ${body.error ?? 'unknown'}`);
+const DEFAULT_MAINTENANCE: BrokerMaintenance = {
+  active: false,
+  window: null,
+  until: null,
+};
+
+const asDecimal = (value: string): OrderResponse['qty'] => value as OrderResponse['qty'];
+
+const MOCK_ORDER_RESPONSES: OrderResponse[] = ORDERS.map(order => ({
+  id: order.id,
+  account_id: order.accountId,
+  broker_order_id: null,
+  symbol: order.symbol,
+  side: order.side === 'buy' ? 'BUY' : 'SELL',
+  order_type: order.orderType === 'limit' ? 'LIMIT' : order.orderType === 'stop' ? 'STOP' : 'MARKET',
+  tif: 'DAY',
+  qty: asDecimal(order.qty.toString()),
+  limit_price: order.limitPx === null ? null : asDecimal(order.limitPx.toString()),
+  stop_price: order.stopPx === null ? null : asDecimal(order.stopPx.toString()),
+  status: order.status === 'open' ? 'submitted' : order.status === 'partial' ? 'partial' : order.status === 'filled' ? 'filled' : order.status === 'cancelled' ? 'cancelled' : 'rejected',
+  filled_qty: asDecimal(order.filledQty.toString()),
+  avg_fill_price: null,
+  notional: asDecimal('0'),
+  created_at: order.createdAt,
+  updated_at: order.updatedAt,
+  last_event_at: null,
+  submission_state: 'submitted',
+  events: [],
+}));
+
+async function parseJson(response: Response): Promise<unknown> {
+  return response.json().catch(() => null) as Promise<unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isErrorEnvelope(value: unknown): value is ErrorEnvelope {
+  return isRecord(value);
+}
+
+function errorMessage(status: number, body: unknown): string {
+  if (isErrorEnvelope(body)) {
+    const message = body.error ?? body.detail ?? body.message;
+    if (message !== undefined) return `orders ${status}: ${message}`;
   }
-  return (await r.json()) as OrderResponse[];
+  return `orders ${status}: unknown`;
+}
+
+function isOrderResponse(value: unknown): value is OrderResponse {
+  return isRecord(value) && typeof value.submission_state === 'string';
+}
+
+async function readOrThrow<T>(response: Response): Promise<T> {
+  const body = await parseJson(response);
+  if (response.status === 503 && response.headers.get('Retry-After') !== null) {
+    const brokerMaintenance = isErrorEnvelope(body) ? body.broker_maintenance ?? null : null;
+    throw new BrokerMaintenanceError(response.headers.get('Retry-After'), brokerMaintenance);
+  }
+  if (response.status === 409 && isOrderResponse(body) && body.submission_state === 'idempotent_retry') {
+    return body as T;
+  }
+  if (!response.ok) {
+    throw new Error(errorMessage(response.status, body));
+  }
+  return body as T;
+}
+
+function jsonHeaders(extra?: HeadersInit): HeadersInit {
+  return {
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+}
+
+export async function previewOrder(req: PreviewRequest): Promise<PreviewResponse> {
+  const response = await fetch('/api/orders/preview', {
+    method: 'POST',
+    credentials: 'include',
+    headers: jsonHeaders(),
+    body: JSON.stringify(req),
+  });
+  return readOrThrow<PreviewResponse>(response);
+}
+
+export async function placeOrder(
+  req: PreviewRequest,
+  nonce: string,
+  clientOrderId: string,
+): Promise<PlaceResult> {
+  const response = await fetch('/api/orders', {
+    method: 'POST',
+    credentials: 'include',
+    headers: jsonHeaders({ 'X-Nonce': nonce }),
+    body: JSON.stringify({
+      ...req,
+      nonce,
+      client_order_id: clientOrderId,
+    }),
+  });
+  const order = await readOrThrow<OrderResponse>(response);
+  return {
+    order,
+    submissionState: order.submission_state,
+  };
+}
+
+export async function cancelOrder(id: string): Promise<void> {
+  const response = await fetch(`/api/orders/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  await readOrThrow<unknown>(response);
+}
+
+export async function getOrders(opts: { status?: string } = {}): Promise<OrderListResult | LegacyOrderListResult> {
+  if (USE_MOCKS) {
+    return {
+      orders: MOCK_ORDER_RESPONSES,
+      brokerMaintenance: DEFAULT_MAINTENANCE,
+      killSwitchActive: false,
+    };
+  }
+  const params = new URLSearchParams();
+  if (opts.status !== undefined) params.set('status', opts.status);
+  const query = params.toString();
+  const response = await fetch(`/api/orders${query ? `?${query}` : ''}`, { credentials: 'include' });
+  const body = await readOrThrow<OrderListResponse>(response);
+  return {
+    orders: body.orders,
+    brokerMaintenance: body.broker_maintenance,
+    killSwitchActive: body.kill_switch_active,
+  };
+}
+
+export async function getOrderById(id: string): Promise<OrderResponse> {
+  const response = await fetch(`/api/orders/${encodeURIComponent(id)}`, { credentials: 'include' });
+  return readOrThrow<OrderResponse>(response);
+}
+
+export async function getOrderPolicy(accountId: string): Promise<PolicyResponse> {
+  const params = new URLSearchParams({ account_id: accountId });
+  const response = await fetch(`/api/orders/policy?${params.toString()}`, { credentials: 'include' });
+  return readOrThrow<PolicyResponse>(response);
+}
+
+export async function searchContracts(
+  q: string,
+  assetClass?: string,
+  signal?: AbortSignal,
+): Promise<ContractSummary[]> {
+  const params = new URLSearchParams({ q });
+  if (assetClass !== undefined && assetClass !== '') params.set('asset_class', assetClass);
+  const init: RequestInit = {
+    credentials: 'include',
+  };
+  if (signal !== undefined) init.signal = signal;
+  const response = await fetch(`/api/contracts?${params.toString()}`, init);
+  const body = await readOrThrow<ContractSearchResponse>(response);
+  return body.contracts;
+}
+
+export function createDebouncedSearch(
+  delayMs = 300,
+): (q: string, assetClass?: string) => Promise<ContractSummary[]> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let controller: AbortController | null = null;
+
+  return (q: string, assetClass?: string): Promise<ContractSummary[]> => {
+    if (timer !== null) clearTimeout(timer);
+    controller?.abort();
+    controller = new AbortController();
+    const activeController = controller;
+
+    return new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        timer = null;
+        searchContracts(q, assetClass, activeController.signal).then(resolve, reject);
+      }, delayMs);
+    });
+  };
+}
+
+export async function listOrders(accountId: string): Promise<OrderResponse[]> {
+  const response = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/orders`, { credentials: 'include' });
+  return readOrThrow<OrderResponse[]>(response);
 }
 
 export interface OrdersService {
@@ -113,10 +247,12 @@ export interface OrdersService {
 
 export class MockOrdersService implements OrdersService {
   constructor(private readonly fixtures: Order[] = ORDERS) {}
+
   async list(mode: Mode): Promise<Order[]> {
-    const ids = new Set(ACCOUNTS.filter(a => a.mode === mode).map(a => a.id));
-    return this.fixtures.filter(o => ids.has(o.accountId));
+    const ids = new Set(ACCOUNTS.filter(account => account.mode === mode).map(account => account.id));
+    return this.fixtures.filter(order => ids.has(order.accountId));
   }
+
   subscribe(mode: Mode, cb: (orders: Order[]) => void): () => void {
     void mode;
     void cb;
