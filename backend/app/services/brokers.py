@@ -603,6 +603,18 @@ class BrokerDiscoverer:
                    last_seen_via = EXCLUDED.last_seen_via,
                    last_seen_at = EXCLUDED.last_seen_at,
                    deleted_at = NULL,
+                   last_nlv = CASE
+                       WHEN broker_accounts.deleted_at IS NOT NULL THEN NULL
+                       ELSE broker_accounts.last_nlv
+                   END,
+                   last_nlv_currency = CASE
+                       WHEN broker_accounts.deleted_at IS NOT NULL THEN NULL
+                       ELSE broker_accounts.last_nlv_currency
+                   END,
+                   last_nlv_at = CASE
+                       WHEN broker_accounts.deleted_at IS NOT NULL THEN NULL
+                       ELSE broker_accounts.last_nlv_at
+                   END,
                    updated_at = now()
             """
         )
