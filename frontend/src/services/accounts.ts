@@ -1,6 +1,7 @@
 import type { Account, Mode } from './types';
 import { ACCOUNTS } from './fixtures';
 import { MaintenanceError, SidecarUnreachableError } from './errors';
+import { safeParseDecimal } from '../lib/decimal';
 
 export interface AccountResponse {
   id: string;
@@ -48,6 +49,21 @@ const MOCK_ACCOUNT_LIST: AccountListResponse = {
 
 const USE_MOCKS = (import.meta.env.VITE_USE_MOCKS as string | undefined) === 'true';
 
+const KNOWN_CURRENCIES = ['USD', 'HKD', 'GBP', 'JPY', 'KRW'] as const;
+type KnownCurrency = (typeof KNOWN_CURRENCIES)[number];
+
+function pickBaseCurrency(r: AccountResponse): KnownCurrency {
+  // Spec §7: prefer nlv_currency (authoritative — same RPC that produced NLV),
+  // fallback to currency_base (legacy from Phase 4), finally USD.
+  const candidates = [r.nlv_currency, r.currency_base, 'USD'];
+  for (const c of candidates) {
+    if (c && (KNOWN_CURRENCIES as readonly string[]).includes(c)) {
+      return c as KnownCurrency;
+    }
+  }
+  return 'USD';
+}
+
 export async function listAccounts(): Promise<AccountListResponse> {
   if (USE_MOCKS) return MOCK_ACCOUNT_LIST;
   const r = await fetch('/api/accounts', { credentials: 'include' });
@@ -92,24 +108,18 @@ export class MockAccountsService implements AccountsService {
  *  may be "") onto the display Account shape the existing stores +
  *  components consume. account_number isn't exposed by the backend
  *  (M22) so we fall back to the UUID prefix; nlv requires the
- *  /summary endpoint and is filled in lazily by the positions/account
- *  detail flows — placeholder 0 here so the picker can render. */
+ *  /summary endpoint. Spec §7 R3: lossy is informational only;
+ *  fixed-point NLV values like "0.10000000" are expected to be lossy. */
 function toDisplayAccount(r: AccountResponse): Account {
-  type DisplayCurrency = Account['baseCurrency'];
-  const allowed: DisplayCurrency[] = ['USD', 'HKD', 'GBP', 'JPY', 'KRW'];
-  const baseCurrency: DisplayCurrency =
-    (allowed as readonly string[]).includes(r.currency_base)
-      ? (r.currency_base as DisplayCurrency)
-      : 'USD';
   return {
     id: r.id,
     broker: r.broker_id,
     mode: r.mode,
     alias: r.alias ?? '',
     accountNumber: r.id.slice(0, 8),
-    nlv: 0,
-    nlvAt: null,
-    baseCurrency,
+    nlv: safeParseDecimal(r.nlv ?? '0').display,
+    nlvAt: r.nlv_at ? new Date(r.nlv_at) : null,
+    baseCurrency: pickBaseCurrency(r),
   };
 }
 
