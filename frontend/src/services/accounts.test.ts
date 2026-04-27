@@ -2,9 +2,82 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MockAccountsService,
   listAccounts,
+  toDisplayAccount,
   type AccountListResponse,
+  type AccountResponse,
 } from './accounts';
 import { MaintenanceError, SidecarUnreachableError } from './errors';
+
+const baseResponse: AccountResponse = {
+  id: 'a1234567-0000-0000-0000-000000000000',
+  broker_id: 'ibkr',
+  alias: null,
+  mode: 'paper',
+  currency_base: 'USD',
+  display_order: 0,
+  nlv: null,
+  nlv_currency: null,
+  nlv_at: null,
+};
+
+describe('toDisplayAccount', () => {
+  it('prefers nlv_currency over currency_base', () => {
+    const acct = toDisplayAccount({
+      ...baseResponse,
+      nlv_currency: 'GBP',
+      currency_base: 'USD',
+    });
+    expect(acct.baseCurrency).toBe('GBP');
+  });
+
+  it('falls back to currency_base when nlv_currency is null', () => {
+    const acct = toDisplayAccount({
+      ...baseResponse,
+      nlv_currency: null,
+      currency_base: 'HKD',
+    });
+    expect(acct.baseCurrency).toBe('HKD');
+  });
+
+  it('falls back to USD when both are unknown', () => {
+    const acct = toDisplayAccount({
+      ...baseResponse,
+      nlv_currency: null,
+      currency_base: 'XYZ',
+    });
+    expect(acct.baseCurrency).toBe('USD');
+  });
+
+  it('produces null nlvAt when nlv_at is null', () => {
+    const acct = toDisplayAccount(baseResponse);
+    expect(acct.nlvAt).toBeNull();
+  });
+
+  it('parses nlv_at ISO-8601 to Date', () => {
+    const acct = toDisplayAccount({
+      ...baseResponse,
+      nlv: '100.00000000',
+      nlv_currency: 'USD',
+      nlv_at: '2026-04-26T12:00:00Z',
+    });
+    expect(acct.nlvAt).toEqual(new Date('2026-04-26T12:00:00Z'));
+  });
+
+  it('does not branch on lossy flag for fixed-point 8-digit input (R3)', () => {
+    const acct = toDisplayAccount({
+      ...baseResponse,
+      nlv: '0.10000000',
+      nlv_currency: 'USD',
+      nlv_at: '2026-04-26T12:00:00Z',
+    });
+    expect(acct.nlv).toBe(0.1);
+  });
+
+  it('safeParseDecimal of null nlv produces display 0 (not NaN)', () => {
+    const acct = toDisplayAccount(baseResponse);
+    expect(acct.nlv).toBe(0);
+  });
+});
 
 describe('MockAccountsService', () => {
   const svc = new MockAccountsService();

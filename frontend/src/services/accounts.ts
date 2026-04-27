@@ -118,7 +118,7 @@ export class MockAccountsService implements AccountsService {
  *  (M22) so we fall back to the UUID prefix; nlv requires the
  *  /summary endpoint. Spec §7 R3: lossy is informational only;
  *  fixed-point NLV values like "0.10000000" are expected to be lossy. */
-function toDisplayAccount(r: AccountResponse): Account {
+export function toDisplayAccount(r: AccountResponse): Account {
   return {
     id: r.id,
     broker: r.broker_id,
