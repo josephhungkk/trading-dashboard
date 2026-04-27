@@ -400,6 +400,25 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 status=str(trade.orderStatus.status),
             )
 
+    async def CancelOrder(  # noqa: N802
+        self,
+        request: broker_pb2.CancelOrderRequest,
+        context: object,
+    ) -> broker_pb2.CancelOrderResponse:
+        del context
+
+        raw_trades: object = self.ib.openTrades()  # type: ignore[attr-defined, unused-ignore]
+        for trade in cast("Iterable[object]", raw_trades):
+            ib_trade: _IbTrade = cast("_IbTrade", trade)
+            if (
+                ib_trade.order.permId == int(request.broker_order_id)
+                and ib_trade.order.account == request.account_number
+            ):
+                self.ib.cancelOrder(ib_trade.order)  # type: ignore[attr-defined, unused-ignore]
+                return broker_pb2.CancelOrderResponse(accepted=True)
+
+        return broker_pb2.CancelOrderResponse(accepted=False)
+
     async def GetContract(  # noqa: N802
         self,
         request: broker_pb2.ContractRef,

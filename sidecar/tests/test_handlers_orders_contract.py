@@ -87,6 +87,7 @@ class FakeIB:
     fills_list: list[FakeFill] = field(default_factory=list)
     qualified: list[FakeContract] = field(default_factory=list)
     place_order_calls: list[tuple[object, object]] = field(default_factory=list)
+    cancel_order_calls: list[object] = field(default_factory=list)
     placed_trades: list[FakeTrade] = field(default_factory=list)
     raise_on_open: bool = False
     raise_on_qualify: bool = False
@@ -115,6 +116,9 @@ class FakeIB:
         )
         self.placed_trades.append(trade)
         return trade
+
+    def cancelOrder(self, order: object) -> None:  # noqa: N802
+        self.cancel_order_calls.append(order)
 
     def trades(self) -> list[FakeTrade]:
         return [*self.open_trades_list, *self.placed_trades]
@@ -265,6 +269,123 @@ async def test_place_order_simulator_mode_returns_sim_id(
     assert re.match(r"^SIM-[0-9a-f-]{36}$", response.broker_order_id)
     assert response.status == "Submitted"
     assert ib.place_order_calls == []
+
+
+# ---------- CancelOrder ----------
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_filters_by_account_and_perm_id() -> None:
+    contract = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
+    matching_order = FakeOrder(
+        permId=77777,
+        orderId=7,
+        account="U1111111",
+        action="BUY",
+        orderType="LMT",
+        totalQuantity=Decimal("10"),
+    )
+    other_account_order = FakeOrder(
+        permId=77777,
+        orderId=8,
+        account="U2222222",
+        action="BUY",
+        orderType="LMT",
+        totalQuantity=Decimal("10"),
+    )
+    ib = FakeIB(
+        open_trades_list=[
+            FakeTrade(
+                contract=contract,
+                order=other_account_order,
+                orderStatus=FakeOrderStatus(status="Submitted"),
+            ),
+            FakeTrade(
+                contract=contract,
+                order=matching_order,
+                orderStatus=FakeOrderStatus(status="Submitted"),
+            ),
+        ]
+    )
+    h = _handlers(ib)
+
+    response = await h.CancelOrder(
+        broker_pb2.CancelOrderRequest(
+            account_number="U1111111",
+            broker_order_id="77777",
+        ),
+        context=object(),
+    )
+
+    assert response.accepted is True
+    assert ib.cancel_order_calls == [matching_order]
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_returns_accepted_false_when_not_found() -> None:
+    contract = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
+    ib = FakeIB(
+        open_trades_list=[
+            FakeTrade(
+                contract=contract,
+                order=FakeOrder(
+                    permId=88888,
+                    orderId=9,
+                    account="U1111111",
+                    action="BUY",
+                    orderType="LMT",
+                    totalQuantity=Decimal("10"),
+                ),
+                orderStatus=FakeOrderStatus(status="Submitted"),
+            )
+        ]
+    )
+    h = _handlers(ib)
+
+    response = await h.CancelOrder(
+        broker_pb2.CancelOrderRequest(
+            account_number="U1111111",
+            broker_order_id="99999",
+        ),
+        context=object(),
+    )
+
+    assert response.accepted is False
+    assert ib.cancel_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_returns_accepted_true_when_found() -> None:
+    contract = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
+    order = FakeOrder(
+        permId=99999,
+        orderId=10,
+        account="U1111111",
+        action="SELL",
+        orderType="MKT",
+        totalQuantity=Decimal("5"),
+    )
+    ib = FakeIB(
+        open_trades_list=[
+            FakeTrade(
+                contract=contract,
+                order=order,
+                orderStatus=FakeOrderStatus(status="Submitted"),
+            )
+        ]
+    )
+    h = _handlers(ib)
+
+    response = await h.CancelOrder(
+        broker_pb2.CancelOrderRequest(
+            account_number="U1111111",
+            broker_order_id="99999",
+        ),
+        context=object(),
+    )
+
+    assert response.accepted is True
+    assert ib.cancel_order_calls == [order]
 
 
 @pytest.mark.asyncio
