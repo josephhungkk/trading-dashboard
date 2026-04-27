@@ -41,3 +41,9 @@ Only repository members with Actions write access (josephhungkk@gmail.com and is
 ### Environment variables set by the workflow
 - REAL_IBKR=1 — enables the @pytest.mark.skipif gate in the smoke tests.
 - IBKR_PAPER_GATEWAY — the gateway label passed to the sidecar fixture.
+
+## Cloudflare Tunnel — SSE endpoint
+
+The /api/orders/events endpoint streams Server-Sent Events. Cloudflare Tunnel buffers responses by default, which will break SSE streaming.
+
+To disable buffering for this endpoint in your Cloudflare Tunnel config or via a Page Rule/Transform Rule, ensure the response is not buffered. Set the no-response-buffering option or use a Cloudflare Worker to strip the Transfer-Encoding header. If using cloudflared config.yml, ensure the tunnel does not compress or buffer the /api/orders/events path.

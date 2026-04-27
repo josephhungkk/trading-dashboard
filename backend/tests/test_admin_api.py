@@ -49,6 +49,9 @@ async def clean_tables(session_factory):
             "running pytest in backend/. See memory feedback_pytest_prod_db_wipe.md."
         )
     async with session_factory() as s:
+        # Phase 5b: orders + order_events FK-ordered (events first).
+        await s.execute(text("DELETE FROM order_events"))
+        await s.execute(text("DELETE FROM orders"))
         await s.execute(text("DELETE FROM app_config"))
         await s.execute(text("DELETE FROM app_secrets"))
         await s.commit()

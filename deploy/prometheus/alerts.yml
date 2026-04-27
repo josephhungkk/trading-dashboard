@@ -1,0 +1,18 @@
+groups:
+  - name: phase5b_orders
+    rules:
+      - alert: BrokerOrderEventsHighDropRate
+        expr: |
+          rate(broker_order_events_dropped_total[5m]) >
+          0.5 * rate(broker_order_events_received_total[5m])
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Order event consumer poisoning"
+          description: "Drop rate >50% sustained for 5m on {{ $labels.label }}"
+      - alert: PendingSubmitOrphan
+        expr: increase(broker_order_pending_submit_orphan_total[15m]) > 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Pending-submit order orphaned (no broker match after 5min)"

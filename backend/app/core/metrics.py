@@ -1,8 +1,8 @@
 """prometheus-client counters/gauges for Phase 2 observability."""
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 
-registry = CollectorRegistry(auto_describe=True)
+registry = REGISTRY
 
 
 cf_jwt_verification_total = Counter(
