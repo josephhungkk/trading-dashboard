@@ -108,3 +108,36 @@ consumer_alive = Gauge(
     labelnames=["label", "account_id"],
     registry=registry,
 )
+
+broker_order_stream_resync_synthetic_events_total = Counter(
+    "broker_order_stream_resync_synthetic_events_total",
+    "Synthetic OrderEventMessages emitted during reconnect resync from snapshot.",
+    labelnames=["label"],
+    registry=registry,
+)
+
+sse_active_connections = Gauge(
+    "sse_active_connections",
+    "Number of currently active SSE /events connections",
+    registry=registry,
+)
+
+sse_dropped_clients_total = Counter(
+    "sse_dropped_clients_total",
+    "Total SSE connections dropped due to slow client (queue overflow)",
+    registry=registry,
+)
+
+broker_order_pending_submit_recovered_total = Counter(
+    "broker_order_pending_submit_recovered_total",
+    "Orders recovered from pending_submit state by the watchdog (broker match found).",
+    labelnames=["label"],
+    registry=registry,
+)
+
+broker_order_pending_submit_orphan_total = Counter(
+    "broker_order_pending_submit_orphan_total",
+    "Orders escalated to rejected by watchdog after 5 min with no broker match.",
+    labelnames=["label"],
+    registry=registry,
+)

@@ -23,7 +23,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.brokers.base import OrderEventMessage
+from app.brokers.base import Order, OrderEventMessage
 from app.core import metrics
 from app.services.brokers import BrokerRegistry
 
@@ -52,6 +52,8 @@ class _BrokerClient(Protocol):
     label: str
 
     def order_event_stream(self, account_number: str) -> AsyncIterator[OrderEventMessage]: ...
+
+    async def get_orders(self, account_number: str) -> list[Order]: ...
 
 
 class _AccountEventQueue(Protocol):
@@ -160,12 +162,7 @@ class OrderEventConsumer:
             while not self._stop_event.is_set():
                 try:
                     client = cast(_BrokerClient, await self._registry.get_client(label))
-                    async for event in client.order_event_stream(account_number):
-                        if self._stop_event.is_set():
-                            return
-                        metrics.broker_order_events_received_total.labels(label=label).inc()
-                        self._observe_lag(label, event.broker_event_at)
-                        await self._process_event(event)
+                    await self._run_account_stream_once(client, label, account_number, account)
                     backoff_seconds = 1.0
                 except asyncio.CancelledError:
                     raise
@@ -185,6 +182,160 @@ class OrderEventConsumer:
             metrics.consumer_alive.labels(label=label, account_id=str(account.account_id)).set(0)
             _stream_context.reset(token)
             self._children.pop(key, None)
+
+    async def _run_account_stream_once(
+        self,
+        client: _BrokerClient,
+        label: str,
+        account_number: str,
+        account: AccountStream,
+    ) -> None:
+        """Buffer-then-drain: open gRPC stream, snapshot, resync, then tail.
+
+        R11 ordering guarantee:
+        1. Open the live gRPC stream and start buffering events immediately.
+        2. Call get_orders() for a snapshot and emit synthetic events for any
+           order whose status is new or changed relative to local DB.
+        3. Drain the buffered live events (UPSERT predicate prevents older
+           synthetic events from overwriting newer live ones).
+        4. Continue tailing the live stream inline.
+        """
+        buffer: asyncio.Queue[OrderEventMessage | None] = asyncio.Queue()
+
+        async def _fill_buffer() -> None:
+            try:
+                async for event in client.order_event_stream(account_number):
+                    await buffer.put(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            finally:
+                await buffer.put(None)  # sentinel
+
+        filler = asyncio.create_task(_fill_buffer(), name=f"order-event-buffer-{label}")
+        try:
+            # Phase 1 — resync from snapshot (before processing any live events)
+            snapshot_orders = await client.get_orders(account_number)
+            synth_events = await self._synthesize_resync_events(
+                account, label, account_number, snapshot_orders
+            )
+            for synth in synth_events:
+                metrics.broker_order_stream_resync_synthetic_events_total.labels(label=label).inc()
+                await self._process_event(synth)
+
+            # Phase 2 — drain buffered events that arrived during snapshot
+            while not buffer.empty():
+                event = buffer.get_nowait()
+                if event is None:
+                    return
+                metrics.broker_order_events_received_total.labels(label=label).inc()
+                self._observe_lag(label, event.broker_event_at)
+                await self._process_event(event)
+
+            # Phase 3 — tail live stream
+            while not self._stop_event.is_set():
+                event = await buffer.get()
+                if event is None:
+                    return
+                metrics.broker_order_events_received_total.labels(label=label).inc()
+                self._observe_lag(label, event.broker_event_at)
+                await self._process_event(event)
+        finally:
+            filler.cancel()
+            try:
+                await filler
+            except asyncio.CancelledError:
+                pass
+
+    async def _synthesize_resync_events(
+        self,
+        account: AccountStream,
+        label: str,
+        account_number: str,
+        snapshot_orders: list[Order],
+    ) -> list[OrderEventMessage]:
+        """Build synthetic OrderEventMessages for snapshot orders that differ from DB state.
+
+        For each order in the snapshot whose client_order_id is absent from the
+        local ``orders`` table OR whose status differs from the DB row, we emit a
+        synthetic event. Synthetic events are sorted by broker_event_at so they
+        are processed in chronological order. The UPSERT predicate on
+        ``last_event_at`` in _update_order ensures stale synthetic events never
+        overwrite newer live events.
+        """
+        if not snapshot_orders:
+            return []
+
+        # Fetch known client_order_ids and their last known state from the DB.
+        known: dict[str, tuple[str, datetime | None]] = {}
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT client_order_id::text, status::text, last_event_at
+                      FROM orders
+                     WHERE account_id = :account_id
+                    """
+                ),
+                {"account_id": account.account_id},
+            )
+            for row in result.mappings().all():
+                known[str(row["client_order_id"])] = (
+                    str(row["status"]),
+                    row["last_event_at"],
+                )
+
+        synth: list[OrderEventMessage] = []
+        import json as _json
+
+        for order in snapshot_orders:
+            client_order_id = order.order_id  # order_id is the client_order_id handle
+            snapshot_status = order.status.lower().removeprefix("status_")
+            # Normalise proto enum -> DB status
+            status_aliases: dict[str, str] = {
+                "pending": "pending_submit",
+                "submitted": "submitted",
+                "partial": "partial",
+                "filled": "filled",
+                "cancelled": "cancelled",
+                "rejected": "rejected",
+                "expired": "expired",
+                "inactive": "inactive",
+                "unspecified": "pending_submit",
+                "status_unspecified": "pending_submit",
+            }
+            normalised_status = status_aliases.get(snapshot_status, snapshot_status)
+
+            db_row = known.get(client_order_id)
+            if db_row is not None:
+                db_status, _ = db_row
+                if db_status == normalised_status:
+                    continue  # no change — skip
+
+            # Determine broker_event_at: prefer order.updated_at then submitted_at
+            broker_event_at = order.updated_at or order.submitted_at
+
+            raw = {
+                "account_id": str(account.account_id),
+                "gateway_label": label,
+                "account_number": account_number,
+                "synthetic": True,
+            }
+            synth.append(
+                OrderEventMessage(
+                    broker_order_id=order.order_id,
+                    client_order_id=order.order_id,
+                    status=normalised_status,
+                    filled_qty=order.quantity_filled,
+                    avg_fill_price=order.avg_fill_price.value,
+                    broker_event_at=broker_event_at,
+                    raw_payload=_json.dumps(raw),
+                )
+            )
+
+        synth.sort(key=lambda e: e.broker_event_at or datetime.min.replace(tzinfo=UTC))
+        return synth
 
     async def _process_event(self, event: OrderEventMessage) -> None:
         label = self._event_label(event)

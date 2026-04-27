@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from app.core.cf_access import AdminIdentity
 from app.core.config import settings
@@ -19,6 +19,7 @@ from app.services import orders_service
 from app.services.brokers import BrokerRegistry
 from app.services.config import ConfigService
 from app.services.orders_service import CancelUnavailable, PreviewUnavailable, RedisLike
+from app.services.orders_sse import order_events_generator
 
 router = APIRouter(
     prefix="/api/orders",
@@ -94,6 +95,35 @@ async def place_order(
             content=exc.payload,
             headers=exc.headers,
         )
+
+
+SSE_HEADERS = {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
+
+@router.get("/events")
+async def stream_order_events(
+    request: Request,
+    redis: RedisDep,
+    db: DbDep,
+    account_id: Annotated[UUID | None, Query()] = None,
+) -> StreamingResponse:
+    """Server-Sent Events stream for order updates.
+
+    Clients may send a ``Last-Event-ID`` HTTP header to replay missed events
+    since that event id before tailing the live pubsub channel (P14).
+    """
+    raw_last = request.headers.get("Last-Event-ID")
+    last_event_id = int(raw_last) if raw_last and raw_last.lstrip("-").isdigit() else 0
+    return StreamingResponse(
+        order_events_generator(request, db, redis, last_event_id, account_id),
+        headers=SSE_HEADERS,
+        media_type="text/event-stream",
+    )
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
