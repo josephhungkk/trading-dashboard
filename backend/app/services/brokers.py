@@ -756,7 +756,9 @@ class BrokerDiscoverer:
                             )
                         nlv_update_count += 1
                     except DBAPIError as exc:
-                        if "overflow" not in str(exc).lower():
+                        # 22003 = numeric_value_out_of_range (asyncpg sqlstate);
+                        # locale-stable vs string-matching the message text.
+                        if getattr(exc.orig, "sqlstate", None) != "22003":
                             raise
                         nlv_overflow_count += 1
                         metrics.broker_discover_nlv_overflow_total.inc()
