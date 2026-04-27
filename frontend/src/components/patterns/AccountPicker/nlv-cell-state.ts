@@ -16,16 +16,18 @@ export function nlvCellState(
   maintenance: FleetMaintenance,
   now = new Date(),
 ): NlvCellState {
+  // Null NLV always renders as placeholder, even during maintenance —
+  // suppressing the staleness rule does not synthesize numeric data.
+  if (account.nlvAt === null) {
+    return { variant: 'placeholder', value: '—', tooltip: 'no data yet' };
+  }
+
   if (maintenance.active && maintenance.until != null) {
     return {
       variant: 'normal',
-      value: account.nlv ?? 0,
+      value: account.nlv,
       tooltip: `maintenance window ends at ${formatTime(maintenance.until)}`,
     };
-  }
-
-  if (account.nlvAt === null) {
-    return { variant: 'placeholder', value: '—', tooltip: 'no data yet' };
   }
 
   const ageSec = (now.getTime() - account.nlvAt.getTime()) / 1000;
