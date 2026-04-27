@@ -54,7 +54,7 @@ const MOCK_ACCOUNT_LIST: AccountListResponse = {
 
 const USE_MOCKS = (import.meta.env.VITE_USE_MOCKS as string | undefined) === 'true';
 
-const KNOWN_CURRENCIES = ['USD', 'HKD', 'GBP', 'JPY', 'KRW'] as const;
+const KNOWN_CURRENCIES = ['USD', 'HKD', 'GBP', 'JPY', 'KRW', 'EUR', 'CAD'] as const;
 type KnownCurrency = (typeof KNOWN_CURRENCIES)[number];
 
 function pickBaseCurrency(r: AccountResponse): KnownCurrency {

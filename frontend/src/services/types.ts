@@ -11,7 +11,7 @@ export interface Account {
   id: string; broker: BrokerId; mode: Mode; alias: string;
   accountNumber: string; nlv: number;
   nlvAt: Date | null;
-  baseCurrency: 'USD' | 'HKD' | 'GBP' | 'JPY' | 'KRW';
+  baseCurrency: 'USD' | 'HKD' | 'GBP' | 'JPY' | 'KRW' | 'EUR' | 'CAD';
 }
 
 export interface Symbol {
