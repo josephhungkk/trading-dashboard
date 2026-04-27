@@ -411,11 +411,35 @@ async def cancel_order(
     )
     await db.commit()
 
+    # Architect-review a81e7988 H2: if the sidecar call fails, reset
+    # cancel_requested_at to NULL so the next DELETE retries the forward
+    # instead of returning the 5s-cooldown false-positive
+    # "cancel_already_in_flight" (R31 cooldown intent is "5s after a
+    # SUCCESSFUL forward").
     client = await registry.get_client(str(row["gateway_label"]))
-    await _as_cancel_order_client(client).cancel_order(
-        str(row["account_number"]),
-        str(broker_order_id),
-    )
+    try:
+        await _as_cancel_order_client(client).cancel_order(
+            str(row["account_number"]),
+            str(broker_order_id),
+        )
+    except BrokerSidecarTimeout, BrokerSidecarUnavailable:
+        await db.execute(
+            text(
+                """
+                UPDATE orders
+                   SET cancel_requested_at = NULL,
+                       updated_at = now()
+                 WHERE id = :order_id;
+                """
+            ),
+            {"order_id": order_id},
+        )
+        await db.commit()
+        raise CancelUnavailable(
+            503,
+            {"error": "sidecar_unavailable", "detail": "cancel forward failed; retry"},
+            {"Retry-After": "1"},
+        ) from None
     return CancelOrderResult(status="cancel_requested")
 
 

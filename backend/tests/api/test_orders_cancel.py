@@ -74,7 +74,10 @@ class _Session:
                 }
             )
         if "UPDATE orders" in sql:
-            self.row.cancel_requested_at = params["cancel_requested_at"]
+            # Two UPDATE shapes: setting cooldown (cancel_requested_at = :ts)
+            # OR resetting it to NULL (no :cancel_requested_at param —
+            # architect-review a81e7988 H2 sidecar-failure rollback).
+            self.row.cancel_requested_at = params.get("cancel_requested_at")
             return _Result(None)
         raise AssertionError(f"unexpected SQL: {sql}")
 
@@ -228,3 +231,29 @@ async def test_cancel_under_lock_contention_returns_423(
 
 def _is_test_lock_error(exc: BaseException) -> bool:
     return isinstance(exc, _LockNotAvailableError)
+
+
+@pytest.mark.asyncio
+async def test_cancel_resets_cooldown_when_sidecar_unavailable(
+    cancel_client: dict[str, Any],
+) -> None:
+    """Architect-review a81e7988 H2: if sidecar.cancel_order raises
+    BrokerSidecarUnavailable, cancel_requested_at must reset to NULL so the
+    next DELETE retries the forward — otherwise R31's 5s cooldown blocks
+    recovery from a transient sidecar failure with a false-positive
+    "cancel_already_in_flight"."""
+
+    async def failing_cancel(account_number: str, broker_order_id: str) -> bool:
+        from app.services.brokers import BrokerSidecarUnavailable
+
+        raise BrokerSidecarUnavailable("sidecar 503", label="isa-paper")
+
+    cancel_client["sidecar"].cancel_order = failing_cancel  # type: ignore[method-assign]
+
+    response = await cancel_client["client"].delete(f"/api/orders/{cancel_client['row'].id}")
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "sidecar_unavailable"
+    assert response.headers["Retry-After"] == "1"
+    # The row's cancel_requested_at must be NULL so the operator can retry.
+    assert cancel_client["row"].cancel_requested_at is None
