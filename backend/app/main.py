@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.metrics import router as metrics_router
+from app.api.orders import router as orders_router
 from app.core.config import settings
 from app.core.crypto import get_fernet
 from app.core.db import SessionLocal, engine
@@ -33,6 +34,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> Any:
     redis = Redis.from_url(settings.redis_url, decode_responses=False)
+    _app.state.redis = redis
     config_cache = ConfigCache(redis, "config:invalidate", "config", ttl_seconds=300)
     secrets_cache = ConfigCache(redis, "config:invalidate:secrets", "secret", ttl_seconds=300)
     fernet = get_fernet(settings.secret_key, settings.secret_key_prev)
@@ -86,6 +88,7 @@ async def lifespan(_app: FastAPI) -> Any:
             except asyncio.CancelledError:
                 pass
         await redis.aclose()
+        _app.state.redis = None
         await engine.dispose()
 
 
@@ -102,6 +105,7 @@ app.add_middleware(
 app.include_router(admin_router)
 app.include_router(accounts_router)
 app.include_router(metrics_router)
+app.include_router(orders_router)
 
 
 @app.get("/health")
