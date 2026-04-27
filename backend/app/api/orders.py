@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
@@ -34,8 +34,8 @@ RegistryDep = Annotated[BrokerRegistry, Depends(get_broker_registry)]
 def get_orders_redis(request: Request) -> RedisLike:
     redis = getattr(request.app.state, "redis", None)
     if redis is not None:
-        return redis
-    return Redis.from_url(settings.redis_url, decode_responses=True)
+        return cast(RedisLike, redis)
+    return cast(RedisLike, Redis.from_url(settings.redis_url, decode_responses=True))
 
 
 RedisDep = Annotated[RedisLike, Depends(get_orders_redis)]

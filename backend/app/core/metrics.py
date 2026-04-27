@@ -72,3 +72,39 @@ broker_discover_nlv_overflow_total = Counter(
     "Number of NUMERIC(20,8) overflow events on per-account NLV UPDATE.",
     registry=registry,
 )
+
+broker_order_events_received_total = Counter(
+    "broker_order_events_received_total",
+    "Broker order stream events received by the backend consumer.",
+    labelnames=["label"],
+    registry=registry,
+)
+
+broker_order_events_dropped_total = Counter(
+    "broker_order_events_dropped_total",
+    "Broker order stream events dropped by the backend consumer.",
+    labelnames=["label", "reason"],
+    registry=registry,
+)
+
+broker_order_event_lag_ms = Histogram(
+    "broker_order_event_lag_ms",
+    "Lag between broker_event_at and backend observation time in milliseconds.",
+    labelnames=["label"],
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 15000, 30000, 60000),
+    registry=registry,
+)
+
+broker_order_stream_reconnects_total = Counter(
+    "broker_order_stream_reconnects_total",
+    "Broker order stream reconnect attempts by backend consumer.",
+    labelnames=["label"],
+    registry=registry,
+)
+
+consumer_alive = Gauge(
+    "consumer_alive",
+    "Whether a per-account broker order event consumer task is alive.",
+    labelnames=["label", "account_id"],
+    registry=registry,
+)

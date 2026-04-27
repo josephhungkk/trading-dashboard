@@ -1,6 +1,8 @@
-"""structlog configuration with a stub secret-redaction processor.
+"""structlog configuration with secret and account redaction.
 
-Phase 2 will expand the redaction patterns to match real broker/OAuth secrets.
+The redaction processor scrubs secret-looking strings and account identifiers
+under ``account``, ``account_number``, and ``acctNumber`` keys, including nested
+dicts such as broker ``raw_payload`` values.
 """
 
 import logging
@@ -17,16 +19,33 @@ _SECRET_PATTERNS = [
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}"),
     re.compile(r"api_key=[^&\s]+"),
 ]
+_ACCOUNT_KEYS = frozenset({"account", "account_number", "acctNumber"})
+_REDACTED = "<redacted>"
 
 
 def _redact_secrets(_logger: Any, _method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    for key, value in list(event_dict.items()):
-        if isinstance(value, str):
-            redacted = value
-            for pattern in _SECRET_PATTERNS:
-                redacted = pattern.sub("[REDACTED]", redacted)
-            event_dict[key] = redacted
-    return event_dict
+    return {
+        key: _REDACTED if key in _ACCOUNT_KEYS else _redact_value(value)
+        for key, value in event_dict.items()
+    }
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        redacted = value
+        for pattern in _SECRET_PATTERNS:
+            redacted = pattern.sub("[REDACTED]", redacted)
+        return redacted
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED if key in _ACCOUNT_KEYS else _redact_value(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    return value
 
 
 def configure_logging() -> None:
