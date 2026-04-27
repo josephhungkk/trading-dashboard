@@ -702,8 +702,11 @@ class BrokerDiscoverer:
                 and bool(nlv_value)
             )
 
-        def _format_decimal(s: str) -> str:
-            d = Decimal(s).quantize(Decimal("1e-8"))
+        def _format_decimal(s: str) -> str | None:
+            try:
+                d = Decimal(s).quantize(Decimal("1e-8"))
+            except InvalidOperation:
+                return None
             return format(d, "f")
 
         nlv_update_stmt = text(
@@ -720,30 +723,41 @@ class BrokerDiscoverer:
         )
 
         nlv_update_count = 0
-        async with self._session_factory() as session, session.begin():
-            for r in results:
-                if r is None or isinstance(r, BaseException):
-                    continue
-                _label, account_number, summary = r
-                if not _is_populated(summary):
-                    continue
-                # C4 will replace this naked try with overflow + Prometheus.
-                try:
-                    await session.execute(
-                        nlv_update_stmt,
-                        {
-                            "broker_id": "ibkr",
-                            "account_number": account_number,
-                            "nlv": _format_decimal(summary.net_liquidation.value),
-                            "currency": summary.net_liquidation.currency,
-                        },
-                    )
-                    nlv_update_count += 1
-                except Exception:
-                    log.exception(
-                        "broker_discover_nlv_update_failed",
-                        account_number=account_number,
-                    )
+        async with self._session_factory() as session:
+            async with session.begin():
+                for r in results:
+                    if r is None or isinstance(r, BaseException):
+                        continue
+                    label, account_number, summary = r
+                    if not _is_populated(summary):
+                        continue
+                    nlv_str = _format_decimal(summary.net_liquidation.value)
+                    if nlv_str is None:
+                        log.warning(
+                            "broker_discover_nlv_unparsable",
+                            label=label,
+                            account_number=account_number,
+                            raw_value=summary.net_liquidation.value,
+                        )
+                        continue
+                    # C4 will replace this naked try with overflow + Prometheus.
+                    try:
+                        await session.execute(
+                            nlv_update_stmt,
+                            {
+                                "broker_id": "ibkr",
+                                "account_number": account_number,
+                                "nlv": nlv_str,
+                                "currency": summary.net_liquidation.currency,
+                            },
+                        )
+                        nlv_update_count += 1
+                    except Exception:  # refined in C4 with overflow + Prometheus
+                        log.exception(
+                            "broker_discover_nlv_update_failed",
+                            label=label,
+                            account_number=account_number,
+                        )
 
         log.info(
             "broker_discover_iteration_ok",
