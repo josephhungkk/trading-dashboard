@@ -2,6 +2,8 @@ import type { Account, Mode } from './types';
 import { ACCOUNTS } from './fixtures';
 import { MaintenanceError, SidecarUnreachableError } from './errors';
 import { safeParseDecimal } from '../lib/decimal';
+// eslint-disable-next-line boundaries/element-types -- account list response publishes global maintenance status
+import { useFleetMaintenance } from '../stores/global/fleet-maintenance';
 
 export interface AccountResponse {
   id: string;
@@ -126,6 +128,11 @@ function toDisplayAccount(r: AccountResponse): Account {
 export class RealAccountsService implements AccountsService {
   async list(mode: Mode): Promise<Account[]> {
     const res = await listAccounts();
+    useFleetMaintenance.getState().setMaintenance({
+      active: res.broker_maintenance.active,
+      window: res.broker_maintenance.window,
+      until: res.broker_maintenance.until ? new Date(res.broker_maintenance.until) : null,
+    });
     return res.accounts.filter(a => a.mode === mode).map(toDisplayAccount);
   }
   subscribe(mode: Mode, cb: (accounts: Account[]) => void): () => void {
