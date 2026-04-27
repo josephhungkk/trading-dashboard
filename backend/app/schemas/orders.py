@@ -145,6 +145,7 @@ class OrderResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_event_at: datetime | None
+    submission_state: Literal["submitted", "pending_unknown", "idempotent_retry"] = "submitted"
     events: list[OrderEvent] = []
 
     @field_validator(

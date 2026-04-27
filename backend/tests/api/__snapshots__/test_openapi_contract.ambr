@@ -243,6 +243,16 @@
               ],
               "title": "Stop Price"
             },
+            "submission_state": {
+              "default": "submitted",
+              "enum": [
+                "submitted",
+                "pending_unknown",
+                "idempotent_retry"
+              ],
+              "title": "Submission State",
+              "type": "string"
+            },
             "symbol": {
               "title": "Symbol",
               "type": "string"
@@ -487,6 +497,16 @@
             }
           ],
           "title": "Stop Price"
+        },
+        "submission_state": {
+          "default": "submitted",
+          "enum": [
+            "submitted",
+            "pending_unknown",
+            "idempotent_retry"
+          ],
+          "title": "Submission State",
+          "type": "string"
         },
         "symbol": {
           "title": "Symbol",
