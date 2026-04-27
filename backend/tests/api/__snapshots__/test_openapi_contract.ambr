@@ -1,0 +1,709 @@
+# serializer version: 1
+# name: test_openapi_schema_lock_phase5b
+  '''
+  {
+    "ContractSummary": {
+      "properties": {
+        "conid": {
+          "title": "Conid",
+          "type": "integer"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conid",
+        "description"
+      ],
+      "title": "ContractSummary",
+      "type": "object"
+    },
+    "OrderListResponse": {
+      "$defs": {
+        "BrokerMaintenance": {
+          "description": "Maintenance-window envelope. Single source of truth for both the\nlist endpoint (broker_maintenance field on AccountListResponse) and\nthe legacy 503 envelope used by _classify_sidecar_failure.",
+          "properties": {
+            "active": {
+              "title": "Active",
+              "type": "boolean"
+            },
+            "until": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Until"
+            },
+            "window": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "weekend",
+                    "daily"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Window"
+            }
+          },
+          "required": [
+            "active"
+          ],
+          "title": "BrokerMaintenance",
+          "type": "object"
+        },
+        "OrderEvent": {
+          "properties": {
+            "avg_fill_price": {
+              "title": "Avg Fill Price",
+              "type": "string"
+            },
+            "broker_event_at": {
+              "format": "date-time",
+              "title": "Broker Event At",
+              "type": "string"
+            },
+            "broker_order_id": {
+              "title": "Broker Order Id",
+              "type": "string"
+            },
+            "client_order_id": {
+              "title": "Client Order Id",
+              "type": "string"
+            },
+            "filled_qty": {
+              "title": "Filled Qty",
+              "type": "string"
+            },
+            "raw_payload": {
+              "title": "Raw Payload",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "pending_submit",
+                "submitted",
+                "partial",
+                "filled",
+                "cancelled",
+                "rejected",
+                "expired",
+                "inactive"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "broker_order_id",
+            "client_order_id",
+            "status",
+            "filled_qty",
+            "avg_fill_price",
+            "broker_event_at",
+            "raw_payload"
+          ],
+          "title": "OrderEvent",
+          "type": "object"
+        },
+        "OrderResponse": {
+          "properties": {
+            "account_id": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            },
+            "avg_fill_price": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Avg Fill Price"
+            },
+            "broker_order_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Broker Order Id"
+            },
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "events": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/OrderEvent"
+              },
+              "title": "Events",
+              "type": "array"
+            },
+            "filled_qty": {
+              "title": "Filled Qty",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "last_event_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last Event At"
+            },
+            "limit_price": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit Price"
+            },
+            "notional": {
+              "title": "Notional",
+              "type": "string"
+            },
+            "order_type": {
+              "enum": [
+                "MARKET",
+                "LIMIT",
+                "STOP"
+              ],
+              "title": "Order Type",
+              "type": "string"
+            },
+            "qty": {
+              "title": "Qty",
+              "type": "string"
+            },
+            "side": {
+              "enum": [
+                "BUY",
+                "SELL"
+              ],
+              "title": "Side",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "pending_submit",
+                "submitted",
+                "partial",
+                "filled",
+                "cancelled",
+                "rejected",
+                "expired",
+                "inactive"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "stop_price": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Stop Price"
+            },
+            "symbol": {
+              "title": "Symbol",
+              "type": "string"
+            },
+            "tif": {
+              "enum": [
+                "DAY",
+                "GTC"
+              ],
+              "title": "Tif",
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "account_id",
+            "broker_order_id",
+            "symbol",
+            "side",
+            "order_type",
+            "tif",
+            "qty",
+            "limit_price",
+            "stop_price",
+            "status",
+            "filled_qty",
+            "avg_fill_price",
+            "notional",
+            "created_at",
+            "updated_at",
+            "last_event_at"
+          ],
+          "title": "OrderResponse",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "broker_maintenance": {
+          "$ref": "#/components/schemas/BrokerMaintenance"
+        },
+        "kill_switch_active": {
+          "title": "Kill Switch Active",
+          "type": "boolean"
+        },
+        "orders": {
+          "items": {
+            "$ref": "#/components/schemas/OrderResponse"
+          },
+          "title": "Orders",
+          "type": "array"
+        }
+      },
+      "required": [
+        "orders",
+        "broker_maintenance",
+        "kill_switch_active"
+      ],
+      "title": "OrderListResponse",
+      "type": "object"
+    },
+    "OrderResponse": {
+      "$defs": {
+        "OrderEvent": {
+          "properties": {
+            "avg_fill_price": {
+              "title": "Avg Fill Price",
+              "type": "string"
+            },
+            "broker_event_at": {
+              "format": "date-time",
+              "title": "Broker Event At",
+              "type": "string"
+            },
+            "broker_order_id": {
+              "title": "Broker Order Id",
+              "type": "string"
+            },
+            "client_order_id": {
+              "title": "Client Order Id",
+              "type": "string"
+            },
+            "filled_qty": {
+              "title": "Filled Qty",
+              "type": "string"
+            },
+            "raw_payload": {
+              "title": "Raw Payload",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "pending_submit",
+                "submitted",
+                "partial",
+                "filled",
+                "cancelled",
+                "rejected",
+                "expired",
+                "inactive"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "broker_order_id",
+            "client_order_id",
+            "status",
+            "filled_qty",
+            "avg_fill_price",
+            "broker_event_at",
+            "raw_payload"
+          ],
+          "title": "OrderEvent",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "account_id": {
+          "format": "uuid",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "avg_fill_price": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Avg Fill Price"
+        },
+        "broker_order_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Broker Order Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "events": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/OrderEvent"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "filled_qty": {
+          "title": "Filled Qty",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "last_event_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Event At"
+        },
+        "limit_price": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Limit Price"
+        },
+        "notional": {
+          "title": "Notional",
+          "type": "string"
+        },
+        "order_type": {
+          "enum": [
+            "MARKET",
+            "LIMIT",
+            "STOP"
+          ],
+          "title": "Order Type",
+          "type": "string"
+        },
+        "qty": {
+          "title": "Qty",
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "BUY",
+            "SELL"
+          ],
+          "title": "Side",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pending_submit",
+            "submitted",
+            "partial",
+            "filled",
+            "cancelled",
+            "rejected",
+            "expired",
+            "inactive"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "stop_price": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Stop Price"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        },
+        "tif": {
+          "enum": [
+            "DAY",
+            "GTC"
+          ],
+          "title": "Tif",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "account_id",
+        "broker_order_id",
+        "symbol",
+        "side",
+        "order_type",
+        "tif",
+        "qty",
+        "limit_price",
+        "stop_price",
+        "status",
+        "filled_qty",
+        "avg_fill_price",
+        "notional",
+        "created_at",
+        "updated_at",
+        "last_event_at"
+      ],
+      "title": "OrderResponse",
+      "type": "object"
+    },
+    "PolicyResponse": {
+      "properties": {
+        "account_id": {
+          "format": "uuid",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "daily_notional_cap": {
+          "title": "Daily Notional Cap",
+          "type": "string"
+        },
+        "max_notional_per_order": {
+          "title": "Max Notional Per Order",
+          "type": "string"
+        },
+        "notional_filled_today": {
+          "title": "Notional Filled Today",
+          "type": "string"
+        },
+        "position_count": {
+          "title": "Position Count",
+          "type": "integer"
+        },
+        "simulator_only": {
+          "title": "Simulator Only",
+          "type": "boolean"
+        },
+        "trade_enabled": {
+          "title": "Trade Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "account_id",
+        "max_notional_per_order",
+        "daily_notional_cap",
+        "notional_filled_today",
+        "trade_enabled",
+        "simulator_only",
+        "position_count"
+      ],
+      "title": "PolicyResponse",
+      "type": "object"
+    },
+    "PreviewResponse": {
+      "$defs": {
+        "ContractSummary": {
+          "properties": {
+            "conid": {
+              "title": "Conid",
+              "type": "integer"
+            },
+            "description": {
+              "title": "Description",
+              "type": "string"
+            }
+          },
+          "required": [
+            "conid",
+            "description"
+          ],
+          "title": "ContractSummary",
+          "type": "object"
+        },
+        "PositionSanityResult": {
+          "properties": {
+            "current_qty": {
+              "title": "Current Qty",
+              "type": "string"
+            },
+            "new_qty_after_fill": {
+              "title": "New Qty After Fill",
+              "type": "string"
+            },
+            "requires_extra_attestation": {
+              "title": "Requires Extra Attestation",
+              "type": "boolean"
+            },
+            "sanity_multiplier": {
+              "title": "Sanity Multiplier",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "high",
+                "extreme"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "current_qty",
+            "new_qty_after_fill",
+            "sanity_multiplier",
+            "status",
+            "requires_extra_attestation"
+          ],
+          "title": "PositionSanityResult",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "cap_status": {
+          "enum": [
+            "ok",
+            "near",
+            "exceeded"
+          ],
+          "title": "Cap Status",
+          "type": "string"
+        },
+        "contract_summary": {
+          "$ref": "#/components/schemas/ContractSummary"
+        },
+        "daily_cap_status": {
+          "enum": [
+            "ok",
+            "near",
+            "exceeded"
+          ],
+          "title": "Daily Cap Status",
+          "type": "string"
+        },
+        "daily_notional_cap": {
+          "title": "Daily Notional Cap",
+          "type": "string"
+        },
+        "max_notional_per_order": {
+          "title": "Max Notional Per Order",
+          "type": "string"
+        },
+        "nonce": {
+          "title": "Nonce",
+          "type": "string"
+        },
+        "notional": {
+          "title": "Notional",
+          "type": "string"
+        },
+        "notional_currency": {
+          "title": "Notional Currency",
+          "type": "string"
+        },
+        "notional_filled_today": {
+          "title": "Notional Filled Today",
+          "type": "string"
+        },
+        "position_sanity": {
+          "$ref": "#/components/schemas/PositionSanityResult"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "nonce",
+        "notional",
+        "notional_currency",
+        "notional_filled_today",
+        "daily_notional_cap",
+        "max_notional_per_order",
+        "cap_status",
+        "daily_cap_status",
+        "position_sanity",
+        "contract_summary",
+        "warnings"
+      ],
+      "title": "PreviewResponse",
+      "type": "object"
+    }
+  }
+  '''
+# ---

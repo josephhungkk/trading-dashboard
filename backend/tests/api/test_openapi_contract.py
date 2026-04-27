@@ -7,6 +7,7 @@ or drop `degraded_sidecars` (M24 partial-fleet UX).
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import pytest
@@ -15,6 +16,13 @@ from httpx import ASGITransport, AsyncClient
 from app.core.cf_access import AdminIdentity
 from app.core.deps import require_admin_jwt
 from app.main import app
+from app.schemas.orders import (
+    ContractSummary,
+    OrderListResponse,
+    OrderResponse,
+    PolicyResponse,
+    PreviewResponse,
+)
 
 
 @pytest.fixture
@@ -132,3 +140,24 @@ async def test_detail_routes_document_404_envelope(client):
 
         example = responses["404"]["content"]["application/json"]["example"]
         assert example["error"] == "not_found"
+
+
+def test_openapi_schema_lock_phase5b(snapshot):
+    """Lock the 5 Phase-5b wire models against drift.
+
+    On schema change, review the diff in __snapshots__/ then re-bless with:
+        pytest tests/api/test_openapi_contract.py -k schema_lock_phase5b \
+            --snapshot-update
+    """
+    locked = {
+        model.__name__: model.model_json_schema(ref_template="#/components/schemas/{model}")
+        for model in (
+            OrderResponse,
+            OrderListResponse,
+            PreviewResponse,
+            ContractSummary,
+            PolicyResponse,
+        )
+    }
+
+    assert json.dumps(locked, indent=2, sort_keys=True) == snapshot
