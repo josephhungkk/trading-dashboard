@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sys
 import types
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -14,7 +16,7 @@ import pytest
 from ib_async import LimitOrder, MarketOrder, StopOrder
 
 from sidecar._generated.broker.v1 import broker_pb2
-from sidecar.handlers import BrokerHandlers
+from sidecar.handlers import BrokerHandlers, aiolimiter
 from sidecar.pnl_cache import PnLCache
 
 # ---------- ib_async-shaped fakes ----------
@@ -28,6 +30,7 @@ class FakeContract:
     currency: str
     secType: str = "STK"  # noqa: N815
     localSymbol: str = ""  # noqa: N815
+    primaryExchange: str = ""  # noqa: N815
 
 
 @dataclass
@@ -41,18 +44,25 @@ class FakeOrder:
     lmtPrice: Decimal = Decimal("0")  # noqa: N815
     auxPrice: Decimal = Decimal("0")  # noqa: N815
     tif: str = "DAY"
+    orderRef: str = ""  # noqa: N815
 
 
 @dataclass
 class FakeOrderStatus:
     status: str
     filled: Decimal = Decimal("0")
+    remaining: Decimal = Decimal("0")
     avgFillPrice: Decimal = Decimal("0")  # noqa: N815
+    lastFillPrice: Decimal = Decimal("0")  # noqa: N815
+    whyHeld: str = ""  # noqa: N815
 
 
 @dataclass
 class FakeLogEntry:
     time: datetime
+    status: str = ""
+    message: str = ""
+    errorCode: int = 0  # noqa: N815
 
 
 @dataclass
@@ -82,15 +92,41 @@ class FakeFill:
 
 
 @dataclass
+class FakeContractDetails:
+    contract: FakeContract
+
+
+class FakeEvent:
+    def __init__(self) -> None:
+        self.handlers: list[object] = []
+
+    def __iadd__(self, handler: object) -> FakeEvent:
+        self.handlers.append(handler)
+        return self
+
+    def __isub__(self, handler: object) -> FakeEvent:
+        self.handlers.remove(handler)
+        return self
+
+    def fire(self, trade: FakeTrade) -> None:
+        for handler in list(self.handlers):
+            handler(trade)  # type: ignore[operator]
+
+
+@dataclass
 class FakeIB:
     open_trades_list: list[FakeTrade] = field(default_factory=list)
     fills_list: list[FakeFill] = field(default_factory=list)
     qualified: list[FakeContract] = field(default_factory=list)
+    contract_details: list[FakeContractDetails] = field(default_factory=list)
+    contract_details_calls: list[object] = field(default_factory=list)
     place_order_calls: list[tuple[object, object]] = field(default_factory=list)
     cancel_order_calls: list[object] = field(default_factory=list)
     placed_trades: list[FakeTrade] = field(default_factory=list)
     raise_on_open: bool = False
     raise_on_qualify: bool = False
+    orderStatusEvent: FakeEvent = field(default_factory=FakeEvent)  # noqa: N815
+    execDetailsEvent: FakeEvent = field(default_factory=FakeEvent)  # noqa: N815
 
     def openTrades(self) -> list[FakeTrade]:  # noqa: N802
         if self.raise_on_open:
@@ -105,6 +141,15 @@ class FakeIB:
         if self.raise_on_qualify:
             raise RuntimeError("contract not found")
         return list(self.qualified)
+
+    async def reqContractDetailsAsync(self, contract: object) -> list[FakeContractDetails]:  # noqa: N802
+        self.contract_details_calls.append(contract)
+        sec_type = str(getattr(contract, "secType", ""))
+        return [
+            detail
+            for detail in self.contract_details
+            if not sec_type or detail.contract.secType == sec_type
+        ]
 
     def placeOrder(self, contract: object, order: object) -> FakeTrade:  # noqa: N802
         self.place_order_calls.append((contract, order))
@@ -123,6 +168,12 @@ class FakeIB:
     def trades(self) -> list[FakeTrade]:
         return [*self.open_trades_list, *self.placed_trades]
 
+    def fire_status(self, trade: FakeTrade) -> None:
+        self.orderStatusEvent.fire(trade)
+
+    def fire_exec(self, trade: FakeTrade) -> None:
+        self.execDetailsEvent.fire(trade)
+
 
 def _handlers(ib: FakeIB, *, simulator_only: bool = False) -> BrokerHandlers:
     return BrokerHandlers(
@@ -133,6 +184,17 @@ def _handlers(ib: FakeIB, *, simulator_only: bool = False) -> BrokerHandlers:
         last_tick_ref={},
         simulator_only=simulator_only,
     )
+
+
+class FakeContext:
+    def __init__(self) -> None:
+        self._cancelled = False
+
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
 
 def _place_order_request(
@@ -157,15 +219,213 @@ def _place_order_request(
     )
 
 
+def _event_trade(
+    *,
+    account: str,
+    perm_id: int = 77777,
+    order_ref: str = "client-order-1",
+    status: str = "Submitted",
+    filled: Decimal = Decimal("0"),
+    avg_fill_price: Decimal = Decimal("0"),
+) -> FakeTrade:
+    return FakeTrade(
+        contract=FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD"),
+        order=FakeOrder(
+            permId=perm_id,
+            orderId=1,
+            account=account,
+            action="BUY",
+            orderType="LMT",
+            totalQuantity=Decimal("10"),
+            orderRef=order_ref,
+        ),
+        orderStatus=FakeOrderStatus(
+            status=status,
+            filled=filled,
+            remaining=Decimal("10") - filled,
+            avgFillPrice=avg_fill_price,
+            lastFillPrice=avg_fill_price,
+        ),
+        log=[
+            FakeLogEntry(
+                time=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+                status=status,
+                message="event",
+                errorCode=0,
+            )
+        ],
+    )
+
+
 # ---------- GetOrders ----------
+
+
+@pytest.mark.asyncio
+async def test_order_event_filters_on_trade_order_account() -> None:
+    ib = FakeIB()
+    h = _handlers(ib)
+    context = FakeContext()
+    stream = h.OrderEvent(broker_pb2.AccountRef(account_number="U1111111"), context)
+    first = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    ib.fire_status(_event_trade(account="U1111111", perm_id=1))
+    ib.fire_status(_event_trade(account="U2222222", perm_id=2))
+    ib.fire_status(_event_trade(account="U1111111", perm_id=3))
+
+    first_event = await first
+    second_event = await anext(stream)
+    assert [first_event.broker_order_id, second_event.broker_order_id] == ["1", "3"]
+
+    context.cancel()
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_order_event_does_not_leak_cross_account() -> None:
+    ib = FakeIB()
+    h = _handlers(ib)
+    context = FakeContext()
+    stream = h.OrderEvent(broker_pb2.AccountRef(account_number="U1111111"), context)
+    first = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    for perm_id in range(10):
+        ib.fire_exec(_event_trade(account="U2222222", perm_id=perm_id))
+    ib.fire_exec(_event_trade(account="U1111111", perm_id=99))
+
+    event = await first
+    assert event.broker_order_id == "99"
+    assert event.raw_payload
+    assert json.loads(event.raw_payload)["account"] == "U1111111"
+
+    context.cancel()
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_order_event_queue_bounded_drops_on_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sidecar import handlers, metrics
+
+    gate = asyncio.Event()
+    real_queue = asyncio.Queue
+
+    class BlockingGetQueue(real_queue):
+        async def get(self) -> object:
+            await gate.wait()
+            return await super().get()
+
+    monkeypatch.setattr(handlers.asyncio, "Queue", BlockingGetQueue)
+    dropped = metrics.broker_order_events_dropped_total.labels(reason="queue_full")
+    before = dropped._value.get()  # type: ignore[attr-defined]
+
+    ib = FakeIB()
+    h = _handlers(ib)
+    context = FakeContext()
+    stream = h.OrderEvent(broker_pb2.AccountRef(account_number="U1111111"), context)
+    first = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    for perm_id in range(10_001):
+        ib.fire_status(_event_trade(account="U1111111", perm_id=perm_id))
+
+    after = dropped._value.get()  # type: ignore[attr-defined]
+    assert after - before == 1
+
+    gate.set()
+    yielded = [await first]
+    for _ in range(9_999):
+        yielded.append(await anext(stream))
+    assert len(yielded) == 10_000
+    assert yielded[0].broker_order_id == "0"
+    assert yielded[-1].broker_order_id == "9999"
+
+    context.cancel()
+    await stream.aclose()
+
+
+def test_serialize_trade_handles_circular_refs() -> None:
+    trade = _event_trade(
+        account="U1111111",
+        perm_id=123,
+        order_ref="client-123",
+        status="Filled",
+        filled=Decimal("2.5"),
+        avg_fill_price=Decimal("181.25"),
+    )
+    trade.self_ref = trade  # type: ignore[attr-defined]
+
+    payload = BrokerHandlers._serialize_trade(trade)
+
+    assert payload == {
+        "perm_id": 123,
+        "order_ref": "client-123",
+        "account": "U1111111",
+        "status": "Filled",
+        "filled": "2.5",
+        "remaining": "7.5",
+        "avg_fill_price": "181.25",
+        "last_fill_price": "181.25",
+        "why_held": "",
+        "log": [
+            {
+                "time": "2026-04-27T12:00:00+00:00",
+                "status": "Filled",
+                "message": "event",
+                "error_code": 0,
+            }
+        ],
+    }
+    json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_order_event_emits_status_and_fill() -> None:
+    ib = FakeIB()
+    h = _handlers(ib)
+    context = FakeContext()
+    stream = h.OrderEvent(broker_pb2.AccountRef(account_number="U1111111"), context)
+    first = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    ib.fire_status(
+        _event_trade(
+            account="U1111111",
+            perm_id=123,
+            status="Submitted",
+            filled=Decimal("1"),
+            avg_fill_price=Decimal("180.50"),
+        )
+    )
+    ib.fire_exec(
+        _event_trade(
+            account="U1111111",
+            perm_id=123,
+            status="Filled",
+            filled=Decimal("10"),
+            avg_fill_price=Decimal("181.25"),
+        )
+    )
+
+    status_event = await first
+    fill_event = await anext(stream)
+    assert status_event.status == "Submitted"
+    assert status_event.filled_qty == "1"
+    assert status_event.avg_fill_price == "180.50"
+    assert fill_event.status == "Filled"
+    assert fill_event.filled_qty == "10"
+    assert fill_event.avg_fill_price == "181.25"
+
+    context.cancel()
+    await stream.aclose()
 
 
 @pytest.mark.asyncio
 async def test_place_order_market_builds_correct_ib_order() -> None:
     ib = FakeIB(
-        qualified=[
-            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
-        ]
+        qualified=[FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")]
     )
     h = _handlers(ib, simulator_only=False)
     request = _place_order_request(order_type="MARKET", side="BUY", qty="10")
@@ -185,9 +445,7 @@ async def test_place_order_market_builds_correct_ib_order() -> None:
 @pytest.mark.asyncio
 async def test_place_order_limit_includes_limit_price() -> None:
     ib = FakeIB(
-        qualified=[
-            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
-        ]
+        qualified=[FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")]
     )
     h = _handlers(ib, simulator_only=False)
     request = _place_order_request(
@@ -211,9 +469,7 @@ async def test_place_order_limit_includes_limit_price() -> None:
 @pytest.mark.asyncio
 async def test_place_order_stop_includes_stop_price() -> None:
     ib = FakeIB(
-        qualified=[
-            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
-        ]
+        qualified=[FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")]
     )
     h = _handlers(ib, simulator_only=False)
     request = _place_order_request(
@@ -237,9 +493,7 @@ async def test_place_order_stop_includes_stop_price() -> None:
 @pytest.mark.asyncio
 async def test_place_order_per_client_id_lock_prevents_double_place() -> None:
     ib = FakeIB(
-        qualified=[
-            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
-        ]
+        qualified=[FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")]
     )
     h = _handlers(ib, simulator_only=False)
     request = _place_order_request(client_order_id="same-client-order")
@@ -411,9 +665,7 @@ async def test_get_orders_maps_open_limit_order() -> None:
     )
     ib = FakeIB(open_trades_list=[trade])
     h = _handlers(ib)
-    response = await h.GetOrders(
-        broker_pb2.AccountRef(account_number="U1111111"), context=object()
-    )
+    response = await h.GetOrders(broker_pb2.AccountRef(account_number="U1111111"), context=object())
     assert len(response.orders) == 1
     o = response.orders[0]
     assert o.order_id == "11111"
@@ -448,9 +700,7 @@ async def test_get_orders_maps_filled_today_market_order() -> None:
     )
     ib = FakeIB(fills_list=[fill])
     h = _handlers(ib)
-    response = await h.GetOrders(
-        broker_pb2.AccountRef(account_number="U1111111"), context=object()
-    )
+    response = await h.GetOrders(broker_pb2.AccountRef(account_number="U1111111"), context=object())
     assert len(response.orders) == 1
     o = response.orders[0]
     assert o.order_id == "22222"
@@ -478,9 +728,7 @@ async def test_get_orders_filters_out_other_account_orders() -> None:
     )
     ib = FakeIB(open_trades_list=[other_account_trade])
     h = _handlers(ib)
-    response = await h.GetOrders(
-        broker_pb2.AccountRef(account_number="U1111111"), context=object()
-    )
+    response = await h.GetOrders(broker_pb2.AccountRef(account_number="U1111111"), context=object())
     assert list(response.orders) == []
 
 
@@ -504,9 +752,7 @@ async def test_get_orders_excludes_yesterdays_fills() -> None:
     )
     ib = FakeIB(fills_list=[fill])
     h = _handlers(ib)
-    response = await h.GetOrders(
-        broker_pb2.AccountRef(account_number="U1111111"), context=object()
-    )
+    response = await h.GetOrders(broker_pb2.AccountRef(account_number="U1111111"), context=object())
     assert list(response.orders) == []
 
 
@@ -543,9 +789,7 @@ async def test_get_orders_dedups_fill_when_open_trade_shares_perm_id() -> None:
     )
     ib = FakeIB(open_trades_list=[trade], fills_list=[fill])
     h = _handlers(ib)
-    response = await h.GetOrders(
-        broker_pb2.AccountRef(account_number="U1111111"), context=object()
-    )
+    response = await h.GetOrders(broker_pb2.AccountRef(account_number="U1111111"), context=object())
     assert len(response.orders) == 1
     assert response.orders[0].order_id == str(perm_id)
 
@@ -582,9 +826,7 @@ async def test_get_orders_status_mapping(
     )
     ib = FakeIB(open_trades_list=[trade])
     h = _handlers(ib)
-    response = await h.GetOrders(
-        broker_pb2.AccountRef(account_number="U1111111"), context=object()
-    )
+    response = await h.GetOrders(broker_pb2.AccountRef(account_number="U1111111"), context=object())
     assert response.orders[0].status == proto_status
 
 
@@ -592,9 +834,7 @@ async def test_get_orders_status_mapping(
 async def test_get_orders_returns_empty_when_api_throws() -> None:
     ib = FakeIB(raise_on_open=True)
     h = _handlers(ib)
-    response = await h.GetOrders(
-        broker_pb2.AccountRef(account_number="U1111111"), context=object()
-    )
+    response = await h.GetOrders(broker_pb2.AccountRef(account_number="U1111111"), context=object())
     assert list(response.orders) == []
 
 
@@ -614,9 +854,7 @@ async def test_get_contract_resolves_by_conid() -> None:
     )
     ib = FakeIB(qualified=[qualified])
     h = _handlers(ib)
-    response = await h.GetContract(
-        broker_pb2.ContractRef(conid="265598"), context=object()
-    )
+    response = await h.GetContract(broker_pb2.ContractRef(conid="265598"), context=object())
     c = response.contract
     assert c.symbol == "AAPL"
     assert c.exchange == "NASDAQ"
@@ -630,9 +868,7 @@ async def test_get_contract_returns_default_when_qualify_throws() -> None:
     """Unknown conId / network error must surface as default Contract proto."""
     ib = FakeIB(raise_on_qualify=True)
     h = _handlers(ib)
-    response = await h.GetContract(
-        broker_pb2.ContractRef(conid="9999999"), context=object()
-    )
+    response = await h.GetContract(broker_pb2.ContractRef(conid="9999999"), context=object())
     # Default proto: empty fields. Caller distinguishes via empty conid.
     assert response.contract.symbol == ""
     assert response.contract.conid == ""
@@ -643,7 +879,134 @@ async def test_get_contract_returns_default_when_qualify_returns_empty() -> None
     """qualifyContractsAsync returning [] (unrecognized conId) must not crash."""
     ib = FakeIB(qualified=[])
     h = _handlers(ib)
-    response = await h.GetContract(
-        broker_pb2.ContractRef(conid="9999999"), context=object()
-    )
+    response = await h.GetContract(broker_pb2.ContractRef(conid="9999999"), context=object())
     assert response.contract.symbol == ""
+
+
+# ---------- SearchContracts ----------
+
+
+@pytest.fixture(autouse=True)
+def _clear_search_cache() -> Iterator[None]:
+    """Reset the class-level _search_cache between tests
+    (architect-review M1: ClassVar leaks across tests; rebinding instance
+    attribute doesn't reach the class dict). Limiter is left intact —
+    R20 mandates process-wide 5/sec."""
+    from handlers import BrokerHandlers
+
+    BrokerHandlers._search_cache.clear()
+    yield
+    BrokerHandlers._search_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_search_contracts_caches_results() -> None:
+    ib = FakeIB(
+        contract_details=[
+            FakeContractDetails(
+                FakeContract(
+                    conId=265598,
+                    symbol="AAPL",
+                    primaryExchange="NASDAQ",
+                    exchange="SMART",
+                    currency="USD",
+                )
+            ),
+            FakeContractDetails(
+                FakeContract(
+                    conId=38708077,
+                    symbol="AAPL",
+                    primaryExchange="LSE",
+                    exchange="SMART",
+                    currency="GBP",
+                )
+            ),
+        ]
+    )
+    h = _handlers(ib)
+    h._search_cache = {}
+
+    request = broker_pb2.SearchContractsRequest(query="AAPL", asset_class="STK")
+    first = await h.SearchContracts(request, context=object())
+    second = await h.SearchContracts(request, context=object())
+
+    assert len(ib.contract_details_calls) == 1
+    assert list(first.contracts) == list(second.contracts)
+    assert len(first.contracts) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_contracts_rate_limits_5_per_sec_process_wide() -> None:
+    ib = FakeIB(
+        contract_details=[
+            FakeContractDetails(
+                FakeContract(
+                    conId=265598,
+                    symbol="AAPL",
+                    primaryExchange="NASDAQ",
+                    exchange="SMART",
+                    currency="USD",
+                )
+            )
+        ]
+    )
+    h = _handlers(ib)
+    h._search_cache = {}
+    h._search_limiter = aiolimiter.AsyncLimiter(5, 1.0)
+
+    await asyncio.gather(
+        *[
+            h.SearchContracts(
+                broker_pb2.SearchContractsRequest(query=f"SYM{index}", asset_class="STK"),
+                context=object(),
+            )
+            for index in range(5)
+        ]
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            h.SearchContracts(
+                broker_pb2.SearchContractsRequest(query="SYM5", asset_class="STK"),
+                context=object(),
+            ),
+            timeout=0.2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_contracts_forwards_asset_class_filter() -> None:
+    ib = FakeIB(
+        contract_details=[
+            FakeContractDetails(
+                FakeContract(
+                    conId=265598,
+                    symbol="AAPL",
+                    primaryExchange="NASDAQ",
+                    exchange="SMART",
+                    currency="USD",
+                    secType="STK",
+                )
+            ),
+            FakeContractDetails(
+                FakeContract(
+                    conId=650242895,
+                    symbol="AAPL",
+                    primaryExchange="CME",
+                    exchange="CME",
+                    currency="USD",
+                    secType="FUT",
+                )
+            ),
+        ]
+    )
+    h = _handlers(ib)
+    h._search_cache = {}
+
+    response = await h.SearchContracts(
+        broker_pb2.SearchContractsRequest(query="AAPL", asset_class="STK"),
+        context=object(),
+    )
+
+    assert ib.contract_details_calls[0].secType == "STK"
+    assert [contract.asset_class for contract in response.contracts] == [broker_pb2.STOCK]

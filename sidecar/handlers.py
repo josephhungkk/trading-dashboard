@@ -3,13 +3,50 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Literal, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
+import ib_async
 import structlog
 from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
 
+try:
+    import aiolimiter
+except ModuleNotFoundError:
+
+    class _FallbackAsyncLimiter:
+        def __init__(self, max_rate: int, time_period: float) -> None:
+            self._max_rate = max_rate
+            self._time_period = time_period
+            self._timestamps: list[float] = []
+            self._lock = asyncio.Lock()
+
+        async def __aenter__(self) -> None:
+            while True:
+                async with self._lock:
+                    now = time.monotonic()
+                    self._timestamps = [
+                        timestamp
+                        for timestamp in self._timestamps
+                        if now - timestamp < self._time_period
+                    ]
+                    if len(self._timestamps) < self._max_rate:
+                        self._timestamps.append(now)
+                        return
+                    wait_for = self._time_period - (now - self._timestamps[0])
+                await asyncio.sleep(max(wait_for, 0.0))
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+    aiolimiter = SimpleNamespace(AsyncLimiter=_FallbackAsyncLimiter)
+
+from sidecar import metrics
 from sidecar._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from sidecar.normalize import (
     decimal_str,
@@ -51,6 +88,7 @@ if TYPE_CHECKING:
         auxPrice: float | Decimal | None  # noqa: N815
         lmtPrice: float | Decimal | None  # noqa: N815
         orderId: int  # noqa: N815
+        orderRef: str  # noqa: N815
         orderType: str  # noqa: N815
         permId: int  # noqa: N815
         tif: str
@@ -59,9 +97,15 @@ if TYPE_CHECKING:
     class _IbOrderStatus(Protocol):
         avgFillPrice: float  # noqa: N815
         filled: float
+        lastFillPrice: float  # noqa: N815
+        remaining: float
         status: str
+        whyHeld: str  # noqa: N815
 
     class _IbTradeLogEntry(Protocol):
+        errorCode: int  # noqa: N815
+        message: str
+        status: str
         time: datetime
 
     class _IbTrade(Protocol):
@@ -93,6 +137,9 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
     # is not strict-clean). The `misc` ignore documents the intentional
     # subclass-of-Any rather than letting it leak into every caller.
     """Read-only broker service backed by an ib_async IB connection."""
+
+    _search_cache: ClassVar[dict[str, tuple[float, list]]] = {}
+    _search_limiter: ClassVar[aiolimiter.AsyncLimiter] = aiolimiter.AsyncLimiter(5, 1.0)
 
     def __init__(
         self,
@@ -374,9 +421,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 status="Submitted",
             )
 
-        lock: asyncio.Lock = self._place_locks.setdefault(
-            request.client_order_id, asyncio.Lock()
-        )
+        lock: asyncio.Lock = self._place_locks.setdefault(request.client_order_id, asyncio.Lock())
         async with lock:
             raw_trades: object = self.ib.trades()  # type: ignore[attr-defined, unused-ignore]
             for trade in cast("Iterable[object]", raw_trades):
@@ -389,8 +434,8 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
             contract: object = await self._resolve_contract(request.conid)
             ib_order: object = self._build_ib_order(request)
-            setattr(ib_order, "orderRef", request.client_order_id)
-            setattr(ib_order, "account", request.account_number)
+            ib_order.orderRef = request.client_order_id
+            ib_order.account = request.account_number
             trade: _IbTrade = cast(
                 "_IbTrade",
                 self.ib.placeOrder(contract, ib_order),  # type: ignore[attr-defined, unused-ignore]
@@ -418,6 +463,31 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 return broker_pb2.CancelOrderResponse(accepted=True)
 
         return broker_pb2.CancelOrderResponse(accepted=False)
+
+    async def OrderEvent(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: object,
+    ) -> object:
+        queue: asyncio.Queue[broker_pb2.OrderEventMessage] = asyncio.Queue(maxsize=10_000)
+
+        def _on_status(trade: object) -> None:
+            ib_trade: _IbTrade = cast("_IbTrade", trade)
+            if ib_trade.order.account != request.account_number:
+                return
+            try:
+                queue.put_nowait(self._proto_event_from_trade(ib_trade))
+            except asyncio.QueueFull:
+                metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
+
+        self.ib.orderStatusEvent += _on_status  # type: ignore[attr-defined, unused-ignore]
+        self.ib.execDetailsEvent += _on_status  # type: ignore[attr-defined, unused-ignore]
+        try:
+            while not context.cancelled():  # type: ignore[attr-defined]
+                yield await queue.get()
+        finally:
+            self.ib.orderStatusEvent -= _on_status  # type: ignore[attr-defined, unused-ignore]
+            self.ib.execDetailsEvent -= _on_status  # type: ignore[attr-defined, unused-ignore]
 
     async def GetContract(  # noqa: N802
         self,
@@ -448,6 +518,31 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
         return broker_pb2.ContractResponse(contract=proto_contract)
 
+    async def SearchContracts(  # noqa: N802
+        self,
+        request: broker_pb2.SearchContractsRequest,
+        context: object,
+    ) -> broker_pb2.SearchContractsResponse:
+        del context
+
+        cache_key = hashlib.sha256(f"{request.query}|{request.asset_class}".encode()).hexdigest()
+        cached = self._search_cache.get(cache_key)
+        if cached is not None:
+            mtime, contracts = cached
+            if time.monotonic() - mtime < 300:
+                return broker_pb2.SearchContractsResponse(contracts=contracts)
+
+        async with self._search_limiter:
+            ib_contract = ib_async.Contract(
+                symbol=request.query,
+                secType=request.asset_class or "STK",
+            )
+            details = await self.ib.reqContractDetailsAsync(ib_contract)  # type: ignore[attr-defined, unused-ignore]
+
+        contracts = [self._proto_contract_from_details(detail) for detail in details]
+        self._search_cache[cache_key] = (time.monotonic(), contracts)
+        return broker_pb2.SearchContractsResponse(contracts=contracts)
+
     async def _resolve_contract(self, conid: str) -> object:
         from ib_async import Contract as RuntimeIbContract  # type: ignore[import-untyped]
 
@@ -477,8 +572,44 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             raise ValueError(f"Unsupported order_type: {order_type}")
 
         if request.tif:
-            setattr(order, "tif", request.tif)
+            order.tif = request.tif
         return order
+
+    @staticmethod
+    def _serialize_trade(trade: _IbTrade) -> dict[str, object]:
+        return {
+            "perm_id": trade.order.permId,
+            "order_ref": trade.order.orderRef,
+            "account": trade.order.account,
+            "status": trade.orderStatus.status,
+            "filled": str(trade.orderStatus.filled),
+            "remaining": str(trade.orderStatus.remaining),
+            "avg_fill_price": str(trade.orderStatus.avgFillPrice or 0),
+            "last_fill_price": str(trade.orderStatus.lastFillPrice or 0),
+            "why_held": trade.orderStatus.whyHeld or "",
+            "log": [
+                {
+                    "time": entry.time.isoformat(),
+                    "status": entry.status,
+                    "message": entry.message,
+                    "error_code": entry.errorCode,
+                }
+                for entry in trade.log
+            ],
+        }
+
+    def _proto_event_from_trade(self, trade: _IbTrade) -> broker_pb2.OrderEventMessage:
+        raw: dict[str, object] = self._serialize_trade(trade)
+        message = broker_pb2.OrderEventMessage(
+            broker_order_id=str(trade.order.permId),
+            client_order_id=trade.order.orderRef or "",
+            status=trade.orderStatus.status,
+            filled_qty=str(trade.orderStatus.filled),
+            avg_fill_price=str(trade.orderStatus.avgFillPrice or 0),
+            raw_payload=json.dumps(raw),
+        )
+        message.event_at.FromDatetime(datetime.now(UTC))
+        return message
 
     def _proto_contract(self, ib_contract: _IbContract) -> broker_pb2.Contract:
         return broker_pb2.Contract(
@@ -488,6 +619,16 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             asset_class=self._asset_class(str(ib_contract.secType)),
             conid=str(ib_contract.conId),
             local_symbol=str(ib_contract.localSymbol),
+        )
+
+    def _proto_contract_from_details(self, details: object) -> broker_pb2.Contract:
+        contract = details.contract
+        return broker_pb2.Contract(
+            conid=str(contract.conId),
+            symbol=contract.symbol,
+            exchange=contract.primaryExchange or contract.exchange,
+            currency=contract.currency,
+            asset_class=self._asset_class(contract.secType),
         )
 
     def _proto_order_from_trade(self, trade: _IbTrade) -> broker_pb2.Order:
