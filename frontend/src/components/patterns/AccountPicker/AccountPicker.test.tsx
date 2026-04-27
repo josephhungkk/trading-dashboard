@@ -5,6 +5,7 @@ import { AccountPicker } from './AccountPicker';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 function stubRadixPointer(): void {
   const proto = Element.prototype as unknown as Record<string, unknown>;
@@ -31,7 +32,7 @@ describe('AccountPicker', () => {
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices());
+    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
   });
 
   it('renders selected account alias in trigger when hydrated', () => {

@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { getScopedStores, getBothScopes } from './registry';
 import { getServices, resetServices } from '@/services/registry';
+import { ACCOUNTS } from '@/services/fixtures';
+import type { Account, Mode } from '@/services/types';
+
+async function fetchFixtureAccounts(mode: Mode): Promise<Account[]> {
+  return ACCOUNTS.filter(account => account.mode === mode);
+}
 
 describe('stores registry', () => {
   beforeEach(() => {
@@ -20,7 +26,7 @@ describe('stores registry', () => {
   it('hydrating live does not populate paper', async () => {
     const { live, paper } = getBothScopes();
     const svc = getServices();
-    await live.hydrate(svc);
+    await live.hydrate(svc, fetchFixtureAccounts);
     expect(live.useAccounts.getState().accounts.length).toBeGreaterThan(0);
     expect(paper.useAccounts.getState().accounts.length).toBe(0);
   });
@@ -28,7 +34,7 @@ describe('stores registry', () => {
   it('suspend clears scope state', async () => {
     const { live } = getBothScopes();
     const svc = getServices();
-    await live.hydrate(svc);
+    await live.hydrate(svc, fetchFixtureAccounts);
     expect(live.useAccounts.getState().accounts.length).toBeGreaterThan(0);
     live.suspend();
     expect(live.useAccounts.getState().accounts.length).toBe(0);

@@ -4,6 +4,7 @@ import { OverviewPage } from './OverviewPage';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 function Hydrate({
   mode,
@@ -18,7 +19,7 @@ function Hydrate({
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode, pendingMode: null, status: 'idle' });
-    void (mode === 'live' ? live : paper).hydrate(getServices());
+    void (mode === 'live' ? live : paper).hydrate(getServices(), fetchAccountsAndSyncMaintenance);
   }, [mode]);
   return <>{children}</>;
 }

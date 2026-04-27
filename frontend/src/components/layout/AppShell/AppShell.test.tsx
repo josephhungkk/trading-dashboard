@@ -13,6 +13,7 @@ import { useConnectedStore } from '@/stores/global/connected';
 import { useCommandsStore } from '@/stores/global/commands';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 import type { ConnectedStatus } from '@/services/types';
 
 // jsdom doesn't implement ResizeObserver — stub it. react-resizable-panels
@@ -110,7 +111,7 @@ describe('AppShell', () => {
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices());
+    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
     useConnectedStore.setState({ statuses: allGreen });
     useCommandsStore.setState({ open: false, commands: [] });
     document.body.removeAttribute('data-mode');

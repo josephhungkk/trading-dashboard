@@ -18,6 +18,8 @@ import { useToast } from '@/hooks/use-toast';
 import { getScopedStores } from '@/stores/registry';
 // eslint-disable-next-line boundaries/element-types -- services singleton for hydration
 import { getServices } from '@/services/registry';
+// eslint-disable-next-line boundaries/element-types -- hooks layer composes account fetch with maintenance publish
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 export function ModeToggle(): React.JSX.Element {
   const mode = useModeStore((s) => s.mode);
@@ -33,7 +35,7 @@ export function ModeToggle(): React.JSX.Element {
     setStatus('switching');
     const from = mode;
     try {
-      await getScopedStores(target).hydrate(getServices());
+      await getScopedStores(target).hydrate(getServices(), fetchAccountsAndSyncMaintenance);
       getScopedStores(from).suspend();
       setMode(target);
       toast({ title: `Switched to ${target.toUpperCase()} mode`, tone: 'success' });

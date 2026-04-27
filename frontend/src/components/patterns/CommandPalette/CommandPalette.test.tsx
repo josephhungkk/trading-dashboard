@@ -6,6 +6,7 @@ import { useCommandsStore } from '@/stores/global/commands';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 const navigateMock = vi.fn();
 vi.mock('@tanstack/react-router', async (orig) => {
@@ -39,7 +40,7 @@ describe('CommandPalette', () => {
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices());
+    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
     // Sync commands store with the fresh in-memory registry.
     useCommandsStore.setState({ open: false, commands: getServices().commands.list() });
   });

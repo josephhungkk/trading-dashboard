@@ -4,6 +4,7 @@ import { OpenOrdersCompact } from './OpenOrdersCompact';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 class ResizeObserverStub {
   observe(): void { /* noop */ }
@@ -50,7 +51,7 @@ describe('OpenOrdersCompact', () => {
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices());
+    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
   });
 
   it('renders heading and reduced column set', async () => {

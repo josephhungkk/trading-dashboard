@@ -4,6 +4,7 @@ import { WatchlistCompact } from './WatchlistCompact';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 describe('WatchlistCompact', () => {
   beforeEach(async () => {
@@ -12,7 +13,7 @@ describe('WatchlistCompact', () => {
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices());
+    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
   });
 
   it('renders the active watchlist name as heading', async () => {

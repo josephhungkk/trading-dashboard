@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import type { Mode, Account } from '@/services/types';
-import type { Services } from '@/services/registry';
 import type { Scoped } from './types';
+
+export type FetchAccounts = (mode: Mode) => Promise<Account[]>;
 
 export interface AccountsState {
   accounts: Account[];
   selectedAccountId: string | null;
-  hydrate(svc: Services): Promise<void>;
+  hydrate(fetchAccounts: FetchAccounts): Promise<void>;
   suspend(): void;
   select(id: string | null): void;
 }
@@ -15,8 +16,8 @@ export function createAccountStore<M extends Mode>(mode: M) {
   const store = create<AccountsState>((set) => ({
     accounts: [],
     selectedAccountId: null,
-    async hydrate(svc) {
-      const accts = await svc.accounts.list(mode);
+    async hydrate(fetchAccounts) {
+      const accts = await fetchAccounts(mode);
       set({ accounts: accts, selectedAccountId: accts[0]?.id ?? null });
     },
     suspend() { set({ accounts: [], selectedAccountId: null }); },

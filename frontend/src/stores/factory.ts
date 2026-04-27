@@ -1,6 +1,6 @@
 import type { Mode } from '@/services/types';
 import type { Services } from '@/services/registry';
-import { createAccountStore } from './scoped/account-store';
+import { createAccountStore, type FetchAccounts } from './scoped/account-store';
 import { createPositionsStore } from './scoped/positions-store';
 import { createOrdersStore } from './scoped/orders-store';
 import { createWatchlistsStore } from './scoped/watchlists-store';
@@ -11,7 +11,7 @@ export interface ScopedStores<M extends Mode> {
   usePositions:  ReturnType<typeof createPositionsStore<M>>;
   useOrders:     ReturnType<typeof createOrdersStore<M>>;
   useWatchlists: ReturnType<typeof createWatchlistsStore<M>>;
-  hydrate(svc: Services): Promise<void>;
+  hydrate(svc: Services, fetchAccounts: FetchAccounts): Promise<void>;
   suspend(): void;
 }
 
@@ -23,9 +23,9 @@ export function createScopedStores<M extends Mode>(mode: M): ScopedStores<M> {
   return {
     mode,
     useAccounts, usePositions, useOrders, useWatchlists,
-    async hydrate(svc) {
+    async hydrate(svc, fetchAccounts) {
       await Promise.all([
-        useAccounts.getState().hydrate(svc),
+        useAccounts.getState().hydrate(fetchAccounts),
         usePositions.getState().hydrate(svc),
         useOrders.getState().hydrate(svc),
         useWatchlists.getState().hydrate(svc),

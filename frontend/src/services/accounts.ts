@@ -2,8 +2,6 @@ import type { Account, Mode } from './types';
 import { ACCOUNTS } from './fixtures';
 import { MaintenanceError, SidecarUnreachableError } from './errors';
 import { safeParseDecimal } from '../lib/decimal';
-// eslint-disable-next-line boundaries/element-types -- account list response publishes global maintenance status
-import { useFleetMaintenance } from '../stores/global/fleet-maintenance';
 
 export interface AccountResponse {
   id: string;
@@ -27,6 +25,11 @@ export interface AccountListResponse {
   accounts: AccountResponse[];
   degraded_sidecars: string[];
   broker_maintenance: BrokerMaintenance;
+}
+
+export interface DisplayAccountListResponse {
+  accounts: Account[];
+  brokerMaintenance: BrokerMaintenance;
 }
 
 const MOCK_ACCOUNT_LIST: AccountListResponse = {
@@ -88,14 +91,17 @@ export async function listAccounts(): Promise<AccountListResponse> {
 }
 
 export interface AccountsService {
-  list(mode: Mode): Promise<Account[]>;
+  list(mode: Mode): Promise<DisplayAccountListResponse>;
   subscribe(mode: Mode, cb: (accounts: Account[]) => void): () => void;
 }
 
 export class MockAccountsService implements AccountsService {
   constructor(private readonly fixtures: Account[] = ACCOUNTS) {}
-  async list(mode: Mode): Promise<Account[]> {
-    return this.fixtures.filter(a => a.mode === mode);
+  async list(mode: Mode): Promise<DisplayAccountListResponse> {
+    return {
+      accounts: this.fixtures.filter(a => a.mode === mode),
+      brokerMaintenance: MOCK_ACCOUNT_LIST.broker_maintenance,
+    };
   }
   subscribe(mode: Mode, cb: (accounts: Account[]) => void): () => void {
     void mode;
@@ -126,14 +132,12 @@ function toDisplayAccount(r: AccountResponse): Account {
 }
 
 export class RealAccountsService implements AccountsService {
-  async list(mode: Mode): Promise<Account[]> {
+  async list(mode: Mode): Promise<DisplayAccountListResponse> {
     const res = await listAccounts();
-    useFleetMaintenance.getState().setMaintenance({
-      active: res.broker_maintenance.active,
-      window: res.broker_maintenance.window,
-      until: res.broker_maintenance.until ? new Date(res.broker_maintenance.until) : null,
-    });
-    return res.accounts.filter(a => a.mode === mode).map(toDisplayAccount);
+    return {
+      accounts: res.accounts.filter(a => a.mode === mode).map(toDisplayAccount),
+      brokerMaintenance: res.broker_maintenance,
+    };
   }
   subscribe(mode: Mode, cb: (accounts: Account[]) => void): () => void {
     void mode;
@@ -143,3 +147,5 @@ export class RealAccountsService implements AccountsService {
     };
   }
 }
+
+export const realAccountsService = new RealAccountsService();

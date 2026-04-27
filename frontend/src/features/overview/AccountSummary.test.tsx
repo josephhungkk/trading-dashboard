@@ -4,6 +4,7 @@ import { AccountSummary } from './AccountSummary';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 describe('AccountSummary', () => {
   beforeEach(() => {
@@ -22,7 +23,7 @@ describe('AccountSummary', () => {
 
   it('renders alias and NLV when an account is selected', async () => {
     const { paper } = getBothScopes();
-    await paper.hydrate(getServices());
+    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
     render(<AccountSummary />);
 
     const selected = paper.useAccounts.getState();

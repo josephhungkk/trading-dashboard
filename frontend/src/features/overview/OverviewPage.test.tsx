@@ -12,6 +12,7 @@ import { OverviewPage } from './OverviewPage';
 import { useModeStore } from '@/stores/global/mode';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 // jsdom doesn't implement ResizeObserver — some child primitives may observe.
 class ResizeObserverStub {
@@ -44,7 +45,7 @@ describe('OverviewPage', () => {
     live.suspend();
     paper.suspend();
     useModeStore.setState({ mode: 'paper', pendingMode: null, status: 'idle' });
-    await paper.hydrate(getServices());
+    await paper.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
   });
 
   it('renders all 4 card titles', async () => {

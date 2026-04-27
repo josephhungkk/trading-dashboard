@@ -14,6 +14,8 @@ import { useModeStore } from '@/stores/global/mode';
 import { useActiveStores, getScopedStores } from '@/stores/registry';
 // eslint-disable-next-line boundaries/element-types -- layout passes service registry to store hydrate
 import { getServices } from '@/services/registry';
+// eslint-disable-next-line boundaries/element-types -- hooks layer composes account fetch with maintenance publish
+import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
 /**
  * AppShell — single-subtree responsive layout.
@@ -35,7 +37,7 @@ export function AppShell(): React.JSX.Element {
   const stores = useActiveStores();
 
   React.useEffect(() => {
-    void stores.hydrate(getServices());
+    void stores.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
     return () => {
       getScopedStores(mode).suspend();
     };
