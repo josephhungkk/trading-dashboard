@@ -260,3 +260,38 @@ async def test_get_account_summary_returns_zero_when_api_throws() -> None:
         broker_pb2.AccountRef(account_number="U1234567"), context=object()
     )
     assert response.summary.net_liquidation.value == "0"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_summaries_do_not_interfere() -> None:
+    """Spec §5 R8 invariant: 22 simultaneous GetAccountSummary calls
+    against the same in-memory ib.accountValues() cache must each return
+    the right account's NLV. GetAccountSummary is read-only — no shared
+    mutable state — so concurrent calls cannot cross-talk.
+
+    Pinning this protects against future refactors that would push
+    GetAccountSummary into ib_async (e.g. per-call reqAccountSummary)
+    and break the read-only invariant.
+    """
+    import asyncio
+
+    accounts = [f"ACCT_{i:02d}" for i in range(22)]
+    ib = FakeIB(
+        values=[
+            FakeAccountValue(acct, "NetLiquidation", str(1000 + i), "USD")
+            for i, acct in enumerate(accounts)
+        ],
+    )
+    h = _handlers(ib)
+
+    coros = [
+        h.GetAccountSummary(broker_pb2.AccountRef(account_number=acct), context=object())
+        for acct in accounts
+    ]
+    responses = await asyncio.gather(*coros)
+
+    for i, (acct, resp) in enumerate(zip(accounts, responses, strict=True)):
+        assert resp.summary.net_liquidation.value == str(1000 + i), (
+            f"account {acct} (i={i}) got {resp.summary.net_liquidation.value!r}"
+        )
+        assert resp.summary.net_liquidation.currency == "USD"
