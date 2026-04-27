@@ -10,6 +10,7 @@ export type AssetClass =
 export interface Account {
   id: string; broker: BrokerId; mode: Mode; alias: string;
   accountNumber: string; nlv: number;
+  nlvAt: Date | null;
   baseCurrency: 'USD' | 'HKD' | 'GBP' | 'JPY' | 'KRW';
 }
 

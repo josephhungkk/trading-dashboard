@@ -61,9 +61,17 @@ describe('listAccounts (real-API path)', () => {
           mode: 'live',
           currency_base: 'USD',
           display_order: 0,
+          nlv: '100.00000000',
+          nlv_currency: 'USD',
+          nlv_at: '2026-04-26T18:00:00Z',
         },
       ],
       degraded_sidecars: ['normal-paper'],
+      broker_maintenance: {
+        active: false,
+        window: null,
+        until: null,
+      },
     };
     stubFetch(200, expected);
 

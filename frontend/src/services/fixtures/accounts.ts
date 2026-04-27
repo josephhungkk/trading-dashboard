@@ -8,6 +8,7 @@ export const ACCOUNTS: Account[] = [
     alias: 'IBKR Live 1',
     accountNumber: 'U1234567',
     nlv: 312_450.28,
+    nlvAt: null,
     baseCurrency: 'USD',
   },
   {
@@ -17,6 +18,7 @@ export const ACCOUNTS: Account[] = [
     alias: 'IBKR Paper 1',
     accountNumber: 'DU9876543',
     nlv: 100_000.0,
+    nlvAt: null,
     baseCurrency: 'USD',
   },
   {
@@ -26,6 +28,7 @@ export const ACCOUNTS: Account[] = [
     alias: 'Futu Live 1',
     accountNumber: 'FT28173922',
     nlv: 486_221.5,
+    nlvAt: null,
     baseCurrency: 'HKD',
   },
   {
@@ -35,6 +38,7 @@ export const ACCOUNTS: Account[] = [
     alias: 'Futu Paper 1',
     accountNumber: 'FTPAPER001',
     nlv: 250_000.0,
+    nlvAt: null,
     baseCurrency: 'HKD',
   },
   {
@@ -44,6 +48,7 @@ export const ACCOUNTS: Account[] = [
     alias: 'Schwab Live 1',
     accountNumber: 'SCH55512345',
     nlv: 178_906.12,
+    nlvAt: null,
     baseCurrency: 'USD',
   },
   {
@@ -53,6 +58,7 @@ export const ACCOUNTS: Account[] = [
     alias: 'Schwab Paper 1',
     accountNumber: 'SCHPAPER99',
     nlv: 75_500.0,
+    nlvAt: null,
     baseCurrency: 'USD',
   },
 ];

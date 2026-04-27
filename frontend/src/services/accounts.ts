@@ -9,11 +9,21 @@ export interface AccountResponse {
   mode: 'live' | 'paper';
   currency_base: string;
   display_order: number;
+  nlv: string | null;
+  nlv_currency: string | null;
+  nlv_at: string | null;
+}
+
+export interface BrokerMaintenance {
+  active: boolean;
+  window: 'weekend' | 'daily' | null;
+  until: string | null;
 }
 
 export interface AccountListResponse {
   accounts: AccountResponse[];
   degraded_sidecars: string[];
+  broker_maintenance: BrokerMaintenance;
 }
 
 const MOCK_ACCOUNT_LIST: AccountListResponse = {
@@ -24,8 +34,16 @@ const MOCK_ACCOUNT_LIST: AccountListResponse = {
     mode: account.mode,
     currency_base: account.baseCurrency,
     display_order: index,
+    nlv: null,
+    nlv_currency: null,
+    nlv_at: null,
   })),
   degraded_sidecars: [],
+  broker_maintenance: {
+    active: false,
+    window: null,
+    until: null,
+  },
 };
 
 const USE_MOCKS = (import.meta.env.VITE_USE_MOCKS as string | undefined) === 'true';
@@ -90,6 +108,7 @@ function toDisplayAccount(r: AccountResponse): Account {
     alias: r.alias ?? '',
     accountNumber: r.id.slice(0, 8),
     nlv: 0,
+    nlvAt: null,
     baseCurrency,
   };
 }
