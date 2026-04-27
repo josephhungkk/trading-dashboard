@@ -1,6 +1,6 @@
 """prometheus-client counters/gauges for Phase 2 observability."""
 
-from prometheus_client import CollectorRegistry, Counter, Gauge
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 registry = CollectorRegistry(auto_describe=True)
 
@@ -57,5 +57,18 @@ avg_cost_unit_suspected_wrong_total = Counter(
     "avg_cost_unit_suspected_wrong_total",
     "Positions where avg_cost appears to be in wrong currency unit (GBX vs GBP)",
     labelnames=["account_id"],
+    registry=registry,
+)
+
+broker_discover_nlv_update_duration_ms = Histogram(
+    "broker_discover_nlv_update_duration_ms",
+    "Time to UPDATE all per-account NLV rows in one discover tick (ms).",
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+    registry=registry,
+)
+
+broker_discover_nlv_overflow_total = Counter(
+    "broker_discover_nlv_overflow_total",
+    "Number of NUMERIC(20,8) overflow events on per-account NLV UPDATE.",
     registry=registry,
 )

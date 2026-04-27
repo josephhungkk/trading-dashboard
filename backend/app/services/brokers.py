@@ -14,6 +14,7 @@ import grpc  # type: ignore[import-untyped]
 import structlog
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import RowMapping
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
@@ -723,6 +724,8 @@ class BrokerDiscoverer:
         )
 
         nlv_update_count = 0
+        nlv_overflow_count = 0
+        t_start = time.monotonic()
         async with self._session_factory() as session:
             async with session.begin():
                 for r in results:
@@ -740,30 +743,38 @@ class BrokerDiscoverer:
                             raw_value=summary.net_liquidation.value,
                         )
                         continue
-                    # C4 will replace this naked try with overflow + Prometheus.
                     try:
-                        await session.execute(
-                            nlv_update_stmt,
-                            {
-                                "broker_id": "ibkr",
-                                "account_number": account_number,
-                                "nlv": nlv_str,
-                                "currency": summary.net_liquidation.currency,
-                            },
-                        )
+                        async with session.begin_nested():
+                            await session.execute(
+                                nlv_update_stmt,
+                                {
+                                    "broker_id": "ibkr",
+                                    "account_number": account_number,
+                                    "nlv": nlv_str,
+                                    "currency": summary.net_liquidation.currency,
+                                },
+                            )
                         nlv_update_count += 1
-                    except Exception:  # refined in C4 with overflow + Prometheus
-                        log.exception(
-                            "broker_discover_nlv_update_failed",
+                    except DBAPIError as exc:
+                        if "overflow" not in str(exc).lower():
+                            raise
+                        nlv_overflow_count += 1
+                        metrics.broker_discover_nlv_overflow_total.inc()
+                        log.warning(
+                            "broker_discover_nlv_overflow",
                             label=label,
                             account_number=account_number,
+                            raw_value=summary.net_liquidation.value,
+                            error=str(exc),
                         )
+        metrics.broker_discover_nlv_update_duration_ms.observe((time.monotonic() - t_start) * 1000)
 
         log.info(
             "broker_discover_iteration_ok",
             upsert_count=len(rows_seen),
             soft_delete_count=soft_delete_count,
             nlv_update_count=nlv_update_count,
+            nlv_overflow_count=nlv_overflow_count,
         )
 
     async def stop(self) -> None:
