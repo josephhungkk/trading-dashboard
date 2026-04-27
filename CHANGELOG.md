@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-27
+
+### Added
+- **Discoverer NLV fan-out** — every 30s, `_discover_once` issues one `GetAccountSummary` per discovered account via `asyncio.gather(*calls, return_exceptions=True)` with per-call `asyncio.wait_for(timeout=10)`. `asyncio.Lock` re-entrancy guard prevents tick overlap. `last_nlv` / `last_nlv_currency` / `last_nlv_at` columns populated on `broker_accounts` (Alembic 0003 — NUMERIC(20,8) + VARCHAR(3) CHECK regex `^[A-Z]{3}$` + TIMESTAMPTZ, all nullable).
+- **`AccountResponse` wire fields** — `nlv` (decimal-as-string, fixed-point 8-fractional-digits), `nlv_currency` (ISO-3 with Pydantic regex constraint), `nlv_at` (UTC ISO-8601). All optional; null until discoverer first populates.
+- **`AccountListResponse.broker_maintenance`** envelope `{active, window, until}` — single source of truth shared with `_classify_sidecar_failure` 503 path. Required field, populated from `compute_broker_maintenance(now)`.
+- **AccountPicker per-row staleness rule** — `< 2 min normal · 2-30 min dim (opacity-60) · > 30 min '—' · null nlvAt 'no data yet'`. Maintenance-active suppresses the rule when `nlvAt` is non-null; null `nlvAt` always renders `—` even during maintenance (no synthesized $0.00).
+- **`React.memo` on AccountPicker row** with custom comparator on `(id, nlv, nlvAt.getTime(), maintenance.active, maintenance.window, maintenance.until?.getTime())`.
+- **`useFleetMaintenance` Zustand store** + `fetchAccountsAndSyncMaintenance(mode)` hook helper composing service + store (services layer stays pure per `eslint-plugin-boundaries`).
+- **Prometheus metrics** — `broker_discover_nlv_update_duration_ms` histogram, `broker_discover_nlv_overflow_total` counter.
+- **6 `@pytest.mark.real_ibkr` smoke tests** — read-only contract tests against paper gateway 4002 (`sidecar/tests/test_real_ibkr_smoke.py`): connect, managedAccounts, accountSummary currency, reqPositionsAsync, openTrades, 60s connection survival. Default CI run filters them out via `-m 'not real_ibkr'`; nightly cron picks them up.
+- **`compute_broker_maintenance(now)` helper** in `app/services/ibkr_maintenance.py` — single-evaluation envelope with `max(secs, 1)` floor to ensure `until > now` whenever `active=true` (eliminates the boundary-second race surface).
+- **`@model_validator(mode="after")` on `BrokerMaintenance`** — rejects inconsistent `active=true, window=null, until=null` constructions.
+- **Per-row savepoint** — each NLV UPDATE wrapped in `session.begin_nested()` so a NUMERIC(20,8) overflow on one account leaves the outer transaction alive for the other 21. `sqlstate=='22003'` (locale-stable) detects the overflow.
+
+### Changed
+- **`_classify_sidecar_failure`** uses `compute_broker_maintenance(now)` shared helper instead of an inline weekend/daily cascade. Zero behavior change, eliminates boundary-second race; 503 envelope shape now mirrors the list-endpoint envelope exactly.
+- **OpenAPI contract test renamed** `tests/api/test_openapi_phase4.py` → `tests/api/test_openapi_contract.py`. Strict-shape check replaced by "required ⊆ actual ⊆ required ∪ optional"; forbidden keys (`gateway_label`, `account_number`) still asserted absent.
+- **`RealAccountsService.list`** returns `{ accounts, brokerMaintenance }` instead of side-effecting a global store; the publish step moved to `frontend/src/hooks/useAccountsList.ts`.
+
+### Fixed
+- **Empty-string currency** from sidecar fallback no longer corrupts the database — skip-write predicate (`_is_populated`) requires `len(currency) == 3 AND isascii AND isupper AND bool(value)` before any UPDATE.
+- **Resurrect-from-soft-delete** clears `last_nlv*` columns via `ON CONFLICT DO UPDATE` CASE clauses — frontend no longer briefly displays week-old stale values when an account reappears.
+- **`_format_nlv` defensive against malformed Decimal** — returns `None` for NaN/Infinity/InvalidOperation instead of 500ing the entire `/api/accounts` list endpoint.
+- **`Retry-After` header restored** on maintenance 503 (regression from the Phase-4 inline cascade refactor).
+- **Migration test fixture** uses outer-rollback + `s.begin_nested()` savepoints so success-path tests cannot commit phantom rows to prod (the SQLAlchemy 2.0 `s.begin()` auto-commit hazard, hit during A2 implementation; see `feedback_pytest_session_begin_commits.md`).
+
 ## [0.4.0] — 2026-04-26
 ### Added
 - **gRPC sidecar contract** — `proto/broker/v1.proto` (`Broker` service: Health, ListManagedAccounts, GetAccountSummary, GetPositions, GetOrders, GetContract). Generated client stubs land in `backend/app/_generated/broker/v1/` and `sidecar/_generated/broker/v1/` via `buf generate`; both dirs gitignored. Frontend uses plain JSON wire shapes — no proto runtime in the browser bundle.
