@@ -4,7 +4,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-04-27-phase5b-trade-execution-design.md` (commit `5ded62e`)
 **Tag at end:** `v0.5.1`
-**Estimated duration:** ~2 weeks
+**Estimated duration:** **~14-16 working days** (revised post-architect-review). Original 2-week estimate covered ~36 tasks; current plan = 39 tasks + ~177 tests + ~26 stories. The +5 new tasks (A0/A4/A5/B6/D7) and +25 hardening tests add ~2 days; the architect-review-applied-then-reviewed cycle cost itself adds ~0.5 day.
 **Prerequisite:** v0.5.0 shipped (NLV caching + 22 IBKR accounts visible + maintenance envelope + `app_config` config service)
 **Successor:** Phase 5c (modify, brackets, fills history, multi-worker)
 
@@ -347,10 +347,17 @@ async def place_order(
     )
 
 async def cancel_order(self, account_number: str, broker_order_id: str) -> bool:
-    ...
+    request = broker_pb2.CancelOrderRequest(
+        account_number=account_number,
+        broker_order_id=broker_order_id,
+    )
+    response = await self._call("cancel_order", self._stub.CancelOrder, request)
+    return response.accepted
 
 async def search_contracts(self, query: str, asset_class: str = "") -> list[base.Contract]:
-    ...
+    request = broker_pb2.SearchContractsRequest(query=query, asset_class=asset_class)
+    response = await self._call("search_contracts", self._stub.SearchContracts, request)
+    return [_contract_from_proto(c) for c in response.contracts]
 
 async def order_event_stream(
     self, account_number: str
@@ -368,7 +375,34 @@ async def order_event_stream(
         )
 ```
 
-Reuse existing `_call` / `_timestamp_from_proto` / `BrokerSidecarUnavailable` / `BrokerSidecarTimeout` helpers from the file. Add `PlaceOrderResult`, `OrderEventMessage` to `base.py` (or wherever the dataclass DTOs live).
+Reuse existing `_call` / `_timestamp_from_proto` / `BrokerSidecarUnavailable` / `BrokerSidecarTimeout` helpers from the file. Add the following dataclasses to `backend/app/services/brokers_base.py` (or wherever the existing DTOs live alongside `Account`/`Summary`/`Position`/`Order`/`Contract`). Ensure imports `from dataclasses import dataclass` and `from datetime import datetime` are present:
+
+```python
+@dataclass(frozen=True)
+class Contract:
+    conid: str
+    symbol: str
+    exchange: str
+    currency: str
+    asset_class: str  # "STK" | "FUT" | "OPT" | etc.
+
+@dataclass(frozen=True)
+class PlaceOrderResult:
+    broker_order_id: str
+    status: str  # "PendingSubmit" | "Submitted" | "PreSubmitted" | etc.
+
+@dataclass(frozen=True)
+class OrderEventMessage:
+    broker_order_id: str
+    client_order_id: str  # echoed via IBKR orderRef (R5); empty for TWS-placed
+    status: str
+    filled_qty: str
+    avg_fill_price: str
+    broker_event_at: datetime
+    raw_payload: str  # JSON-encoded whitelist (R16)
+```
+
+If `Contract` already exists from Phase 4 (it does — used by `get_contract` at line 156), extend its field list to match what `SearchContracts` returns; do NOT define a new type.
 
 - [ ] **Step 3: Run + commit**
 
@@ -410,7 +444,15 @@ Provide these pytest fixtures (all `async`):
 ```python
 @pytest.fixture
 def mock_sidecar_client():
-    """Default-happy-path BrokerSidecarClient mock — all RPCs return canned data."""
+    """Default-happy-path BrokerSidecarClient mock.
+    Canned returns:
+      - place_order → PlaceOrderResult(broker_order_id="100001", status="Submitted")
+      - cancel_order → True
+      - search_contracts → [Contract(conid="265598", symbol="AAPL",
+            exchange="SMART", currency="USD", asset_class="STK")]
+      - get_orders → [] (empty)
+    Tests override individual methods via `monkeypatch.setattr` per test.
+    """
     ...
 
 @pytest.fixture
@@ -430,9 +472,37 @@ def mock_sidecar_503():
 
 @pytest.fixture
 def fake_order_event_stream():
-    """Programmable async iterator that yields canned OrderEventMessage sequences."""
+    """Programmable async iterator yielding canned OrderEventMessage sequences.
+
+    Imports needed in test files:
+        from datetime import UTC, datetime  # Python 3.11+; project is on 3.14
+        from app.services.brokers_base import OrderEventMessage
+
+    Usage:
+        events = [
+            OrderEventMessage(broker_order_id="100001", client_order_id=COID,
+                              status="Submitted", filled_qty="0",
+                              avg_fill_price="0",
+                              broker_event_at=datetime(2026, 4, 27, 9, 0, tzinfo=UTC),
+                              raw_payload="{}"),
+            OrderEventMessage(broker_order_id="100001", client_order_id=COID,
+                              status="Filled", filled_qty="100",
+                              avg_fill_price="150.50",
+                              broker_event_at=datetime(2026, 4, 27, 9, 0, 5, tzinfo=UTC),
+                              raw_payload="{}"),
+        ]
+        async for msg in fake_order_event_stream(events):
+            ...
+
+    Returns a callable that wraps a list of events into an async iterator with
+    optional inter-event delay (`delay_ms` kwarg) for backpressure simulation.
+    Body is `...` here; implementer (Claude in Task A5) fills with an inline
+    async generator + queue.
+    """
     ...
 ```
+
+**Note on the 5 fixture bodies all being `...`**: this is intentional — the task body in A5 step 1 specifies the contract; the implementer (Claude) replaces each `...` with the actual implementation when executing A5. Mirrors the convention used in A1/A4 elsewhere in this plan.
 
 - [ ] **Step 2: Smoke-test the fixtures**
 
@@ -1332,7 +1402,7 @@ audit-only (R18 — order_id=NULL)."
 
 ### Task E2 — PendingSubmitWatchdog + startup reconciliation
 
-**Owner: Codex**
+**Owner: Claude** (architect-review W4 owner-balance fix — pure SQL + asyncio scan loop, no wire-format codegen needed; lowers Codex/Claude ratio from 28:9 → 27:10 after this swap)
 
 **Files:**
 - Create: `backend/app/services/pending_submit_watchdog.py`
@@ -2099,4 +2169,4 @@ The plan-level architect-review pass (2026-04-27) returned 4 CRITICAL + 8 HIGH +
 | P22 | MEDIUM | C1/C2/C3 parallelism implicit | "Parallel-safe pairs" table includes `C1 ⊥ C2 ⊥ C3`. |
 | P23 | LOW | F1/G1 debounce-test redundancy | Acknowledged; both kept (defense-in-depth) — F1 verifies factory contract, G1 verifies wiring. |
 | P24 | LOW | Codex/Claude fallback ownership | Owner & review chain section added explicit fallback line + commit-footer convention. |
-| P25 | LOW | H4 close-out simulator_only seed mention | H4 step 5 expanded under canary section to call out explicit row writes for ops audit-trail (still default-fallback safe). |
+| P25 | LOW | H4/H5 close-out simulator_only seed mention | H5 step 5 (canary section, line ~2054) calls out explicit `app_config.broker.<label>.simulator_only=true` + `trade_enabled=false` row writes for ops audit-trail (still default-fallback safe). |
