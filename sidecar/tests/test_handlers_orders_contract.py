@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+import sys
+import types
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from ib_async import LimitOrder, MarketOrder, StopOrder
 
 from sidecar._generated.broker.v1 import broker_pb2
 from sidecar.handlers import BrokerHandlers
@@ -81,6 +86,8 @@ class FakeIB:
     open_trades_list: list[FakeTrade] = field(default_factory=list)
     fills_list: list[FakeFill] = field(default_factory=list)
     qualified: list[FakeContract] = field(default_factory=list)
+    place_order_calls: list[tuple[object, object]] = field(default_factory=list)
+    placed_trades: list[FakeTrade] = field(default_factory=list)
     raise_on_open: bool = False
     raise_on_qualify: bool = False
 
@@ -98,18 +105,166 @@ class FakeIB:
             raise RuntimeError("contract not found")
         return list(self.qualified)
 
+    def placeOrder(self, contract: object, order: object) -> FakeTrade:  # noqa: N802
+        self.place_order_calls.append((contract, order))
+        order.permId = 12345
+        trade = FakeTrade(
+            contract=contract,  # type: ignore[arg-type]
+            order=order,  # type: ignore[arg-type]
+            orderStatus=FakeOrderStatus(status="Submitted"),
+        )
+        self.placed_trades.append(trade)
+        return trade
 
-def _handlers(ib: FakeIB) -> BrokerHandlers:
+    def trades(self) -> list[FakeTrade]:
+        return [*self.open_trades_list, *self.placed_trades]
+
+
+def _handlers(ib: FakeIB, *, simulator_only: bool = False) -> BrokerHandlers:
     return BrokerHandlers(
         ib=ib,  # type: ignore[arg-type]
         pnl_cache=PnLCache(ib),  # type: ignore[arg-type]
         label="ibgw_live_us",
         version="0.4.0+test",
         last_tick_ref={},
+        simulator_only=simulator_only,
+    )
+
+
+def _place_order_request(
+    *,
+    client_order_id: str = "client-order-1",
+    order_type: str = "MARKET",
+    side: str = "BUY",
+    qty: str = "10",
+    limit_price: str = "",
+    stop_price: str = "",
+) -> broker_pb2.PlaceOrderRequest:
+    return broker_pb2.PlaceOrderRequest(
+        account_number="U1111111",
+        client_order_id=client_order_id,
+        conid="265598",
+        side=side,
+        order_type=order_type,
+        tif="DAY",
+        qty=qty,
+        limit_price=limit_price,
+        stop_price=stop_price,
     )
 
 
 # ---------- GetOrders ----------
+
+
+@pytest.mark.asyncio
+async def test_place_order_market_builds_correct_ib_order() -> None:
+    ib = FakeIB(
+        qualified=[
+            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
+        ]
+    )
+    h = _handlers(ib, simulator_only=False)
+    request = _place_order_request(order_type="MARKET", side="BUY", qty="10")
+
+    response = await h.PlaceOrder(request, context=object())
+
+    assert response.broker_order_id == "12345"
+    assert len(ib.place_order_calls) == 1
+    _, ib_order = ib.place_order_calls[0]
+    assert isinstance(ib_order, MarketOrder)
+    assert ib_order.action == "BUY"
+    assert ib_order.totalQuantity == 10.0
+    assert ib_order.orderRef == request.client_order_id
+    assert ib_order.account == request.account_number
+
+
+@pytest.mark.asyncio
+async def test_place_order_limit_includes_limit_price() -> None:
+    ib = FakeIB(
+        qualified=[
+            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
+        ]
+    )
+    h = _handlers(ib, simulator_only=False)
+    request = _place_order_request(
+        client_order_id="limit-client-order",
+        order_type="LIMIT",
+        side="SELL",
+        qty="7",
+        limit_price="180.5",
+    )
+
+    await h.PlaceOrder(request, context=object())
+
+    _, ib_order = ib.place_order_calls[0]
+    assert isinstance(ib_order, LimitOrder)
+    assert ib_order.action == "SELL"
+    assert ib_order.totalQuantity == 7.0
+    assert ib_order.lmtPrice == 180.5
+    assert ib_order.orderRef == request.client_order_id
+
+
+@pytest.mark.asyncio
+async def test_place_order_stop_includes_stop_price() -> None:
+    ib = FakeIB(
+        qualified=[
+            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
+        ]
+    )
+    h = _handlers(ib, simulator_only=False)
+    request = _place_order_request(
+        client_order_id="stop-client-order",
+        order_type="STOP",
+        side="SELL",
+        qty="3",
+        stop_price="175.25",
+    )
+
+    await h.PlaceOrder(request, context=object())
+
+    _, ib_order = ib.place_order_calls[0]
+    assert isinstance(ib_order, StopOrder)
+    assert ib_order.action == "SELL"
+    assert ib_order.totalQuantity == 3.0
+    assert ib_order.auxPrice == 175.25
+    assert ib_order.orderRef == request.client_order_id
+
+
+@pytest.mark.asyncio
+async def test_place_order_per_client_id_lock_prevents_double_place() -> None:
+    ib = FakeIB(
+        qualified=[
+            FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
+        ]
+    )
+    h = _handlers(ib, simulator_only=False)
+    request = _place_order_request(client_order_id="same-client-order")
+
+    first, second = await asyncio.gather(
+        h.PlaceOrder(request, context=object()),
+        h.PlaceOrder(request, context=object()),
+    )
+
+    assert len(ib.place_order_calls) == 1
+    assert first.broker_order_id == second.broker_order_id == "12345"
+
+
+@pytest.mark.asyncio
+async def test_place_order_simulator_mode_returns_sim_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uuid_utils = types.ModuleType("uuid_utils")
+    uuid_utils.uuid7 = lambda: "018f8f97-7b4a-7000-8000-123456789abc"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uuid_utils", uuid_utils)
+    ib = FakeIB()
+    h = _handlers(ib, simulator_only=True)
+    request = _place_order_request()
+
+    response = await h.PlaceOrder(request, context=object())
+
+    assert re.match(r"^SIM-[0-9a-f-]{36}$", response.broker_order_id)
+    assert response.status == "Submitted"
+    assert ib.place_order_calls == []
 
 
 @pytest.mark.asyncio

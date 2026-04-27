@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal, cast
@@ -100,12 +101,15 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         label: str,
         version: str,
         last_tick_ref: dict[str, datetime],
+        simulator_only: bool = True,
     ) -> None:
         self.ib: IB = ib
         self.pnl_cache: PnLCache = pnl_cache
         self.label: str = label
         self.version: str = version
         self.last_tick_ref: dict[str, datetime] = last_tick_ref
+        self._place_locks: dict[str, asyncio.Lock] = {}
+        self._simulator_only: bool = simulator_only
 
     async def Health(  # noqa: N802 — gRPC servicer methods mirror proto rpc names
         self,
@@ -349,6 +353,53 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
         return broker_pb2.OrdersResponse(orders=orders)
 
+    async def PlaceOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceOrderRequest,
+        context: object,
+    ) -> broker_pb2.PlaceOrderResponse:
+        del context
+
+        if self._simulator_only:
+            from uuid_utils import uuid7
+
+            sim_id: str = f"SIM-{uuid7()}"
+            logger.info(
+                "place_order_simulated",
+                client_order_id=request.client_order_id,
+                sim_id=sim_id,
+            )
+            return broker_pb2.PlaceOrderResponse(
+                broker_order_id=sim_id,
+                status="Submitted",
+            )
+
+        lock: asyncio.Lock = self._place_locks.setdefault(
+            request.client_order_id, asyncio.Lock()
+        )
+        async with lock:
+            raw_trades: object = self.ib.trades()  # type: ignore[attr-defined, unused-ignore]
+            for trade in cast("Iterable[object]", raw_trades):
+                ib_trade: _IbTrade = cast("_IbTrade", trade)
+                if str(getattr(ib_trade.order, "orderRef", "")) == request.client_order_id:
+                    return broker_pb2.PlaceOrderResponse(
+                        broker_order_id=str(ib_trade.order.permId),
+                        status=str(ib_trade.orderStatus.status),
+                    )
+
+            contract: object = await self._resolve_contract(request.conid)
+            ib_order: object = self._build_ib_order(request)
+            setattr(ib_order, "orderRef", request.client_order_id)
+            setattr(ib_order, "account", request.account_number)
+            trade: _IbTrade = cast(
+                "_IbTrade",
+                self.ib.placeOrder(contract, ib_order),  # type: ignore[attr-defined, unused-ignore]
+            )
+            return broker_pb2.PlaceOrderResponse(
+                broker_order_id=str(trade.order.permId),
+                status=str(trade.orderStatus.status),
+            )
+
     async def GetContract(  # noqa: N802
         self,
         request: broker_pb2.ContractRef,
@@ -377,6 +428,38 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             return broker_pb2.ContractResponse()
 
         return broker_pb2.ContractResponse(contract=proto_contract)
+
+    async def _resolve_contract(self, conid: str) -> object:
+        from ib_async import Contract as RuntimeIbContract  # type: ignore[import-untyped]
+
+        contract: object = RuntimeIbContract(conId=int(conid))
+        raw_qualified: object = await self.ib.qualifyContractsAsync(contract)  # type: ignore[attr-defined, unused-ignore]
+        qualified: list[object] = list(cast("Iterable[object]", raw_qualified))
+        return qualified[0] if qualified else contract
+
+    def _build_ib_order(self, request: broker_pb2.PlaceOrderRequest) -> object:
+        side: str = "BUY" if request.side == "BUY" else "SELL"
+        qty: float = float(request.qty)
+        order_type: str = request.order_type
+
+        if order_type == "MARKET":
+            from ib_async import MarketOrder  # type: ignore[import-untyped]
+
+            order: object = MarketOrder(side, qty)
+        elif order_type == "LIMIT":
+            from ib_async import LimitOrder  # type: ignore[import-untyped]
+
+            order = LimitOrder(side, qty, float(request.limit_price))
+        elif order_type == "STOP":
+            from ib_async import StopOrder  # type: ignore[import-untyped]
+
+            order = StopOrder(side, qty, float(request.stop_price))
+        else:
+            raise ValueError(f"Unsupported order_type: {order_type}")
+
+        if request.tif:
+            setattr(order, "tif", request.tif)
+        return order
 
     def _proto_contract(self, ib_contract: _IbContract) -> broker_pb2.Contract:
         return broker_pb2.Contract(
