@@ -69,30 +69,52 @@ Lays the database tables, proto contract additions, type-generation tooling, and
 
 **Files:**
 - Modify: `scripts/gen-types.sh` (currently a stub that exits 1)
-- Create: `frontend/scripts/check-generated-types.mjs` (CI snapshot diff)
-- Modify: `frontend/package.json` (add `gen:types` + `check:types-up-to-date` scripts)
-- Modify: `.github/workflows/ci.yml` (CI step that runs `pnpm check:types-up-to-date`)
-- Test: `frontend/src/services/api-generated.test.ts` (smoke import test)
+- Create: `backend/app/scripts/dump_openapi.py` (offline schema dump)
+- Create: `frontend/scripts/check-generated-types.mjs` (CI drift gate)
+- Modify: `frontend/package.json` (add `gen:types` + `check:types-up-to-date` scripts; pin `openapi-typescript@^7`)
+- Modify: `.github/workflows/ci.yml` (CI step running `pnpm check:types-up-to-date`)
 
-**Spec reference:** CLAUDE.md "When Claude Code Makes Changes" — "Always regenerate types when changing API schemas: see `scripts/gen-types.sh` (Phase 2+)." The script is currently a stub; making it real is a Phase 5b prereq.
+**Spec reference:** CLAUDE.md "When Claude Code Makes Changes" — "Always regenerate types when changing API schemas: see `scripts/gen-types.sh` (Phase 2+)." The script is currently a stub.
 
-- [ ] **Step 1: Implement `scripts/gen-types.sh`**
+**Step-0 research findings (agent a69d792e):** `app.openapi()` is side-effect-free — it does NOT trigger lifespan, so no DB/Redis/gRPC boot needed. Adapt the existing AsyncClient pattern in `backend/tests/api/test_openapi_contract.py` for the dump. `openapi-typescript@^7` requires JSON file input (not stdin), so write to `/tmp/openapi.json` first.
+
+- [ ] **Step 1: Implement `backend/app/scripts/dump_openapi.py`**
+
+```python
+"""Dump FastAPI OpenAPI schema to stdout. Side-effect-free — does NOT boot lifespan.
+
+Usage:
+    uv run python -m app.scripts.dump_openapi > /tmp/openapi.json
+"""
+import json
+import sys
+
+from app.main import app
+
+
+def main() -> None:
+    spec = app.openapi()
+    json.dump(spec, sys.stdout, indent=2, sort_keys=True)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 2: Implement `scripts/gen-types.sh`**
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT/backend"
-# Boot a backend in offline-OpenAPI dump mode (no DB needed)
 uv run python -m app.scripts.dump_openapi > /tmp/openapi.json
 cd "$ROOT/frontend"
 pnpm exec openapi-typescript /tmp/openapi.json -o src/services/api-generated.ts
 echo "Wrote frontend/src/services/api-generated.ts"
 ```
 
-Add `backend/app/scripts/dump_openapi.py` — imports the FastAPI app and prints `app.openapi()` as JSON without booting uvicorn (skip lifespan startup; just construct the app).
-
-- [ ] **Step 2: Wire `pnpm gen:types` and `pnpm check:types-up-to-date`**
+- [ ] **Step 3: Wire `pnpm gen:types` and `pnpm check:types-up-to-date`**
 
 `frontend/package.json` scripts:
 ```json
@@ -100,32 +122,35 @@ Add `backend/app/scripts/dump_openapi.py` — imports the FastAPI app and prints
 "check:types-up-to-date": "node scripts/check-generated-types.mjs"
 ```
 
-`check-generated-types.mjs` regenerates `api-generated.ts` to a temp file, diffs against the committed file, and exits 1 with a helpful "run `pnpm gen:types`" message if drift is detected.
+Pin `openapi-typescript@^7` in `devDependencies` (research found no breaking changes affecting offline schema gen; v7+ is current stable).
 
-- [ ] **Step 3: Add CI step in `.github/workflows/ci.yml`**
+`frontend/scripts/check-generated-types.mjs` regenerates `api-generated.ts` to a temp file, diffs against the committed file with `node:fs.readFile`, exits 1 with `"Run `pnpm gen:types` to refresh."` message on drift.
 
-A `frontend-types-up-to-date` job that runs after the backend image builds: `pnpm install && pnpm check:types-up-to-date`.
+- [ ] **Step 4: Add CI step in `.github/workflows/ci.yml`**
 
-- [ ] **Step 4: Run + commit**
+A `frontend-types-up-to-date` job that depends on the backend image build; runs `pnpm install && pnpm check:types-up-to-date`.
+
+- [ ] **Step 5: Run + commit**
 
 ```bash
 ./scripts/gen-types.sh
 cd frontend && pnpm check:types-up-to-date
 ```
 
-Expected: writes `frontend/src/services/api-generated.ts` ; CI check passes.
+Expected: writes `frontend/src/services/api-generated.ts` (>1KB); CI check passes.
 
 ```bash
 git add scripts/gen-types.sh frontend/scripts/check-generated-types.mjs \
-        frontend/package.json frontend/src/services/api-generated.ts \
+        frontend/package.json frontend/pnpm-lock.yaml \
+        frontend/src/services/api-generated.ts \
         backend/app/scripts/dump_openapi.py .github/workflows/ci.yml
 git commit -m "feat(tooling): implement scripts/gen-types.sh + CI drift gate
 
-CLAUDE.md Phase 2+ promise. Backend OpenAPI dumped via offline
-app.openapi() (no DB / no uvicorn boot). openapi-typescript
-generates frontend/src/services/api-generated.ts. CI fails if
-the committed file drifts from regen — operator runs pnpm
-gen:types to refresh."
+CLAUDE.md Phase 2+ promise. dump_openapi.py uses app.openapi()
+(side-effect-free per Step-0 research; no DB / no uvicorn boot).
+openapi-typescript@^7 generates frontend/src/services/api-
+generated.ts. CI fails if committed file drifts from regen —
+operator runs pnpm gen:types to refresh."
 ```
 
 ---
@@ -313,6 +338,8 @@ NOTE: `GetOrders(AccountRef) returns (OrdersResponse)` already exists from Phase
 
 **Spec reference:** Spec §6 sidecar contract; Phase 4 client pattern at `backend/app/services/brokers.py` lines 73-167 (existing `health`, `list_managed_accounts`, `get_account_summary`, `get_positions`, `get_orders`, `get_contract`).
 
+**Step-0 research findings (agent a69d792e):** existing `_call` helper at line 170+ is unary-only — wraps `await stub.Method(req)` with timeout + AioRpcError mapping. **Server-streaming RPCs need a separate `_stream_call` async-generator helper** that yields messages with per-message latency logging, catches `asyncio.CancelledError` (client-side cancellation), and maps to the same `BrokerSidecarUnavailable` / `BrokerSidecarTimeout` taxonomy. The 6 existing unary methods stay unchanged.
+
 - [ ] **Step 1: Write failing tests** (~6 tests)
 
 1. `test_place_order_marshals_request_and_unmarshals_response` — calls `client.place_order(account_number, client_order_id, conid, side, order_type, tif, qty, limit_price, stop_price)`; mock gRPC stub asserts request fields populated correctly (decimal-as-string fixed-point); response demarshalled into `BrokerPlaceOrderResult(broker_order_id, status)`.
@@ -362,8 +389,9 @@ async def search_contracts(self, query: str, asset_class: str = "") -> list[base
 async def order_event_stream(
     self, account_number: str
 ) -> AsyncIterator[base.OrderEventMessage]:
+    """Server-streaming RPC. Use _stream_call helper (NOT _call which is unary-only)."""
     request = broker_pb2.AccountRef(account_number=account_number)
-    async for msg in self._stub.OrderEvent(request, metadata=self._metadata):
+    async for msg in self._stream_call("order_event", self._stub.OrderEvent, request):
         yield base.OrderEventMessage(
             broker_order_id=msg.broker_order_id,
             client_order_id=msg.client_order_id,
@@ -373,6 +401,34 @@ async def order_event_stream(
             broker_event_at=_timestamp_from_proto(msg.event_at),
             raw_payload=msg.raw_payload,
         )
+
+async def _stream_call(
+    self,
+    name: str,
+    stub_method: Callable[..., AsyncIterator[Any]],
+    request: Any,
+) -> AsyncIterator[Any]:
+    """Server-streaming counterpart to _call. Yields per-message; cancellation-safe.
+
+    Ensure these imports exist in brokers.py (some already do for _call):
+        import asyncio, time, grpc
+        from typing import Any, AsyncIterator, Callable
+    """
+    started = time.monotonic()
+    try:
+        async for msg in stub_method(request, metadata=self._metadata):
+            yield msg
+        # log total stream duration on natural close
+        log.debug("rpc_stream_closed", rpc=name, latency_ms=_latency_ms(started))
+    except asyncio.CancelledError:
+        log.debug("rpc_stream_cancelled", rpc=name, latency_ms=_latency_ms(started))
+        raise
+    except grpc.aio.AioRpcError as exc:
+        if exc.code() == grpc.StatusCode.UNAVAILABLE:
+            raise BrokerSidecarUnavailable(str(exc), label=self._label) from exc
+        if exc.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            raise BrokerSidecarTimeout(str(exc)) from exc
+        raise
 ```
 
 Reuse existing `_call` / `_timestamp_from_proto` / `BrokerSidecarUnavailable` / `BrokerSidecarTimeout` helpers from the file. Add the following dataclasses to `backend/app/services/brokers_base.py` (or wherever the existing DTOs live alongside `Account`/`Summary`/`Position`/`Order`/`Contract`). Ensure imports `from dataclasses import dataclass` and `from datetime import datetime` are present:
@@ -432,10 +488,13 @@ the stream cleanly via grpc.aio. Architect-review P1."
 **Owner: Claude** (architect-review P8)
 
 **Files:**
-- Create: `backend/tests/fixtures/sidecar_mocks.py`
-- Modify: `backend/tests/conftest.py` (re-export the fixtures)
+- Modify: `backend/tests/services/test_broker_client.py` (extend existing `_FakeBrokerServicer` with the 4 new RPCs)
+- Create: `backend/tests/fixtures/sidecar_servicer.py` (extracted reusable fake servicer + in-process server harness)
+- Modify: `backend/tests/conftest.py` (re-export the fixture)
 
 **Spec reference:** N/A — pure test infrastructure. Without this, ~50 tests across D + E will reinvent the mock surface inconsistently.
+
+**Step-0 research findings (agent a69d792e):** the project's gold-standard test pattern is **real in-process gRPC servers with ephemeral mTLS PKI** at `backend/tests/services/test_broker_client.py:127+`. AsyncMock approaches are anti-pattern here — gRPC mocking gets messy with channels/stubs/contexts and async-iterator protocol for streaming. **Extend the existing `_FakeBrokerServicer` instead** (add the 4 new RPCs as servicer methods) and extract the harness into a reusable fixture module. Use `pytest-asyncio` (already configured at `pyproject.toml:70`).
 
 - [ ] **Step 1: Implement the fixtures**
 
@@ -1261,71 +1320,78 @@ nginx + CF tunnel buffering off."
 
 ---
 
-### Task D7 — OpenAPI snapshot lock (5 named models)
+### Task D7 — OpenAPI snapshot lock (5 named models) via `snapshottest`
 
 **Owner: Claude** (architect-review P6)
 
 **Files:**
-- Create: `backend/tests/api/test_openapi_snapshot.py`
-- Create: `backend/tests/fixtures/openapi-snapshot.json` (committed snapshot)
+- Modify: `backend/tests/api/test_openapi_contract.py` (extend the existing contract test)
+- Add: `backend/tests/api/snapshots/snap_test_openapi_contract.py` (committed snapshot — `snapshottest` uses Python-file snapshots, NOT `.ambr` which is `syrupy`'s convention)
+- Modify: `backend/pyproject.toml` (add `snapshottest` to dev deps)
 
 **Spec reference:** §8 line 675 — "OpenAPI shape locked for OrderResponse + OrderListResponse + PreviewResponse + ContractSummary + PolicyResponse".
 
-- [ ] **Step 1: Generate the initial snapshot**
+**Step-0 research findings (agent a69d792e):** project already has `backend/tests/api/test_openapi_contract.py` with an AsyncClient pattern. Extend it (don't create a new file). Use `snapshottest` (proven at scale, Context7-confirmed) with built-in `pytest --snapshot-update` flag — no env var needed. Snapshots auto-named `__snapshots__/<test_module>__<test_function>.ambr` and committed to git so reviewers diff the contract.
+
+- [ ] **Step 1: Add `snapshottest` to dev deps**
 
 ```bash
-cd backend && uv run python -c "
-from app.main import app
-import json
-spec = app.openapi()
-# Extract just the 5 named models we care about
-models = {k: spec['components']['schemas'][k] for k in [
-    'OrderResponse', 'OrderListResponse', 'PreviewResponse',
-    'ContractSummary', 'PolicyResponse',
-]}
-with open('tests/fixtures/openapi-snapshot.json', 'w') as f:
-    json.dump(models, f, indent=2, sort_keys=True)
-"
+cd backend && uv add --dev snapshottest
 ```
 
-- [ ] **Step 2: Write the snapshot diff test**
+- [ ] **Step 2: Add the snapshot lock test to `test_openapi_contract.py`**
 
 ```python
-def test_openapi_snapshot_unchanged():
-    spec = app.openapi()
-    actual = {k: spec["components"]["schemas"][k] for k in (
-        "OrderResponse", "OrderListResponse", "PreviewResponse",
-        "ContractSummary", "PolicyResponse",
-    )}
-    expected = json.loads(Path("tests/fixtures/openapi-snapshot.json").read_text())
-    if actual != expected:
-        pytest.fail(
-            "OpenAPI shape drift detected. If intentional, regen the snapshot "
-            "with: python -m app.scripts.regen_openapi_snapshot"
+def test_openapi_schema_lock_phase5b(client, snapshot):
+    """Lock the 5 Phase-5b wire models against drift.
+
+    On schema change, review the diff in __snapshots__/ then re-bless with:
+        pytest backend/tests/api/test_openapi_contract.py --snapshot-update
+    """
+    spec = client.get("/openapi.json").json()
+    locked = {
+        k: spec["components"]["schemas"][k]
+        for k in (
+            "OrderResponse",
+            "OrderListResponse",
+            "PreviewResponse",
+            "ContractSummary",
+            "PolicyResponse",
         )
+    }
+    snapshot.assert_match(json.dumps(locked, indent=2, sort_keys=True))
 ```
 
-Provide an `app/scripts/regen_openapi_snapshot.py` matching Step 1 so operators have a one-liner to bless drifts.
+(Reuses the existing `client` AsyncClient fixture in `test_openapi_contract.py`; adds `json` import if not already present.)
 
-- [ ] **Step 3: Run + commit**
+- [ ] **Step 3: Generate the initial snapshot**
 
 ```bash
-cd backend && uv run pytest tests/api/test_openapi_snapshot.py -v
+cd backend && uv run pytest tests/api/test_openapi_contract.py::test_openapi_schema_lock_phase5b --snapshot-update -v
 ```
 
-Expected: 1 PASS.
+This creates `backend/tests/api/snapshots/snap_test_openapi_contract.py` (a Python file with a `snapshots` dict). Review the file before committing — it's the canonical wire shape for Phase 5b.
+
+- [ ] **Step 4: Run + commit**
 
 ```bash
-git add backend/tests/api/test_openapi_snapshot.py \
-        backend/tests/fixtures/openapi-snapshot.json \
-        backend/app/scripts/regen_openapi_snapshot.py
+cd backend && uv run pytest tests/api/test_openapi_contract.py -v
+```
+
+Expected: all PASS (existing + 1 new).
+
+```bash
+git add backend/tests/api/test_openapi_contract.py \
+        backend/tests/api/snapshots/snap_test_openapi_contract.py \
+        backend/pyproject.toml backend/uv.lock
 git commit -m "test(backend): OpenAPI snapshot lock for 5b wire models
 
 Architect-review P6: locks OrderResponse, OrderListResponse,
-PreviewResponse, ContractSummary, PolicyResponse so frontend +
-backend can't drift silently. Drift requires explicit
-regen_openapi_snapshot script invocation — intentional schema
-changes get a paper trail in PR diff."
+PreviewResponse, ContractSummary, PolicyResponse via snapshottest.
+Drift requires explicit pytest --snapshot-update — intentional
+schema changes get a paper trail in PR diff. Extends existing
+test_openapi_contract.py rather than creating a new file
+(per Step-0 research a69d792e)."
 ```
 
 ---
