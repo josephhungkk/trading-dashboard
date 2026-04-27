@@ -35,9 +35,14 @@ async def test_broker_accounts_table_exists(engine: AsyncEngine) -> None:
 
 @pytest.mark.asyncio
 async def test_all_columns_present_with_correct_types(engine: AsyncEngine) -> None:
-    """Spec section 4.4 columns + last_seen_via (C1 race-free soft-delete)."""
+    """Spec section 4.4 columns + last_seen_via (C1 race-free soft-delete).
 
-    expected = {
+    Phase 5a appended last_nlv* columns; this test validates 0002's
+    contract by asserting the required subset is present rather than
+    pinning the exact column set.
+    """
+
+    required = {
         "id": ("uuid", "NO"),
         "broker_id": ("USER-DEFINED", "NO"),
         "account_number": ("text", "NO"),
@@ -64,7 +69,8 @@ async def test_all_columns_present_with_correct_types(engine: AsyncEngine) -> No
         )
         actual = {row.column_name: (row.data_type, row.is_nullable) for row in result}
 
-    assert actual == expected
+    missing = {k: v for k, v in required.items() if actual.get(k) != v}
+    assert not missing, f"missing or wrong-typed 0002 columns: {missing}"
 
 
 @pytest.mark.asyncio
@@ -186,11 +192,16 @@ def _run_alembic(action: str, target: str) -> None:
 
 @pytest.mark.asyncio
 async def test_downgrade_then_upgrade_round_trip(engine: AsyncEngine) -> None:
-    """Run downgrade -1 then upgrade head; verify the table + enum types are
-    dropped and recreated cleanly. Schema returns to head before the test
-    finishes so subsequent tests are unaffected."""
+    """Downgrade past 0002 then upgrade head; verify the table + enum types
+    are dropped and recreated cleanly. Schema returns to head before the
+    test finishes so subsequent tests are unaffected.
 
-    _run_alembic("downgrade", "-1")
+    Pinned to explicit revision 0001 so it stays correct as later
+    migrations (0003+) accumulate; ``-1`` would otherwise resolve to
+    ``head - 1`` and stop short of dropping ``broker_accounts``.
+    """
+
+    _run_alembic("downgrade", "0001")
     async with engine.connect() as conn:
         tbl = (
             await conn.execute(text("SELECT to_regclass('public.broker_accounts')"))
