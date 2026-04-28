@@ -161,6 +161,12 @@ async def preview_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[
     app.dependency_overrides[get_broker_registry] = override_registry
     app.dependency_overrides[orders_api.get_orders_redis] = override_redis
 
+    monkeypatch.setattr(
+        orders_api.orders_service,
+        "compute_broker_maintenance",
+        lambda _now: BrokerMaintenance(active=False, window=None, until=None),
+    )
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield {
             "client": client,

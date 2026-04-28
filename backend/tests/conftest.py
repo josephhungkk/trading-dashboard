@@ -1,13 +1,18 @@
 """Pytest fixtures."""
 
-import os
-from collections.abc import AsyncIterator
+# Top-level registration: pytest 9 requires `pytest_plugins` to live in the
+# rootdir conftest, never in nested conftests. The shared ``session`` fixture
+# is consumed by tests under ``tests/migrations/`` and ``tests/models/``.
+pytest_plugins = ("tests.fixtures.db_session",)
 
-import pytest
-from alembic.config import Config
-from httpx import ASGITransport, AsyncClient
+import os  # noqa: E402
+from collections.abc import AsyncIterator  # noqa: E402
 
-from alembic import command
+import pytest  # noqa: E402
+from alembic.config import Config  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+from alembic import command  # noqa: E402
 
 # Env vars set before importing app (pydantic-settings reads at import time).
 os.environ.setdefault("APP_ENV", "dev")
@@ -22,10 +27,10 @@ os.environ.setdefault("POSTGRES_MAX_OVERFLOW", "2")
 os.environ.setdefault("REDIS_PASSWORD", "ci")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
-from app.core.config import settings
-from app.main import app
-from tests.fixtures.sidecar_servicer import sidecar_client as sidecar_client
-from tests.fixtures.sidecar_servicer import sidecar_server as sidecar_server
+from app.core.config import settings  # noqa: E402
+from app.main import app  # noqa: E402
+from tests.fixtures.sidecar_servicer import sidecar_client as sidecar_client  # noqa: E402
+from tests.fixtures.sidecar_servicer import sidecar_server as sidecar_server  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)

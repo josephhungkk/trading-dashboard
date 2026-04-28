@@ -12,8 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.ids import uuid7
 from app.models.orders import Order, OrderEvent
 
-pytest_plugins = ("tests.migrations.conftest",)
-
 _ACCT_BASE_COLS = "broker_id, account_number, mode, gateway_label, currency_base, last_seen_via"
 _ACCT_BASE_VALS = "'ibkr', :acct_num, 'paper', 'isa-paper', 'USD', 'isa-paper'"
 

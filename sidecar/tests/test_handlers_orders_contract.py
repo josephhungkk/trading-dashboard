@@ -892,7 +892,7 @@ def _clear_search_cache() -> Iterator[None]:
     (architect-review M1: ClassVar leaks across tests; rebinding instance
     attribute doesn't reach the class dict). Limiter is left intact —
     R20 mandates process-wide 5/sec."""
-    from handlers import BrokerHandlers
+    from sidecar.handlers import BrokerHandlers
 
     BrokerHandlers._search_cache.clear()
     yield

@@ -58,6 +58,20 @@ class FakeChannel:
         del method, request_serializer, response_deserializer, _registered_method
         return self._unary
 
+    def unary_stream(
+        self,
+        method: str,
+        request_serializer: Any = None,
+        response_deserializer: Any = None,
+        _registered_method: bool = False,
+    ) -> FakeUnaryUnary:
+        # BrokerStub binds the OrderEvent server-streaming RPC (added in
+        # Phase 5b) at __init__ time. Probe never invokes it, but the
+        # channel must expose the attribute or BrokerStub(channel) raises
+        # AttributeError.
+        del method, request_serializer, response_deserializer, _registered_method
+        return self._unary
+
     async def close(self) -> None:
         self.closed = True
 
