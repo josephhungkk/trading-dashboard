@@ -21,6 +21,7 @@ from uuid import UUID
 import structlog
 from redis.asyncio import Redis
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.brokers.base import Order, OrderEventMessage
@@ -373,6 +374,21 @@ class OrderEventConsumer:
                             avg_fill_price=avg_fill_price,
                             broker_event_at=broker_event_at,
                         )
+                    if event.exec_id and event.kind == "exec_details":
+                        await self._record_fill(
+                            session,
+                            account=account,
+                            event=event,
+                            order_id=order_id,
+                            broker_event_at=broker_event_at,
+                            raw_payload=raw_payload,
+                        )
+                    if order_id is not None and event.broker_order_id:
+                        await self._drain_pending_fills(
+                            session,
+                            order_id=order_id,
+                            broker_order_id=event.broker_order_id,
+                        )
                     payload = await self._publish_payload(session, event_id)
 
             await self._publish(account.account_id, payload)
@@ -615,6 +631,100 @@ class OrderEventConsumer:
                 "account_id": account.account_id,
                 "client_order_id": client_order_id,
             },
+        )
+
+    async def _record_fill(
+        self,
+        session: AsyncSession,
+        *,
+        account: AccountStream,
+        event: OrderEventMessage,
+        order_id: UUID | None,
+        broker_event_at: datetime,
+        raw_payload: dict[str, Any] | list[Any] | None,
+    ) -> None:
+        payload_dict = raw_payload if isinstance(raw_payload, dict) else {}
+        currency = str(payload_dict.get("currency") or "USD").upper()
+        if order_id is None:
+            await session.execute(
+                text(
+                    "INSERT INTO pending_fills (exec_id, broker_order_id, account_id, "
+                    "qty, price, currency, executed_at, raw_payload) "
+                    "VALUES (:e, :bo, :a, :q, :p, :c, :ts, CAST(:rp AS jsonb)) "
+                    "ON CONFLICT (exec_id) DO NOTHING"
+                ),
+                {
+                    "e": event.exec_id,
+                    "bo": event.broker_order_id,
+                    "a": account.account_id,
+                    "q": event.filled_qty or "0",
+                    "p": event.avg_fill_price or "0",
+                    "c": currency,
+                    "ts": broker_event_at,
+                    "rp": event.raw_payload or "{}",
+                },
+            )
+            return
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    text(
+                        "INSERT INTO fills (order_id, exec_id, qty, price, currency, executed_at) "
+                        "VALUES (:o, :e, :q, :p, :c, :ts) "
+                        "ON CONFLICT (exec_id) DO NOTHING"
+                    ),
+                    {
+                        "o": order_id,
+                        "e": event.exec_id,
+                        "q": event.filled_qty or "0",
+                        "p": event.avg_fill_price or "0",
+                        "c": currency,
+                        "ts": broker_event_at,
+                    },
+                )
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "23503":
+                raise
+            await session.execute(
+                text(
+                    "INSERT INTO pending_fills (exec_id, broker_order_id, account_id, "
+                    "qty, price, currency, executed_at, raw_payload) "
+                    "VALUES (:e, :bo, :a, :q, :p, :c, :ts, CAST(:rp AS jsonb)) "
+                    "ON CONFLICT (exec_id) DO NOTHING"
+                ),
+                {
+                    "e": event.exec_id,
+                    "bo": event.broker_order_id,
+                    "a": account.account_id,
+                    "q": event.filled_qty or "0",
+                    "p": event.avg_fill_price or "0",
+                    "c": currency,
+                    "ts": broker_event_at,
+                    "rp": event.raw_payload or "{}",
+                },
+            )
+
+    async def _drain_pending_fills(
+        self,
+        session: AsyncSession,
+        *,
+        order_id: UUID,
+        broker_order_id: str,
+    ) -> None:
+        await session.execute(
+            text(
+                "WITH drained AS ("
+                "  DELETE FROM pending_fills WHERE broker_order_id = :bo "
+                "  RETURNING exec_id, qty, price, currency, executed_at, "
+                "            commission, commission_currency"
+                ") "
+                "INSERT INTO fills (order_id, exec_id, qty, price, currency, executed_at, "
+                "                   commission, commission_currency) "
+                "SELECT :o, exec_id, qty, price, currency, executed_at, "
+                "       commission, commission_currency FROM drained "
+                "ON CONFLICT (exec_id) DO NOTHING"
+            ),
+            {"o": order_id, "bo": broker_order_id},
         )
 
     async def _publish_payload(self, session: AsyncSession, event_id: int) -> str:

@@ -256,13 +256,14 @@ async def place_bracket(
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse(status_code=422, content={"detail": "JSON object required"})
-        return await orders_service.place_bracket(
+        result = await orders_service.place_bracket(
             db=db,
             redis=redis,
             config=cfg,
             registry=registry,
             request=OrderBracketRequest.model_validate(body),
         )
+        return OrderBracketResponse.model_validate(result)
     except ValidationError as exc:
         return JSONResponse(status_code=422, content={"detail": exc.errors()})
     except PreviewUnavailable as exc:

@@ -29,6 +29,7 @@ from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistr
 from app.services.config import ConfigService
 from app.services.config_cache import ConfigCache
 from app.services.order_event_consumer import OrderEventConsumer
+from app.services.pending_fills_sweeper import PendingFillsSweeper
 from app.services.pending_submit_watchdog import PendingSubmitWatchdog
 
 configure_logging()
@@ -56,6 +57,8 @@ async def lifespan(_app: FastAPI) -> Any:
     broker_discover_task: asyncio.Task[None] | None = None
     order_consumer: OrderEventConsumer | None = None
     pending_watchdog: PendingSubmitWatchdog | None = None
+    pending_fills_sweeper: PendingFillsSweeper | None = None
+    pending_fills_task: asyncio.Task[None] | None = None
 
     try:
         broker_registry = await build_broker_registry(svc)
@@ -67,12 +70,14 @@ async def lifespan(_app: FastAPI) -> Any:
 
         order_consumer = OrderEventConsumer(broker_registry, session_factory, redis)
         pending_watchdog = PendingSubmitWatchdog(broker_registry, session_factory, order_consumer)
+        pending_fills_sweeper = PendingFillsSweeper(session_factory)
         # R9: reconcile orders that transitioned at the broker while the
         # backend was down BEFORE per-account streams open, so synthetic
         # recovery events fire ahead of any live events arriving.
         await pending_watchdog.reconcile_at_startup()
         await order_consumer.start()
         await pending_watchdog.start()
+        pending_fills_task = asyncio.create_task(pending_fills_sweeper.run())
         log.info("broker_lifespan_started")
     except MissingBrokerSecrets as exc:
         log.warning("broker_lifespan_skipped reason=%s", exc)
@@ -81,6 +86,13 @@ async def lifespan(_app: FastAPI) -> Any:
     try:
         yield
     finally:
+        if pending_fills_sweeper is not None:
+            await pending_fills_sweeper.stop()
+        if pending_fills_task is not None:
+            try:
+                await pending_fills_task
+            except asyncio.CancelledError:
+                pass
         if pending_watchdog is not None:
             await pending_watchdog.stop()
         if order_consumer is not None:

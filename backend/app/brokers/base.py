@@ -137,6 +137,8 @@ class OrderEventMessage:
     avg_fill_price: str
     broker_event_at: datetime | None
     raw_payload: str
+    exec_id: str = ""
+    kind: str = ""
 
 
 class AccountResponse(BaseModel):

@@ -319,6 +319,8 @@ class BrokerSidecarClient:
                 avg_fill_price=msg.avg_fill_price,
                 broker_event_at=_timestamp_from_proto(msg.event_at),
                 raw_payload=msg.raw_payload,
+                exec_id=msg.exec_id,
+                kind=msg.kind,
             )
 
     async def close(self) -> None:

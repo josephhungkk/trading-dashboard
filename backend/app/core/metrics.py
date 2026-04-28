@@ -155,3 +155,9 @@ broker_order_pending_submit_orphan_total = Counter(
     labelnames=["label"],
     registry=registry,
 )
+
+pending_fills_backlog_count = Gauge(
+    "pending_fills_backlog_count",
+    "Count of pending_fills rows older than 5 minutes (BrokerPendingFillsBacklog alert).",
+    registry=registry,
+)
