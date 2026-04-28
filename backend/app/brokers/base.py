@@ -115,6 +115,20 @@ class PlaceOrderResult:
 
 
 @dataclass(frozen=True)
+class ModifyOrderResult:
+    broker_order_id: str
+    status: str
+
+
+@dataclass(frozen=True)
+class BracketResult:
+    parent_broker_order_id: str
+    stop_loss_broker_order_id: str  # "" if not requested
+    take_profit_broker_order_id: str  # "" if not requested
+    status: str
+
+
+@dataclass(frozen=True)
 class OrderEventMessage:
     broker_order_id: str
     client_order_id: str
