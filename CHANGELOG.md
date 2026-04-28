@@ -16,10 +16,10 @@ Three of four 5b.1 work items shipped; one (BASE-tag startup round) was delibera
 - **Layered E2E tests:** `e2e-mock.yml` runs the full preview→place→cancel chain on every push + PR (httpx ASGITransport + extended sidecar mock servicer + Postgres-18 + Redis-7 service containers). `nightly-real-ibkr.yml` cron moved to 12:00 UTC (clears all four IBKR maintenance windows by ≥6h) with new `workflow_dispatch.inputs.run_e2e` for manual runs and `CF_ACCESS_*` env wired through; the `@pytest.mark.real_ibkr`-gated test in `sidecar/tests/test_real_ibkr_e2e_trade.py` exercises the production HTTPS endpoint with a finally-revert of `trade_enabled`.
 - **Prometheus alerts:** `BrokerDiscoverPositionsP99HighWarning` (fan-out p99 > 1000ms over 5m), `BrokerSimCancelEchoMismatch` (synthetic emit rate diverges from cancel HTTP 202 rate by >10% over 10m).
 
-### Skipped — BASE-tag startup round (C1 acceptance failed)
+### Skipped — BASE-tag startup round (C1 acceptance failed twice)
 
-- Empirical pre-flight script (`sidecar/scripts/base_round_preflight.py`) ran on the dev box against paper gateway 4002. After cycling `ib.client.reqAccountUpdates(True/False, account)` for all six isa-paper accounts, `ib.accountValues()` contained no BASE entries. The IBKR API (or ib_async wrapper) does not surface BASE through the documented per-account subscription path concurrent with the sidecar's `reqAccountSummary`.
-- Per the spec contingency (architect-review CRIT-2 fallback): the v0.5.2 `_resolve_account` fallback to `last_nlv_currency` is the durable solution. C2/C3 are dropped from this release. Script committed as evidence so future readers can re-run if the API ever exposes a working round.
+- Empirical pre-flight script (`sidecar/scripts/base_round_preflight.py`) ran twice on the dev box against paper gateway 4002. **Run 1** (paper sidecar live, `clientId=999` as secondary): `ib.accountValues()` empty for all six isa-paper accounts. **Run 2** (paper sidecar killed via `gsudo Stop-Process`, port 18002 confirmed FREE, `clientId=999` as master): same empty result. Both runs cycled `ib.client.reqAccountUpdates(True, account)` → 2.0s → `(False, account)` → 0.3s for each managed account.
+- The master/secondary session theory is therefore ruled out — the IBKR API simply does not surface BASE through this path. Per the spec contingency (architect-review CRIT-2 fallback): the v0.5.2 `_resolve_account` fallback to `last_nlv_currency` (`9910e3b`) is the durable solution. C2/C3 are dropped from this release. Script committed as evidence so future readers can re-run if a future ib_async / IBKR API revision changes things.
 
 ### Open Phase 5c work surfaced for the next phase
 
