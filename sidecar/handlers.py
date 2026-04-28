@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
+import grpc
 import ib_async
 import structlog
 from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
@@ -521,6 +522,65 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 return broker_pb2.CancelOrderResponse(accepted=True)
 
         return broker_pb2.CancelOrderResponse(accepted=False)
+
+    async def ModifyOrder(  # noqa: N802
+        self,
+        request: broker_pb2.ModifyOrderRequest,
+        context: object,
+    ) -> broker_pb2.ModifyOrderResponse:
+        del context
+        broker_order_id = request.broker_order_id
+
+        if broker_order_id.startswith("SIM-"):
+            raise grpc.RpcError(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "modify on simulator orders not supported",
+            )
+
+        try:
+            target_perm_id = int(broker_order_id)
+        except ValueError as exc:
+            raise grpc.RpcError(
+                grpc.StatusCode.INVALID_ARGUMENT, f"invalid broker_order_id: {exc}"
+            ) from exc
+
+        raw_trades: object = self.ib.openTrades()  # type: ignore[attr-defined, unused-ignore]
+        target_trade: _IbTrade | None = None
+        for trade in cast("Iterable[object]", raw_trades):
+            ib_trade: _IbTrade = cast("_IbTrade", trade)
+            if (
+                ib_trade.order.permId == target_perm_id
+                and ib_trade.order.account == request.account_number
+            ):
+                target_trade = ib_trade
+                break
+
+        if target_trade is None:
+            raise grpc.RpcError(
+                grpc.StatusCode.NOT_FOUND, f"order {broker_order_id} not in openTrades"
+            )
+
+        ib_order = target_trade.order
+        ib_order.totalQuantity = float(request.qty)
+        if request.HasField("limit_price"):
+            ib_order.lmtPrice = float(request.limit_price.value)
+        if request.HasField("stop_price"):
+            ib_order.auxPrice = float(request.stop_price.value)
+        if request.tif:
+            ib_order.tif = request.tif
+        try:
+            contract: object = await self._resolve_contract(request.contract.conid)
+            new_trade: _IbTrade = cast(
+                "_IbTrade",
+                self.ib.placeOrder(contract, ib_order),  # type: ignore[attr-defined, unused-ignore]
+            )
+        except Exception as exc:
+            raise grpc.RpcError(grpc.StatusCode.UNKNOWN, f"placeOrder failed: {exc}") from exc
+
+        return broker_pb2.ModifyOrderResponse(
+            broker_order_id=str(new_trade.order.permId),
+            status=str(new_trade.orderStatus.status),
+        )
 
     async def OrderEvent(  # noqa: N802
         self,
