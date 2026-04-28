@@ -612,6 +612,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         return message
 
     def _proto_contract(self, ib_contract: _IbContract) -> broker_pb2.Contract:
+        raw_mult = getattr(ib_contract, "multiplier", "")
         return broker_pb2.Contract(
             symbol=str(ib_contract.symbol),
             exchange=str(ib_contract.exchange),
@@ -619,16 +620,19 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             asset_class=self._asset_class(str(ib_contract.secType)),
             conid=str(ib_contract.conId),
             local_symbol=str(ib_contract.localSymbol),
+            multiplier=str(raw_mult) if raw_mult else "1",
         )
 
     def _proto_contract_from_details(self, details: object) -> broker_pb2.Contract:
         contract = details.contract
+        raw_mult = getattr(contract, "multiplier", "")
         return broker_pb2.Contract(
             conid=str(contract.conId),
             symbol=contract.symbol,
             exchange=contract.primaryExchange or contract.exchange,
             currency=contract.currency,
             asset_class=self._asset_class(contract.secType),
+            multiplier=str(raw_mult) if raw_mult else "1",
         )
 
     def _proto_order_from_trade(self, trade: _IbTrade) -> broker_pb2.Order:

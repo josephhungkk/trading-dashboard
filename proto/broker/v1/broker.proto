@@ -145,6 +145,9 @@ message Contract {
   // IBKR contract id, as string
   string conid = 5;
   string local_symbol = 6;
+  // Contract multiplier (50 for futures @ES, 100 for options, 1 for stocks).
+  // Sourced from ib_async.Contract.multiplier; defaults to "1" when absent.
+  string multiplier = 7;
 }
 message ContractRef {
   string conid = 1;
