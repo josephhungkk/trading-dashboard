@@ -94,11 +94,11 @@ Claude Code keeps:
 - [x] Chunk E — Frontend mapper (`AccountResponse` TS types, `BrokerMaintenance`, currency fallback chain, `useFleetMaintenance` Zustand, `fetchAccountsAndSyncMaintenance` hook)
 - [x] Chunk F — AccountPicker UI (`nlvCellState` 4-variant helper, React.memo row, 6 unit tests)
 - [x] Chunk G — `sidecar/tests/test_real_ibkr_smoke.py` (6 read-only tests vs paper 4002)
-- [ ] Chunk H — Close-out (CHANGELOG ✓, TASKS ✓, CLAUDE.md, pre-flight, USER GATE for tag v0.5.0)
+- [x] Chunk H — Close-out (CHANGELOG ✓, TASKS ✓, CLAUDE.md ✓, tag v0.5.0)
 
-## Phase 5b — Trade execution (IBKR)  *(complete — v0.5.1 · 2026-04-28)*
+## Phase 5b — Trade execution (IBKR)  *(complete — v0.5.1 + v0.5.2 hardening · 2026-04-28)*
 
-Order place/cancel/status for IBKR. `OrderEvent` stream subscription is a separate background task per sidecar (one persistent gRPC server-streaming RPC per gateway), NOT extended off `_discover_once` (R14 architectural note from 5a spec).
+Order place/cancel/status for IBKR. `OrderEvent` stream subscription is a separate background task per sidecar (one persistent gRPC server-streaming RPC per gateway), NOT extended off `_discover_once` (R14 architectural note from 5a spec). End-to-end verified on prod via paper canary (BARC + VOD on isa-paper).
 
 - [x] Chunk A — Foundation (Alembic 0004 orders + order_events; proto add PlaceOrder/CancelOrder/OrderEvent/SearchContracts; gen-types.sh; BrokerSidecarClient extension; shared mock fixtures)
 - [x] Chunk B — Sidecar handlers (PlaceOrder + simulator, CancelOrder, OrderEvent stream, SearchContracts caching + 5/sec rate limit, real-IBKR smoke gated on `CI_USE_REAL_IBKR=1`)
@@ -108,15 +108,21 @@ Order place/cancel/status for IBKR. `OrderEvent` stream subscription is a separa
 - [x] Chunk F — Frontend services + Zustand store + `useOrdersList` / `useOrdersStream` hooks
 - [x] Chunk G — `ContractSearchInput` + `TradeTicketModal` + `OrdersPage` extension + Trade entry-points (AccountPicker + positions row)
 - [x] Chunk H — Prometheus metrics + alerts.yml + docker-compose.prod single-worker + nginx SSE + clean_tables fixture + lifespan integration
-- [ ] H4 close-out — CHANGELOG ✓, TASKS ✓, CLAUDE.md, USER GATE for tag v0.5.1
+- [x] H4 close-out — CHANGELOG ✓, TASKS ✓, CLAUDE.md ✓, tag v0.5.1 ✓
+- [x] v0.5.2 hardening — 13 post-tag hotfixes (contract resolver, positions guard, currency_base fallback, trade-policy key shape, streaming-deadline) + first end-to-end paper canary validated on prod ✓
 
-## Phase 5c — Advanced order types  *(next)*
+## Phase 5c — Advanced order types + canary gaps  *(next)*
 
-Modify, brackets, fills history, multi-worker uvicorn. Builds on 5b's place/cancel + the consumer/watchdog infra.
+Modify, bracket orders, fills history, multi-worker uvicorn. Builds on 5b's place/cancel + the consumer/watchdog infra. Plus three concrete gaps surfaced by the v0.5.2 paper canary:
 
-## Phase 5c — Advanced order types  *(deferred)*
-
-Modify, bracket orders, algos. Builds on 5b's place/cancel.
+- [ ] **Alembic migration for `positions` table** — currently absent; `_position_qty` defaults to 0 via `to_regclass` guard, but real position-sanity needs the table populated by a discoverer/portfolio sync.
+- [ ] **SIM-mode cancel echo** — sidecar simulator prefix `SIM-…` doesn't emit synthetic `cancelled` OrderEvents, so `DELETE /api/orders/{id}` returns 202 but the row stays `submitted` until manually cleaned up (or the cancel HTTP path optimistically transitions on broker-call success).
+- [ ] **`currency_base` BASE-tag workaround** — sidecar can't run `reqAccountUpdates` concurrently with `reqAccountSummary` (second await never resolves). Backend currently falls back to `last_nlv_currency`. Possible fix: dedicated short-lived BASE-only round per discovery tick before reqAccountSummary subscribes.
+- [ ] **Modify orders** (replace order qty/price; ib_async `placeOrder` on existing orderId).
+- [ ] **Bracket orders / OCO** — single-leg only in 5b; entries that auto-attach stop-loss + take-profit children.
+- [ ] **Fills history endpoint** — order_events has the data; needs `GET /api/fills` with date-range pagination.
+- [ ] **Multi-worker uvicorn** (Phase 9 originally; bumped here if other 5c work touches the same surfaces). Replaces the in-memory nonce store + cancel cooldown set + per-client SSE queues with Redis or PG-backed equivalents.
+- [ ] **Integration test that round-trips trade_enabled flip → preview → place → cancel** through the admin API + paper account, so v0.5.1-style bugs are caught in CI.
 
 ## Phase 6 — Futu adapter + CJK font polish
 
