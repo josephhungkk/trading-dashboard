@@ -69,10 +69,13 @@ class _Session:
                     "gateway_label": self.account.gateway_label,
                     "mode": self.account.mode,
                     "currency_base": self.account.currency_base,
+                    "last_nlv_currency": self.account.currency_base,
                 }
             )
         if "FROM orders" in sql:
             return _Result(scalar=self.filled_today)
+        if "to_regclass('public.positions')" in sql:
+            return _Result(scalar="public.positions")
         if "FROM positions" in sql:
             return _Result(scalar=self.position_qty)
         raise AssertionError(f"unexpected SQL: {sql}")

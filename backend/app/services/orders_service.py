@@ -645,6 +645,11 @@ async def _notional_filled_today(db: AsyncSession, account_id: object) -> Decima
 
 
 async def _position_qty(db: AsyncSession, account_id: object, conid: str) -> Decimal:
+    # positions table is Phase 5c work — sanity check defaults to 0 until then.
+    # Mirrors the to_regclass guard in _position_count below.
+    exists_result = await db.execute(text("SELECT to_regclass('public.positions')"), {})
+    if exists_result.scalar_one_or_none() is None:
+        return Decimal("0")
     result = await db.execute(
         text(
             """
