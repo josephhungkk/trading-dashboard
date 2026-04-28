@@ -2,8 +2,16 @@ name: Nightly real-IBKR contract tests
 
 on:
   schedule:
-    - cron: '0 6 * * *'
-  workflow_dispatch: {}
+    # 12:00 UTC clears all four IBKR daily maintenance windows by >=6h.
+    # 5b.1 D3 expanded scope: the e2e-trade test placed in this same job
+    # makes live HTTP calls and asserts maintenance.active == false.
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: 'Run e2e-trade chain (real paper gateway 4002) in addition to smoke'
+        required: false
+        default: 'false'
 
 jobs:
   real-ibkr:
@@ -12,6 +20,11 @@ jobs:
     env:
       CI_USE_REAL_IBKR: '1'
       IBKR_PAPER_PORT: '4002'
+      # 5b.1 D3 - CF Access service-token creds are read by the e2e-trade
+      # test (sidecar/tests/test_real_ibkr_e2e_trade.py) which calls
+      # https://dashboard.kiusinghung.com/api/* with the service-token headers.
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
       # NOTE: NOT opting into FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 yet —
       # astral-sh/setup-uv@v5 crashes on Node 24 with a libuv assertion
       # (src\win\async.c:76). Re-enable once setup-uv ships a Node-24
