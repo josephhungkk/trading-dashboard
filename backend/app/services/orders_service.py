@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -21,6 +22,7 @@ from app.schemas.orders import (
     ContractSummary,
     OrderEvent,
     OrderListResponse,
+    OrderModifyRequest,
     OrderResponse,
     PlaceOrderRequest,
     PolicyResponse,
@@ -33,6 +35,9 @@ from app.services.brokers import BrokerRegistry, BrokerSidecarTimeout, BrokerSid
 from app.services.config import ConfigService
 from app.services.ibkr_maintenance import BrokerMaintenance, compute_broker_maintenance
 from app.services.orders_policy import get_account_policy, is_kill_switch_active
+
+_MODIFY_REPLAY_CACHE: dict[tuple[UUID, str], tuple[float, dict[str, Any]]] = {}
+_MODIFY_REPLAY_TTL_SECONDS = 60.0
 
 
 class RedisLike(Protocol):
@@ -264,6 +269,162 @@ async def place_order(
             pass
 
     return _order_response_from_mapping(submitted or row, submission_state="submitted")
+
+
+async def modify_order(
+    db: AsyncSession,
+    redis: RedisLike,
+    config: ConfigService,
+    registry: BrokerRegistry,
+    *,
+    order_id: UUID,
+    request: OrderModifyRequest,
+) -> dict[str, Any]:
+    cached = _modify_replay_lookup(order_id, request.nonce)
+    if cached is not None:
+        return cached
+
+    result = await db.execute(
+        text(
+            """
+            SELECT account_id,
+                   broker_order_id,
+                   conid,
+                   symbol,
+                   side,
+                   order_type,
+                   tif,
+                   qty,
+                   limit_price,
+                   stop_price,
+                   status::text AS status,
+                   filled_qty,
+                   parent_order_id,
+                   client_order_id
+              FROM orders
+             WHERE id = :id;
+            """
+        ),
+        {"id": order_id},
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise PreviewUnavailable(404, {"error": "not_found"})
+
+    status = str(row["status"])
+    if status in TERMINAL_STATUSES:
+        raise PreviewUnavailable(409, {"error": "terminal_status"})
+
+    filled_qty = Decimal(str(row["filled_qty"] or "0"))
+    if row["parent_order_id"] is None and filled_qty > 0:
+        child_result = await db.execute(
+            text(
+                """
+                SELECT 1
+                  FROM orders
+                 WHERE parent_order_id = :p
+                   AND status NOT IN ('filled', 'cancelled', 'rejected', 'expired')
+                 LIMIT 1;
+                """
+            ),
+            {"p": order_id},
+        )
+        if child_result.scalar_one_or_none() is not None:
+            raise PreviewUnavailable(409, {"error": "bracket_parent_partial"})
+
+    if await config.get_bool("broker", "kill_switch_enabled", default=False):
+        raise PreviewUnavailable(503, {"error": "kill_switch"})
+
+    account = await _resolve_account(db, row["account_id"])
+    qty_text = canonicalize_qty(request.qty)
+    existing_limit_price = str(row["limit_price"]) if row["limit_price"] is not None else None
+    new_limit_price = request.limit_price or existing_limit_price
+    new_notional = Decimal(qty_text) * Decimal(new_limit_price or "0")
+    await _check_trade_policy(
+        config,
+        account.gateway_label,
+        notional=new_notional,
+        currency_base=account.currency_base,
+        redis=redis,
+        mode=account.mode,
+    )
+    await _consume_nonce(
+        redis,
+        request.nonce,
+        account_id=row["account_id"],
+        qty=qty_text,
+        limit_price=request.limit_price,
+    )
+
+    raw_payload = {
+        "client_order_id": str(row["client_order_id"]),
+        "qty": qty_text,
+        "limit_price": _canonical_decimal_or_none(request.limit_price),
+        "stop_price": _canonical_decimal_or_none(request.stop_price),
+        "tif": request.tif,
+    }
+    await db.execute(
+        text(
+            """
+            INSERT INTO order_events (
+                order_id,
+                account_id,
+                broker_order_id,
+                status,
+                filled_qty,
+                avg_fill_price,
+                broker_event_at,
+                raw_payload
+            )
+            VALUES (
+                :order_id,
+                :account_id,
+                :broker_order_id,
+                CAST(:status AS order_status_enum),
+                NULL,
+                NULL,
+                now() - interval '100 milliseconds',
+                CAST(:raw_payload AS jsonb)
+            );
+            """
+        ),
+        {
+            "order_id": order_id,
+            "account_id": row["account_id"],
+            "broker_order_id": row["broker_order_id"],
+            "status": "modified",
+            "raw_payload": json.dumps(raw_payload),
+        },
+    )
+    await db.commit()
+
+    client = await registry.get_client(account.gateway_label)
+    contract = await client.get_contract(str(row["conid"]))
+    modify_result = await _as_order_sidecar_client(client).modify_order(
+        broker_order_id=str(row["broker_order_id"] or ""),
+        account_number=account.account_number,
+        contract=contract,
+        side=str(row["side"]),
+        order_type=str(row["order_type"]),
+        tif=request.tif,
+        qty=qty_text,
+        limit_price=request.limit_price or "",
+        stop_price=request.stop_price or "",
+        client_order_id=str(row["client_order_id"]),
+    )
+
+    projected = {
+        "id": order_id,
+        "client_order_id": str(row["client_order_id"]),
+        "broker_order_id": modify_result.broker_order_id or str(row["broker_order_id"] or ""),
+        "status": "modified",
+        "qty": qty_text,
+        "limit_price": request.limit_price,
+        "stop_price": request.stop_price,
+        "tif": request.tif,
+    }
+    _modify_replay_store(order_id, request.nonce, projected)
+    return projected
 
 
 async def list_orders(
@@ -581,6 +742,21 @@ class _OrderSidecarClient(_ContractSearchClient, Protocol):
 
     async def cancel_order(self, account_number: str, broker_order_id: str) -> bool: ...
 
+    async def modify_order(
+        self,
+        *,
+        broker_order_id: str,
+        account_number: str,
+        contract: base.Contract,
+        side: str,
+        order_type: str,
+        tif: str,
+        qty: str,
+        limit_price: str,
+        stop_price: str,
+        client_order_id: str,
+    ) -> base.ModifyOrderResult: ...
+
 
 def _as_order_sidecar_client(client: object) -> _OrderSidecarClient:
     return client  # type: ignore[return-value]
@@ -836,6 +1012,24 @@ def _nonce_and_payload_hash(request: PreviewRequest) -> tuple[str, str]:
     return nonce, hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _modify_nonce_payload_hash(
+    *,
+    account_id: object,
+    qty: str,
+    limit_price: str | None,
+) -> str:
+    canonical = json.dumps(
+        {
+            "account_id": str(account_id),
+            "qty": canonicalize_qty(qty),
+            "limit_price": _canonical_decimal_or_none(limit_price),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _canonical_decimal_or_none(value: str | None) -> str | None:
     if value is None:
         return None
@@ -867,6 +1061,69 @@ def _decode_nonce_payload(value: object) -> dict[str, object]:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _modify_replay_lookup(order_id: UUID, nonce: str) -> dict[str, Any] | None:
+    now = time.monotonic()
+    expired_keys = [key for key, (deadline, _) in _MODIFY_REPLAY_CACHE.items() if deadline <= now]
+    for key in expired_keys:
+        _MODIFY_REPLAY_CACHE.pop(key, None)
+
+    entry = _MODIFY_REPLAY_CACHE.get((order_id, nonce))
+    if entry is None:
+        return None
+    deadline, response = entry
+    if deadline <= now:
+        _MODIFY_REPLAY_CACHE.pop((order_id, nonce), None)
+        return None
+    return dict(response)
+
+
+def _modify_replay_store(order_id: UUID, nonce: str, response: dict[str, Any]) -> None:
+    _MODIFY_REPLAY_CACHE[(order_id, nonce)] = (
+        time.monotonic() + _MODIFY_REPLAY_TTL_SECONDS,
+        dict(response),
+    )
+
+
+async def _check_trade_policy(
+    cfg: ConfigService,
+    gateway_label: str,
+    *,
+    notional: Decimal,
+    currency_base: str,
+    redis: RedisLike,
+    mode: str = "live",
+) -> None:
+    del currency_base, redis
+    policy = await get_account_policy(cfg, gateway_label=gateway_label, mode=mode)
+    if not policy.trade_enabled:
+        raise PreviewUnavailable(422, {"error": "trade_disabled"})
+    if policy.simulator_only and mode == "live":
+        raise PreviewUnavailable(422, {"error": "simulator_only"})
+    if cap_status(notional, policy.max_notional_per_order) == "exceeded":
+        raise PreviewUnavailable(422, {"error": "max_notional_exceeded"})
+
+
+async def _consume_nonce(
+    redis: RedisLike,
+    nonce: str,
+    *,
+    account_id: object,
+    qty: str,
+    limit_price: str | None,
+) -> None:
+    nonce_key = f"nonce:order:{account_id}:{nonce}"
+    consumed_nonce_value = await redis.execute_command("GETDEL", nonce_key)
+    if consumed_nonce_value is None:
+        raise PreviewUnavailable(422, {"error": "unknown_nonce"})
+    consumed_nonce_payload = _decode_nonce_payload(consumed_nonce_value)
+    if consumed_nonce_payload["payload_hash"] != _modify_nonce_payload_hash(
+        account_id=account_id,
+        qty=qty,
+        limit_price=limit_price,
+    ):
+        raise PreviewUnavailable(422, {"error": "payload_mismatch"})
 
 
 def _is_regular_trading_hours(now: datetime) -> bool:
