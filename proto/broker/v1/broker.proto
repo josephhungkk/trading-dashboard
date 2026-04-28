@@ -26,6 +26,8 @@ service Broker {
   rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
   rpc OrderEvent(AccountRef) returns (stream OrderEventMessage);
   rpc SearchContracts(SearchContractsRequest) returns (SearchContractsResponse);
+  rpc ModifyOrder(ModifyOrderRequest) returns (ModifyOrderResponse);
+  rpc PlaceBracket(PlaceBracketRequest) returns (PlaceBracketResponse);
 }
 
 enum BrokerId {
@@ -209,6 +211,40 @@ message PlaceOrderResponse {
   string status = 2; // initial status from ib_async (PendingSubmit etc.)
 }
 
+message ModifyOrderRequest {
+  string broker_order_id = 1;
+  string account_number = 2;
+  Contract contract = 3;
+  OrderSide side = 4;
+  OrderType order_type = 5;
+  TimeInForce tif = 6;
+  string qty = 7;
+  Money limit_price = 8;
+  Money stop_price = 9;
+  string client_order_id = 10;
+}
+
+message ModifyOrderResponse {
+  string broker_order_id = 1;
+  string status = 2;
+}
+
+message PlaceBracketRequest {
+  PlaceOrderRequest parent = 1;
+  PlaceOrderRequest stop_loss = 2;
+  PlaceOrderRequest take_profit = 3;
+  string oca_group = 4;
+  bool has_stop_loss = 5;
+  bool has_take_profit = 6;
+}
+
+message PlaceBracketResponse {
+  string parent_broker_order_id = 1;
+  string stop_loss_broker_order_id = 2;
+  string take_profit_broker_order_id = 3;
+  string status = 4;
+}
+
 message CancelOrderRequest {
   string account_number = 1;
   string broker_order_id = 2;
@@ -226,6 +262,8 @@ message OrderEventMessage {
   string avg_fill_price = 5;
   google.protobuf.Timestamp event_at = 6;
   string raw_payload = 7; // jsonb-friendly debug blob (ib_async Trade snapshot)
+  string exec_id = 8;
+  string kind = 9;
 }
 
 message SearchContractsRequest {
