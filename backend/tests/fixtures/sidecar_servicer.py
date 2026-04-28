@@ -102,6 +102,7 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.place_order_calls: list[broker_pb2.PlaceOrderRequest] = []
         self.cancel_order_calls: list[broker_pb2.CancelOrderRequest] = []
         self._sim_orders: dict[str, dict[str, str]] = {}
+        self._bracket_children: dict[str, list[str]] = {}
         self._event_subscribers: list[asyncio.Queue[broker_pb2.OrderEventMessage]] = []
         self.delay_seconds = 0.0
         self.unavailable_methods: set[str] = set()
@@ -234,6 +235,62 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             status="Submitted",
         )
 
+    async def ModifyOrder(  # noqa: N802
+        self,
+        request: broker_pb2.ModifyOrderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.ModifyOrderResponse:
+        await self._before_rpc("ModifyOrder", context)
+        for queue in self._event_subscribers:
+            await queue.put(
+                broker_pb2.OrderEventMessage(
+                    broker_order_id=request.broker_order_id,
+                    client_order_id=request.client_order_id,
+                    status="modified",
+                    filled_qty="0",
+                    avg_fill_price="0",
+                    raw_payload="{}",
+                    exec_id="",
+                    kind="status",
+                )
+            )
+        return broker_pb2.ModifyOrderResponse(
+            broker_order_id=request.broker_order_id,
+            status="Modified",
+        )
+
+    async def PlaceBracket(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceBracketRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PlaceBracketResponse:
+        await self._before_rpc("PlaceBracket", context)
+        parent_id = f"SIM-{uuid7()}"
+        sl_id = f"SIM-{uuid7()}" if request.has_stop_loss else ""
+        tp_id = f"SIM-{uuid7()}" if request.has_take_profit else ""
+        children = [c for c in (sl_id, tp_id) if c]
+        self._bracket_children[parent_id] = children
+        self._sim_orders[parent_id] = {
+            "client_order_id": request.parent.client_order_id,
+            "account_number": request.parent.account_number,
+        }
+        if sl_id:
+            self._sim_orders[sl_id] = {
+                "client_order_id": request.stop_loss.client_order_id,
+                "account_number": request.stop_loss.account_number,
+            }
+        if tp_id:
+            self._sim_orders[tp_id] = {
+                "client_order_id": request.take_profit.client_order_id,
+                "account_number": request.take_profit.account_number,
+            }
+        return broker_pb2.PlaceBracketResponse(
+            parent_broker_order_id=parent_id,
+            stop_loss_broker_order_id=sl_id,
+            take_profit_broker_order_id=tp_id,
+            status="Submitted",
+        )
+
     async def CancelOrder(  # noqa: N802
         self,
         request: broker_pb2.CancelOrderRequest,
@@ -257,6 +314,22 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                     raw_payload='{"sim_cancel_echo": true}',
                 )
             )
+        children = self._bracket_children.pop(request.broker_order_id, [])
+        for child_id in children:
+            child_meta = self._sim_orders.pop(child_id, None)
+            if child_meta is None:
+                continue
+            for queue in self._event_subscribers:
+                await queue.put(
+                    broker_pb2.OrderEventMessage(
+                        broker_order_id=child_id,
+                        client_order_id=child_meta["client_order_id"],
+                        status="cancelled",
+                        filled_qty="0",
+                        avg_fill_price="0",
+                        raw_payload='{"oca_cascade": true}',
+                    )
+                )
         return broker_pb2.CancelOrderResponse(accepted=True)
 
     async def OrderEvent(  # noqa: N802
@@ -359,6 +432,20 @@ class _DispatchingBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignor
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.CancelOrderResponse:
         return await self._servicer.CancelOrder(request, context)
+
+    async def ModifyOrder(  # noqa: N802
+        self,
+        request: broker_pb2.ModifyOrderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.ModifyOrderResponse:
+        return await self._servicer.ModifyOrder(request, context)
+
+    async def PlaceBracket(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceBracketRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PlaceBracketResponse:
+        return await self._servicer.PlaceBracket(request, context)
 
     async def OrderEvent(  # noqa: N802
         self,
