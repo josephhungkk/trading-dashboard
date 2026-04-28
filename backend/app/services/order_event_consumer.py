@@ -580,6 +580,9 @@ class OrderEventConsumer:
                    SET status = CASE
                          WHEN orders.status IN ('filled', 'cancelled', 'rejected', 'expired')
                            THEN orders.status
+                         WHEN order_status_rank(orders.status)
+                              > order_status_rank(CAST(:new_status AS order_status_enum))
+                           THEN orders.status
                          ELSE CAST(:new_status AS order_status_enum)
                        END,
                        broker_order_id = COALESCE(orders.broker_order_id, :broker_order_id),
