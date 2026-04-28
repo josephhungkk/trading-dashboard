@@ -460,12 +460,43 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         context: object,
     ) -> broker_pb2.CancelOrderResponse:
         del context
+        broker_order_id = request.broker_order_id
+
+        if broker_order_id.startswith("SIM-"):
+            sim_meta = self._sim_orders.pop(broker_order_id, None)
+            if sim_meta is None:
+                return broker_pb2.CancelOrderResponse(accepted=False)
+
+            from decimal import Decimal
+            from types import SimpleNamespace
+
+            synthetic_trade = SimpleNamespace(
+                order=SimpleNamespace(
+                    permId=broker_order_id,
+                    orderRef=sim_meta["client_order_id"],
+                    account=sim_meta["account_number"],
+                ),
+                orderStatus=SimpleNamespace(
+                    status="Cancelled",
+                    filled=Decimal("0"),
+                    avgFillPrice=Decimal("0"),
+                ),
+                contract=SimpleNamespace(
+                    currency="USD", symbol="", exchange="",
+                    conId=0, secType="STK", localSymbol="",
+                ),
+                fills=[],
+                log=[],
+            )
+            self.ib.orderStatusEvent.emit(synthetic_trade)  # type: ignore[attr-defined, unused-ignore]
+            metrics.broker_sim_cancel_echo_total.labels(label=self.label).inc()
+            return broker_pb2.CancelOrderResponse(accepted=True)
 
         raw_trades: object = self.ib.openTrades()  # type: ignore[attr-defined, unused-ignore]
         for trade in cast("Iterable[object]", raw_trades):
             ib_trade: _IbTrade = cast("_IbTrade", trade)
             if (
-                ib_trade.order.permId == int(request.broker_order_id)
+                ib_trade.order.permId == int(broker_order_id)
                 and ib_trade.order.account == request.account_number
             ):
                 self.ib.cancelOrder(ib_trade.order)  # type: ignore[attr-defined, unused-ignore]

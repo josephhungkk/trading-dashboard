@@ -54,3 +54,9 @@ broker_order_events_dropped_total = Counter(
     "Order events dropped by the sidecar stream before delivery.",
     labelnames=["reason"],
 )
+
+broker_sim_cancel_echo_total = Counter(
+    "broker_sim_cancel_echo_total",
+    "Synthetic cancellation events emitted for SIM-prefixed orders.",
+    labelnames=["label"],
+)
