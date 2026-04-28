@@ -161,3 +161,9 @@ pending_fills_backlog_count = Gauge(
     "Count of pending_fills rows older than 5 minutes (BrokerPendingFillsBacklog alert).",
     registry=registry,
 )
+
+commission_buffer_overflow_total = Counter(
+    "commission_buffer_overflow_total",
+    "Times the in-memory commission buffer exceeded 1000 entries.",
+    registry=registry,
+)

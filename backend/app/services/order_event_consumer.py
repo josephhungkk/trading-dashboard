@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,6 +33,32 @@ log = structlog.get_logger(__name__)
 
 TERMINAL_STATUSES = ("filled", "cancelled", "rejected", "expired")
 MAX_CONSECUTIVE_FAILURES = 50
+
+
+# 5c MED-5: in-memory buffer for commissionReport events that arrive before
+# the matching fill row has been written. 5-min TTL.
+_COMMISSION_BUFFER: dict[str, tuple[float, str, str]] = {}
+_COMMISSION_BUFFER_TTL_SECONDS: float = 300.0
+
+
+def _commission_buffer_set(exec_id: str, commission: str, currency: str) -> None:
+    _COMMISSION_BUFFER[exec_id] = (
+        time.monotonic() + _COMMISSION_BUFFER_TTL_SECONDS,
+        commission,
+        currency,
+    )
+    if len(_COMMISSION_BUFFER) > 1000:
+        metrics.commission_buffer_overflow_total.inc()
+
+
+def _commission_buffer_pop(exec_id: str) -> tuple[str, str] | None:
+    entry = _COMMISSION_BUFFER.pop(exec_id, None)
+    if entry is None:
+        return None
+    expires, commission, currency = entry
+    if time.monotonic() > expires:
+        return None
+    return commission, currency
 
 
 @dataclass(frozen=True)
@@ -340,6 +367,24 @@ class OrderEventConsumer:
 
     async def _process_event(self, event: OrderEventMessage) -> None:
         label = self._event_label(event)
+        if event.kind == "commission_report" and event.exec_id:
+            cr_payload = _parse_raw_payload(event.raw_payload)
+            payload_dict = cr_payload if isinstance(cr_payload, dict) else {}
+            commission = str(payload_dict.get("commission", "0"))
+            commission_currency = str(payload_dict.get("commission_currency", "USD")).upper()
+            async with self._session_factory() as session, session.begin():
+                result = await session.execute(
+                    text(
+                        "UPDATE fills SET commission = :c, commission_currency = :cc "
+                        "WHERE exec_id = :e"
+                    ),
+                    {"c": commission, "cc": commission_currency, "e": event.exec_id},
+                )
+                if (getattr(result, "rowcount", None) or 0) == 0:
+                    _commission_buffer_set(event.exec_id, commission, commission_currency)
+            async with self._failure_lock:
+                self._consecutive_failures = 0
+            return
         try:
             account = await self._account_for_event(event)
             broker_event_at = event.broker_event_at or datetime.now(UTC)
@@ -682,6 +727,16 @@ class OrderEventConsumer:
                         "ts": broker_event_at,
                     },
                 )
+                buffered = _commission_buffer_pop(event.exec_id)
+                if buffered:
+                    buf_commission, buf_currency = buffered
+                    await session.execute(
+                        text(
+                            "UPDATE fills SET commission = :c, commission_currency = :cc "
+                            "WHERE exec_id = :e"
+                        ),
+                        {"c": buf_commission, "cc": buf_currency, "e": event.exec_id},
+                    )
         except DBAPIError as exc:
             if getattr(exc.orig, "sqlstate", None) != "23503":
                 raise
