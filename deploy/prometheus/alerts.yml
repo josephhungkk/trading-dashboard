@@ -16,3 +16,27 @@ groups:
         labels: { severity: page }
         annotations:
           summary: "Pending-submit order orphaned (no broker match after 5min)"
+
+  - name: phase5b1_canary_hotfix
+    rules:
+      - alert: BrokerDiscoverPositionsP99HighWarning
+        expr: histogram_quantile(0.99, rate(broker_discover_positions_update_duration_ms_bucket[5m])) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BrokerDiscoverer positions fan-out p99 > 1000ms"
+          description: "p99 of broker_discover_positions_update_duration_ms over 5m is {{ $value }}ms (threshold 1000ms). Expected ~150ms at 22 accounts."
+
+      - alert: BrokerSimCancelEchoMismatch
+        expr: |
+          abs(
+            rate(broker_sim_cancel_echo_total[5m])
+            - rate(http_requests_total{handler="DELETE /api/orders/{id}",code="202"}[5m])
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIM cancel echo rate diverges from cancel HTTP rate"
+          description: "broker_sim_cancel_echo_total rate {{ $value }} differs from cancel HTTP 202 rate by >10% - synthetic emit may be dropping events or extra echoes are firing."
