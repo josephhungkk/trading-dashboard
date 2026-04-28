@@ -582,6 +582,102 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             status=str(new_trade.orderStatus.status),
         )
 
+    async def PlaceBracket(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceBracketRequest,
+        context: object,
+    ) -> broker_pb2.PlaceBracketResponse:
+        del context
+        parent_contract: object = await self._resolve_contract(request.parent.conid)
+        parent_order = self._build_ib_order(request.parent)
+        parent_order.transmit = False
+        parent_order.orderRef = request.parent.client_order_id
+        parent_order.account = request.parent.account_number
+
+        if self._simulator_only:
+            from uuid_utils import uuid7
+
+            parent_sim = f"SIM-{uuid7()}"
+            self._sim_orders[parent_sim] = {
+                "client_order_id": request.parent.client_order_id,
+                "account_number": request.parent.account_number,
+            }
+            sl_sim = ""
+            tp_sim = ""
+            if request.has_stop_loss:
+                sl_sim = f"SIM-{uuid7()}"
+                self._sim_orders[sl_sim] = {
+                    "client_order_id": request.stop_loss.client_order_id,
+                    "account_number": request.stop_loss.account_number,
+                    "parent_sim_id": parent_sim,
+                }
+            if request.has_take_profit:
+                tp_sim = f"SIM-{uuid7()}"
+                self._sim_orders[tp_sim] = {
+                    "client_order_id": request.take_profit.client_order_id,
+                    "account_number": request.take_profit.account_number,
+                    "parent_sim_id": parent_sim,
+                }
+            return broker_pb2.PlaceBracketResponse(
+                parent_broker_order_id=parent_sim,
+                stop_loss_broker_order_id=sl_sim,
+                take_profit_broker_order_id=tp_sim,
+                status="Submitted",
+            )
+
+        # Real broker path. Place parent first (transmit=False) so ib_async
+        # assigns parent.orderId synchronously; then wire children's
+        # parentId/ocaGroup before placing them. Last child gets transmit=True
+        # to atomically submit the entire bracket per IBKR docs (OCA type 1
+        # = "cancel all remaining orders with block").
+        parent_trade: _IbTrade = cast(
+            "_IbTrade",
+            self.ib.placeOrder(parent_contract, parent_order),  # type: ignore[attr-defined, unused-ignore]
+        )
+        parent_order_id_int = parent_order.orderId
+
+        sl_perm_id = ""
+        tp_perm_id = ""
+        children_to_place: list[tuple[object, object, str]] = []
+        if request.has_stop_loss:
+            sl_contract = await self._resolve_contract(request.stop_loss.conid)
+            sl_order = self._build_ib_order(request.stop_loss)
+            sl_order.parentId = parent_order_id_int
+            sl_order.ocaGroup = request.oca_group
+            sl_order.ocaType = 1
+            sl_order.orderRef = request.stop_loss.client_order_id
+            sl_order.account = request.stop_loss.account_number
+            children_to_place.append((sl_contract, sl_order, "stop_loss"))
+        if request.has_take_profit:
+            tp_contract = await self._resolve_contract(request.take_profit.conid)
+            tp_order = self._build_ib_order(request.take_profit)
+            tp_order.parentId = parent_order_id_int
+            tp_order.ocaGroup = request.oca_group
+            tp_order.ocaType = 1
+            tp_order.orderRef = request.take_profit.client_order_id
+            tp_order.account = request.take_profit.account_number
+            children_to_place.append((tp_contract, tp_order, "take_profit"))
+
+        for i, (_c, child_order, _leg) in enumerate(children_to_place):
+            child_order.transmit = (i == len(children_to_place) - 1)
+
+        for child_contract, child_order, leg in children_to_place:
+            child_trade: _IbTrade = cast(
+                "_IbTrade",
+                self.ib.placeOrder(child_contract, child_order),  # type: ignore[attr-defined, unused-ignore]
+            )
+            if leg == "stop_loss":
+                sl_perm_id = str(child_trade.order.permId)
+            else:
+                tp_perm_id = str(child_trade.order.permId)
+
+        return broker_pb2.PlaceBracketResponse(
+            parent_broker_order_id=str(parent_trade.order.permId),
+            stop_loss_broker_order_id=sl_perm_id,
+            take_profit_broker_order_id=tp_perm_id,
+            status=str(parent_trade.orderStatus.status),
+        )
+
     async def OrderEvent(  # noqa: N802
         self,
         request: broker_pb2.AccountRef,
