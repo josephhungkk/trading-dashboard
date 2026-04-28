@@ -434,6 +434,20 @@ class OrderEventConsumer:
                             order_id=order_id,
                             broker_order_id=event.broker_order_id,
                         )
+                    if status == "cancelled" and order_id is not None:
+                        parent_cancel_at = (
+                            await session.execute(
+                                text(
+                                    "SELECT p.cancel_requested_at FROM orders o "
+                                    "JOIN orders p ON p.id = o.parent_order_id "
+                                    "WHERE o.id = :oid AND p.cancel_requested_at IS NOT NULL"
+                                ),
+                                {"oid": order_id},
+                            )
+                        ).scalar_one_or_none()
+                        if parent_cancel_at is not None:
+                            latency = (broker_event_at - parent_cancel_at).total_seconds()
+                            metrics.broker_bracket_cancel_cascade_seconds.observe(max(latency, 0.0))
                     payload = await self._publish_payload(session, event_id)
 
             await self._publish(account.account_id, payload)

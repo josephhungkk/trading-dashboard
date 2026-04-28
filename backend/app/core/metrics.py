@@ -167,3 +167,10 @@ commission_buffer_overflow_total = Counter(
     "Times the in-memory commission buffer exceeded 1000 entries.",
     registry=registry,
 )
+
+broker_bracket_cancel_cascade_seconds = Histogram(
+    "broker_bracket_cancel_cascade_seconds",
+    "Latency from parent.cancel_requested_at to child cancelled-event for OCA cascade.",
+    buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
+    registry=registry,
+)
