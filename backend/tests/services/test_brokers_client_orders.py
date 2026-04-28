@@ -102,7 +102,10 @@ class _FakeBrokerStub:
         request: broker_pb2.AccountRef,
         **kwargs: Any,
     ) -> AsyncIterator[broker_pb2.OrderEventMessage]:
-        assert kwargs["timeout"] == 5.0
+        # Streaming RPC: no per-call deadline (would tear the subscription
+        # down every 5s in production). Unary RPCs above keep their timeout
+        # assertion.
+        assert "timeout" not in kwargs, "streaming RPC must not pass timeout"
         self.order_event_request = request
 
         async def _events() -> AsyncIterator[broker_pb2.OrderEventMessage]:
