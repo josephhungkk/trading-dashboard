@@ -202,6 +202,47 @@ class BrokerSidecarClient:
             status=response.status,
         )
 
+    async def modify_order(
+        self,
+        *,
+        broker_order_id: str,
+        account_number: str,
+        contract: base.Contract,
+        side: str,
+        order_type: str,
+        tif: str,
+        qty: str,
+        limit_price: str,
+        stop_price: str,
+        client_order_id: str,
+    ) -> base.ModifyOrderResult:
+        # ModifyOrderRequest expects Money protos for prices (vs PlaceOrderRequest
+        # which takes plain strings). Wrap with the contract's currency so the
+        # sidecar can echo it back on fills.
+        request = broker_pb2.ModifyOrderRequest(
+            broker_order_id=broker_order_id,
+            account_number=account_number,
+            side=side,
+            order_type=order_type,
+            tif=tif,
+            qty=qty,
+            limit_price=broker_pb2.Money(value=limit_price or "0", currency=contract.currency),
+            stop_price=broker_pb2.Money(value=stop_price or "0", currency=contract.currency),
+            client_order_id=client_order_id,
+        )
+        response = await self._call(
+            method="ModifyOrder",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.ModifyOrderRequest, broker_pb2.ModifyOrderResponse]",
+                self.stub.ModifyOrder,
+            ),
+            request=request,
+        )
+        return base.ModifyOrderResult(
+            broker_order_id=response.broker_order_id,
+            status=response.status,
+        )
+
     async def cancel_order(self, account_number: str, broker_order_id: str) -> bool:
         request = broker_pb2.CancelOrderRequest(
             account_number=account_number,
