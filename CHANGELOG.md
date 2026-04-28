@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-04-28
+
+### Added — Phase 5b: IBKR trade execution (write path)
+
+- **Three new RPCs + one search RPC** — `proto/broker/v1/broker.proto` adds `PlaceOrder` (unary), `CancelOrder` (unary), `OrderEvent` (server-streaming), and `SearchContracts` (unary). Stubs regenerated for both backend and sidecar.
+- **`orders` + `order_events` tables** (Alembic 0004) — UUIDv7 PKs (sortable client_order_id for idempotency), 8-state `order_status_enum` (`pending_submit/submitted/working/partial/filled/cancelled/rejected/expired`), terminal-status sticky transitions, NUMERIC(20,8) for qty/avg_fill_price, JSONB `raw_payload` for broker-specific fields.
+- **8 backend HTTP endpoints** — `POST /api/orders/preview` (validate + nonce-mint), `POST /api/orders` (place, requires nonce), `GET /api/orders` + `GET /api/orders/{id}` (list + detail), `GET /api/orders/policy/{account_id}` (per-account caps + kill-switch), `DELETE /api/orders/{id}` (cancel with cooldown rollback), `GET /api/orders/events` (SSE with Last-Event-ID replay), `GET /api/contracts/search` (proxy to sidecar with caching + 5/sec rate limit).
+- **`BrokerOrderEventConsumer`** — supervisor task spawns one child per `(gateway_label, account_number)` tailing the OrderEvent stream. Child INSERTs into `order_events`, UPSERTs `orders`, PUBLISHes onto Redis `orders:events:account:<id>` + `orders:events:fleet`. Reconnect-and-resync on stream death. Account add/remove churn drives child lifecycle without restarting siblings.
+- **`PendingSubmitWatchdog`** — 30s scan loop reconciles orders stuck in `pending_submit > 60s` against the broker's live order list. Match → synthesize `OrderEventMessage` and route through `_process_event`. No match after 5 min → escalate to `rejected` with audit row. `reconcile_at_startup()` runs the same pass before consumer streams open (R9: closes the mid-order-bounce gap).
+- **Per-account trade policy** — `app_config` keys `broker.<account>.trade_enabled`, `broker.<account>.daily_notional_cap`, `broker.<account>.max_notional_per_order`, `broker.kill_switch_enabled` (fleet-wide). Policy resolver enforced at preview + place; kill-switch returns 503 ahead of every other check.
+- **Frontend trade execution UX** — `TradeTicketModal` (preview → confirm flow with debounced policy fetches), `ContractSearchInput` (debounced search w/ keyboard nav), extended `OrdersPage` with active orders + cancel + EventSource subscription, "Trade" entry-points on `AccountPicker` row + position rows. Zustand `useOrders` store with optimistic insert + reconcile via SSE.
+- **`scripts/gen-types.sh`** — frontend types now generated from the backend OpenAPI snapshot (`backend/app/scripts/dump_openapi.py`), with `pnpm check:types-up-to-date` CI drift gate.
+- **OpenAPI schema lock (D7)** — `tests/api/test_openapi_contract.py::test_openapi_schema_lock_phase5b` snapshots 5 named models (`PreviewResponse`, `OrderResponse`, `OrderListResponse`, `PolicyResponse`, `ContractSummary`) via `syrupy` so wire-shape changes can't sneak through unreviewed.
+- **9 Prometheus metrics + 12 alert rules** — `broker_order_pending_submit_recovered_total`, `broker_order_pending_submit_orphan_total`, `sse_active_connections`, `sse_dropped_clients_total`, etc. Alerts cover preview latency, place failure rate, watchdog orphan rate, SSE backpressure.
+- **Real-IBKR smoke gate (B6)** — `CI_USE_REAL_IBKR=1` env-gated workflow `real-ibkr.yml` for nightly + manual dispatch, exercises place/cancel/stream against a paper gateway.
+
+### Changed
+- **Cancel cooldown rollback** — sidecar 503 / network failure during `DELETE /api/orders/{id}` rolls back the in-memory cooldown so the operator can immediately retry (H2 fix).
+- **Lifespan ordering** — consumer + watchdog start AFTER the broker registry succeeds; shutdown drains them BEFORE the registry closes, so in-flight events finish processing.
+- **Single-worker uvicorn assertion** — `docker-compose.prod.yml` pins backend to `--workers 1` (Phase 5b only — multi-worker support is deferred to Phase 9). CI asserts the entrypoint can't drift.
+- **nginx SSE config** — `proxy_buffering off`, `X-Accel-Buffering: no`, 65s read timeout, no compression for `/api/orders/events`.
+
+### Fixed
+- **Pytest 9 duplicate-conftest plugin error** — the rootdir conftest is now the only place `pytest_plugins` is declared. Shared `session` fixture moved to `tests.fixtures.db_session`.
+- **Preview test maintenance flake** — fixture default-monkeypatches `compute_broker_maintenance` so the suite runs cleanly during the live IBKR daily reset window.
+- **Sidecar test imports** — `from handlers import ...` (missing package prefix) replaced with `from sidecar.handlers import ...`. Probe `FakeChannel` mock now exposes `unary_stream` so `BrokerStub(channel)` works after the OrderEvent server-streaming RPC was added.
+
 ## [0.5.0] — 2026-04-27
 
 ### Added

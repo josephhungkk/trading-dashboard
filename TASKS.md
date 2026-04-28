@@ -96,9 +96,23 @@ Claude Code keeps:
 - [x] Chunk G — `sidecar/tests/test_real_ibkr_smoke.py` (6 read-only tests vs paper 4002)
 - [ ] Chunk H — Close-out (CHANGELOG ✓, TASKS ✓, CLAUDE.md, pre-flight, USER GATE for tag v0.5.0)
 
-## Phase 5b — Trade execution (IBKR)  *(next)*
+## Phase 5b — Trade execution (IBKR)  *(complete — v0.5.1 · 2026-04-28)*
 
-Order place/modify/cancel/status for IBKR. `OrderEvent` stream subscription is a separate background task per sidecar (one persistent gRPC server-streaming RPC per gateway), NOT extended off `_discover_once` (R14 architectural note from 5a spec).
+Order place/cancel/status for IBKR. `OrderEvent` stream subscription is a separate background task per sidecar (one persistent gRPC server-streaming RPC per gateway), NOT extended off `_discover_once` (R14 architectural note from 5a spec).
+
+- [x] Chunk A — Foundation (Alembic 0004 orders + order_events; proto add PlaceOrder/CancelOrder/OrderEvent/SearchContracts; gen-types.sh; BrokerSidecarClient extension; shared mock fixtures)
+- [x] Chunk B — Sidecar handlers (PlaceOrder + simulator, CancelOrder, OrderEvent stream, SearchContracts caching + 5/sec rate limit, real-IBKR smoke gated on `CI_USE_REAL_IBKR=1`)
+- [x] Chunk C — Pydantic + ORM models + per-account trade policy keys
+- [x] Chunk D — 8 backend endpoints (preview, place, list, detail, policy, cancel, contract search, SSE) + OpenAPI snapshot lock
+- [x] Chunk E — `BrokerOrderEventConsumer` + `PendingSubmitWatchdog` + reconnect-and-resync (R9 startup gap closed)
+- [x] Chunk F — Frontend services + Zustand store + `useOrdersList` / `useOrdersStream` hooks
+- [x] Chunk G — `ContractSearchInput` + `TradeTicketModal` + `OrdersPage` extension + Trade entry-points (AccountPicker + positions row)
+- [x] Chunk H — Prometheus metrics + alerts.yml + docker-compose.prod single-worker + nginx SSE + clean_tables fixture + lifespan integration
+- [ ] H4 close-out — CHANGELOG ✓, TASKS ✓, CLAUDE.md, USER GATE for tag v0.5.1
+
+## Phase 5c — Advanced order types  *(next)*
+
+Modify, brackets, fills history, multi-worker uvicorn. Builds on 5b's place/cancel + the consumer/watchdog infra.
 
 ## Phase 5c — Advanced order types  *(deferred)*
 
