@@ -61,9 +61,12 @@ async def test_listmanagedaccounts_replay_yields_recorded_accounts(
     assert all(n.startswith(("DF", "DU")) for n in numbers), (
         "scrubbed paper IDs must keep the D-prefix family the classifier reads"
     )
-    # Proto contract: currency_base is NOT defaulted. Recorded paper accounts
-    # have no BASE tag so every Account.currency_base must be empty, not "USD".
-    assert all(a.currency_base == "" for a in resp.accounts)
+    # Per IBKR TWS API: BASE is a CURRENCY meta-marker, not a tag. The
+    # account base currency is the .currency on the NetLiquidation row.
+    # The recorded paper-account fixture ships NetLiquidation rows with
+    # currency="GBP" for all six isa-paper accounts (UK base for the real
+    # gateways the trace was captured against).
+    assert all(a.currency_base == "GBP" for a in resp.accounts)
 
 
 @pytest.mark.asyncio

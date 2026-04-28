@@ -470,11 +470,15 @@ async def _resolve_account(db: AsyncSession, account_id: object) -> _Account:
     row = result.mappings().one_or_none()
     if row is None:
         raise PreviewUnavailable(404, {"error": "not_found", "detail": f"account {account_id}"})
-    # Sidecar can't subscribe to reqAccountUpdates concurrently with
-    # reqAccountSummary on the same connection (see sidecar/ibkr_sidecar.py
-    # comment), so currency_base on broker_accounts is permanently empty in
-    # production. Fall back to last_nlv_currency, which the discoverer
-    # caches from accountSummary's NLV-bearing currency tag.
+    # 5b.1 update: sidecar now runs a per-account reqAccountUpdates round
+    # at startup BEFORE reqAccountSummaryAsync (the IBKR API allows only one
+    # active reqAccountUpdates subscription per connection at a time, so the
+    # round MUST complete first). _base_currency reads the .currency field
+    # of the NetLiquidation row, so currency_base normally arrives populated.
+    # The last_nlv_currency fallback is retained as defence-in-depth: a new
+    # account added mid-run won't have BASE cached until the next sidecar
+    # restart, but the discoverer's NLV fan-out still fills last_nlv_currency
+    # within one 30s tick.
     currency_base = str(row["currency_base"]) or str(row["last_nlv_currency"] or "")
     return _Account(
         gateway_label=str(row["gateway_label"]),

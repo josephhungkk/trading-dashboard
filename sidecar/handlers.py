@@ -733,16 +733,25 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         return timestamp
 
     def _base_currency(self, account_values: Iterable[object], account_number: str) -> str:
+        # Per the IBKR TWS API: BASE is a CURRENCY meta-marker, not a tag.
+        # Each per-currency tag (NetLiquidation, CashBalance, etc.) ships a
+        # row with currency='BASE' (meta) and a row with currency='<X>' where
+        # <X> is a real ISO code. The account's actual base currency is the
+        # `<X>` on the NetLiquidation row (IBKR reports NLV in account base
+        # currency only). See sidecar/scripts/base_round_preflight.py for the
+        # empirical evidence (commit 97efe0f).
+        #
         # Proto contract (broker/v1/broker.proto §Account.currency_base): "NOT
-        # defaulted." Return empty string if the BASE tag isn't cached yet so
-        # the backend can distinguish "not loaded" from a real currency.
+        # defaulted." Return empty string if no NetLiquidation row exists yet
+        # so the backend can distinguish "not loaded" from a real currency.
         for value in account_values:
             tag: str = str(getattr(value, "tag", ""))
             account: str = str(getattr(value, "account", ""))
-            if tag == "BASE" and account == account_number:
-                currency: str = str(getattr(value, "value", ""))
-                if currency:
-                    return currency
+            if tag != "NetLiquidation" or account != account_number:
+                continue
+            currency: str = str(getattr(value, "currency", ""))
+            if currency and currency != "BASE":
+                return currency
         return ""
 
     def _money_for_tag(self, values_by_tag: dict[str, object], tag: str) -> broker_pb2.Money:

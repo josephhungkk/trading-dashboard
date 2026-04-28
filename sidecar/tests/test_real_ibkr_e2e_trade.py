@@ -11,8 +11,12 @@ import os
 import time as _t
 import uuid
 
-import httpx
 import pytest
+
+# httpx is a backend dependency, not a sidecar runtime dep. The CI workflow
+# (nightly-real-ibkr.yml) installs it. Local sidecar test runs skip the
+# module entirely if httpx isn't present.
+httpx = pytest.importorskip("httpx")
 
 CF_BASE = "https://dashboard.kiusinghung.com"
 

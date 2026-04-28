@@ -143,11 +143,26 @@ async def test_health_omits_last_tick_when_unset() -> None:
 @pytest.mark.asyncio
 async def test_list_managed_accounts_classifies_paper_by_d_prefix() -> None:
     """IBKR paper account numbers begin with 'D' — must surface as MODE_PAPER."""
+    # Per IBKR TWS API: BASE is a CURRENCY meta-marker, not a tag. The
+    # account's base currency is the .currency on the NetLiquidation row
+    # (IBKR reports NLV in the account base currency only). The matching
+    # currency='BASE' meta-marker rows are present in real responses too;
+    # _base_currency must skip them and return the real ISO code.
     ib = FakeIB(
         managed_accounts=["U1234567", "DU2345678"],
         values=[
-            FakeAccountValue(account="U1234567", tag="BASE", value="USD"),
-            FakeAccountValue(account="DU2345678", tag="BASE", value="GBP"),
+            FakeAccountValue(
+                account="U1234567", tag="NetLiquidation", currency="USD", value="0.00"
+            ),
+            FakeAccountValue(
+                account="U1234567", tag="NetLiquidation", currency="BASE", value="0.00"
+            ),
+            FakeAccountValue(
+                account="DU2345678", tag="NetLiquidation", currency="GBP", value="0.00"
+            ),
+            FakeAccountValue(
+                account="DU2345678", tag="NetLiquidation", currency="BASE", value="0.00"
+            ),
         ],
     )
     h = _handlers(ib)
