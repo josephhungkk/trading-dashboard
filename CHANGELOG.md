@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-04-28
+
+### Fixed — Phase 5b.1 canary hotfix pack
+
+Three of four 5b.1 work items shipped; one (BASE-tag startup round) was deliberately skipped after empirical pre-flight evidence ruled out the design. The v0.5.2 `last_nlv_currency` fallback (`9910e3b`) remains the durable BASE-tag workaround.
+
+- **`positions` table** (Alembic 0005) populated by `BrokerDiscoverer._discover_positions` per-account fan-out (mirrors Phase 5a NLV pattern: per-account `gather` + `return_exceptions=True`, savepoint-isolated upsert via `jsonb_to_recordset`, NULL-safe delta-delete via `NOT EXISTS`, sqlstate `22003` overflow → metric + skip, resurrect-from-soft-delete clears positions cache). `_position_qty` now reads real values; the defensive `to_regclass` guard from `b5a633d` is dropped.
+- **SIM cancel echo:** sidecar `CancelOrder` recognizes `SIM-` prefix BEFORE int-parsing (latent ValueError fixed), pops new `_sim_orders` map registered at PlaceOrder time, synthesizes a Trade-like `SimpleNamespace`, and fires `ib.orderStatusEvent.emit(...)` so the existing per-subscriber OrderEvent fan-out emits a `cancelled` event for every connected backend consumer. Idempotent (re-cancelling missing SIM is a no-op). New metric `broker_sim_cancel_echo_total{label}`.
+- **Layered E2E tests:** `e2e-mock.yml` runs the full preview→place→cancel chain on every push + PR (httpx ASGITransport + extended sidecar mock servicer + Postgres-18 + Redis-7 service containers). `nightly-real-ibkr.yml` cron moved to 12:00 UTC (clears all four IBKR maintenance windows by ≥6h) with new `workflow_dispatch.inputs.run_e2e` for manual runs and `CF_ACCESS_*` env wired through; the `@pytest.mark.real_ibkr`-gated test in `sidecar/tests/test_real_ibkr_e2e_trade.py` exercises the production HTTPS endpoint with a finally-revert of `trade_enabled`.
+- **Prometheus alerts:** `BrokerDiscoverPositionsP99HighWarning` (fan-out p99 > 1000ms over 5m), `BrokerSimCancelEchoMismatch` (synthetic emit rate diverges from cancel HTTP 202 rate by >10% over 10m).
+
+### Skipped — BASE-tag startup round (C1 acceptance failed)
+
+- Empirical pre-flight script (`sidecar/scripts/base_round_preflight.py`) ran on the dev box against paper gateway 4002. After cycling `ib.client.reqAccountUpdates(True/False, account)` for all six isa-paper accounts, `ib.accountValues()` contained no BASE entries. The IBKR API (or ib_async wrapper) does not surface BASE through the documented per-account subscription path concurrent with the sidecar's `reqAccountSummary`.
+- Per the spec contingency (architect-review CRIT-2 fallback): the v0.5.2 `_resolve_account` fallback to `last_nlv_currency` is the durable solution. C2/C3 are dropped from this release. Script committed as evidence so future readers can re-run if the API ever exposes a working round.
+
+### Open Phase 5c work surfaced for the next phase
+
+- `AccountResponse.position_count` (deferred from 5b.1 spec on architect-review HIGH-3 — needs Pydantic + service SQL + OpenAPI snapshot regen + frontend types regen).
+- Periodic BASE-tag refresh for new accounts added mid-run (Phase 5c R11) — only relevant if a future ib_async / IBKR API revision makes BASE reachable.
+- Modify orders + brackets/OCO + fills history endpoint + multi-worker uvicorn.
+
 ## [0.5.2] — 2026-04-28
 
 ### Fixed — Phase 5b post-canary hardening

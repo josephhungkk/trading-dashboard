@@ -110,14 +110,14 @@ Order place/cancel/status for IBKR. `OrderEvent` stream subscription is a separa
 - [x] Chunk H — Prometheus metrics + alerts.yml + docker-compose.prod single-worker + nginx SSE + clean_tables fixture + lifespan integration
 - [x] H4 close-out — CHANGELOG ✓, TASKS ✓, CLAUDE.md ✓, tag v0.5.1 ✓
 - [x] v0.5.2 hardening — 13 post-tag hotfixes (contract resolver, positions guard, currency_base fallback, trade-policy key shape, streaming-deadline) + first end-to-end paper canary validated on prod ✓
+- [x] v0.5.3 — Phase 5b.1 canary hotfix pack — Alembic 0005 positions table + discoverer fan-out, SIM cancel echo via synthetic `ib.orderStatusEvent.emit`, layered E2E tests (`e2e-mock.yml` per-PR + `nightly-real-ibkr.yml` `e2e-trade` job), Prometheus alerts. BASE-tag startup round skipped per empirical pre-flight failure; v0.5.2 `last_nlv_currency` fallback remains canonical workaround.
 
-## Phase 5c — Advanced order types + canary gaps  *(next)*
+## Phase 5c — Advanced order types + remaining canary gaps  *(next)*
 
-Modify, bracket orders, fills history, multi-worker uvicorn. Builds on 5b's place/cancel + the consumer/watchdog infra. Plus three concrete gaps surfaced by the v0.5.2 paper canary:
+Modify, bracket orders, fills history, multi-worker uvicorn. Builds on 5b's place/cancel + the consumer/watchdog infra. Plus the remaining canary surface area:
 
-- [ ] **Alembic migration for `positions` table** — currently absent; `_position_qty` defaults to 0 via `to_regclass` guard, but real position-sanity needs the table populated by a discoverer/portfolio sync.
-- [ ] **SIM-mode cancel echo** — sidecar simulator prefix `SIM-…` doesn't emit synthetic `cancelled` OrderEvents, so `DELETE /api/orders/{id}` returns 202 but the row stays `submitted` until manually cleaned up (or the cancel HTTP path optimistically transitions on broker-call success).
-- [ ] **`currency_base` BASE-tag workaround** — sidecar can't run `reqAccountUpdates` concurrently with `reqAccountSummary` (second await never resolves). Backend currently falls back to `last_nlv_currency`. Possible fix: dedicated short-lived BASE-only round per discovery tick before reqAccountSummary subscribes.
+- [ ] **`AccountResponse.position_count`** — deferred from 5b.1 architect-review HIGH-3; needs Pydantic + service SQL + OpenAPI snapshot regen + frontend types regen.
+- [ ] **Periodic BASE-tag refresh for accounts added mid-run** — only relevant if a future ib_async / IBKR API revision makes BASE reachable through `reqAccountUpdates` concurrent with `reqAccountSummary`. v0.5.2 `last_nlv_currency` fallback covers steady state.
 - [ ] **Modify orders** (replace order qty/price; ib_async `placeOrder` on existing orderId).
 - [ ] **Bracket orders / OCO** — single-leg only in 5b; entries that auto-attach stop-loss + take-profit children.
 - [ ] **Fills history endpoint** — order_events has the data; needs `GET /api/fills` with date-range pagination.
