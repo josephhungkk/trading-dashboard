@@ -645,11 +645,9 @@ async def _notional_filled_today(db: AsyncSession, account_id: object) -> Decima
 
 
 async def _position_qty(db: AsyncSession, account_id: object, conid: str) -> Decimal:
-    # positions table is Phase 5c work — sanity check defaults to 0 until then.
-    # Mirrors the to_regclass guard in _position_count below.
-    exists_result = await db.execute(text("SELECT to_regclass('public.positions')"), {})
-    if exists_result.scalar_one_or_none() is None:
-        return Decimal("0")
+    # As of 5b.1 the positions table is guaranteed by Alembic 0005 + populated
+    # by BrokerDiscoverer fan-out within 30s of bootstrap. Returns Decimal("0")
+    # for accounts with no holdings (no row), as designed.
     result = await db.execute(
         text(
             """
