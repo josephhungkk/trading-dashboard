@@ -289,9 +289,14 @@ class BrokerSidecarClient:
         rpc: Callable[..., Any],
         request: Any,
     ) -> AsyncIterator[Any]:
+        # Streaming RPCs (OrderEvent) must NOT carry a per-call deadline —
+        # the deadline applies to the full stream lifespan, so a 5s default
+        # tears the subscription down every 5 seconds with DEADLINE_EXCEEDED.
+        # The consumer's reconnect-and-resync still bounds total downtime;
+        # individual connection liveness is governed by gRPC keepalives.
         started = time.perf_counter()
         try:
-            async for msg in rpc(request, timeout=self.deadline_seconds):
+            async for msg in rpc(request):
                 yield msg
         except asyncio.CancelledError:
             log.debug(
