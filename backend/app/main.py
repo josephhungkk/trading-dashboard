@@ -27,6 +27,8 @@ from app.services.broker_registry_factory import MissingBrokerSecrets, build_bro
 from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistry
 from app.services.config import ConfigService
 from app.services.config_cache import ConfigCache
+from app.services.order_event_consumer import OrderEventConsumer
+from app.services.pending_submit_watchdog import PendingSubmitWatchdog
 
 configure_logging()
 log = logging.getLogger(__name__)
@@ -51,6 +53,8 @@ async def lifespan(_app: FastAPI) -> Any:
     broker_discoverer: BrokerDiscoverer | None = None
     broker_health_task: asyncio.Task[None] | None = None
     broker_discover_task: asyncio.Task[None] | None = None
+    order_consumer: OrderEventConsumer | None = None
+    pending_watchdog: PendingSubmitWatchdog | None = None
 
     try:
         broker_registry = await build_broker_registry(svc)
@@ -59,6 +63,15 @@ async def lifespan(_app: FastAPI) -> Any:
         broker_discover_task = asyncio.create_task(broker_discoverer.discover_loop())
         set_broker_registry(broker_registry)
         set_account_service(AccountService(broker_registry, session_factory))
+
+        order_consumer = OrderEventConsumer(broker_registry, session_factory, redis)
+        pending_watchdog = PendingSubmitWatchdog(broker_registry, session_factory, order_consumer)
+        # R9: reconcile orders that transitioned at the broker while the
+        # backend was down BEFORE per-account streams open, so synthetic
+        # recovery events fire ahead of any live events arriving.
+        await pending_watchdog.reconcile_at_startup()
+        await order_consumer.start()
+        await pending_watchdog.start()
         log.info("broker_lifespan_started")
     except MissingBrokerSecrets as exc:
         log.warning("broker_lifespan_skipped reason=%s", exc)
@@ -67,6 +80,10 @@ async def lifespan(_app: FastAPI) -> Any:
     try:
         yield
     finally:
+        if pending_watchdog is not None:
+            await pending_watchdog.stop()
+        if order_consumer is not None:
+            await order_consumer.stop()
         if broker_discoverer is not None:
             await broker_discoverer.stop()
         if broker_registry is not None:
