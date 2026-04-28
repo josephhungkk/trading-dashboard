@@ -1,0 +1,76 @@
+name: E2E Mock Trade Chain
+
+on: [push, pull_request]
+
+jobs:
+  e2e-mock:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: trader
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: dashboard
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.14'
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Generate proto stubs
+        working-directory: backend
+        run: |
+          mkdir -p app/_generated/broker/v1
+          : > app/_generated/__init__.py
+          : > app/_generated/broker/__init__.py
+          : > app/_generated/broker/v1/__init__.py
+          uv run python -m grpc_tools.protoc \
+            --proto_path=../proto \
+            --python_out=app/_generated \
+            --grpc_python_out=app/_generated \
+            --pyi_out=app/_generated \
+            broker/v1/broker.proto
+          sed -i 's|^from broker\.v1 import broker_pb2|from app._generated.broker.v1 import broker_pb2|' \
+            app/_generated/broker/v1/broker_pb2_grpc.py
+      - name: Alembic upgrade
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://trader:ci@localhost:5432/dashboard
+          APP_SECRET_KEY: ci-secret-key-32-chars-minimum-req
+          APP_ENV: dev
+          APP_CORS_ORIGINS: '["http://localhost:5173"]'
+          POSTGRES_POOL_SIZE: '2'
+          POSTGRES_MAX_OVERFLOW: '2'
+          REDIS_PASSWORD: ci
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run alembic upgrade head
+      - name: E2E mock chain
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://trader:ci@localhost:5432/dashboard
+          APP_SECRET_KEY: ci-secret-key-32-chars-minimum-req
+          APP_ENV: dev
+          APP_CORS_ORIGINS: '["http://localhost:5173"]'
+          POSTGRES_POOL_SIZE: '2'
+          POSTGRES_MAX_OVERFLOW: '2'
+          REDIS_PASSWORD: ci
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest tests/integration/test_e2e_trade_chain.py -v
