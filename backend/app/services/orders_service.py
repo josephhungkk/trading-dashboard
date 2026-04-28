@@ -434,6 +434,8 @@ async def list_orders(
     db: AsyncSession,
     cfg: ConfigService,
     status: str | None = None,
+    from_ts: datetime | None = None,
+    to_ts: datetime | None = None,
 ) -> OrderListResponse:
     if status is None:
         where_clause = "WHERE status NOT IN ('filled', 'cancelled', 'rejected', 'expired')"
@@ -441,6 +443,14 @@ async def list_orders(
     else:
         where_clause = "WHERE status = CAST(:status AS order_status_enum)"
         params = {"status": status}
+
+    # 5c C7: optional date-range filter on created_at.
+    if from_ts is not None:
+        where_clause += " AND created_at >= :from_ts"
+        params["from_ts"] = from_ts
+    if to_ts is not None:
+        where_clause += " AND created_at <= :to_ts"
+        params["to_ts"] = to_ts
 
     result = await db.execute(
         text(

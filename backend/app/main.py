@@ -17,6 +17,7 @@ from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.contracts import router as contracts_router
 from app.api.metrics import router as metrics_router
+from app.api.orders import fills_router
 from app.api.orders import router as orders_router
 from app.core.config import settings
 from app.core.crypto import get_fernet
@@ -124,6 +125,7 @@ app.include_router(admin_router)
 app.include_router(accounts_router)
 app.include_router(metrics_router)
 app.include_router(orders_router)
+app.include_router(fills_router)
 app.include_router(contracts_router)
 
 

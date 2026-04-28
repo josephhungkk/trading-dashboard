@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated, cast
+from datetime import datetime
+from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,16 @@ from starlette.responses import JSONResponse, StreamingResponse
 from app.core.cf_access import AdminIdentity
 from app.core.config import settings
 from app.core.deps import get_broker_registry, get_config, get_db, require_admin_jwt
-from app.schemas.orders import OrderListResponse, OrderResponse, PolicyResponse, PreviewResponse
+from app.schemas.orders import (
+    FillListResponse,
+    OrderBracketRequest,
+    OrderBracketResponse,
+    OrderListResponse,
+    OrderModifyRequest,
+    OrderResponse,
+    PolicyResponse,
+    PreviewResponse,
+)
 from app.services import orders_service
 from app.services.brokers import BrokerRegistry
 from app.services.config import ConfigService
@@ -24,6 +34,14 @@ from app.services.orders_sse import order_events_generator
 router = APIRouter(
     prefix="/api/orders",
     tags=["orders"],
+    dependencies=[Depends(require_admin_jwt)],
+)
+
+# 5c C7: GET /api/fills lives on its own router because the canonical path is
+# /api/fills, not /api/orders/fills. Mounted in main.py alongside the orders router.
+fills_router = APIRouter(
+    prefix="/api/fills",
+    tags=["fills"],
     dependencies=[Depends(require_admin_jwt)],
 )
 
@@ -48,8 +66,16 @@ async def list_orders(
     cfg: ConfigDep,
     db: DbDep,
     status: str | None = None,
+    from_: Annotated[datetime | None, Query(alias="from")] = None,
+    to: datetime | None = None,
 ) -> OrderListResponse:
-    return await orders_service.list_orders(db=db, cfg=cfg, status=status)
+    return await orders_service.list_orders(
+        db=db,
+        cfg=cfg,
+        status=status,
+        from_ts=from_,
+        to_ts=to,
+    )
 
 
 @router.get("/policy/{account_id}", response_model=PolicyResponse)
@@ -183,3 +209,88 @@ async def preview_order(
             content=exc.payload,
             headers=exc.headers,
         )
+
+
+# 5c C5: PUT /api/orders/{order_id} - modify an existing order.
+@router.put("/{order_id}", response_model=None)
+async def modify_order(
+    order_id: UUID,
+    request: Request,
+    cfg: ConfigDep,
+    db: DbDep,
+    redis: RedisDep,
+    registry: RegistryDep,
+) -> dict[str, Any] | JSONResponse:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=422, content={"detail": "JSON object required"})
+        return await orders_service.modify_order(
+            db=db,
+            redis=redis,
+            config=cfg,
+            registry=registry,
+            order_id=order_id,
+            request=OrderModifyRequest.model_validate(body),
+        )
+    except ValidationError as exc:
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    except PreviewUnavailable as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.payload,
+            headers=exc.headers,
+        )
+
+
+# 5c C6: POST /api/orders/bracket - create a bracket order.
+@router.post("/bracket", response_model=OrderBracketResponse)
+async def place_bracket(
+    request: Request,
+    cfg: ConfigDep,
+    db: DbDep,
+    redis: RedisDep,
+    registry: RegistryDep,
+) -> OrderBracketResponse | JSONResponse:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=422, content={"detail": "JSON object required"})
+        return await orders_service.place_bracket(
+            db=db,
+            redis=redis,
+            config=cfg,
+            registry=registry,
+            request=OrderBracketRequest.model_validate(body),
+        )
+    except ValidationError as exc:
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    except PreviewUnavailable as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.payload,
+            headers=exc.headers,
+        )
+
+
+# 5c C7: GET /api/fills - paginated execution-level fills history.
+@fills_router.get("", response_model=FillListResponse)
+async def list_fills(
+    account_id: UUID,
+    from_: Annotated[datetime, Query(alias="from")],
+    to: datetime,
+    db: DbDep,
+    limit: int = 100,
+    cursor: str | None = None,
+) -> FillListResponse:
+    if limit > 500:
+        raise HTTPException(status_code=400, detail={"error": "limit_too_large"})
+    result = await orders_service.list_fills(
+        db,
+        account_id=account_id,
+        from_ts=from_,
+        to_ts=to,
+        limit=limit,
+        cursor=cursor,
+    )
+    return FillListResponse.model_validate(result)
