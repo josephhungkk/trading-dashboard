@@ -219,3 +219,57 @@ def _format_decimal_8(value: Decimal) -> str:
     """Non-Optional sibling of `_serialize_decimal_8` for callers passing
     a guaranteed-non-None Decimal (mypy needs the narrower return type)."""
     return format(value.quantize(Decimal("1e-8")), "f")
+
+
+class OrderModifyRequest(BaseModel):
+    """PUT /api/orders/{id} body. account_id/conid/side/order_type immutable."""
+
+    nonce: str = Field(min_length=1, max_length=128)
+    qty: str = Field(pattern=r"^\d+(\.\d+)?$")
+    limit_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
+    tif: Literal["DAY", "GTC"]
+    stop_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
+
+
+class OrderBracketLeg(BaseModel):
+    id: UUID
+    leg: Literal["stop_loss", "take_profit"]
+    broker_order_id: str
+    status: str
+
+
+class OrderBracketResponse(BaseModel):
+    parent: OrderResponse
+    children: list[OrderBracketLeg]
+    oca_group: str
+
+
+class OrderBracketRequest(BaseModel):
+    nonce: str = Field(min_length=1, max_length=128)
+    account_id: UUID
+    client_order_id: UUID
+    conid: str = Field(pattern=r"^\d+$")
+    side: Literal["BUY", "SELL"]
+    order_type: Literal["LIMIT"]
+    tif: Literal["DAY", "GTC"]
+    qty: str = Field(pattern=r"^\d+(\.\d+)?$")
+    limit_price: str = Field(pattern=r"^\d+(\.\d+)?$")
+    stop_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
+    target_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
+
+
+class FillResponse(BaseModel):
+    id: UUID
+    order_id: UUID
+    exec_id: str
+    qty: str
+    price: str
+    currency: str = Field(min_length=3, max_length=3)
+    executed_at: datetime
+    commission: str | None = None
+    commission_currency: str | None = Field(default=None, min_length=3, max_length=3)
+
+
+class FillListResponse(BaseModel):
+    fills: list[FillResponse]
+    next_cursor: str | None = None
