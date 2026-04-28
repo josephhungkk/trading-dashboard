@@ -344,7 +344,17 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
             unrealized, realized, daily = self.pnl_cache.snapshot(account_number, conid)
 
-            raw_market_price: Decimal = Decimal(str(ib_position.marketPrice))
+            # ib_async.Position (from reqPositions) has no marketPrice;
+            # PortfolioItem (from reqAccountUpdates) does. Since the BASE
+            # round at startup unsubscribes accountUpdates after caching
+            # currency_base, the portfolio cache may or may not be live.
+            # Default to 0 when the field is missing - the positions table
+            # schema doesn't store marketPrice (the discoverer only writes
+            # qty/avg_cost/currency/multiplier/asset_class), and downstream
+            # consumers tolerate 0 as "market data not yet snapshotted".
+            raw_market_price: Decimal = Decimal(
+                str(getattr(ib_position, "marketPrice", "0") or "0")
+            )
             market_price: Decimal = normalize_quote_currency(raw_market_price, currency, exchange)
             raw_avg_cost: Decimal = Decimal(str(ib_position.avgCost))
             # TODO(task14): wire ConfigService.get(
