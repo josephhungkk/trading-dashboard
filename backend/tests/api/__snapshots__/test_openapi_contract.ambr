@@ -727,3 +727,492 @@
   }
   '''
 # ---
+# name: test_openapi_schema_lock_phase5c
+  '''
+  {
+    "FillListResponse": {
+      "$defs": {
+        "FillResponse": {
+          "properties": {
+            "commission": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Commission"
+            },
+            "commission_currency": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "minLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Commission Currency"
+            },
+            "currency": {
+              "maxLength": 3,
+              "minLength": 3,
+              "title": "Currency",
+              "type": "string"
+            },
+            "exec_id": {
+              "title": "Exec Id",
+              "type": "string"
+            },
+            "executed_at": {
+              "format": "date-time",
+              "title": "Executed At",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "order_id": {
+              "format": "uuid",
+              "title": "Order Id",
+              "type": "string"
+            },
+            "price": {
+              "title": "Price",
+              "type": "string"
+            },
+            "qty": {
+              "title": "Qty",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "order_id",
+            "exec_id",
+            "qty",
+            "price",
+            "currency",
+            "executed_at"
+          ],
+          "title": "FillResponse",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "fills": {
+          "items": {
+            "$ref": "#/components/schemas/FillResponse"
+          },
+          "title": "Fills",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "fills"
+      ],
+      "title": "FillListResponse",
+      "type": "object"
+    },
+    "FillResponse": {
+      "properties": {
+        "commission": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commission"
+        },
+        "commission_currency": {
+          "anyOf": [
+            {
+              "maxLength": 3,
+              "minLength": 3,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commission Currency"
+        },
+        "currency": {
+          "maxLength": 3,
+          "minLength": 3,
+          "title": "Currency",
+          "type": "string"
+        },
+        "exec_id": {
+          "title": "Exec Id",
+          "type": "string"
+        },
+        "executed_at": {
+          "format": "date-time",
+          "title": "Executed At",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "order_id": {
+          "format": "uuid",
+          "title": "Order Id",
+          "type": "string"
+        },
+        "price": {
+          "title": "Price",
+          "type": "string"
+        },
+        "qty": {
+          "title": "Qty",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "order_id",
+        "exec_id",
+        "qty",
+        "price",
+        "currency",
+        "executed_at"
+      ],
+      "title": "FillResponse",
+      "type": "object"
+    },
+    "OrderBracketLeg": {
+      "properties": {
+        "broker_order_id": {
+          "title": "Broker Order Id",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "leg": {
+          "enum": [
+            "stop_loss",
+            "take_profit"
+          ],
+          "title": "Leg",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "leg",
+        "broker_order_id",
+        "status"
+      ],
+      "title": "OrderBracketLeg",
+      "type": "object"
+    },
+    "OrderBracketParent": {
+      "properties": {
+        "broker_order_id": {
+          "title": "Broker Order Id",
+          "type": "string"
+        },
+        "client_order_id": {
+          "format": "uuid",
+          "title": "Client Order Id",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "client_order_id",
+        "broker_order_id",
+        "status"
+      ],
+      "title": "OrderBracketParent",
+      "type": "object"
+    },
+    "OrderBracketRequest": {
+      "properties": {
+        "account_id": {
+          "format": "uuid",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "client_order_id": {
+          "format": "uuid",
+          "title": "Client Order Id",
+          "type": "string"
+        },
+        "conid": {
+          "pattern": "^\\d+$",
+          "title": "Conid",
+          "type": "string"
+        },
+        "limit_price": {
+          "pattern": "^\\d+(\\.\\d+)?$",
+          "title": "Limit Price",
+          "type": "string"
+        },
+        "nonce": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Nonce",
+          "type": "string"
+        },
+        "order_type": {
+          "const": "LIMIT",
+          "title": "Order Type",
+          "type": "string"
+        },
+        "qty": {
+          "pattern": "^\\d+(\\.\\d+)?$",
+          "title": "Qty",
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "BUY",
+            "SELL"
+          ],
+          "title": "Side",
+          "type": "string"
+        },
+        "stop_price": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Price"
+        },
+        "target_price": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Price"
+        },
+        "tif": {
+          "enum": [
+            "DAY",
+            "GTC"
+          ],
+          "title": "Tif",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nonce",
+        "account_id",
+        "client_order_id",
+        "conid",
+        "side",
+        "order_type",
+        "tif",
+        "qty",
+        "limit_price"
+      ],
+      "title": "OrderBracketRequest",
+      "type": "object"
+    },
+    "OrderBracketResponse": {
+      "$defs": {
+        "OrderBracketLeg": {
+          "properties": {
+            "broker_order_id": {
+              "title": "Broker Order Id",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "leg": {
+              "enum": [
+                "stop_loss",
+                "take_profit"
+              ],
+              "title": "Leg",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "leg",
+            "broker_order_id",
+            "status"
+          ],
+          "title": "OrderBracketLeg",
+          "type": "object"
+        },
+        "OrderBracketParent": {
+          "properties": {
+            "broker_order_id": {
+              "title": "Broker Order Id",
+              "type": "string"
+            },
+            "client_order_id": {
+              "format": "uuid",
+              "title": "Client Order Id",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "client_order_id",
+            "broker_order_id",
+            "status"
+          ],
+          "title": "OrderBracketParent",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/components/schemas/OrderBracketLeg"
+          },
+          "title": "Children",
+          "type": "array"
+        },
+        "oca_group": {
+          "title": "Oca Group",
+          "type": "string"
+        },
+        "parent": {
+          "$ref": "#/components/schemas/OrderBracketParent"
+        }
+      },
+      "required": [
+        "parent",
+        "children",
+        "oca_group"
+      ],
+      "title": "OrderBracketResponse",
+      "type": "object"
+    },
+    "OrderModifyRequest": {
+      "description": "PUT /api/orders/{id} body. account_id/conid/side/order_type immutable.",
+      "properties": {
+        "limit_price": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit Price"
+        },
+        "nonce": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Nonce",
+          "type": "string"
+        },
+        "qty": {
+          "pattern": "^\\d+(\\.\\d+)?$",
+          "title": "Qty",
+          "type": "string"
+        },
+        "stop_price": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Price"
+        },
+        "tif": {
+          "enum": [
+            "DAY",
+            "GTC"
+          ],
+          "title": "Tif",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nonce",
+        "qty",
+        "tif"
+      ],
+      "title": "OrderModifyRequest",
+      "type": "object"
+    }
+  }
+  '''
+# ---

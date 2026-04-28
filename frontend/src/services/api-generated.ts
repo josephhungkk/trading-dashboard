@@ -200,6 +200,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/fills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Fills */
+        get: operations["list_fills_api_fills_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orders": {
         parameters: {
             query?: never;
@@ -212,6 +229,23 @@ export interface paths {
         put?: never;
         /** Place Order */
         post: operations["place_order_api_orders_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/bracket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Place Bracket */
+        post: operations["place_bracket_api_orders_bracket_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -284,7 +318,8 @@ export interface paths {
         };
         /** Get Order */
         get: operations["get_order_api_orders__order_id__get"];
-        put?: never;
+        /** Modify Order */
+        put: operations["modify_order_api_orders__order_id__put"];
         post?: never;
         /** Cancel Order */
         delete: operations["cancel_order_api_orders__order_id__delete"];
@@ -457,6 +492,11 @@ export interface components {
             exchange: string;
             /** Local Symbol */
             local_symbol: string;
+            /**
+             * Multiplier
+             * @default
+             */
+            multiplier: string;
             /** Symbol */
             symbol: string;
         };
@@ -466,6 +506,43 @@ export interface components {
             conid: number;
             /** Description */
             description: string;
+        };
+        /** FillListResponse */
+        FillListResponse: {
+            /** Fills */
+            fills: components["schemas"]["FillResponse"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** FillResponse */
+        FillResponse: {
+            /** Commission */
+            commission?: string | null;
+            /** Commission Currency */
+            commission_currency?: string | null;
+            /** Currency */
+            currency: string;
+            /** Exec Id */
+            exec_id: string;
+            /**
+             * Executed At
+             * Format: date-time
+             */
+            executed_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /** Price */
+            price: string;
+            /** Qty */
+            qty: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -515,6 +592,48 @@ export interface components {
             time_in_force: "TIF_UNSPECIFIED" | "DAY" | "GTC" | "IOC" | "FOK";
             /** Updated At */
             updated_at: string | null;
+        };
+        /** OrderBracketLeg */
+        OrderBracketLeg: {
+            /** Broker Order Id */
+            broker_order_id: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Leg
+             * @enum {string}
+             */
+            leg: "stop_loss" | "take_profit";
+            /** Status */
+            status: string;
+        };
+        /** OrderBracketParent */
+        OrderBracketParent: {
+            /** Broker Order Id */
+            broker_order_id: string;
+            /**
+             * Client Order Id
+             * Format: uuid
+             */
+            client_order_id: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Status */
+            status: string;
+        };
+        /** OrderBracketResponse */
+        OrderBracketResponse: {
+            /** Children */
+            children: components["schemas"]["OrderBracketLeg"][];
+            /** Oca Group */
+            oca_group: string;
+            parent: components["schemas"]["OrderBracketParent"];
         };
         /** OrderEvent */
         OrderEvent: {
@@ -1411,10 +1530,47 @@ export interface operations {
             };
         };
     };
+    list_fills_api_fills_get: {
+        parameters: {
+            query: {
+                account_id: string;
+                from: string;
+                to: string;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FillListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_orders_api_orders_get: {
         parameters: {
             query?: {
                 status?: string | null;
+                from?: string | null;
+                to?: string | null;
             };
             header?: never;
             path?: never;
@@ -1458,6 +1614,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OrderResponse"];
+                };
+            };
+        };
+    };
+    place_bracket_api_orders_bracket_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrderBracketResponse"];
                 };
             };
         };
@@ -1562,6 +1738,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OrderResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    modify_order_api_orders__order_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

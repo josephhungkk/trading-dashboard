@@ -18,7 +18,14 @@ from app.core.deps import require_admin_jwt
 from app.main import app
 from app.schemas.orders import (
     ContractSummary,
+    FillListResponse,
+    FillResponse,
+    OrderBracketLeg,
+    OrderBracketParent,
+    OrderBracketRequest,
+    OrderBracketResponse,
     OrderListResponse,
+    OrderModifyRequest,
     OrderResponse,
     PolicyResponse,
     PreviewResponse,
@@ -157,6 +164,29 @@ def test_openapi_schema_lock_phase5b(snapshot):
             PreviewResponse,
             ContractSummary,
             PolicyResponse,
+        )
+    }
+
+    assert json.dumps(locked, indent=2, sort_keys=True) == snapshot
+
+
+def test_openapi_schema_lock_phase5c(snapshot):
+    """Lock the 7 Phase-5c wire models against drift.
+
+    On schema change, review the diff in __snapshots__/ then re-bless with:
+        pytest tests/api/test_openapi_contract.py -k schema_lock_phase5c \
+            --snapshot-update
+    """
+    locked = {
+        model.__name__: model.model_json_schema(ref_template="#/components/schemas/{model}")
+        for model in (
+            OrderModifyRequest,
+            OrderBracketRequest,
+            OrderBracketResponse,
+            OrderBracketParent,
+            OrderBracketLeg,
+            FillResponse,
+            FillListResponse,
         )
     }
 
