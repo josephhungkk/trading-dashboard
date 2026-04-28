@@ -98,10 +98,18 @@ class PendingSubmitWatchdog:
         self._task = asyncio.create_task(self._loop(), name="pending-submit-watchdog")
 
     async def stop(self) -> None:
-        """Signal the loop to stop and await its completion."""
+        """Signal the loop to stop and await its completion.
+
+        Cancels the task before awaiting so a hung sidecar call inside
+        ``_scan_once`` (no per-RPC timeout) cannot stall uvicorn shutdown.
+        """
         self._stop_event.set()
         if self._task is not None:
-            await self._task
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
     # ------------------------------------------------------------------
     # Public one-shot reconciliation (R9)

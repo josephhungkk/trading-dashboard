@@ -264,7 +264,9 @@ async def test_preview_canonicalizes_qty(preview_client: dict[str, Any]) -> None
         f"nonce:order:{preview_client['account_id']}:{nonce}"
     )
     payload_hash = _hash_payload(preview_client["account_id"], qty="1.00000000")
-    assert stored == payload_hash
+    decoded = json.loads(stored)
+    assert decoded["payload_hash"] == payload_hash
+    assert isinstance(decoded["rth_at_mint"], bool)
 
 
 @pytest.mark.asyncio
@@ -328,10 +330,12 @@ async def test_preview_mints_redis_nonce_with_canonicalized_payload(
     nonce = response.json()["nonce"]
     key = f"nonce:order:{preview_client['account_id']}:{nonce}"
     assert await preview_client["redis"].ttl(key) == 30
-    assert await preview_client["redis"].get(key) == _hash_payload(
+    decoded = json.loads(await preview_client["redis"].get(key))
+    assert decoded["payload_hash"] == _hash_payload(
         preview_client["account_id"],
         qty="1.00000000",
     )
+    assert isinstance(decoded["rth_at_mint"], bool)
 
 
 @pytest.mark.asyncio

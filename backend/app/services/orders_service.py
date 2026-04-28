@@ -144,7 +144,10 @@ async def preview_order(
     current_qty = await _position_qty(db, request.account_id, request.conid)
     nonce, payload_hash = _nonce_and_payload_hash(request)
     nonce_key = f"nonce:order:{request.account_id}:{nonce}"
-    await redis.set(nonce_key, payload_hash, ex=30, nx=True)
+    nonce_value = json.dumps(
+        {"payload_hash": payload_hash, "rth_at_mint": _is_regular_trading_hours(now)}
+    )
+    await redis.set(nonce_key, nonce_value, ex=30, nx=True)
 
     return PreviewResponse(
         nonce=nonce,

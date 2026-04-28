@@ -7,7 +7,7 @@ import json
 from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from redis.asyncio import Redis
 from starlette.responses import JSONResponse
 
@@ -98,7 +98,7 @@ def _contracts_from_json(raw: str) -> list[dict[str, Any]]:
 
 @router.get("/search")
 async def search_contracts(
-    q: str,
+    q: Annotated[str, Query(min_length=1, max_length=64)],
     redis: RedisDep,
     registry: RegistryDep,
     identity: IdentityDep,
