@@ -167,6 +167,10 @@ class _Sidecar:
         assert query == self.contract.conid
         return [self.contract]
 
+    async def get_contract(self, conid: str) -> base.Contract:
+        assert conid == self.contract.conid
+        return self.contract
+
     async def place_order(
         self,
         account_number: str,
