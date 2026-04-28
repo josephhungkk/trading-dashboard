@@ -99,9 +99,11 @@ class _Config:
         return default
 
     async def get(self, namespace: str, key: str, *, default: str) -> str:
-        if key == "daily_notional_cap":
+        # Per-gateway keys are now dotted: "<label>.daily_notional_cap" etc.
+        # (see app/services/orders_policy.py for the layout fix).
+        if key.endswith(".daily_notional_cap"):
             return "1000"
-        if key == "max_notional_per_order":
+        if key.endswith(".max_notional_per_order"):
             return "10000"
         return default
 

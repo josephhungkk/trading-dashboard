@@ -28,18 +28,24 @@ class _Config:
     simulator_only: bool = False
 
     async def get_bool(self, namespace: str, key: str, *, default: bool) -> bool:
-        if namespace == "broker" and key == "kill_switch":
+        # Per-gateway settings: namespace="broker", key="<label>.<setting>".
+        # Global kill switch: namespace="broker", key="kill_switch_enabled".
+        if namespace != "broker":
+            return default
+        if key == "kill_switch":
             return self.kill_switch
-        if namespace == "broker.isa-paper" and key == "trade_enabled":
+        if key == "isa-paper.trade_enabled":
             return self.trade_enabled
-        if namespace == "broker.isa-paper" and key == "simulator_only":
+        if key == "isa-paper.simulator_only":
             return self.simulator_only
         return default
 
     async def get(self, namespace: str, key: str, *, default: str) -> str:
-        if namespace == "broker.isa-paper" and key == "max_notional_per_order":
+        if namespace != "broker":
+            return default
+        if key == "isa-paper.max_notional_per_order":
             return self.max_notional_per_order
-        if namespace == "broker.isa-paper" and key == "daily_notional_cap":
+        if key == "isa-paper.daily_notional_cap":
             return self.daily_notional_cap
         return default
 
