@@ -197,4 +197,16 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Check generated frontend API types
         working-directory: frontend
+        # dump_openapi.py imports app.main, which boots pydantic Settings —
+        # supply the same fake values the pytest step uses (lines 124-132)
+        # so the schema dump succeeds without a live PG/Redis.
+        env:
+          APP_ENV: dev
+          APP_SECRET_KEY: ci-secret-key-32-chars-minimum-req
+          APP_CORS_ORIGINS: '["http://localhost:5173"]'
+          DATABASE_URL: postgresql+asyncpg://trader:ci@localhost:5432/dashboard
+          POSTGRES_POOL_SIZE: '2'
+          POSTGRES_MAX_OVERFLOW: '2'
+          REDIS_PASSWORD: ci
+          REDIS_URL: redis://localhost:6379/0
         run: pnpm install --frozen-lockfile && pnpm check:types-up-to-date
