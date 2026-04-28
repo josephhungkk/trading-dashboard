@@ -5,6 +5,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-04-28
+
+### Fixed — Phase 5b post-canary hardening
+
+Thirteen hotfixes since v0.5.1; first end-to-end canary validated (BARC + VOD on isa-paper, place + cancel both 200/202, simulator-prefixed broker IDs).
+
+**Order placement path (canary blockers):**
+- `_resolve_contract` was using `search_contracts` (symbol-name autocomplete via `reqMatchingSymbols`); switched to `get_contract` (qualifyContractsAsync) — numeric conids now round-trip correctly. Without this every preview 404'd `contract_not_found`.
+- `_position_qty` defends against missing `positions` table via `to_regclass` (Phase 5c work; mirrors `_position_count` guard). Without this every preview 500'd UndefinedTableError.
+- `_resolve_account` falls back to `last_nlv_currency` when `currency_base` is empty. The sidecar can't subscribe `reqAccountUpdates` concurrently with `reqAccountSummary` on one connection — `currency_base` is permanently empty in production, so without the fallback every preview 503'd `fx_rate_unavailable USD:""`.
+- Trade-policy keys moved from namespace=`broker.<label>` to namespace=`broker` with dotted key prefix `<label>.trade_enabled` etc. NAMESPACE_PATTERN forbids dots; the resolver was unreachable through the validated admin POST endpoint.
+- `_stream_call` no longer passes the unary `deadline_seconds` to streaming gRPC RPCs — every OrderEvent subscription was being torn down with `DEADLINE_EXCEEDED` at exactly 5s in production thrash. Connection liveness now governed by gRPC keepalives.
+
+**Test fixtures aligned:**
+- `_Sidecar` mock gains `get_contract` in `test_orders_preview.py` + `test_orders_place.py`.
+- `_Config` mocks accept the dotted policy key shape (`broker.<label>.<key>` → namespace="broker", key="<label>.<setting>").
+- `OrderEvent` mock asserts no `timeout` kwarg (mirrors streaming-RPC contract change).
+
+**Deploy + CI:**
+- `docker-compose.prod.yml` uses absolute `/app/.venv/bin/uvicorn` path (bare `uvicorn` not on `$PATH` in the python:3.14-slim base — entrypoint `exec` was failing).
+- `tests/migrations/test_0004.py` resolves `backend_dir` from `__file__` instead of hardcoding `/home/joseph/dashboard/backend` (broke CI runners at `/home/runner/work/...`).
+- `ci.yml` `frontend-types-up-to-date` job now generates proto stubs + supplies pydantic Settings env vars before `dump_openapi`.
+- ESLint ignores `frontend/src/services/api-generated.ts` — `--fix` was rewriting openapi-typescript output and dropping ~110 lines, breaking the CI drift gate every iteration.
+
+### Open Phase 5c work surfaced this canary
+
+- `positions` table never received an Alembic migration. Position-sanity defaults to `qty=0` until then.
+- Sidecar `SIM-` simulator prefix doesn't echo cancel events through OrderEvent — cancels are recorded server-side (`cancel_requested` 202) but the orders table row stays at `submitted` until a real broker `cancelled` event arrives. Acceptable for paper canary; production-grade fills/cancels need real broker handlers wired.
+- Sidecar `currency_base` permanently empty (BASE tag unreachable concurrent with reqAccountSummary). Possible 5c fix: dedicated short-lived `reqAccountUpdates` round per discovery tick, or use accountValues snapshot at startup before reqAccountSummary subscribes.
+
 ## [0.5.1] — 2026-04-28
 
 ### Added — Phase 5b: IBKR trade execution (write path)
