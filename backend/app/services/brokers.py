@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -384,6 +385,7 @@ def _contract_from_proto(contract: broker_pb2.Contract) -> base.Contract:
         asset_class=cast("base.AssetClass", broker_pb2.AssetClass.Name(contract.asset_class)),
         conid=contract.conid,
         local_symbol=contract.local_symbol,
+        multiplier=contract.multiplier,
     )
 
 
@@ -751,6 +753,25 @@ class BrokerDiscoverer:
         soft_delete_count = 0
 
         async with self._session_factory() as session, session.begin():
+            # Phase 5b.1 A3 (R1): capture account_ids about to be resurrected
+            # BEFORE the upsert flips deleted_at -> NULL, so we can clear
+            # their positions cache to avoid showing week-old stale data.
+            # Mirrors the existing last_nlv* CASE null-out for resurrected rows.
+            resurrected_ids: list[UUID] = []
+            if rows_seen_keys:
+                resurrect_check_stmt = text(
+                    """
+                    SELECT id FROM broker_accounts
+                     WHERE (broker_id, account_number) IN :keys
+                       AND deleted_at IS NOT NULL
+                    """
+                ).bindparams(bindparam("keys", expanding=True))
+                resurrect_rows = await session.execute(
+                    resurrect_check_stmt,
+                    {"keys": rows_seen_keys},
+                )
+                resurrected_ids = [cast(UUID, r[0]) for r in resurrect_rows]
+
             for label, account in rows_seen:
                 await session.execute(
                     upsert_stmt,
@@ -762,6 +783,12 @@ class BrokerDiscoverer:
                         "currency_base": account.currency_base,
                         "last_seen_via": label,
                     },
+                )
+
+            if resurrected_ids:
+                await session.execute(
+                    text("DELETE FROM positions WHERE account_id = ANY(:ids)"),
+                    {"ids": resurrected_ids},
                 )
 
             if healthy_labels:
@@ -911,12 +938,137 @@ class BrokerDiscoverer:
                         )
         metrics.broker_discover_nlv_update_duration_ms.observe((time.monotonic() - t_start) * 1000)
 
+        # Phase 5b.1 A3: positions fan-out (mirrors NLV pattern above).
+        positions_targets: list[tuple[str, str]] = [
+            (label, account.account_number) for label, account in rows_seen
+        ]
+        await self._discover_positions(positions_targets)
+
         log.info(
             "broker_discover_iteration_ok",
             upsert_count=len(rows_seen),
             soft_delete_count=soft_delete_count,
             nlv_update_count=nlv_update_count,
             nlv_overflow_count=nlv_overflow_count,
+        )
+
+    async def _discover_positions(self, targets: list[tuple[str, str]]) -> None:
+        """Fan out GetPositions per account, upsert positions, delete vanished rows.
+
+        Phase 5b.1 A3 — mirrors _discover_nlv. Per-account savepoint isolates
+        NUMERIC(20,8) overflow; RPC failures leave the row untouched; gather
+        return_exceptions=True ensures one failure doesn't break the batch.
+        """
+        if not targets:
+            return
+
+        t_start = time.monotonic()
+
+        async def _fetch(
+            label: str, account_number: str
+        ) -> tuple[str, str, list[base.Position]] | None:
+            try:
+                client = await self._registry.get_client(label)
+                positions = await asyncio.wait_for(
+                    client.get_positions(account_number),
+                    timeout=10.0,
+                )
+                return (label, account_number, positions)
+            except TimeoutError, BrokerSidecarUnavailable, BrokerSidecarTimeout, KeyError:
+                return None
+
+        results = await asyncio.gather(
+            *(_fetch(label, account_number) for (label, account_number) in targets),
+            return_exceptions=True,
+        )
+
+        async with self._session_factory() as session, session.begin():
+            for r in results:
+                if r is None or isinstance(r, BaseException):
+                    continue
+                label, account_number, positions = r
+                # Resolve account_id for this (broker_id, account_number) tuple.
+                acct_row = (
+                    await session.execute(
+                        text(
+                            "SELECT id FROM broker_accounts "
+                            " WHERE broker_id = CAST(:broker_id AS broker_id_enum) "
+                            "   AND account_number = :account_number "
+                            "   AND deleted_at IS NULL"
+                        ),
+                        {"broker_id": "ibkr", "account_number": account_number},
+                    )
+                ).one_or_none()
+                if acct_row is None:
+                    continue
+                account_id = cast(UUID, acct_row[0])
+                try:
+                    async with session.begin_nested():
+                        await self._upsert_positions(session, account_id, positions)
+                except DBAPIError as exc:
+                    if getattr(exc.orig, "sqlstate", None) != "22003":
+                        raise
+                    metrics.broker_discover_positions_overflow_total.labels(label=label).inc()
+                    log.warning(
+                        "broker_discover_positions_overflow",
+                        label=label,
+                        account_number=account_number,
+                    )
+
+        metrics.broker_discover_positions_update_duration_ms.observe(
+            (time.monotonic() - t_start) * 1000
+        )
+
+    async def _upsert_positions(
+        self,
+        session: AsyncSession,
+        account_id: UUID,
+        positions: list[base.Position],
+    ) -> None:
+        """Atomic upsert + delta-delete for one account's positions.
+
+        Uses NOT EXISTS (architect-review HIGH-4) — NULL-safe and slightly
+        faster than NOT IN.
+        """
+        rows_json = json.dumps(
+            [
+                {
+                    "conid": p.contract.conid,
+                    "qty": p.quantity,
+                    "avg_cost": p.avg_cost.value,
+                    "currency": p.avg_cost.currency,
+                    "multiplier": (getattr(p.contract, "multiplier", "") or "1"),
+                    "asset_class": _proto_asset_class_to_str(p.contract.asset_class),
+                }
+                for p in positions
+            ]
+        )
+        await session.execute(
+            text(
+                """
+                WITH upserted AS (
+                  INSERT INTO positions (account_id, conid, qty, avg_cost, currency,
+                                         multiplier, asset_class, updated_at)
+                  SELECT :account_id, conid, qty::numeric, avg_cost::numeric, currency,
+                         multiplier::numeric, asset_class, now()
+                    FROM jsonb_to_recordset(CAST(:rows AS jsonb))
+                      AS x(conid varchar, qty varchar, avg_cost varchar, currency varchar,
+                           multiplier varchar, asset_class varchar)
+                  ON CONFLICT (account_id, conid) DO UPDATE
+                    SET qty = EXCLUDED.qty,
+                        avg_cost = EXCLUDED.avg_cost,
+                        currency = EXCLUDED.currency,
+                        multiplier = EXCLUDED.multiplier,
+                        asset_class = EXCLUDED.asset_class,
+                        updated_at = now()
+                  RETURNING conid
+                )
+                DELETE FROM positions p
+                 WHERE p.account_id = :account_id
+                   AND NOT EXISTS (SELECT 1 FROM upserted u WHERE u.conid = p.conid);
+                """
+            ),
+            {"account_id": account_id, "rows": rows_json},
         )
 
     async def stop(self) -> None:
@@ -927,6 +1079,34 @@ class BrokerDiscoverer:
         if isinstance(mode, str):
             return mode.lower()
         return mode.value.lower()
+
+
+_POSITIONS_ASSET_CLASSES = frozenset(
+    {
+        "STOCK",
+        "ETF",
+        "OPTION",
+        "FUTURE",
+        "FOREX",
+        "CRYPTO",
+        "BOND",
+        "MUTUAL_FUND",
+        "WARRANT",
+    }
+)
+
+
+def _proto_asset_class_to_str(ac: object) -> str:
+    """Normalize asset_class to positions.asset_class VARCHAR.
+
+    Pydantic decoders surface the proto AssetClass enum as a string Literal
+    via broker_pb2.AssetClass.Name() at line ~385. Default "STOCK" for
+    unknown — never raise: positions upsert must not 500 on an exotic
+    asset class.
+    """
+    if isinstance(ac, str) and ac.upper() in _POSITIONS_ASSET_CLASSES:
+        return ac.upper()
+    return "STOCK"
 
 
 def _account_row_from_mapping(row: RowMapping) -> _AccountRow:

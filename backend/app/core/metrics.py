@@ -73,6 +73,20 @@ broker_discover_nlv_overflow_total = Counter(
     registry=registry,
 )
 
+broker_discover_positions_update_duration_ms = Histogram(
+    "broker_discover_positions_update_duration_ms",
+    "BrokerDiscoverer per-tick GetPositions fan-out + DB upsert duration in ms",
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+    registry=registry,
+)
+
+broker_discover_positions_overflow_total = Counter(
+    "broker_discover_positions_overflow_total",
+    "Per-account NUMERIC(20,8) overflow rejections during positions upsert",
+    labelnames=("label",),
+    registry=registry,
+)
+
 broker_order_events_received_total = Counter(
     "broker_order_events_received_total",
     "Broker order stream events received by the backend consumer.",

@@ -78,6 +78,7 @@ class Contract(BaseModel):
     asset_class: AssetClass
     conid: str
     local_symbol: str
+    multiplier: str = ""
 
 
 class Position(BaseModel):
