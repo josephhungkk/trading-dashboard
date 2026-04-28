@@ -301,8 +301,16 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
         account_number: str = str(request.account_number)
 
+        # Read from ib_async's cached positions snapshot. The cache is
+        # populated by the connectAsync()-time reqPositions() subscription
+        # and kept fresh by position()/positionEnd() callbacks. Calling
+        # reqPositionsAsync() again per-RPC is the wrong pattern: the IBKR
+        # API only allows one active reqPositions subscription per
+        # connection, so the second concurrent call hangs until 5s gRPC
+        # deadline (regression seen post-5b.1 deploy when the discoverer
+        # fan-out invoked GetPositions every 30s x 22 accounts).
         try:
-            raw_positions: object = await self.ib.reqPositionsAsync()  # type: ignore[attr-defined, unused-ignore]
+            raw_positions: object = self.ib.positions()  # type: ignore[attr-defined, unused-ignore]
             positions: list[object] = list(cast("Iterable[object]", raw_positions))
         except Exception as exc:
             logger.exception(

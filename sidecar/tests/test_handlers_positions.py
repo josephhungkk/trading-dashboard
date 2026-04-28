@@ -44,15 +44,22 @@ class FakePosition:
 
 @dataclass
 class FakeIB:
-    """Minimal ib_async.IB stand-in for GetPositions tests."""
+    """Minimal ib_async.IB stand-in for GetPositions tests.
 
-    positions: list[FakePosition] = field(default_factory=list)
+    Production handler reads from ib.positions() (cached snapshot)
+    instead of awaiting reqPositionsAsync() per RPC, to dodge the IBKR
+    "one active reqPositions per connection" constraint that surfaced
+    when the discoverer fan-out started calling GetPositions per-account
+    every 30s. Tests mirror that read pattern.
+    """
+
+    _positions: list[FakePosition] = field(default_factory=list)
     raise_on_positions: bool = False
 
-    async def reqPositionsAsync(self) -> list[FakePosition]:  # noqa: N802
+    def positions(self) -> list[FakePosition]:
         if self.raise_on_positions:
             raise RuntimeError("api timeout")
-        return list(self.positions)
+        return list(self._positions)
 
 
 class StubPnLCache:
@@ -104,7 +111,7 @@ async def test_get_positions_filters_to_requested_account() -> None:
     aapl = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
     msft = FakeContract(conId=272093, symbol="MSFT", exchange="NASDAQ", currency="USD")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", aapl, Decimal("10"), Decimal("180.5"), Decimal("190.0")),
             FakePosition("U2222222", msft, Decimal("5"), Decimal("400.0"), Decimal("420.0")),
         ],
@@ -128,7 +135,7 @@ async def test_get_positions_emits_warn_when_rows_dropped() -> None:
     aapl = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
     msft = FakeContract(conId=272093, symbol="MSFT", exchange="NASDAQ", currency="USD")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", aapl, Decimal("10"), Decimal("180"), Decimal("190")),
             FakePosition("U2222222", msft, Decimal("5"), Decimal("400"), Decimal("420")),
             FakePosition("U3333333", msft, Decimal("3"), Decimal("400"), Decimal("420")),
@@ -154,7 +161,7 @@ async def test_get_positions_does_not_warn_when_no_filter() -> None:
     """Single-account result must not emit the dropped_rows WARN."""
     aapl = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", aapl, Decimal("10"), Decimal("180"), Decimal("190")),
         ],
     )
@@ -175,7 +182,7 @@ async def test_get_positions_scales_lse_market_price_from_pence_to_pounds() -> N
     """LSE GBP quotes arrive in pence — sidecar must divide by 100 before emitting."""
     sgln = FakeContract(conId=88888, symbol="SGLN", exchange="LSE", currency="GBP", secType="ETF")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", sgln, Decimal("100"), Decimal("0"), Decimal("12000")),
         ],
     )
@@ -194,7 +201,7 @@ async def test_get_positions_does_not_scale_us_quote() -> None:
     """USD-denominated NASDAQ positions must pass through untouched."""
     aapl = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", aapl, Decimal("10"), Decimal("180.5"), Decimal("190.25")),
         ],
     )
@@ -210,7 +217,7 @@ async def test_get_positions_does_not_scale_ibis_eur_quote() -> None:
     """CR-1 regression guard: IBIS is Frankfurt EUR — never /100, even if currency=GBP."""
     sap = FakeContract(conId=33333, symbol="SAP", exchange="IBIS", currency="EUR")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", sap, Decimal("10"), Decimal("125"), Decimal("130")),
         ],
     )
@@ -234,7 +241,7 @@ async def test_get_positions_reads_pnl_from_cache_not_naive_math() -> None:
     """
     vwrp = FakeContract(conId=44444, symbol="VWRP", exchange="LSE", currency="GBP", secType="ETF")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", vwrp, Decimal("100"), Decimal("9000"), Decimal("12000")),
         ],
     )
@@ -256,7 +263,7 @@ async def test_get_positions_zero_money_when_pnl_cache_empty() -> None:
     """During the 30s warm-up window snapshot returns (None, None, None) — emit 0."""
     aapl = FakeContract(conId=265598, symbol="AAPL", exchange="NASDAQ", currency="USD")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", aapl, Decimal("10"), Decimal("180"), Decimal("190")),
         ],
     )
@@ -284,7 +291,7 @@ async def test_get_positions_maps_contract_fields() -> None:
         localSymbol="AAPL",
     )
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", aapl, Decimal("10"), Decimal("180"), Decimal("190")),
         ],
     )
@@ -306,7 +313,7 @@ async def test_get_positions_maps_etf_sectype() -> None:
     """ib_async secType 'ETF' must map to proto AssetClass.ETF."""
     sgln = FakeContract(conId=88888, symbol="SGLN", exchange="LSE", currency="GBP", secType="ETF")
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", sgln, Decimal("100"), Decimal("0"), Decimal("12000")),
         ],
     )
@@ -324,7 +331,7 @@ async def test_get_positions_unknown_sectype_falls_back_to_unspecified() -> None
         conId=99999, symbol="WEIRD", exchange="SMART", currency="USD", secType="ZZZ"
     )
     ib = FakeIB(
-        positions=[
+        _positions=[
             FakePosition("U1111111", weird, Decimal("1"), Decimal("1"), Decimal("1")),
         ],
     )

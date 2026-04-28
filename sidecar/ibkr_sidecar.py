@@ -258,6 +258,23 @@ async def run(args: argparse.Namespace) -> None:
         await ib.reqAccountSummaryAsync()
         await asyncio.sleep(0.5)
 
+        # 5b.1 follow-up: subscribe to positions ONCE at startup so
+        # ib.positions() is populated for GetPositions handlers. The IBKR
+        # API allows only one active reqPositions subscription per
+        # connection, so calling reqPositionsAsync per GetPositions RPC
+        # (the pre-fix pattern) made concurrent fan-out calls hang at
+        # gRPC deadline. Subscribe once + read cached ib.positions() in
+        # the handler avoids the constraint entirely.
+        try:
+            await ib.reqPositionsAsync()
+            log.info("positions_subscribed", count=len(ib.positions()))
+        except Exception as exc:
+            log.warning(
+                "positions_subscribe_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
         server = grpc.aio.server(options=server_options_for_tls13())
         creds = build_grpc_server_credentials(cert_pem, key_pem, ca_bundle_pem, crl_pem)
         bind_addr = f"10.10.0.2:{args.grpc_port}"
