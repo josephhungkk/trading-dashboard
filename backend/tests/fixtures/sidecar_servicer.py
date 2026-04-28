@@ -14,6 +14,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from uuid_utils import uuid7
 
 from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from app.services.brokers import BrokerSidecarClient
@@ -100,6 +101,8 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.order_event_messages: list[broker_pb2.OrderEventMessage] = []
         self.place_order_calls: list[broker_pb2.PlaceOrderRequest] = []
         self.cancel_order_calls: list[broker_pb2.CancelOrderRequest] = []
+        self._sim_orders: dict[str, dict[str, str]] = {}
+        self._event_subscribers: list[asyncio.Queue[broker_pb2.OrderEventMessage]] = []
         self.delay_seconds = 0.0
         self.unavailable_methods: set[str] = set()
         self.server_san = ""
@@ -188,9 +191,18 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         request: broker_pb2.ContractRef,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.ContractResponse:
-        del request
         await self._before_rpc("GetContract", context)
-        return broker_pb2.ContractResponse(contract=_default_contract())
+        return broker_pb2.ContractResponse(
+            contract=broker_pb2.Contract(
+                conid=request.conid,
+                symbol="AAPL",
+                exchange="NASDAQ",
+                currency="USD",
+                asset_class=broker_pb2.STOCK,
+                multiplier="1",
+                local_symbol="AAPL",
+            )
+        )
 
     async def PlaceOrder(  # noqa: N802
         self,
@@ -201,8 +213,24 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.place_order_calls.append(request)
         if self.place_order_response is not None:
             return self.place_order_response
+        sim_id = f"SIM-{uuid7()}"
+        self._sim_orders[sim_id] = {
+            "client_order_id": request.client_order_id,
+            "account_number": request.account_number,
+        }
+        for queue in self._event_subscribers:
+            await queue.put(
+                broker_pb2.OrderEventMessage(
+                    broker_order_id=sim_id,
+                    client_order_id=request.client_order_id,
+                    status="submitted",
+                    filled_qty="0",
+                    avg_fill_price="0",
+                    raw_payload="{}",
+                )
+            )
         return broker_pb2.PlaceOrderResponse(
-            broker_order_id="100001",
+            broker_order_id=sim_id,
             status="Submitted",
         )
 
@@ -215,6 +243,20 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.cancel_order_calls.append(request)
         if self.cancel_order_response is not None:
             return self.cancel_order_response
+        sim_meta = self._sim_orders.pop(request.broker_order_id, None)
+        if sim_meta is None:
+            return broker_pb2.CancelOrderResponse(accepted=False)
+        for queue in self._event_subscribers:
+            await queue.put(
+                broker_pb2.OrderEventMessage(
+                    broker_order_id=request.broker_order_id,
+                    client_order_id=sim_meta["client_order_id"],
+                    status="cancelled",
+                    filled_qty="0",
+                    avg_fill_price="0",
+                    raw_payload='{"sim_cancel_echo": true}',
+                )
+            )
         return broker_pb2.CancelOrderResponse(accepted=True)
 
     async def OrderEvent(  # noqa: N802
@@ -224,8 +266,15 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
     ) -> AsyncIterator[broker_pb2.OrderEventMessage]:
         del request
         await self._before_rpc("OrderEvent", context)
-        for message in self.order_event_messages:
-            yield message
+        queue: asyncio.Queue[broker_pb2.OrderEventMessage] = asyncio.Queue(maxsize=1000)
+        self._event_subscribers.append(queue)
+        try:
+            for message in self.order_event_messages:
+                yield message
+            while not context.cancelled():
+                yield await queue.get()
+        finally:
+            self._event_subscribers.remove(queue)
 
     async def SearchContracts(  # noqa: N802
         self,
@@ -236,7 +285,19 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         await self._before_rpc("SearchContracts", context)
         if self.search_contracts_response is not None:
             return self.search_contracts_response
-        return broker_pb2.SearchContractsResponse(contracts=[_default_contract()])
+        return broker_pb2.SearchContractsResponse(
+            contracts=[
+                broker_pb2.Contract(
+                    conid="265598",
+                    symbol="AAPL",
+                    exchange="NASDAQ",
+                    currency="USD",
+                    asset_class=broker_pb2.STOCK,
+                    multiplier="1",
+                    local_symbol="AAPL",
+                )
+            ]
+        )
 
 
 class _DispatchingBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
