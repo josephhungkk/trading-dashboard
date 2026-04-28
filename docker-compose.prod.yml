@@ -40,7 +40,10 @@ services:
     restart: unless-stopped
     # Bypass `uv run` at runtime — dev-deps sync would OOM the /tmp tmpfs + needs
     # network + writes to a cache dir that's read-only under our hardening.
-    command: uvicorn app.main:app --workers 1 --timeout-graceful-shutdown 30 --host 0.0.0.0 --port 8000
+    # Absolute path: ``uvicorn`` is not on $PATH inside the python:3.14-slim
+    # base image; the Dockerfile CMD uses /app/.venv/bin/uvicorn for the
+    # same reason. Bare ``uvicorn`` here makes the entrypoint exec fail.
+    command: /app/.venv/bin/uvicorn app.main:app --workers 1 --timeout-graceful-shutdown 30 --host 0.0.0.0 --port 8000
     healthcheck:
       # python:3.14-slim has no curl; use stdlib urllib.
       test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).getcode()==200 else 1)"]
