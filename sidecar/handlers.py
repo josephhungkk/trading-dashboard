@@ -157,6 +157,11 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.last_tick_ref: dict[str, datetime] = last_tick_ref
         self._place_locks: dict[str, asyncio.Lock] = {}
         self._simulator_only: bool = simulator_only
+        # Maps SIM-<uuid> broker_order_id -> {"client_order_id": ..., "account_number": ...}.
+        # Required by CancelOrder (SIM branch) to (1) recognize a SIM order without
+        # int-parsing the prefix, (2) reconstruct the orderRef + account for the
+        # synthetic cancellation event fired through ib.orderStatusEvent.emit().
+        self._sim_orders: dict[str, dict[str, str]] = {}
 
     async def Health(  # noqa: N802 — gRPC servicer methods mirror proto rpc names
         self,
@@ -411,6 +416,10 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             from uuid_utils import uuid7
 
             sim_id: str = f"SIM-{uuid7()}"
+            self._sim_orders[sim_id] = {
+                "client_order_id": request.client_order_id,
+                "account_number": request.account_number,
+            }
             logger.info(
                 "place_order_simulated",
                 client_order_id=request.client_order_id,
