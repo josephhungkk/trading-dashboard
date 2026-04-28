@@ -261,54 +261,11 @@ async def bracket_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[
     )
     sidecar = _Sidecar(contract)
 
-    from app.api import orders as orders_api
-
-    bracket_route = next(
-        route
-        for route in app.router.routes
-        if getattr(route, "path", None) == "/api/orders/bracket"
-        and "POST" in getattr(route, "methods", set())
-    )
-    original_response_field = getattr(bracket_route, "response_field", None)
-    original_secure_response_field = getattr(bracket_route, "secure_cloned_response_field", None)
-    bracket_route.response_field = None
-    if hasattr(bracket_route, "secure_cloned_response_field"):
-        bracket_route.secure_cloned_response_field = None
-
     monkeypatch.setattr(
         orders_service,
         "_utcnow",
         lambda: datetime(2026, 4, 27, 14, 45, tzinfo=UTC),
     )
-    original_place_bracket = orders_service.place_bracket
-
-    async def _place_bracket_with_full_parent(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        result = await original_place_bracket(*args, **kwargs)
-        parent = session.orders[UUID(result["parent"]["id"])]
-        result["parent"] = {
-            "id": parent.id,
-            "account_id": parent.account_id,
-            "broker_order_id": parent.broker_order_id,
-            "symbol": parent.symbol,
-            "side": parent.side,
-            "order_type": parent.order_type,
-            "tif": parent.tif,
-            "qty": parent.qty,
-            "limit_price": parent.limit_price,
-            "stop_price": parent.stop_price,
-            "status": parent.status,
-            "filled_qty": parent.filled_qty,
-            "avg_fill_price": parent.avg_fill_price,
-            "notional": parent.notional,
-            "created_at": parent.created_at,
-            "updated_at": parent.updated_at,
-            "last_event_at": parent.last_event_at,
-            "submission_state": "submitted",
-            "events": [],
-        }
-        return result
-
-    monkeypatch.setattr(orders_service, "place_bracket", _place_bracket_with_full_parent)
 
     async def override_db() -> AsyncIterator[_Session]:
         yield session
@@ -329,6 +286,8 @@ async def bracket_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_config] = override_config
     app.dependency_overrides[get_broker_registry] = override_registry
+    from app.api import orders as orders_api
+
     app.dependency_overrides[orders_api.get_orders_redis] = override_redis
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -341,9 +300,6 @@ async def bracket_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[
             "sidecar": sidecar,
         }
 
-    bracket_route.response_field = original_response_field
-    if hasattr(bracket_route, "secure_cloned_response_field"):
-        bracket_route.secure_cloned_response_field = original_secure_response_field
     app.dependency_overrides.clear()
 
 

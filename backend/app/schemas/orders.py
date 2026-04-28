@@ -238,8 +238,15 @@ class OrderBracketLeg(BaseModel):
     status: str
 
 
+class OrderBracketParent(BaseModel):
+    id: UUID
+    client_order_id: UUID
+    broker_order_id: str
+    status: str
+
+
 class OrderBracketResponse(BaseModel):
-    parent: OrderResponse
+    parent: OrderBracketParent
     children: list[OrderBracketLeg]
     oca_group: str
 
