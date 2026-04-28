@@ -116,6 +116,10 @@ class _Sidecar:
         assert query == self.contract.conid
         return [self.contract]
 
+    async def get_contract(self, conid: str) -> base.Contract:
+        assert conid == self.contract.conid
+        return self.contract
+
 
 class _Registry:
     def __init__(self, sidecar: _Sidecar) -> None:

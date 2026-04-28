@@ -545,10 +545,13 @@ def _is_lock_not_available(exc: BaseException) -> bool:
 
 
 class _ContractSearchClient(Protocol):
-    """Minimal protocol for _resolve_contract — accepts any object with the
-    expected search_contracts signature (BrokerSidecarClient + test mocks)."""
+    """Minimal protocol for _resolve_contract — accepts any object exposing
+    both the symbol-search RPC (autocomplete) and the conid-resolve RPC.
+    BrokerSidecarClient + test mocks satisfy this."""
 
     async def search_contracts(self, *, query: str) -> list[base.Contract]: ...
+
+    async def get_contract(self, conid: str) -> base.Contract: ...
 
 
 class _OrderSidecarClient(_ContractSearchClient, Protocol):
@@ -573,11 +576,16 @@ def _as_order_sidecar_client(client: object) -> _OrderSidecarClient:
 
 
 async def _resolve_contract(client: _ContractSearchClient, conid: str) -> base.Contract:
-    contracts = await client.search_contracts(query=conid)
-    for contract in contracts:
-        if contract.conid == conid:
-            return contract
-    raise PreviewUnavailable(404, {"error": "contract_not_found", "conid": conid})
+    # search_contracts is symbol-name autocomplete (reqMatchingSymbols);
+    # it cannot resolve a numeric conid. Use the explicit GetContract RPC
+    # (qualifyContractsAsync on the sidecar) so a numeric conid like 265598
+    # round-trips correctly.
+    try:
+        return await client.get_contract(conid)
+    except BrokerSidecarUnavailable, BrokerSidecarTimeout:
+        raise
+    except Exception as exc:  # contract not found / sidecar logic error
+        raise PreviewUnavailable(404, {"error": "contract_not_found", "conid": conid}) from exc
 
 
 async def _native_notional(
