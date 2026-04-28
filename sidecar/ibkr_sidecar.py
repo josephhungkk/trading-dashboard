@@ -215,19 +215,47 @@ async def run(args: argparse.Namespace) -> None:
         # accountList message has been parsed before we read.
         await asyncio.sleep(0.5)
         accounts = list(ib.managedAccounts())
+        # 5b.1 C2 — BASE-tag round BEFORE reqAccountSummaryAsync.
+        # Pre-flight (sidecar/scripts/base_round_preflight.py, commit 97efe0f)
+        # validated this design empirically on paper gateway 4002 against six
+        # isa-paper accounts: ib.client.reqAccountUpdates(True/False, account)
+        # populates ib.accountValues() with 876 per-currency rows; the base
+        # currency code is the .currency field of the NetLiquidation row.
+        #
+        # Concurrency constraint: the sub/unsub cycle MUST complete before
+        # reqAccountSummary opens its subscription on the same connection.
+        # Sequential per-account: ~2.3s per account, ~14s total for a
+        # 6-account paper sidecar.
+        log.info("base_round_starting", accounts=len(accounts))
+        round_started = time.perf_counter()
+        for acct in accounts:
+            ib.client.reqAccountUpdates(True, acct)
+            await asyncio.sleep(2.0)
+            ib.client.reqAccountUpdates(False, acct)
+            await asyncio.sleep(0.3)
+        log.info(
+            "base_round_done",
+            elapsed_s=round(time.perf_counter() - round_started, 1),
+        )
+
+        # Graceful warning: if any account has no NetLiquidation row, log
+        # base_round_partial. Backend's last_nlv_currency fallback in
+        # _resolve_account (9910e3b) covers the residual case.
+        missing_base = [
+            acct for acct in accounts
+            if not any(
+                v.account == acct and v.tag == "NetLiquidation" and v.currency
+                and v.currency != "BASE"
+                for v in ib.accountValues()
+            )
+        ]
+        if missing_base:
+            log.warning("base_round_partial", missing=missing_base)
+
         # No-arg reqAccountSummaryAsync() — modern ib_async dropped the
         # group/tags kwargs; the default subscription includes most of the
         # tags the handlers care about (NetLiquidation, TotalCashValue, etc.)
-        # but NOT the BASE tag.
         await ib.reqAccountSummaryAsync()
-        # We previously subscribed reqAccountUpdates per managed account to
-        # populate ib.accountValues() with the BASE tag, but the IB API only
-        # permits one active reqAccountUpdates subscription at a time on a
-        # connection that already has reqAccountSummary running, and the
-        # second await never resolves -- the sidecar hangs before bind.
-        # Ship without it: handlers fall back to "" for currency_base when
-        # the BASE tag isn't cached, the backend's discover loop treats ""
-        # as "unknown" and still upserts the row.
         await asyncio.sleep(0.5)
 
         server = grpc.aio.server(options=server_options_for_tls13())
