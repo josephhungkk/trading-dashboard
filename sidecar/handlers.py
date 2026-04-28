@@ -710,14 +710,40 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             except asyncio.QueueFull:
                 metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
 
+        def _on_commission_report(
+            trade: object, fill: object, commission_report: object
+        ) -> None:
+            ib_trade: _IbTrade = cast("_IbTrade", trade)
+            if ib_trade.order.account != request.account_number:
+                return
+            try:
+                exec_id = str(getattr(commission_report, "execId", ""))
+                commission = str(getattr(commission_report, "commission", "0"))
+                currency = str(getattr(commission_report, "currency", ""))
+                msg = self._proto_event_from_trade(
+                    ib_trade, kind="commission_report", exec_id=exec_id
+                )
+                payload = json.loads(msg.raw_payload) if msg.raw_payload else {}
+                payload["commission"] = commission
+                payload["commission_currency"] = currency
+                msg.raw_payload = json.dumps(payload)
+                queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
+
+        commission_report_event = getattr(self.ib, "commissionReportEvent", None)
         self.ib.orderStatusEvent += _on_status  # type: ignore[attr-defined, unused-ignore]
         self.ib.execDetailsEvent += _on_exec_details  # type: ignore[attr-defined, unused-ignore]
+        if commission_report_event is not None:
+            self.ib.commissionReportEvent += _on_commission_report  # type: ignore[attr-defined, unused-ignore]
         try:
             while not context.cancelled():  # type: ignore[attr-defined]
                 yield await queue.get()
         finally:
             self.ib.orderStatusEvent -= _on_status  # type: ignore[attr-defined, unused-ignore]
             self.ib.execDetailsEvent -= _on_exec_details  # type: ignore[attr-defined, unused-ignore]
+            if commission_report_event is not None:
+                self.ib.commissionReportEvent -= _on_commission_report  # type: ignore[attr-defined, unused-ignore]
 
     async def GetContract(  # noqa: N802
         self,
