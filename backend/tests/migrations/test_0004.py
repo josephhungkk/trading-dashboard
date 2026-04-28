@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -304,7 +305,10 @@ def test_0004_downgrade_then_upgrade_round_trips_twice() -> None:
 
     Synchronous (no AsyncSession) — runs alembic CLI in a subprocess.
     """
-    backend_dir = "/home/joseph/dashboard/backend"
+    # Resolve backend/ relative to this test file so CI runners (workspace
+    # at /home/runner/work/trading-dashboard/...) work alongside the NUC
+    # dev box at /home/joseph/dashboard/backend.
+    backend_dir = str(Path(__file__).resolve().parents[2])
 
     def alembic(arg: str) -> str:
         # Use `python -m alembic` (NOT `uv run alembic`) to avoid the stale
