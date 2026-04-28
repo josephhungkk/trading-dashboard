@@ -39,13 +39,44 @@ async def main() -> int:
         await asyncio.sleep(0.3)
 
     print("-- inspecting accountValues after round --")
+    # Per ib_async/wrapper.py:527 updateAccountValue stores key=(account, tag, currency).
+    # BASE is a CURRENCY, not a tag. The base currency code lands in the VALUE
+    # field of rows where tag in {"Currency", "AccountCurrency", ...} and
+    # currency == "BASE". Print all distinct (tag, currency) shapes for a single
+    # account first to discover the right filter empirically.
+    av = list(ib.accountValues())
+    print(f"  total AccountValue rows: {len(av)}")
+    if av:
+        sample_acct = accounts[0]
+        sample_rows = [v for v in av if v.account == sample_acct]
+        print(f"  distinct (tag, currency) for {sample_acct}:")
+        seen: set[tuple[str, str]] = set()
+        for v in sample_rows:
+            key = (v.tag, v.currency)
+            if key in seen:
+                continue
+            seen.add(key)
+            print(f"    tag={v.tag!r:32s} currency={v.currency!r:8s} value={v.value!r}")
+
     missing: list[str] = []
     for acct in accounts:
+        # The (tag='Currency', currency='BASE', value='BASE') row is just a
+        # meta-marker. The real base currency code is the currency on the
+        # NetLiquidation row (which IBKR reports in the account's base
+        # currency only), or equivalently the currency where ExchangeRate=1.00
+        # and currency != 'BASE'.
         base = next(
-            (v.value for v in ib.accountValues() if v.tag == "BASE" and v.account == acct),
+            (
+                v.currency
+                for v in av
+                if v.account == acct
+                and v.tag == "NetLiquidation"
+                and v.currency
+                and v.currency != "BASE"
+            ),
             None,
         )
-        print(f"  {acct}: BASE = {base!r}")
+        print(f"  {acct}: base_currency = {base!r}")
         if not base:
             missing.append(acct)
 
