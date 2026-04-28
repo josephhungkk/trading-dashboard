@@ -690,18 +690,34 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             if ib_trade.order.account != request.account_number:
                 return
             try:
-                queue.put_nowait(self._proto_event_from_trade(ib_trade))
+                queue.put_nowait(
+                    self._proto_event_from_trade(ib_trade, kind="status", exec_id="")
+                )
+            except asyncio.QueueFull:
+                metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
+
+        def _on_exec_details(trade: object, fill: object = None) -> None:
+            ib_trade: _IbTrade = cast("_IbTrade", trade)
+            if ib_trade.order.account != request.account_number:
+                return
+            try:
+                exec_id = str(getattr(getattr(fill, "execution", None), "execId", ""))
+                queue.put_nowait(
+                    self._proto_event_from_trade(
+                        ib_trade, kind="exec_details", exec_id=exec_id
+                    )
+                )
             except asyncio.QueueFull:
                 metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
 
         self.ib.orderStatusEvent += _on_status  # type: ignore[attr-defined, unused-ignore]
-        self.ib.execDetailsEvent += _on_status  # type: ignore[attr-defined, unused-ignore]
+        self.ib.execDetailsEvent += _on_exec_details  # type: ignore[attr-defined, unused-ignore]
         try:
             while not context.cancelled():  # type: ignore[attr-defined]
                 yield await queue.get()
         finally:
             self.ib.orderStatusEvent -= _on_status  # type: ignore[attr-defined, unused-ignore]
-            self.ib.execDetailsEvent -= _on_status  # type: ignore[attr-defined, unused-ignore]
+            self.ib.execDetailsEvent -= _on_exec_details  # type: ignore[attr-defined, unused-ignore]
 
     async def GetContract(  # noqa: N802
         self,
@@ -812,7 +828,13 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             ],
         }
 
-    def _proto_event_from_trade(self, trade: _IbTrade) -> broker_pb2.OrderEventMessage:
+    def _proto_event_from_trade(
+        self,
+        trade: _IbTrade,
+        *,
+        kind: str = "status",
+        exec_id: str = "",
+    ) -> broker_pb2.OrderEventMessage:
         raw: dict[str, object] = self._serialize_trade(trade)
         message = broker_pb2.OrderEventMessage(
             broker_order_id=str(trade.order.permId),
@@ -821,6 +843,8 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             filled_qty=str(trade.orderStatus.filled),
             avg_fill_price=str(trade.orderStatus.avgFillPrice or 0),
             raw_payload=json.dumps(raw),
+            exec_id=exec_id,
+            kind=kind,
         )
         message.event_at.FromDatetime(datetime.now(UTC))
         return message
