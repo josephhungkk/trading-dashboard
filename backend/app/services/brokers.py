@@ -243,6 +243,41 @@ class BrokerSidecarClient:
             status=response.status,
         )
 
+    async def place_bracket(
+        self,
+        *,
+        parent_request_proto: Any,
+        stop_loss_proto: Any,
+        take_profit_proto: Any,
+        oca_group: str,
+    ) -> base.BracketResult:
+        request = broker_pb2.PlaceBracketRequest(
+            parent=parent_request_proto,
+            stop_loss=stop_loss_proto
+            if stop_loss_proto is not None
+            else broker_pb2.PlaceOrderRequest(),
+            take_profit=take_profit_proto
+            if take_profit_proto is not None
+            else broker_pb2.PlaceOrderRequest(),
+            oca_group=oca_group,
+            has_stop_loss=stop_loss_proto is not None,
+            has_take_profit=take_profit_proto is not None,
+        )
+        response = await self._call(
+            method="PlaceBracket",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.PlaceBracketRequest, broker_pb2.PlaceBracketResponse]",
+                self.stub.PlaceBracket,
+            ),
+            request=request,
+        )
+        return base.BracketResult(
+            parent_broker_order_id=response.parent_broker_order_id,
+            stop_loss_broker_order_id=response.stop_loss_broker_order_id,
+            take_profit_broker_order_id=response.take_profit_broker_order_id,
+            status=response.status,
+        )
+
     async def cancel_order(self, account_number: str, broker_order_id: str) -> bool:
         request = broker_pb2.CancelOrderRequest(
             account_number=account_number,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import time
@@ -20,6 +21,7 @@ from app.brokers import base
 from app.core.ids import uuid7
 from app.schemas.orders import (
     ContractSummary,
+    OrderBracketRequest,
     OrderEvent,
     OrderListResponse,
     OrderModifyRequest,
@@ -1138,3 +1140,320 @@ def _retry_after(now: datetime, maintenance: BrokerMaintenance) -> int:
     if maintenance.until is None:
         return 30
     return max(1, int((maintenance.until - now).total_seconds()))
+
+
+# 5c C3: bracket order placement - HIGH-2 two-phase commit.
+async def place_bracket(
+    db: AsyncSession,
+    redis: RedisLike,
+    config: ConfigService,
+    registry: BrokerRegistry,
+    *,
+    request: OrderBracketRequest,
+) -> dict[str, Any]:
+    """POST /api/orders/bracket - HIGH-2 two-phase commit.
+
+    Step 1: validation + INSERT parent only (status=pending_submit).
+    Step 2: PlaceBracket RPC.
+    Step 3: On success - INSERT 2 children + UPDATE parent.broker_order_id (one tx).
+    """
+    if request.stop_price is None and request.target_price is None:
+        raise PreviewUnavailable(400, {"error": "bracket_invalid_legs"})
+    entry = Decimal(request.limit_price)
+    if request.side == "BUY":
+        if request.stop_price and Decimal(request.stop_price) >= entry:
+            raise PreviewUnavailable(400, {"error": "bracket_invalid_prices"})
+        if request.target_price and Decimal(request.target_price) <= entry:
+            raise PreviewUnavailable(400, {"error": "bracket_invalid_prices"})
+    else:
+        if request.stop_price and Decimal(request.stop_price) <= entry:
+            raise PreviewUnavailable(400, {"error": "bracket_invalid_prices"})
+        if request.target_price and Decimal(request.target_price) >= entry:
+            raise PreviewUnavailable(400, {"error": "bracket_invalid_prices"})
+
+    if await is_kill_switch_active(config):
+        raise PreviewUnavailable(503, {"error": "kill_switch"})
+    account = await _resolve_account(db, request.account_id)
+    parent_qty = canonicalize_qty(request.qty)
+    parent_notional = Decimal(parent_qty) * entry
+    policy = await get_account_policy(
+        config,
+        gateway_label=account.gateway_label,
+        mode=account.mode,
+    )
+    if cap_status(parent_notional, policy.max_notional_per_order) == "exceeded":
+        raise PreviewUnavailable(422, {"error": "max_notional_exceeded"})
+    await _consume_nonce(
+        redis,
+        request.nonce,
+        account_id=request.account_id,
+        qty=parent_qty,
+        limit_price=request.limit_price,
+    )
+
+    parent_id = uuid7()
+    oca_group = f"BRK-{parent_id.hex[:8]}"
+    contract = await _resolve_contract(
+        await registry.get_client(account.gateway_label), request.conid
+    )
+    symbol = _contract_description(contract)
+    await db.execute(
+        text(
+            "INSERT INTO orders (id, account_id, client_order_id, conid, symbol, side, "
+            "order_type, tif, qty, limit_price, status, notional, parent_order_id, oca_group) "
+            "VALUES (:id, :a, :coid, :conid, :symbol, :side, :ot, :tif, :qty, :lp, "
+            "'pending_submit', :n, NULL, :oca)"
+        ),
+        {
+            "id": parent_id,
+            "a": request.account_id,
+            "coid": request.client_order_id,
+            "conid": request.conid,
+            "symbol": symbol,
+            "side": request.side,
+            "ot": request.order_type,
+            "tif": request.tif,
+            "qty": parent_qty,
+            "lp": request.limit_price,
+            "n": parent_notional,
+            "oca": oca_group,
+        },
+    )
+    await db.commit()
+
+    client = await registry.get_client(account.gateway_label)
+    bracket_result = await client.place_bracket(
+        parent_request_proto=_build_place_proto(
+            request,
+            request.side,
+            request.order_type,
+            str(request.client_order_id),
+            parent_qty,
+            limit_price=request.limit_price,
+            stop_price=None,
+            account_number=account.account_number,
+            conid=request.conid,
+        ),
+        stop_loss_proto=(
+            _build_place_proto(
+                request,
+                "SELL" if request.side == "BUY" else "BUY",
+                "STOP",
+                str(uuid7()),
+                parent_qty,
+                limit_price=None,
+                stop_price=request.stop_price,
+                account_number=account.account_number,
+                conid=request.conid,
+            )
+            if request.stop_price
+            else None
+        ),
+        take_profit_proto=(
+            _build_place_proto(
+                request,
+                "SELL" if request.side == "BUY" else "BUY",
+                "LIMIT",
+                str(uuid7()),
+                parent_qty,
+                limit_price=request.target_price,
+                stop_price=None,
+                account_number=account.account_number,
+                conid=request.conid,
+            )
+            if request.target_price
+            else None
+        ),
+        oca_group=oca_group,
+    )
+
+    children: list[dict[str, Any]] = []
+    async with db.begin():
+        await db.execute(
+            text("UPDATE orders SET broker_order_id = :bo, status = 'submitted' WHERE id = :id"),
+            {"bo": bracket_result.parent_broker_order_id, "id": parent_id},
+        )
+        if request.stop_price and bracket_result.stop_loss_broker_order_id:
+            sl_id = uuid7()
+            await db.execute(
+                text(
+                    "INSERT INTO orders (id, account_id, client_order_id, conid, symbol, "
+                    "side, order_type, tif, qty, stop_price, status, notional, "
+                    "broker_order_id, parent_order_id, oca_group) "
+                    "VALUES (:id, :a, :coid, :conid, :symbol, :side, 'STOP', :tif, :qty, "
+                    ":sp, 'submitted', :n, :bo, :pid, :oca)"
+                ),
+                {
+                    "id": sl_id,
+                    "a": request.account_id,
+                    "coid": uuid7(),
+                    "conid": request.conid,
+                    "symbol": symbol,
+                    "side": "SELL" if request.side == "BUY" else "BUY",
+                    "tif": request.tif,
+                    "qty": parent_qty,
+                    "sp": request.stop_price,
+                    "n": Decimal(parent_qty) * Decimal(request.stop_price),
+                    "bo": bracket_result.stop_loss_broker_order_id,
+                    "pid": parent_id,
+                    "oca": oca_group,
+                },
+            )
+            children.append(
+                {
+                    "id": str(sl_id),
+                    "leg": "stop_loss",
+                    "broker_order_id": bracket_result.stop_loss_broker_order_id,
+                    "status": "submitted",
+                }
+            )
+        if request.target_price and bracket_result.take_profit_broker_order_id:
+            tp_id = uuid7()
+            await db.execute(
+                text(
+                    "INSERT INTO orders (id, account_id, client_order_id, conid, symbol, "
+                    "side, order_type, tif, qty, limit_price, status, notional, "
+                    "broker_order_id, parent_order_id, oca_group) "
+                    "VALUES (:id, :a, :coid, :conid, :symbol, :side, 'LIMIT', :tif, "
+                    ":qty, :tp, 'submitted', :n, :bo, :pid, :oca)"
+                ),
+                {
+                    "id": tp_id,
+                    "a": request.account_id,
+                    "coid": uuid7(),
+                    "conid": request.conid,
+                    "symbol": symbol,
+                    "side": "SELL" if request.side == "BUY" else "BUY",
+                    "tif": request.tif,
+                    "qty": parent_qty,
+                    "tp": request.target_price,
+                    "n": Decimal(parent_qty) * Decimal(request.target_price),
+                    "bo": bracket_result.take_profit_broker_order_id,
+                    "pid": parent_id,
+                    "oca": oca_group,
+                },
+            )
+            children.append(
+                {
+                    "id": str(tp_id),
+                    "leg": "take_profit",
+                    "broker_order_id": bracket_result.take_profit_broker_order_id,
+                    "status": "submitted",
+                }
+            )
+
+    return {
+        "parent": {
+            "id": str(parent_id),
+            "client_order_id": str(request.client_order_id),
+            "broker_order_id": bracket_result.parent_broker_order_id,
+            "status": "submitted",
+        },
+        "children": children,
+        "oca_group": oca_group,
+    }
+
+
+def _build_place_proto(
+    request: OrderBracketRequest,
+    side: str,
+    order_type: str,
+    client_order_id: str,
+    qty: str,
+    *,
+    limit_price: str | None,
+    stop_price: str | None,
+    account_number: str,
+    conid: str,
+) -> Any:
+    """Helper - builds a broker_pb2.PlaceOrderRequest for the bracket legs."""
+    from app._generated.broker.v1 import broker_pb2
+
+    return broker_pb2.PlaceOrderRequest(
+        account_number=account_number,
+        client_order_id=client_order_id,
+        conid=conid,
+        side=side,
+        order_type=order_type,
+        tif=request.tif,
+        qty=qty,
+        limit_price=limit_price or "",
+        stop_price=stop_price or "",
+    )
+
+
+# 5c C4: fills history - cursor-paginated by (executed_at DESC, id DESC).
+async def list_fills(
+    db: AsyncSession,
+    *,
+    account_id: UUID,
+    from_ts: datetime,
+    to_ts: datetime,
+    limit: int = 100,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """GET /api/fills - cursor-paginated by (executed_at DESC, id DESC).
+
+    Cursor encodes (executed_at, id) as base64-JSON. JOIN orders for account
+    scoping (fills don't carry account_id directly; orders does).
+    """
+    cursor_executed_at: datetime | None = None
+    cursor_id: UUID | None = None
+    if cursor:
+        try:
+            decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+            cursor_executed_at = datetime.fromisoformat(decoded["executed_at"])
+            cursor_id = UUID(decoded["id"])
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise PreviewUnavailable(400, {"error": "invalid_cursor"}) from exc
+
+    query = (
+        "SELECT f.id, f.order_id, f.exec_id, f.qty, f.price, f.currency, f.executed_at, "
+        "       f.commission, f.commission_currency "
+        "  FROM fills f "
+        "  JOIN orders o ON o.id = f.order_id "
+        " WHERE o.account_id = :a "
+        "   AND f.executed_at BETWEEN :f AND :t "
+    )
+    params: dict[str, Any] = {"a": account_id, "f": from_ts, "t": to_ts, "lim": limit + 1}
+    if cursor_executed_at and cursor_id:
+        query += " AND (f.executed_at, f.id) < (:cea, :cid) "
+        params["cea"] = cursor_executed_at
+        params["cid"] = cursor_id
+    query += " ORDER BY f.executed_at DESC, f.id DESC LIMIT :lim"
+
+    result = await db.execute(text(query), params)
+    rows = list(result.mappings())
+
+    next_cursor: str | None = None
+    if len(rows) > limit:
+        last_kept = rows[limit - 1]
+        next_cursor = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "executed_at": last_kept["executed_at"].isoformat(),
+                    "id": str(last_kept["id"]),
+                }
+            ).encode()
+        ).decode()
+        rows = rows[:limit]
+
+    return {
+        "fills": [
+            {
+                "id": str(r["id"]),
+                "order_id": str(r["order_id"]),
+                "exec_id": r["exec_id"],
+                "qty": str(r["qty"]),
+                "price": str(r["price"]),
+                "currency": r["currency"].strip(),
+                "executed_at": r["executed_at"].isoformat(),
+                "commission": str(r["commission"]) if r["commission"] is not None else None,
+                "commission_currency": r["commission_currency"].strip()
+                if r["commission_currency"]
+                else None,
+            }
+            for r in rows
+        ],
+        "next_cursor": next_cursor,
+    }
