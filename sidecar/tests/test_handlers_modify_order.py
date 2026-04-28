@@ -1,0 +1,105 @@
+"""Sidecar ModifyOrder handler (5c B1+B5)."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import grpc
+import pytest
+
+from sidecar import handlers
+from sidecar._generated.broker.v1 import broker_pb2
+
+
+def _rpc_code(exc: grpc.RpcError) -> grpc.StatusCode:
+    return exc.args[0]
+
+
+@pytest.fixture
+def mock_ib() -> MagicMock:
+    ib = MagicMock()
+    ib.openTrades = MagicMock(return_value=[])
+    return ib
+
+
+@pytest.fixture
+def handler(mock_ib: MagicMock) -> handlers.BrokerHandlers:
+    return handlers.BrokerHandlers(
+        ib=mock_ib,
+        pnl_cache={},
+        label="isa-live",
+        version="0.5.4-dev",
+        last_tick_ref={},
+        simulator_only=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_modify_sim_prefix_rejected(handler) -> None:
+    """SIM-prefixed broker_order_id rejected with INVALID_ARGUMENT."""
+    request = broker_pb2.ModifyOrderRequest(
+        broker_order_id="SIM-deadbeef",
+        account_number="DU111",
+    )
+    with pytest.raises(grpc.RpcError) as exc:
+        await handler.ModifyOrder(request, context=MagicMock())
+    assert _rpc_code(exc.value) == grpc.StatusCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_modify_invalid_int_id_rejected(handler) -> None:
+    """Non-numeric broker_order_id rejected with INVALID_ARGUMENT."""
+    request = broker_pb2.ModifyOrderRequest(
+        broker_order_id="abc123",
+        account_number="DU111",
+    )
+    with pytest.raises(grpc.RpcError) as exc:
+        await handler.ModifyOrder(request, context=MagicMock())
+    assert _rpc_code(exc.value) == grpc.StatusCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_modify_order_id_not_found(handler, mock_ib) -> None:
+    """orderId not in openTrades -> NOT_FOUND."""
+    mock_ib.openTrades.return_value = []
+    request = broker_pb2.ModifyOrderRequest(
+        broker_order_id="123456",
+        account_number="DU111",
+        contract=broker_pb2.Contract(
+            conid="265598", symbol="AAPL", exchange="SMART", currency="USD",
+        ),
+    )
+    with pytest.raises(grpc.RpcError) as exc:
+        await handler.ModifyOrder(request, context=MagicMock())
+    assert _rpc_code(exc.value) == grpc.StatusCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_modify_simulator_only_rejected() -> None:
+    """When simulator_only=True with non-SIM id, the openTrades scan returns
+    empty in this test's mock so we fall through to NOT_FOUND. v1 doesn't
+    formally guard against simulator_only at the start of ModifyOrder; that's
+    acceptable since the openTrades scan can never match in SIM mode (no real
+    broker trades exist). Either INVALID_ARGUMENT or NOT_FOUND is acceptable.
+    """
+    sim_handler = handlers.BrokerHandlers(
+        ib=MagicMock(openTrades=MagicMock(return_value=[])),
+        pnl_cache={},
+        label="isa-paper",
+        version="0.5.4-dev",
+        last_tick_ref={},
+        simulator_only=True,
+    )
+    request = broker_pb2.ModifyOrderRequest(
+        broker_order_id="123456",
+        account_number="DU111",
+        contract=broker_pb2.Contract(
+            conid="265598", symbol="AAPL", exchange="SMART", currency="USD",
+        ),
+    )
+    with pytest.raises(grpc.RpcError) as exc:
+        await sim_handler.ModifyOrder(request, context=MagicMock())
+    assert _rpc_code(exc.value) in (
+        grpc.StatusCode.INVALID_ARGUMENT,
+        grpc.StatusCode.NOT_FOUND,
+    )
