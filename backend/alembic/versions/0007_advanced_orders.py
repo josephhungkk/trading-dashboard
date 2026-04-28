@@ -1,11 +1,13 @@
-"""advanced orders: brackets + fills + pending_fills + modified status
+"""advanced orders: brackets + fills + pending_fills + status-rank fn
 
-Revision ID: 0006
-Revises: 0005
+Revision ID: 0007
+Revises: 0006
 Create Date: 2026-04-28
 
-Adds Phase 5c schema:
-- modified enum value (status-rank ordering for modify HTTP path)
+Adds the rest of Phase 5c schema (the 'modified' enum value itself
+shipped in 0006 to satisfy Postgres's "new enum value must be committed
+before use" constraint):
+
 - order_status_rank() function (consumer's _update_order rejects rank-decreasing)
 - orders.parent_order_id + oca_group (bracket linkage)
 - fills (execution-level audit trail with exec_id UNIQUE for resync idempotency)
@@ -16,8 +18,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0006"
-down_revision = "0005"
+revision = "0007"
+down_revision = "0006"
 branch_labels = None
 depends_on = None
 
@@ -37,7 +39,6 @@ def upgrade() -> None:
           WHERE parent_order_id IS NOT NULL;
         """
     )
-    op.execute("ALTER TYPE order_status_enum ADD VALUE 'modified' AFTER 'submitted';")
     op.execute(
         """
         CREATE FUNCTION order_status_rank(s order_status_enum) RETURNS INT AS $$
@@ -102,8 +103,6 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS pending_fills;")
     op.execute("DROP TABLE IF EXISTS fills;")
     op.execute("DROP FUNCTION IF EXISTS order_status_rank(order_status_enum);")
-    # NOTE: Postgres doesn't support DROP VALUE on an enum; downgrade leaves
-    # 'modified' in the enum. Acceptable since downgrade is dev-only.
     op.execute("DROP INDEX IF EXISTS orders_parent_order_id_idx;")
     op.execute("ALTER TABLE orders DROP COLUMN IF EXISTS oca_group;")
     op.execute("ALTER TABLE orders DROP COLUMN IF EXISTS parent_order_id;")

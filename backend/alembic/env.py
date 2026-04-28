@@ -54,7 +54,16 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # transaction_per_migration: each revision gets its own transaction +
+    # commit. Required for Phase 5c 0006 (ALTER TYPE ADD VALUE 'modified')
+    # to commit before 0007 references the new enum value in
+    # order_status_rank() - Postgres rejects "use new enum value in same
+    # transaction it was created" with UnsafeNewEnumValueUsageError.
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transaction_per_migration=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
