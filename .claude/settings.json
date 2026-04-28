@@ -1,6 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
+    "defaultMode": "auto",
     "allow": [
       "Bash(cd frontend && pnpm test:*)",
       "Bash(cd frontend && pnpm test)",
@@ -53,6 +54,25 @@
       "Bash(git stash list)",
       "Skill(codex:rescue)",
       "Skill(codex:setup)"
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Read-only inspection of source files anywhere under /home/joseph/dashboard, /mnt/c/dashboard, or /mnt/c/Users (cat, head, tail, sed -n, grep, find, ls, file size/mtime checks).",
+      "Read-only PowerShell + WSL interop probes against the NUC: powershell.exe -NoProfile -Command 'schtasks /Query', 'Get-Process', 'Test-Path'; nc -z 10.10.0.2 18001..18004 for sidecar liveness.",
+      "Read-only HTTP probes via the operator's CF Access service token (curl GET to /health, /openapi.json, /api/accounts, /api/orders, /api/orders/policy/<id>, /api/contracts/search?q=...).",
+      "Reading + tailing remote container logs over the operator's existing SSH session: ssh -p 2222 trader@88.208.197.219 'docker logs --tail|--since|--follow ...'.",
+      "Reading paper-only IBKR sidecar logs at /mnt/c/ProgramData/dashboard/sidecar-*/sidecar.log; reading deploy/nuc/*.{ps1,vbs} launchers; inspecting /mnt/c/dashboard/sidecar/dist*/ binary metadata (size, mtime, ls).",
+      "Bouncing the production stack via `ssh ... docker compose -f docker-compose.prod.yml restart backend nginx` once a code change has shipped — memory `nginx_backend_recreate_502.md` mandates the nginx bounce alongside backend.",
+      "GitHub Actions polling against this user's trading-dashboard repo: gh run list/view/watch, gh run --log-failed, gh pr list/view/comment."
+    ],
+    "soft_deny": [
+      "$defaults",
+      "Placing or modifying live trading orders against any IBKR account (paper OR live) without an explicit per-turn user authorization in the latest message. trade_enabled flag flips, preview, place, cancel, and config writes against namespace=broker key=*.trade_enabled all count.",
+      "Rotating production mTLS certs / publishing secrets to /api/admin/secrets/** without explicit 'run provision-and-publish.ps1' (or equivalent) in the latest user message. -DryRun invocations are fine.",
+      "Stopping or restarting IBKR sidecars (taskkill, Stop-Process, schtasks /End, gsudo elevated kills) outside an explicit user-authorized canary or sidecar-redeploy turn.",
+      "Moving/deleting/swapping production binaries under /mnt/c/dashboard/sidecar/dist/** without explicit user authorization in the latest message."
     ]
   },
   "hooks": {
