@@ -459,7 +459,8 @@ async def _resolve_account(db: AsyncSession, account_id: object) -> _Account:
     result = await db.execute(
         text(
             """
-            SELECT gateway_label, mode, currency_base, account_number
+            SELECT gateway_label, mode, currency_base, account_number,
+                   last_nlv_currency
               FROM broker_accounts
              WHERE id = :account_id AND deleted_at IS NULL;
             """
@@ -469,10 +470,16 @@ async def _resolve_account(db: AsyncSession, account_id: object) -> _Account:
     row = result.mappings().one_or_none()
     if row is None:
         raise PreviewUnavailable(404, {"error": "not_found", "detail": f"account {account_id}"})
+    # Sidecar can't subscribe to reqAccountUpdates concurrently with
+    # reqAccountSummary on the same connection (see sidecar/ibkr_sidecar.py
+    # comment), so currency_base on broker_accounts is permanently empty in
+    # production. Fall back to last_nlv_currency, which the discoverer
+    # caches from accountSummary's NLV-bearing currency tag.
+    currency_base = str(row["currency_base"]) or str(row["last_nlv_currency"] or "")
     return _Account(
         gateway_label=str(row["gateway_label"]),
         mode=str(row["mode"]),
-        currency_base=str(row["currency_base"]),
+        currency_base=currency_base,
         account_number=str(row["account_number"]) if "account_number" in row else "",
     )
 
