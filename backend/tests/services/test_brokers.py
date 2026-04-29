@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import structlog.testing
@@ -32,6 +32,7 @@ from app.core.config import settings
 from app.services.brokers import (
     BrokerDiscoverer,
     BrokerRegistry,
+    BrokerSidecarClient,
     BrokerSidecarTimeout,
     BrokerSidecarUnavailable,
 )
@@ -737,3 +738,58 @@ async def test_overflow_does_not_taint_other_accounts(
     ok_row = await _select_nlv_row(db_engine, ok_acct)
     assert big_row is not None and big_row.last_nlv is None  # savepoint rolled back
     assert ok_row is not None and ok_row.last_nlv == Decimal("100.00000000")
+
+
+@pytest.mark.asyncio
+async def test_label_mismatch_marks_label_degraded_and_increments_metric() -> None:
+    from prometheus_client import REGISTRY as PCREG
+
+    health = base.HealthResponse(
+        label="futu",
+        gateway_connected=True,
+        gateway_version="0.6.0",
+        last_tick_at=None,
+        sidecar_version="0.6.0",
+    )
+    object.__setattr__(health, "broker_id", "ibkr")
+    before = (
+        PCREG.get_sample_value("broker_registry_label_mismatch_total", {"label": "futu"}) or 0.0
+    )
+    fake_client = MagicMock(spec=BrokerSidecarClient)
+    fake_client.health = AsyncMock(return_value=health)
+    registry = BrokerRegistry({"futu": _as_any(fake_client)})
+
+    with structlog.testing.capture_logs():
+        await registry.probe_once()
+
+    degraded = await registry.degraded_labels()
+    sample = PCREG.get_sample_value("broker_registry_label_mismatch_total", {"label": "futu"})
+    assert "futu" in degraded
+    assert sample == before + 1.0
+
+
+@pytest.mark.asyncio
+async def test_label_mismatch_logs_critical_expected_and_actual() -> None:
+    health = base.HealthResponse(
+        label="isa-live",
+        gateway_connected=True,
+        gateway_version="0.6.0",
+        last_tick_at=None,
+        sidecar_version="0.6.0",
+    )
+    object.__setattr__(health, "broker_id", "futu")
+    fake_client = MagicMock(spec=BrokerSidecarClient)
+    fake_client.health = AsyncMock(return_value=health)
+    registry = BrokerRegistry({"isa-live": _as_any(fake_client)})
+
+    with structlog.testing.capture_logs() as captured:
+        await registry.probe_once()
+
+    assert any(
+        event.get("event") == "broker_registry_label_mismatch"
+        and event.get("log_level") == "critical"
+        and event.get("label") == "isa-live"
+        and event.get("expected") == "ibkr"
+        and event.get("actual") == "futu"
+        for event in captured
+    ), f"expected critical mismatch log; got {captured}"

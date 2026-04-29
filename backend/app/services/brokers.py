@@ -584,6 +584,21 @@ class BrokerRegistry:
             )
             return
 
+        from app.services.broker_registry_factory import SIDECAR_BROKERS
+
+        expected_broker = SIDECAR_BROKERS.get(label)
+        actual_broker = getattr(health, "broker_id", "")
+        if expected_broker and actual_broker and actual_broker != expected_broker:
+            log.critical(
+                "broker_registry_label_mismatch",
+                label=label,
+                expected=expected_broker,
+                actual=actual_broker,
+            )
+            metrics.broker_registry_label_mismatch_total.labels(label=label).inc()
+            await self._mark_health(label, ok=False, health=health)
+            return
+
         await self._mark_health(label, ok=True, health=health)
         log.debug("broker_registry_probe_ok", label=label)
 
