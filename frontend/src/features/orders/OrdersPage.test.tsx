@@ -25,6 +25,14 @@ vi.mock('@/services/orders', async () => {
   };
 });
 
+vi.mock('@/components/patterns/TradeTicketModal/TradeTicketModal', () => ({
+  TradeTicketModal: ({ mode, orderId, symbol }: { mode: string; orderId: string; symbol?: string }) => (
+    <div data-testid="trade-ticket-modal" data-mode={mode} data-order-id={orderId}>
+      {symbol !== undefined ? <span>{symbol}</span> : null}
+    </div>
+  ),
+}));
+
 class ResizeObserverStub {
   observe(): void { /* noop */ }
   unobserve(): void { /* noop */ }
@@ -268,5 +276,37 @@ describe('OrdersPage', () => {
     const banner = await screen.findByText(/Broker maintenance active/);
     expect(banner).toBeInTheDocument();
     expect(banner).toHaveClass('bg-warning/20');
+  });
+
+  it('modify_button_visible_only_on_non_terminal_rows', async () => {
+    mockList([
+      order({ id: 'ord-submitted', symbol: 'AAPL', status: 'submitted', account_id: 'acct-1' }),
+      order({ id: 'ord-filled', symbol: 'MSFT', status: 'filled', account_id: 'acct-1' }),
+      order({ id: 'ord-cancelled', symbol: 'TSLA', status: 'cancelled', account_id: 'acct-1' }),
+    ]);
+
+    renderPage();
+
+    await screen.findByLabelText('Active orders table');
+
+    expect(screen.getByRole('button', { name: 'Modify order ord-submitted' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Modify order ord-filled' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Modify order ord-cancelled' })).not.toBeInTheDocument();
+  });
+
+  it('click_modify_opens_trade_ticket_modal_in_modify_mode', async () => {
+    const user = userEvent.setup();
+    mockList([
+      order({ id: 'ord-mod', symbol: 'GOOGL', status: 'submitted', qty: '5' as DecimalString, limit_price: '150' as DecimalString, account_id: 'acct-42' }),
+    ]);
+
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'Modify order ord-mod' }));
+
+    const modal = await screen.findByTestId('trade-ticket-modal');
+    expect(modal).toHaveAttribute('data-mode', 'modify');
+    expect(modal).toHaveAttribute('data-order-id', 'ord-mod');
+    expect(within(modal).getByText('GOOGL')).toBeInTheDocument();
   });
 });

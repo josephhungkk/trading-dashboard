@@ -12,6 +12,7 @@ import { Badge } from '@/components/primitives/Badge';
 import { Button } from '@/components/primitives/Button';
 import { DataTable } from '@/components/patterns/DataTable';
 import { MobileCardRow } from '@/components/patterns/MobileCardRow/MobileCardRow';
+import { TradeTicketModal } from '@/components/patterns/TradeTicketModal/TradeTicketModal';
 import { useToast } from '@/hooks/use-toast';
 import { useOrdersList } from '@/hooks/useOrdersList';
 import { useOrdersStream } from '@/hooks/useOrdersStream';
@@ -36,10 +37,12 @@ type UiOrderStatus =
 
 interface UiOrder {
   id: string;
+  accountId: string;
   symbol: string;
   side: 'BUY' | 'SELL' | 'buy' | 'sell';
   qty: string;
   orderType: string;
+  limitPrice: string | null;
   status: UiOrderStatus;
   filledQty: string;
   avgFillPrice: string | null;
@@ -72,6 +75,7 @@ export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.E
   const [historyPage, setHistoryPage] = React.useState(0);
   const [orderToCancel, setOrderToCancel] = React.useState<UiOrder | null>(null);
   const [cancelInFlight, setCancelInFlight] = React.useState(false);
+  const [modifyTarget, setModifyTarget] = React.useState<UiOrder | null>(null);
 
   React.useEffect(() => {
     if (storySnapshot) {
@@ -105,7 +109,7 @@ export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.E
   );
 
   const columns = React.useMemo(
-    () => createOrderColumns((order) => setOrderToCancel(order)),
+    () => createOrderColumns((order) => setOrderToCancel(order), (order) => setModifyTarget(order)),
     [],
   );
 
@@ -194,6 +198,23 @@ export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.E
           orders={visibleHistory}
         />
       </section>
+
+      {modifyTarget !== null ? (
+        <TradeTicketModal
+          mode="modify"
+          accountId={modifyTarget.accountId}
+          orderId={modifyTarget.id}
+          symbol={modifyTarget.symbol}
+          initialOrder={{
+            conid: '',
+            side: modifyTarget.side === 'buy' ? 'BUY' : modifyTarget.side === 'sell' ? 'SELL' : modifyTarget.side,
+            order_type: modifyTarget.orderType === 'LIMIT' || modifyTarget.orderType === 'STOP' ? modifyTarget.orderType : 'MARKET',
+            qty: Number(modifyTarget.qty),
+            ...(modifyTarget.limitPrice !== null ? { limit_price: Number(modifyTarget.limitPrice) } : {}),
+          }}
+          onClose={() => { setModifyTarget(null); }}
+        />
+      ) : null}
 
       <CancelDialog
         order={orderToCancel}
@@ -333,7 +354,7 @@ function CancelDialog({
   );
 }
 
-function createOrderColumns(onCancel: (order: UiOrder) => void): ColumnDef<UiOrder>[] {
+function createOrderColumns(onCancel: (order: UiOrder) => void, onModify: (order: UiOrder) => void): ColumnDef<UiOrder>[] {
   return [
     {
       accessorKey: 'id',
@@ -385,22 +406,35 @@ function createOrderColumns(onCancel: (order: UiOrder) => void): ColumnDef<UiOrd
       },
     },
     {
-      id: 'cancel',
-      header: 'Cancel',
+      id: 'actions',
+      header: 'Actions',
       cell: (info) => {
         const order = info.row.original;
-        const disabled = TERMINAL_STATUSES.has(order.status);
+        const terminal = TERMINAL_STATUSES.has(order.status);
         return (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => onCancel(order)}
-            disabled={disabled}
-            aria-label={`Cancel order ${order.id}`}
-          >
-            Cancel
-          </Button>
+          <div className="flex items-center gap-1.5">
+            {!terminal ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => { onModify(order); }}
+                aria-label={`Modify order ${order.id}`}
+              >
+                Modify
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => { onCancel(order); }}
+              disabled={terminal}
+              aria-label={`Cancel order ${order.id}`}
+            >
+              Cancel
+            </Button>
+          </div>
         );
       },
     },
@@ -410,10 +444,12 @@ function createOrderColumns(onCancel: (order: UiOrder) => void): ColumnDef<UiOrd
 function normalizeOrder(order: StoreOrderResponse): UiOrder {
   return {
     id: String(order.id),
+    accountId: readString(order, 'account_id', readString(order, 'accountId', '')),
     symbol: readString(order, 'symbol', '-'),
     side: normalizeSide(readString(order, 'side', 'BUY')),
     qty: readString(order, 'qty', '0'),
     orderType: readString(order, 'order_type', readString(order, 'orderType', 'MARKET')),
+    limitPrice: readNullableString(order, 'limit_price') ?? readNullableString(order, 'limitPrice'),
     status: normalizeStatus(readString(order, 'status', 'submitted')),
     filledQty: readString(order, 'filled_qty', readString(order, 'filledQty', '0')),
     avgFillPrice: readNullableString(order, 'avg_fill_price') ?? readNullableString(order, 'avgFillPrice'),
