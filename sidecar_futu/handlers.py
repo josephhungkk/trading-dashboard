@@ -135,3 +135,33 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         if contract.symbol.startswith("HK."):
             contract.exchange = "SEHK"
         return broker_pb2.ContractResponse(contract=contract)
+
+    async def PlaceOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceOrderRequest,
+        context: Any,
+    ) -> broker_pb2.PlaceOrderResponse:
+        if self._sim_mode:
+            raise NotImplementedError("sim PlaceOrder is implemented in C7")
+        if not self._client.gateway_connected:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
+
+        try:
+            broker_order_id, status = await self._client.place_order(request)
+        except Exception as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        return broker_pb2.PlaceOrderResponse(broker_order_id=broker_order_id, status=status)
+
+    async def CancelOrder(  # noqa: N802
+        self,
+        request: broker_pb2.CancelOrderRequest,
+        context: Any,
+    ) -> broker_pb2.CancelOrderResponse:
+        if self._sim_mode:
+            raise NotImplementedError("sim CancelOrder is implemented in C7")
+
+        accepted = await self._client.cancel_order(
+            request.account_number,
+            request.broker_order_id,
+        )
+        return broker_pb2.CancelOrderResponse(accepted=accepted)

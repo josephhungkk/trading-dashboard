@@ -30,13 +30,18 @@ except OSError:
 from futu import (  # noqa: E402
     RET_OK,
     Market,
+    ModifyOrderOp,
     OpenQuoteContext,
     OpenSecTradeContext,
+    OrderType,
     SecurityFirm,
     SecurityType,
     SysConfig,
     TrdMarket,
+    TrdSide,
 )
+
+from sidecar_futu._generated.broker.v1 import broker_pb2  # noqa: E402
 
 log = structlog.get_logger(__name__)
 
@@ -212,6 +217,76 @@ class FutuClient:
 
         return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
 
+    async def place_order(self, request: broker_pb2.PlaceOrderRequest) -> tuple[str, str]:
+        """Place an order through the active trade context."""
+        if not self.gateway_connected or self._trade_ctx is None:
+            raise RuntimeError("trade context not connected")
+        trade_ctx = self._trade_ctx
+        trd_env = self._accounts_trd_env.get(request.account_number, "REAL")
+
+        side = self._order_side_name(request.side)
+        order_type_name = self._order_type_name(request.order_type)
+        futu_order_type = {
+            "LIMIT": OrderType.NORMAL,
+            "MARKET": OrderType.MARKET,
+            "STOP": OrderType.STOP,
+            "STOP_LIMIT": OrderType.STOP_LIMIT,
+        }.get(order_type_name)
+        if futu_order_type is None:
+            raise RuntimeError(f"unsupported order_type: {request.order_type}")
+
+        futu_side = {
+            "BUY": TrdSide.BUY,
+            "SELL": TrdSide.SELL,
+        }.get(side)
+        if futu_side is None:
+            raise RuntimeError(f"unsupported side: {request.side}")
+
+        time_in_force = self._time_in_force_name(request.tif) or "DAY"
+        aux_price = self._float_or_none(request.stop_price)
+
+        def _place() -> tuple[str, str]:
+            kwargs: dict[str, Any] = {
+                "price": self._float_or_zero(request.limit_price),
+                "qty": self._qty_number(request.qty),
+                "code": request.conid,
+                "trd_side": futu_side,
+                "order_type": futu_order_type,
+                "trd_env": trd_env,
+                "acc_id": int(request.account_number),
+                "remark": request.client_order_id[:64],
+                "time_in_force": time_in_force,
+            }
+            if order_type_name in {"STOP", "STOP_LIMIT"}:
+                kwargs["aux_price"] = aux_price
+
+            ret, data = trade_ctx.place_order(**kwargs)
+            if ret != RET_OK:
+                raise RuntimeError(f"place_order_failed: {data}")
+            return str(data.iloc[0]["order_id"]), "submitted"
+
+        return cast("tuple[str, str]", await _run_in_worker_thread(_place))
+
+    async def cancel_order(self, account_number: str, broker_order_id: str) -> bool:
+        """Cancel an order through the active trade context."""
+        if not self.gateway_connected or self._trade_ctx is None:
+            return False
+        trade_ctx = self._trade_ctx
+        trd_env = self._accounts_trd_env.get(account_number, "REAL")
+
+        def _cancel() -> bool:
+            ret, _ = trade_ctx.modify_order(
+                ModifyOrderOp.CANCEL,
+                order_id=int(broker_order_id),
+                qty=0,
+                price=0,
+                trd_env=trd_env,
+                acc_id=int(account_number),
+            )
+            return bool(ret == RET_OK)
+
+        return cast("bool", await _run_in_worker_thread(_cancel))
+
     async def search_contracts(self, query: str) -> list[dict[str, Any]]:
         if not self.gateway_connected or self._creds is None:
             return []
@@ -253,6 +328,40 @@ class FutuClient:
                     quote_ctx.close()
 
         return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
+
+    @staticmethod
+    def _enum_name(enum_type: Any, value: object) -> str:
+        if isinstance(value, int):
+            try:
+                return cast("str", enum_type.Name(value))
+            except ValueError:
+                return ""
+        return str(value or "").upper()
+
+    @classmethod
+    def _order_side_name(cls, value: object) -> str:
+        return cls._enum_name(broker_pb2.OrderSide, value)
+
+    @classmethod
+    def _order_type_name(cls, value: object) -> str:
+        return cls._enum_name(broker_pb2.OrderType, value)
+
+    @classmethod
+    def _time_in_force_name(cls, value: object) -> str:
+        return cls._enum_name(broker_pb2.TimeInForce, value)
+
+    @staticmethod
+    def _float_or_zero(value: str) -> float:
+        return float(value) if value else 0.0
+
+    @staticmethod
+    def _float_or_none(value: str) -> float | None:
+        return float(value) if value else None
+
+    @staticmethod
+    def _qty_number(value: str) -> int | float:
+        qty = float(value)
+        return int(qty) if qty.is_integer() else qty
 
     def _write_rsa_tempfile(self) -> None:
         if self._rsa_tempfile_path is not None:
