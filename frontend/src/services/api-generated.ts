@@ -656,7 +656,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "pending_submit" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "inactive";
+            status: "pending_submit" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "inactive" | "modified";
         };
         /** OrderListResponse */
         OrderListResponse: {
@@ -718,7 +718,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "pending_submit" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "inactive";
+            status: "pending_submit" | "submitted" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | "inactive" | "modified";
             /** Stop Price */
             stop_price: string | null;
             /**

@@ -21,6 +21,7 @@ OrderStatusEnum = Literal[
     "rejected",
     "expired",
     "inactive",
+    "modified",
 ]
 CapStatus = Literal["ok", "near", "exceeded"]
 PositionSanityStatus = Literal["ok", "high", "extreme"]
