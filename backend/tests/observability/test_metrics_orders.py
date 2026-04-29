@@ -55,6 +55,29 @@ def test_dropped_rate_alert_fires_at_50_percent() -> None:
     assert "0.5" in alert["expr"]
 
 
+def _phase5b_rule(name: str) -> dict:
+    alerts_path = Path(__file__).resolve().parents[3] / "deploy/prometheus/alerts.yml"
+    alerts = yaml.safe_load(alerts_path.read_text())
+    group = next(g for g in alerts["groups"] if g["name"] == "phase5b_orders")
+    return next(rule for rule in group["rules"] if rule["alert"] == name)
+
+
+def test_orderevent_stream_down_alert_present() -> None:
+    alert = _phase5b_rule("BrokerOrderEventStreamDown")
+    assert alert.get("for") == "2m"
+    assert alert.get("labels", {}).get("severity") == "page"
+    assert "consumer_alive" in alert["expr"]
+    assert "== 0" in alert["expr"]
+
+
+def test_orderevent_stream_flapping_alert_present() -> None:
+    alert = _phase5b_rule("BrokerOrderEventStreamFlapping")
+    assert alert.get("for") == "5m"
+    assert alert.get("labels", {}).get("severity") == "warning"
+    assert "broker_order_stream_reconnects_total" in alert["expr"]
+    assert "[10m]" in alert["expr"]
+
+
 def test_consumer_alive_gauge_per_label_account() -> None:
     assert isinstance(consumer_alive, Gauge)
     assert set(consumer_alive._labelnames) == {"label", "account_id"}

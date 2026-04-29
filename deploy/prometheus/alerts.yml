@@ -17,6 +17,22 @@ groups:
         annotations:
           summary: "Pending-submit order orphaned (no broker match after 5min)"
 
+      - alert: BrokerOrderEventStreamDown
+        expr: consumer_alive == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "OrderEvent stream down for {{ $labels.label }}/{{ $labels.account_id }}"
+          description: "Per-account broker order stream task is not alive; supervisor should respawn within 60s. >2m down means the supervisor is stuck or the (label, account) pair was removed. Check broker_order_event_supervisor_iteration_skipped_overlap and broker_order_event_supervisor_error logs."
+
+      - alert: BrokerOrderEventStreamFlapping
+        expr: increase(broker_order_stream_reconnects_total[10m]) > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "OrderEvent stream flapping for {{ $labels.label }} (>10 reconnects/10m)"
+          description: "Reconnect counter climbed by {{ $value }} in 10m sustained for 5m; sidecar gRPC channel or IBKR connection is unstable. Check sidecar logs for orderevent_subscribed/orderevent_unsubscribed lifecycle and broker_sidecar_stream_closed entries."
+
   - name: phase5b1_canary_hotfix
     rules:
       - alert: BrokerDiscoverPositionsP99HighWarning
