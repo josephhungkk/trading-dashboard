@@ -123,6 +123,9 @@ export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.E
       await cancelOrder(orderToCancel.id);
       toast({ title: 'Cancel requested', description: `Order #${orderToCancel.id}`, tone: 'success' });
       setOrderToCancel(null);
+      // 5c v0.5.5: refetch so the row visibly transitions to cancelled
+      // immediately instead of waiting for SSE.
+      void fetchAndSync();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       toast({ title: 'Cancel failed', description: message, tone: 'error' });
@@ -214,7 +217,14 @@ export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.E
             qty: Number(modifyTarget.qty),
             ...(modifyTarget.limitPrice !== null ? { limit_price: Number(modifyTarget.limitPrice) } : {}),
           }}
-          onClose={() => { setModifyTarget(null); }}
+          onClose={() => {
+            setModifyTarget(null);
+            // 5c v0.5.5: refetch /api/orders after modify so qty/limit_price/
+            // status flip in the UI without waiting for SSE (SSE event payload
+            // is currently a slim projection that doesn't carry mutable fields).
+            void fetchAndSync();
+          }}
+          onSuccess={() => { void fetchAndSync(); }}
         />
       ) : null}
 
