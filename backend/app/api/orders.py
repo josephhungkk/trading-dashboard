@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Annotated, Any, cast
 from uuid import UUID
@@ -12,6 +13,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse, StreamingResponse
 
+from app.core import metrics
 from app.core.cf_access import AdminIdentity
 from app.core.config import settings
 from app.core.deps import get_broker_registry, get_config, get_db, require_admin_jwt
@@ -221,6 +223,7 @@ async def modify_order(
     redis: RedisDep,
     registry: RegistryDep,
 ) -> dict[str, Any] | JSONResponse:
+    started = time.perf_counter()
     try:
         body = await request.json()
         if not isinstance(body, dict):
@@ -258,6 +261,8 @@ async def modify_order(
             status_code=503,
             content={"error": "sidecar_unreachable", "label": exc.label},
         )
+    finally:
+        metrics.broker_order_modify_duration_ms.observe((time.perf_counter() - started) * 1000)
 
 
 # 5c C6: POST /api/orders/bracket - create a bracket order.

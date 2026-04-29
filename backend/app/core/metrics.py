@@ -174,3 +174,17 @@ broker_bracket_cancel_cascade_seconds = Histogram(
     buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0),
     registry=registry,
 )
+
+broker_order_modify_duration_ms = Histogram(
+    "broker_order_modify_duration_ms",
+    "Time to process PUT /api/orders/{id} from request entry to response (ms).",
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+    registry=registry,
+)
+
+broker_fills_write_failed_total = Counter(
+    "broker_fills_write_failed_total",
+    "Times the consumer's fills INSERT raised an unexpected DB error.",
+    labelnames=("reason",),
+    registry=registry,
+)

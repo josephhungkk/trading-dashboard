@@ -41,6 +41,20 @@ function contractSymbol(contract: DisplayContract): string {
   return contract.symbol ?? contract.description;
 }
 
+// 5c v0.5.5: bump STK/STOCK contracts to the top so a search like "AAPL"
+// surfaces the equity row above options/futures/currency variants. Stable
+// ordering preserved within both partitions.
+function rankContracts(contracts: DisplayContract[]): DisplayContract[] {
+  const stk: DisplayContract[] = [];
+  const rest: DisplayContract[] = [];
+  for (const c of contracts) {
+    const ac = (c.asset_class ?? '').toUpperCase();
+    if (ac === 'STK' || ac === 'STOCK') stk.push(c);
+    else rest.push(c);
+  }
+  return [...stk, ...rest];
+}
+
 function contractLabel(contract: DisplayContract): string {
   return [
     contractSymbol(contract),
@@ -136,7 +150,7 @@ export function ContractSearchInput({
       search(nextQuery, assetClass)
         .then((contracts) => {
           if (requestRef.current !== requestId || controller.signal.aborted) return;
-          setResults(contracts as DisplayContract[]);
+          setResults(rankContracts(contracts as DisplayContract[]));
           setError(false);
           setFetched(true);
           setOpen(true);

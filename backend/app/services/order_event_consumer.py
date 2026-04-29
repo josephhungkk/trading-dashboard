@@ -762,7 +762,13 @@ class OrderEventConsumer:
                         {"c": buf_commission, "cc": buf_currency, "e": event.exec_id},
                     )
         except DBAPIError as exc:
-            if getattr(exc.orig, "sqlstate", None) != "23503":
+            sqlstate = getattr(exc.orig, "sqlstate", None)
+            if sqlstate != "23503":
+                # 5c v0.5.5: instrument unexpected fills-INSERT failures so the
+                # BrokerFillsWriteFailures alert can fire on real DB errors.
+                metrics.broker_fills_write_failed_total.labels(
+                    reason=str(sqlstate or "unknown")
+                ).inc()
                 raise
             await session.execute(
                 text(
