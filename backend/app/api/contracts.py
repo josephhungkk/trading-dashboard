@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from redis.asyncio import Redis
@@ -103,11 +103,18 @@ async def search_contracts(
     registry: RegistryDep,
     identity: IdentityDep,
     asset_class: str = "",
+    broker: Annotated[Literal["ibkr", "futu", "schwab"] | None, Query()] = None,
 ) -> JSONResponse:
     """Autocomplete proxy: forward to one healthy sidecar, cache 5 min."""
     rate_err = await _check_rate_limit(redis, identity.email)
     if rate_err is not None:
         return rate_err
+    if broker == "schwab":
+        return JSONResponse(
+            status_code=503,
+            content={"error": "schwab_not_yet_supported"},
+            headers={"Retry-After": "86400"},
+        )
 
     cache_k = _cache_key(q, asset_class)
     cached = await redis.get(cache_k)
@@ -115,9 +122,27 @@ async def search_contracts(
         return JSONResponse(content={"contracts": _contracts_from_json(cached)})
 
     try:
-        clients = await registry.healthy_clients()
-        client = clients[0] if clients else await registry.get_client("isa-paper")
+        if broker == "futu":
+            client = await registry.get_client("futu")
+        elif broker == "ibkr":
+            clients = await registry.healthy_clients()
+            ibkr_client = next(
+                (c for c in clients if c.label.startswith(("isa-", "normal-"))),
+                None,
+            )
+            client = (
+                ibkr_client if ibkr_client is not None else await registry.get_client("isa-paper")
+            )
+        else:
+            clients = await registry.healthy_clients()
+            client = clients[0] if clients else await registry.get_client("isa-paper")
         contracts = await client.search_contracts(query=q, asset_class=asset_class)
+    except KeyError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "broker_not_configured"},
+            headers={"Retry-After": "30"},
+        )
     except (BrokerSidecarUnavailable, BrokerSidecarTimeout) as exc:
         return _maintenance_503(exc)
 
