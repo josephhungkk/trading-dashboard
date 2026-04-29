@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-04-29
+
+### Fixed — Phase 5c canary debug pass + SIM dispatch fix
+
+End-to-end SIM canary debug session that uncovered a longstanding propagation bug from 5b.1 SIM cancel echo. ~14 commits, all via the per-commit review chain.
+
+- **CRITICAL — SIM dispatch via per-account queue:** the sidecar's SIM cancel/modify echo paths were calling `ib.orderStatusEvent.emit(synthetic_trade)` to fan a synthetic event out to the OrderEvent gRPC stream's `_on_status` listener. Under `ib_async`'s eventkit, `emit()` doesn't trigger externally-registered listeners (cross-loop / IB-callback-only dispatch). The 5b.1 SIM cancel echo "worked" in tests because the mock servicer bypasses the real path. Real prod was silently dropping every SIM-echo. Fix: sidecar now maintains `self._order_event_queues: dict[str, list[asyncio.Queue]]` keyed by account_number; the OrderEvent handler registers its queue on subscribe, the SIM echo paths put the synthetic `OrderEventMessage` directly into all matching queues. Bypasses eventkit entirely. Diagnostic logging added: `orderevent_subscribed/_unsubscribed/_emit_queued` (sidecar) + `stream_subscribed/_closed` (backend consumer).
+- **Modify nonce hash matched preview's** — `_consume_nonce` for the modify path was computing a 3-field hash (`account_id, qty, limit_price`) but the preview endpoint mints an 8-field hash. Every modify returned 422 `payload_mismatch`. `_consume_nonce` now recomputes the same 8-field hash by merging the order row's immutable fields with the request's mutable fields.
+- **TradeTicketModal `handleSubmit` awaits a fresh preview** before constructing the body. Without this, a fast-typing user could click Modify before the 300ms debounced preview fires, sending the new body with a stale nonce → 422.
+- **Sidecar SIM modify echo handler** — mirrors 5b.1 SIM cancel echo (was previously a hard `INVALID_ARGUMENT` rejection). Backend INVALID_ARGUMENT/NOT_FOUND now translates to HTTP 422 `broker_modify_rejected` (was 500 with raw stack). `BrokerSidecarUnavailable` exception now carries `grpc_code` + `grpc_details`.
+- **Sidecar `--no-simulator` CLI flag** — opt out of simulator branch for real-IBKR placement; default still simulator-only for safety.
+- **Wire shape:** `OrderResponse.conid` exposed on wire + `list_orders` and `get_order_by_id` SELECT projections include it. Modify modal pre-fills the contract correctly. `OrderStatusEnum` Literal includes `'modified'`. Consumer status alias maps include `'modified'`.
+- **Frontend orders flow:**
+  - Topbar mounts the features-layer AccountPicker (was bare pattern → no Trade button surfaced).
+  - `services/orders.ts` corrected to call `/api/contracts/search` (was hitting `/api/contracts` → 404).
+  - `applyEvent` in `stores/global/orders.ts` keys by `event.order_id` (not audit `event.id`) so SSE events update the right row instead of creating orphan entries.
+  - `OrdersPage` `ACTIVE_STATUSES` includes `'modified'` so modified rows stay visible.
+  - `OrdersPage` refetches after modify modal close + cancel (immediate + 750ms double-refetch) so the UI updates without manual page refresh.
+  - `ContractSearchInput` STK-first ranking via `rankContracts` — search "AAPL" now surfaces the SMART/STK row above options/futures.
+- **Modify route updates `orders.qty/limit_price/stop_price/tif/notional` in-place** so UI reflects new values, not just status. HIGH-3 audit-only-write split preserved for `status` (consumer-owned).
+- **Observability completion:** `broker_order_modify_duration_ms` Histogram instrumented in modify route via `time.perf_counter()`. `broker_fills_write_failed_total{reason}` Counter incremented in `_record_fill` exception path. `BrokerOrderModifyP99HighWarning` + `BrokerFillsWriteFailures` alerts re-enabled in `alerts.yml` (the original plan §G1 alerts that were previously skipped because the metrics didn't exist).
+
+### Notes
+
+- 9 orphan SIM orders from the canary debug were marked `cancelled` via authorized DB UPDATE (audit trail in `order_events` preserved).
+- Single-worker uvicorn assumption still load-bearing.
+
 ## [0.5.4] — 2026-04-29
 
 ### Added — Phase 5c: advanced order types

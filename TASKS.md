@@ -124,20 +124,36 @@ Modify, bracket orders, fills history. Builds on 5b's place/cancel + the consume
 - [x] Chunk F — Frontend (`TradeTicketModal` mode prop with field-disable map; `useFillsHistory` cursor hook; `FillsTable` pattern with date grouping + sticky header; `OrdersPage` Modify button on non-terminal rows; `/orders/$id/fills` route)
 - [x] Chunk G — Alerts + close-out (`BrokerBracketCascadeLag` + `BrokerPendingFillsBacklog` + `CommissionBufferOverflow` alerts; CHANGELOG ✓; TASKS ✓; CLAUDE.md ✓; memory `phase5c_shipped.md`; tag v0.5.4)
 
-### Open scope deferred from 5c
+### Open scope deferred from 5c (carries to v0.5.6+)
 
 - [ ] **`AccountResponse.position_count`** — still deferred from 5b.1 architect-review HIGH-3; out of 5c scope per user choice "Family A only".
 - [ ] **Periodic BASE-tag refresh for accounts added mid-run** — out of 5c scope; v0.5.2 `last_nlv_currency` fallback covers steady state.
 - [ ] **Multi-worker uvicorn** (Phase 9) — single-worker still load-bearing for the in-memory replay cache + commission buffer.
-- [ ] **`broker_order_modify_duration_ms` + `broker_fills_write_failed_total`** — alert-suite surfaced these in plan §G1; metrics not yet emitted. Alerts that depend on them are skipped until the metrics exist.
-- [ ] **On-demand quote subscribe for preview** — `_get_market_mid()` reads `mkt:mid:<conid>` from Redis only; sidecar populates this only for held positions. New tickers (e.g. AAPL when no AAPL position is held) → preview returns `503 market_mid_unavailable`. Surfaced during v0.5.4 canary smoke: SGLN/VWRP work (held positions), AAPL fails. Fix options: eager `reqMktData` on contract-pick in `ContractSearchInput`, or backend-side one-shot subscribe with timeout in the preview path.
-- [ ] **`ContractSearchInput` STK-first ranking** — search `AAPL` returns dozens of options/futures/currency variants; the cleanest result (`AAPL SMART USD STK`) is buried. Add asset-class rank to the dropdown so STK appears first.
-- [x] **v0.5.5 hotfix shipped during 5c canary smoke (2026-04-29):** SIM modify echo (mirrors 5b.1 SIM cancel echo); backend INVALID_ARGUMENT/NOT_FOUND from sidecar → HTTP 422 (not 500); sidecar `--no-simulator` CLI flag; `OrderStatusEnum` Literal + consumer status-aliases + `OrderResponse.conid` wire field + Topbar wired to features-layer AccountPicker + ContractSearchInput URL fix.
-- [ ] **Sidecar `OrderEvent` stream observability** — the gRPC `OrderEvent` handler currently doesn't log subscribe/unsubscribe or queue-fill events. After the v0.5.4 sidecar rebuild + backend bounces, the SIM modify echo + SIM cancel echo synthetic events fire (sidecar log confirms RPC OK; no NOT_FOUND error) but the backend consumer's `orders.status` update never fires (DB row stuck in `submitted`). This is the same propagation gap that affects 5b.1 SIM cancel echo (worked at first canary, didn't work after multi-restart cycles). Needs (a) `INFO log` on `_on_status += handler` subscribe + on each queue.put, (b) backend-side `INFO log` on `client.order_event_stream(...)` connect / disconnect, (c) Prometheus counter for `broker_order_events_received_total{label,kind}` (already defined; verify it increments). Diagnose v0.5.5+.
-- [ ] **`get_order_by_id` SQL projection missing `parent_order_id` + `oca_group`** — earlier 5c work confirmed `OrderResponse` schema includes them, but `get_order_by_id` SELECT projection at line 482 doesn't list them. Verify and add if missing.
-- [ ] **Active-orders panel SSE auto-refresh gap** — after the v0.5.5 fixes (SIM dispatch via direct queue, `applyEvent` keys by `order_id`, `ACTIVE_STATUSES` includes `'modified'`), end-to-end SIM canary works at the data layer (DB transitions, sidecar emits, audit rows landed). But the OrdersPage Active list still requires manual hard-refresh to display the status flip — SSE event fires but the row doesn't visually re-render. Likely a memoization or selector subscription issue in the OrdersPage useOrdersList hook. Diagnose: log `applyEvent` calls and verify the matching React render fires. v0.5.5+ task.
-- [ ] **TradeTicketModal preview-debounce → submit race** — user types new qty/price → debounced preview fires after 300ms → if user clicks Submit before debounce settles, body has new values but `preview?.nonce` still references the previous (old-values) preview. Backend recomputes 8-field hash on the new body and mismatches → 422 `payload_mismatch`. Fix: have submit await any pending debounced preview (or disable Submit until preview state matches the form). Workaround: type, wait 1s, then submit.
-- [ ] **Brief 502 flash after backend restart** — nginx caches the backend container IP at start; after `docker compose restart backend` the cached IP is stale for ~1-2s of `/api/*` requests until nginx re-resolves. `scripts/deploy.sh` already runs `nginx -s reload` post-deploy, but a manual `docker compose restart backend` doesn't trigger the reload. Add a hook OR document. Per memory `nginx_backend_recreate_502.md`.
+- [ ] **On-demand quote subscribe for preview** — `_get_market_mid()` reads `mkt:mid:<conid>` from Redis only; sidecar populates this only for held positions. New tickers (e.g. AAPL when no AAPL position is held) → preview returns `503 market_mid_unavailable`. SGLN/VWRP work (held). Fix: eager `reqMktData` on contract-pick in `ContractSearchInput`, or backend-side one-shot subscribe with timeout in preview path. Substantial — focused v0.5.6+ feature.
+- [ ] **Brief 502 flash after backend restart** — nginx caches the backend container IP; after manual `docker compose restart backend` (without `deploy.sh`), `/api/*` 502s for ~1-2s until nginx re-resolves. `deploy.sh` already does the reload; manual restart doesn't. Add a wrapper script or alias.
+- [ ] **OrderEvent stream observability — partial:** v0.5.5 added `orderevent_subscribed`/`orderevent_unsubscribed`/`orderevent_emit_queued` in sidecar + `stream_subscribed`/`stream_closed` in backend consumer. `broker_order_events_received_total` exists. Remaining: dashboard panel + alert on stream-down.
+
+### v0.5.5 hotfix bundle shipped (2026-04-29) — end-to-end SIM canary debug pass
+
+~14 commits between v0.5.4 (`5a86448`) and v0.5.5 close, all via the per-commit review chain.
+
+- [x] **Topbar wires features-layer AccountPicker** so the Trade button surfaces in the picker dropdown (was bare pattern before).
+- [x] **`/api/contracts/search` URL fix** in `services/orders.ts` (was hitting `/api/contracts`, returning 404).
+- [x] **`OrderResponse.conid` exposed on the wire** + `list_orders`/`get_order_by_id` SELECT projections so the modify modal can pre-fill the contract.
+- [x] **Modify nonce hashes 8 fields** (matching preview mint), not 3 — `_consume_nonce` now recomputes the same hash preview produced. Test helper updated.
+- [x] **`OrderStatusEnum` + `_normalize_status` + `_synthesize_resync` aliases include `'modified'`** so the wire reads back; consumer accepts the new status.
+- [x] **Sidecar SIM modify echo handler** (mirrors 5b.1 SIM cancel echo). Plus `--no-simulator` CLI flag (default still simulator-only for safety).
+- [x] **Backend INVALID_ARGUMENT/NOT_FOUND from sidecar → 422 `broker_modify_rejected`** (was 500 with raw stack trace). `BrokerSidecarUnavailable` carries `grpc_code` + `grpc_details`.
+- [x] **CRITICAL: SIM dispatch via per-account `_order_event_queues`** instead of `ib.orderStatusEvent.emit()`. Diagnostic instrumentation showed `emit()` doesn't trigger externally-registered listeners under ib_async's eventkit (cross-loop / IB-callback-only). Sidecar now puts the synthetic message directly into matching gRPC stream queues. This was the root cause of the 5b.1 SIM cancel echo flakiness AND the 5c modify smoke gap.
+- [x] **`OrderEvent` subscribe/emit/queue lifecycle logging** in sidecar handler + backend consumer to diagnose the propagation gap above.
+- [x] **`applyEvent` keys by `event.order_id` (not audit `event.id`)** — was creating orphan store entries; now updates the right row.
+- [x] **`ACTIVE_STATUSES` includes `'modified'`** — modified rows stay visible in the Active list.
+- [x] **Modify route updates `orders.qty/limit_price/stop_price/tif/notional` in-place** so UI reflects the new values, not just status. HIGH-3 audit-only-write split preserved for `status` (consumer-owned).
+- [x] **OrdersPage refetches after modify (modal close + onSuccess) and after cancel (immediate + 750ms double-refetch)** so UI updates without manual page refresh.
+- [x] **TradeTicketModal `handleSubmit` awaits a fresh preview** before constructing the body, eliminating the debounce → submit race that produced `payload_mismatch`.
+- [x] **`broker_order_modify_duration_ms` Histogram + `broker_fills_write_failed_total{reason}` Counter** — instrumented. `BrokerOrderModifyP99HighWarning` + `BrokerFillsWriteFailures` alerts re-enabled in `alerts.yml`.
+- [x] **`ContractSearchInput` STK-first ranking** — `rankContracts` partitions STK/STOCK to the top of the search dropdown.
+- [x] **Verified `get_order_by_id` SELECT projection** — `OrderResponse` schema doesn't expose `parent_order_id`/`oca_group` (those exist in DB but aren't on the wire); the projection is correctly minimal. Earlier note was wrong.
 
 ## Phase 6 — Futu adapter + CJK font polish
 
