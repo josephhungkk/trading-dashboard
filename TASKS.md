@@ -130,6 +130,8 @@ Modify, bracket orders, fills history. Builds on 5b's place/cancel + the consume
 - [ ] **Periodic BASE-tag refresh for accounts added mid-run** — out of 5c scope; v0.5.2 `last_nlv_currency` fallback covers steady state.
 - [ ] **Multi-worker uvicorn** (Phase 9) — single-worker still load-bearing for the in-memory replay cache + commission buffer.
 - [ ] **`broker_order_modify_duration_ms` + `broker_fills_write_failed_total`** — alert-suite surfaced these in plan §G1; metrics not yet emitted. Alerts that depend on them are skipped until the metrics exist.
+- [ ] **On-demand quote subscribe for preview** — `_get_market_mid()` reads `mkt:mid:<conid>` from Redis only; sidecar populates this only for held positions. New tickers (e.g. AAPL when no AAPL position is held) → preview returns `503 market_mid_unavailable`. Surfaced during v0.5.4 canary smoke: SGLN/VWRP work (held positions), AAPL fails. Fix options: eager `reqMktData` on contract-pick in `ContractSearchInput`, or backend-side one-shot subscribe with timeout in the preview path.
+- [ ] **`ContractSearchInput` STK-first ranking** — search `AAPL` returns dozens of options/futures/currency variants; the cleanest result (`AAPL SMART USD STK`) is buried. Add asset-class rank to the dropdown so STK appears first.
 
 ## Phase 6 — Futu adapter + CJK font polish
 
