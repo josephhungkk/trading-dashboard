@@ -509,6 +509,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             )
             self.ib.orderStatusEvent.emit(synthetic_trade)  # type: ignore[attr-defined, unused-ignore]
             metrics.broker_sim_cancel_echo_total.labels(label=self.label).inc()
+            # 5c v0.5.5 diagnostic: confirm synthetic emit fired.
+            logger.info(
+                "sim_cancel_echo_emitted",
+                label=self.label,
+                broker_order_id=broker_order_id,
+                client_order_id=sim_meta["client_order_id"],
+                account_number=sim_meta["account_number"],
+            )
             return broker_pb2.CancelOrderResponse(accepted=True)
 
         raw_trades: object = self.ib.openTrades()  # type: ignore[attr-defined, unused-ignore]
@@ -565,6 +573,15 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 log=[],
             )
             self.ib.orderStatusEvent.emit(synthetic_trade)  # type: ignore[attr-defined, unused-ignore]
+            # 5c v0.5.5 diagnostic: confirm synthetic emit fired (paired with
+            # orderevent_emit_queued log to verify subscriber received it).
+            logger.info(
+                "sim_modify_echo_emitted",
+                label=self.label,
+                broker_order_id=broker_order_id,
+                client_order_id=sim_meta["client_order_id"],
+                account_number=sim_meta["account_number"],
+            )
             return broker_pb2.ModifyOrderResponse(
                 broker_order_id=broker_order_id,
                 status="Modified",
@@ -726,6 +743,15 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 queue.put_nowait(
                     self._proto_event_from_trade(ib_trade, kind="status", exec_id="")
                 )
+                # 5c v0.5.5 diagnostic: confirm synthetic emits queue properly.
+                logger.info(
+                    "orderevent_emit_queued",
+                    label=self.label,
+                    account_number=request.account_number,
+                    broker_order_id=str(getattr(ib_trade.order, "permId", "")),
+                    status=str(getattr(ib_trade.orderStatus, "status", "")),
+                    kind="status",
+                )
             except asyncio.QueueFull:
                 metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
 
@@ -769,6 +795,13 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.ib.execDetailsEvent += _on_exec_details  # type: ignore[attr-defined, unused-ignore]
         if commission_report_event is not None:
             self.ib.commissionReportEvent += _on_commission_report  # type: ignore[attr-defined, unused-ignore]
+        # 5c v0.5.5 diagnostic: log subscribe/unsubscribe lifecycle so SIM-echo
+        # propagation gaps are visible (paired with backend stream_subscribed log).
+        logger.info(
+            "orderevent_subscribed",
+            label=self.label,
+            account_number=request.account_number,
+        )
         try:
             while not context.cancelled():  # type: ignore[attr-defined]
                 yield await queue.get()
@@ -777,6 +810,11 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             self.ib.execDetailsEvent -= _on_exec_details  # type: ignore[attr-defined, unused-ignore]
             if commission_report_event is not None:
                 self.ib.commissionReportEvent -= _on_commission_report  # type: ignore[attr-defined, unused-ignore]
+            logger.info(
+                "orderevent_unsubscribed",
+                label=self.label,
+                account_number=request.account_number,
+            )
 
     async def GetContract(  # noqa: N802
         self,

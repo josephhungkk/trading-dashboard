@@ -229,6 +229,8 @@ class OrderEventConsumer:
         4. Continue tailing the live stream inline.
         """
         buffer: asyncio.Queue[OrderEventMessage | None] = asyncio.Queue()
+        # 5c v0.5.5 diagnostic: log when the stream actually subscribes/closes.
+        log.info("stream_subscribed", label=label, account_number=account_number)
 
         async def _fill_buffer() -> None:
             try:
@@ -236,9 +238,16 @@ class OrderEventConsumer:
                     await buffer.put(event)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning(
+                    "stream_buffer_fill_error",
+                    label=label,
+                    account_number=account_number,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
             finally:
+                log.info("stream_closed", label=label, account_number=account_number)
                 await buffer.put(None)  # sentinel
 
         filler = asyncio.create_task(_fill_buffer(), name=f"order-event-buffer-{label}")
