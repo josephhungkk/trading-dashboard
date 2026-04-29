@@ -2,17 +2,43 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import os
 import re
+import stat
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import structlog
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+_futu_log_dir = Path(os.environ["HOME"]) / ".com.futunn.FutuOpenD" / "Log"
+try:
+    _futu_log_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=_futu_log_dir):
+        pass
+except OSError:
+    _futu_import_home = Path(tempfile.gettempdir()) / "futu-home"
+    _futu_import_home.mkdir(parents=True, exist_ok=True)
+    os.environ["HOME"] = str(_futu_import_home)
+
+from futu import RET_OK, OpenSecTradeContext, SecurityFirm, SysConfig, TrdMarket  # noqa: E402
+
 log = structlog.get_logger(__name__)
 
+_BACKOFF_BASE_S = 1.0
+_BACKOFF_MAX_S = 30.0
 _MD5_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+async def _run_in_worker_thread(fn: Callable[[], Any]) -> Any:
+    loop = asyncio.get_running_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return await loop.run_in_executor(executor, fn)
 
 
 @dataclass(frozen=True, repr=False)
@@ -31,6 +57,7 @@ class FutuClient:
         self._creds: FutuCreds | None = None
         self._init_task: asyncio.Task[None] | None = None
         self._trade_ctx: Any | None = None
+        self._rsa_tempfile_path: Path | None = None
         self.gateway_connected: bool = False
         self._order_event_queues: dict[str, list[asyncio.Queue[Any]]] = {}
         self._configure_lock = asyncio.Lock()
@@ -59,20 +86,92 @@ class FutuClient:
                     log.warning("futu_init_task_cleanup_error", error=str(exc))
                     raise
 
-            self._creds = FutuCreds(
+            if self._trade_ctx is not None:
+                await _run_in_worker_thread(self._trade_ctx.close)
+                self._trade_ctx = None
+
+            self._cleanup_rsa_tempfile()
+
+            new_creds = FutuCreds(
                 unlock_pwd_md5=request.unlock_pwd_md5,
                 rsa_priv_pem=request.rsa_priv_pem,
                 opend_host=request.opend_host,
                 opend_port=request.opend_port,
                 connection_id=request.connection_id,
             )
+            self._creds = new_creds
             self.gateway_connected = False
             self._init_task = asyncio.create_task(
                 self._init_loop(),
                 name="futu-init-connect",
             )
 
+    def _write_rsa_tempfile(self) -> None:
+        if self._rsa_tempfile_path is not None:
+            self._cleanup_rsa_tempfile()
+        assert self._creds is not None
+
+        with tempfile.NamedTemporaryFile(delete=False, mode="w") as rsa_file:
+            rsa_file.write(self._creds.rsa_priv_pem)
+            rsa_file_path = Path(rsa_file.name)
+
+        os.chmod(rsa_file_path, stat.S_IRUSR | stat.S_IWUSR)
+        self._rsa_tempfile_path = rsa_file_path
+
+    def _cleanup_rsa_tempfile(self) -> None:
+        if self._rsa_tempfile_path is None:
+            return
+        try:
+            os.unlink(self._rsa_tempfile_path)
+        except FileNotFoundError:
+            pass
+        self._rsa_tempfile_path = None
+
+    async def _init_attempt(self) -> None:
+        assert self._creds is not None
+        creds = self._creds
+        self._write_rsa_tempfile()
+
+        def _connect() -> Any:
+            ctx: Any | None = None
+            SysConfig.enable_proto_encrypt(True)
+            SysConfig.set_init_rsa_file(str(self._rsa_tempfile_path))
+            try:
+                ctx = OpenSecTradeContext(
+                    filter_trdmarket=TrdMarket.HK,
+                    host=creds.opend_host,
+                    port=creds.opend_port,
+                    is_encrypt=True,
+                    security_firm=SecurityFirm.FUTUSECURITIES,
+                )
+                ret, msg = ctx.unlock_trade(password_md5=creds.unlock_pwd_md5)
+                if ret != RET_OK:
+                    ctx.close()
+                    ctx = None
+                    raise RuntimeError(f"unlock_trade failed: {msg}")
+                return ctx
+            except Exception:
+                if ctx is not None:
+                    ctx.close()
+                raise
+
+        ctx = await _run_in_worker_thread(_connect)
+        self._trade_ctx = ctx
+        self.gateway_connected = True
+        log.info("futu_init_connected", host=creds.opend_host)
+
     async def _init_loop(self) -> None:
-        """Stub: B4 replaces this with the real InitConnect loop."""
-        log.info("futu_init_loop_stub", host=self._creds.opend_host if self._creds else None)
-        await asyncio.sleep(60)
+        await asyncio.sleep(0)
+        backoff = _BACKOFF_BASE_S
+        while True:
+            try:
+                await self._init_attempt()
+                backoff = _BACKOFF_BASE_S
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("futu_init_connect_error", error=str(exc))
+                self.gateway_connected = False
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _BACKOFF_MAX_S)
