@@ -14,6 +14,16 @@ SIDECAR_PORTS: dict[str, int] = {
     "isa-paper": 18002,
     "normal-live": 18003,
     "normal-paper": 18004,
+    "futu": 18005,
+}
+
+# H4: used by BrokerRegistry to detect Health.broker_id mismatches against the registered label
+SIDECAR_BROKERS: dict[str, str] = {
+    "isa-live": "ibkr",
+    "isa-paper": "ibkr",
+    "normal-live": "ibkr",
+    "normal-paper": "ibkr",
+    "futu": "futu",
 }
 
 
