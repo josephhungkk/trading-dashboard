@@ -1,6 +1,8 @@
 """gRPC Broker service handlers for the Futu sidecar."""
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
@@ -166,6 +168,31 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             request.broker_order_id,
         )
         return broker_pb2.CancelOrderResponse(accepted=accepted)
+
+    async def OrderEvent(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: Any,
+    ) -> AsyncIterator[broker_pb2.OrderEventMessage]:
+        queue: asyncio.Queue[broker_pb2.OrderEventMessage] = asyncio.Queue(
+            maxsize=1000
+        )
+        self._client._order_event_queues.setdefault(
+            request.account_number, []
+        ).append(queue)
+        log.info("orderevent_subscribed", account=request.account_number)
+        try:
+            while True:
+                event = await queue.get()
+                yield event
+        finally:
+            try:
+                self._client._order_event_queues[request.account_number].remove(
+                    queue
+                )
+            except (KeyError, ValueError):
+                pass
+            log.info("orderevent_unsubscribed", account=request.account_number)
 
     async def _sim_place(
         self,

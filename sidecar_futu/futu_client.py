@@ -329,6 +329,57 @@ class FutuClient:
 
         return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
 
+    def _on_order_update(self, account_number: str, futu_row: dict[str, Any]) -> None:
+        """Called by TradeOrderHandlerBase callback (futu-api thread)."""
+        queues = self._order_event_queues.get(account_number, [])
+        if not queues:
+            return
+        from sidecar_futu.normalize import order_event_from_futu_order_row
+
+        event = order_event_from_futu_order_row(futu_row)
+        self._dispatch_to_queues(queues, event, account_number)
+
+    def _on_deal_update(self, account_number: str, futu_row: dict[str, Any]) -> None:
+        """Called by TradeDealHandlerBase. Emits exec_details + commission_report."""
+        queues = self._order_event_queues.get(account_number, [])
+        if not queues:
+            return
+        from sidecar_futu.normalize import (
+            commission_event_from_futu_deal_row,
+            order_event_from_futu_deal_row,
+        )
+
+        for ev in (
+            order_event_from_futu_deal_row(futu_row),
+            commission_event_from_futu_deal_row(futu_row),
+        ):
+            self._dispatch_to_queues(queues, ev, account_number)
+
+    def _dispatch_to_queues(
+        self,
+        queues: list[asyncio.Queue[Any]],
+        event: Any,
+        account_number: str,
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        for q in queues:
+            if loop is not None:
+                loop.call_soon_threadsafe(self._safe_put, q, event, account_number)
+            else:
+                self._safe_put(q, event, account_number)
+
+    def _safe_put(
+        self, q: asyncio.Queue[Any], event: Any, account_number: str
+    ) -> None:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            log.warning("orderevent_queue_full", account=account_number)
+
     @staticmethod
     def _enum_name(enum_type: Any, value: object) -> str:
         if isinstance(value, int):

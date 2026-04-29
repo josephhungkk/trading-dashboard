@@ -168,6 +168,72 @@ def status_from_futu_status(value: str | None) -> broker_pb2.OrderStatus:
     }.get(str(value or ""), broker_pb2.OrderStatus.STATUS_UNSPECIFIED)
 
 
+def status_string_from_futu(value: str | None) -> str:
+    status = status_from_futu_status(value)
+    if status == broker_pb2.OrderStatus.STATUS_UNSPECIFIED:
+        return ""
+    return str(broker_pb2.OrderStatus.Name(status)).lower()
+
+
+def order_event_from_futu_order_row(
+    row: dict[str, Any],
+) -> broker_pb2.OrderEventMessage:
+    ts = (
+        hk_local_to_utc_timestamp(row["updated_time"])
+        if row.get("updated_time")
+        else None
+    )
+    return broker_pb2.OrderEventMessage(
+        broker_order_id=str(row["order_id"]),
+        client_order_id=row.get("remark", "") or "",
+        status=status_string_from_futu(row.get("order_status", "")),
+        filled_qty=str(row.get("dealt_qty", "0")),
+        avg_fill_price=str(row.get("dealt_avg_price", "0")),
+        event_at=ts,
+        kind="status",
+    )
+
+
+def order_event_from_futu_deal_row(
+    row: dict[str, Any],
+) -> broker_pb2.OrderEventMessage:
+    ts = (
+        hk_local_to_utc_timestamp(row["create_time"])
+        if row.get("create_time")
+        else None
+    )
+    return broker_pb2.OrderEventMessage(
+        broker_order_id=str(row.get("order_id", "")),
+        filled_qty=str(row.get("qty", "0")),
+        avg_fill_price=str(row.get("price", "0")),
+        event_at=ts,
+        exec_id=str(row.get("deal_id", "")),
+        kind="exec_details",
+    )
+
+
+def commission_event_from_futu_deal_row(
+    row: dict[str, Any],
+) -> broker_pb2.OrderEventMessage:
+    ts = (
+        hk_local_to_utc_timestamp(row["create_time"])
+        if row.get("create_time")
+        else None
+    )
+    return broker_pb2.OrderEventMessage(
+        broker_order_id=str(row.get("order_id", "")),
+        event_at=ts,
+        exec_id=str(row.get("deal_id", "")),
+        kind="commission_report",
+        raw_payload=str(
+            {
+                "commission": str(row.get("commission", "0")),
+                "currency": row.get("currency", "HKD"),
+            }
+        ),
+    )
+
+
 def order_from_futu_row(row: dict[str, Any]) -> broker_pb2.Order:
     currency = row.get("currency") or "HKD"
     return broker_pb2.Order(
