@@ -43,11 +43,12 @@ async def _serve(args: argparse.Namespace) -> None:
     started_at = datetime.now(UTC)
     handlers = BrokerHandlers(started_at=started_at, simulator=args.simulator)
 
+    # Permission guard before any read so a world-readable key isn't loaded.
+    assert_key_file_permissions(args.tls_key_pem)
     cert_pem = args.tls_cert_pem.read_bytes()
     key_pem = args.tls_key_pem.read_bytes()
     ca_bundle_pem = args.tls_ca_bundle_pem.read_bytes()
     crl_pem = args.tls_crl_pem.read_bytes()
-    assert_key_file_permissions(args.tls_key_pem)
     creds = build_grpc_server_credentials(cert_pem, key_pem, ca_bundle_pem, crl_pem)
 
     server = grpc_server(options=server_options_for_tls13())

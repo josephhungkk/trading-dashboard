@@ -116,3 +116,21 @@ Add-MpPreference -ExclusionPath "C:\dashboard\dist-staging-*"
 ```
 
 Otherwise the kanji-rich PyInstaller payload triggers a Defender scan on every restart.
+
+## 9. Provision sidecar mTLS material
+
+Run `deploy/nuc/provision-sidecar-mtls.ps1 -Label futu` to issue + sign the per-sidecar
+cert/key pair. The script writes `C:\dashboard\secrets\futu-sidecar-cert.pem`,
+`futu-sidecar-key.pem`, `ca-bundle.pem`, `crl.pem` and applies `icacls`
+restrictive ACLs (administrators + SYSTEM only).
+
+Then verify the key is not world-readable:
+
+```powershell
+icacls C:\dashboard\secrets\futu-sidecar-key.pem
+```
+
+Expected: only `BUILTIN\Administrators` and `NT AUTHORITY\SYSTEM` listed; no `Users`
+or `Everyone`. The sidecar's in-process `assert_key_file_permissions` guard is a
+no-op on Windows (POSIX-only mode-bit check); ACL hardening is enforced here at
+provisioning time and must be re-checked after any cert rotation.
