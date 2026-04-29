@@ -188,3 +188,17 @@ broker_fills_write_failed_total = Counter(
     labelnames=("reason",),
     registry=registry,
 )
+
+broker_registry_label_mismatch_total = Counter(
+    "broker_registry_label_mismatch_total",
+    "Health.broker_id from sidecar disagreed with SIDECAR_BROKERS map.",
+    labelnames=["label"],
+    registry=registry,
+)
+
+broker_normalize_unknown_total = Counter(
+    "broker_normalize_unknown_total",
+    "Sidecar normalize layer received an unknown enum value from broker SDK.",
+    labelnames=["label", "field"],
+    registry=registry,
+)
