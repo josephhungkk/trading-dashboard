@@ -60,6 +60,7 @@ class FutuClient:
         self._trade_ctx: Any | None = None
         self._rsa_tempfile_path: Path | None = None
         self.gateway_connected: bool = False
+        self._accounts_trd_env: dict[str, str] = {}
         self._order_event_queues: dict[str, list[asyncio.Queue[Any]]] = {}
         self._configure_lock = asyncio.Lock()
         atexit.register(self._cleanup_rsa_tempfile)
@@ -123,7 +124,38 @@ class FutuClient:
                 raise RuntimeError(f"get_acc_list failed: {data}")
             return cast("list[dict[str, Any]]", data.to_dict("records"))
 
-        return cast("list[dict[str, Any]]", await _run_in_worker_thread(_list_accounts))
+        rows = cast("list[dict[str, Any]]", await _run_in_worker_thread(_list_accounts))
+        self._accounts_trd_env = {
+            str(row["acc_id"]): row.get("trd_env", "REAL")
+            for row in rows
+            if row.get("trd_env") in ("REAL", "SIMULATE")
+        }
+        return rows
+
+    async def get_account_summary(self, account_number: str) -> dict[str, Any]:
+        if not self.gateway_connected or self._trade_ctx is None:
+            return {}
+        trd_env = self._accounts_trd_env.get(account_number, "REAL")
+        trade_ctx = self._trade_ctx
+
+        def _query() -> dict[str, Any]:
+            ret, data = trade_ctx.accinfo_query(
+                trd_env=trd_env,
+                acc_id=int(account_number),
+            )
+            if ret != RET_OK:
+                log.warning(
+                    "futu_accinfo_query_failed",
+                    account=account_number,
+                    trd_env=trd_env,
+                    msg=str(data),
+                )
+                return {}
+            if data.empty:
+                return {}
+            return cast("dict[str, Any]", data.iloc[0].to_dict())
+
+        return cast("dict[str, Any]", await _run_in_worker_thread(_query))
 
     def _write_rsa_tempfile(self) -> None:
         if self._rsa_tempfile_path is not None:

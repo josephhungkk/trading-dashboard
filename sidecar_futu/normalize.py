@@ -1,6 +1,7 @@
 """Normalize Futu SDK payloads into broker proto messages."""
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, NamedTuple, TypeAlias
 
@@ -38,4 +39,29 @@ def account_from_futu_row(row: dict[str, Any]) -> AccountResult:
             mode=mode,
             gateway_label="futu",
         )
+    )
+
+
+def _money(value: str | int | float | None, currency: str) -> broker_pb2.Money:
+    if value is None or value == "":
+        d = Decimal("0")
+    else:
+        d = Decimal(str(value))
+    d = d.quantize(Decimal("1e-8"))
+    return broker_pb2.Money(value=format(d, "f"), currency=(currency or "HKD"))
+
+
+def summary_from_futu_row(
+    row: dict[str, Any],
+    *,
+    account_number: str,
+) -> broker_pb2.Summary:
+    del account_number  # reserved for L2 currency override
+    currency = row.get("currency") or "HKD"
+    return broker_pb2.Summary(
+        net_liquidation=_money(row.get("total_assets", "0"), currency),
+        total_cash=_money(row.get("cash", "0"), currency),
+        realized_pnl=_money(row.get("realized_pl", "0"), currency),
+        unrealized_pnl=_money(row.get("unrealized_pl", "0"), currency),
+        buying_power=_money(row.get("power", "0"), currency),
     )
