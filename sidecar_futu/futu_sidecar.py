@@ -6,21 +6,30 @@ import argparse
 import asyncio
 import signal
 from datetime import UTC, datetime
+from pathlib import Path
 
 import structlog
-from grpc.aio import server as grpc_server
+from grpc.aio import server as grpc_server  # type: ignore[import-untyped]
 
-# Import for side-effect: registers BrokerServicer descriptors so the
-# generated stubs are importable here. Handler registration lands in B2/B6.
-from sidecar_futu._generated.broker.v1 import broker_pb2_grpc  # noqa: F401
+from sidecar_futu._generated.broker.v1 import broker_pb2_grpc
+from sidecar_futu.handlers import BrokerHandlers
+from sidecar_futu.tls import (
+    assert_key_file_permissions,
+    build_grpc_server_credentials,
+    server_options_for_tls13,
+    start_crl_reloader,
+)
 
 log = structlog.get_logger(__name__)
 BIND_ADDRESS = "10.10.0.2:18005"
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--cert-dir", default=r"C:\dashboard\secrets")
+    p = argparse.ArgumentParser(description="Futu gRPC sidecar")
+    p.add_argument("--tls-cert-pem", type=Path, required=True)
+    p.add_argument("--tls-key-pem", type=Path, required=True)
+    p.add_argument("--tls-ca-bundle-pem", type=Path, required=True)
+    p.add_argument("--tls-crl-pem", type=Path, required=True)
     p.add_argument(
         "--simulator",
         action=argparse.BooleanOptionalAction,
@@ -32,8 +41,19 @@ def _parse_args() -> argparse.Namespace:
 
 async def _serve(args: argparse.Namespace) -> None:
     started_at = datetime.now(UTC)
-    server = grpc_server()
-    server.add_insecure_port(BIND_ADDRESS)  # replaced with mTLS in B6
+    handlers = BrokerHandlers(started_at=started_at, simulator=args.simulator)
+
+    cert_pem = args.tls_cert_pem.read_bytes()
+    key_pem = args.tls_key_pem.read_bytes()
+    ca_bundle_pem = args.tls_ca_bundle_pem.read_bytes()
+    crl_pem = args.tls_crl_pem.read_bytes()
+    assert_key_file_permissions(args.tls_key_pem)
+    creds = build_grpc_server_credentials(cert_pem, key_pem, ca_bundle_pem, crl_pem)
+
+    server = grpc_server(options=server_options_for_tls13())
+    broker_pb2_grpc.add_BrokerServicer_to_server(handlers, server)
+    server.add_secure_port(BIND_ADDRESS, creds)
+
     log.info(
         "futu_sidecar_start",
         bind=BIND_ADDRESS,
@@ -41,11 +61,20 @@ async def _serve(args: argparse.Namespace) -> None:
         started_at=started_at.isoformat(),
     )
     await server.start()
+
+    crl_task = await start_crl_reloader(args.tls_crl_pem, ca_bundle_pem, server)
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
+
+    crl_task.cancel()
+    try:
+        await crl_task
+    except asyncio.CancelledError:
+        pass
     await server.stop(grace=5)
 
 
