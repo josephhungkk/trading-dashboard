@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-04-29
+
+### Fixed — BrokerTray switched from WG dev-bypass to CF Access service token
+
+The Windows tray hit `http://10.10.0.1/api/brokers/accounts` (WG dev-bypass)
+which always returned 401 because `require_admin_jwt`'s dev-bypass is gated
+on `APP_ENV=dev` (cf_access.py:89), and the VPS runs `APP_ENV=prod`. Result:
+yellow "VPS unreachable" forever even after v0.5.6 added the endpoint.
+
+- `BrokerTray.ps1` now hits `https://dashboard.kiusinghung.com/...` with
+  `CF-Access-Client-Id` + `CF-Access-Client-Secret` headers (the same shape
+  CI uses for `/health` probes). Backend's `require_admin_jwt` accepts the
+  resulting service-token JWT (`kind=service_token`).
+- New `Get-CFAccessHeaders` helper reads `CF_ACCESS_CLIENT_ID` /
+  `CF_ACCESS_CLIENT_SECRET` env vars first (interactive runs), falls back
+  to `C:\dashboard\secrets\cf-access-tray.env` (the Scheduled Task user
+  context typically has neither env var).
+- Operator setup: drop the two creds into `C:\dashboard\secrets\cf-access-tray.env`,
+  then `restart-tray.ps1`. Template at `secrets/cf-access-tray.env.example`.
+- Removed the dead `https://10.10.0.1` + cert-bypass override + Host rewrite.
+  WG-side TLS termination on the VPS doesn't exist (nginx binds :80 only;
+  TLS is terminated by Cloudflare Tunnel on the public path).
+- `secrets/` directory tracked but contents gitignored except `*.example`.
+
+No backend redeploy required — tray-side change only.
+
 ## [0.5.6] — 2026-04-29
 
 ### Phase 5 close-out — deferred items shipped
