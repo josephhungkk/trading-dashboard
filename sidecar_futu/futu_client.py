@@ -180,6 +180,29 @@ class FutuClient:
 
         return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
 
+    async def get_orders(self, account_number: str) -> list[dict[str, Any]]:
+        if not self.gateway_connected or self._trade_ctx is None:
+            return []
+        trd_env = self._accounts_trd_env.get(account_number, "REAL")
+        trade_ctx = self._trade_ctx
+
+        def _query() -> list[dict[str, Any]]:
+            ret, data = trade_ctx.order_list_query(
+                trd_env=trd_env,
+                acc_id=int(account_number),
+            )
+            if ret != RET_OK:
+                log.warning(
+                    "futu_order_list_query_failed",
+                    account=account_number,
+                    trd_env=trd_env,
+                    msg=str(data),
+                )
+                return []
+            return cast("list[dict[str, Any]]", data.to_dict("records"))
+
+        return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
+
     def _write_rsa_tempfile(self) -> None:
         if self._rsa_tempfile_path is not None:
             self._cleanup_rsa_tempfile()
