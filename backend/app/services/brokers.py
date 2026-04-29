@@ -661,6 +661,34 @@ class AccountService:
             broker_maintenance=compute_broker_maintenance(datetime.now(UTC)),
         )
 
+    async def list_broker_status(self) -> list[base.BrokerSidecarStatus]:
+        """Per-sidecar (broker, label, mode, connected) tuples for the
+        Windows tray probe at GET /api/brokers/accounts. One row per
+        (gateway_label, mode, broker_id) triple in broker_accounts; the
+        `connected` flag mirrors the registry's health probe."""
+        stmt = text(
+            """
+            SELECT DISTINCT broker_id, gateway_label, mode
+              FROM broker_accounts
+             WHERE deleted_at IS NULL
+             ORDER BY broker_id, mode, gateway_label;
+            """
+        )
+        async with self._session_factory() as session:
+            result = await session.execute(stmt)
+            rows = result.mappings().all()
+
+        degraded = set(await self._registry.degraded_labels())
+        return [
+            base.BrokerSidecarStatus(
+                broker=row["broker_id"],
+                label=row["gateway_label"],
+                mode=row["mode"],
+                connected=row["gateway_label"] not in degraded,
+            )
+            for row in rows
+        ]
+
     async def get_summary(self, account_id: UUID) -> base.Summary:
         """Resolve uuid -> (gateway_label, account_number), fetch via
         registry.get_client(gateway_label).get_account_summary()."""

@@ -180,6 +180,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/brokers/accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Broker Status */
+        get: operations["list_broker_status_api_brokers_accounts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/contracts/search": {
         parameters: {
             query?: never;
@@ -430,6 +447,28 @@ export interface components {
             until?: string | null;
             /** Window */
             window?: ("weekend" | "daily") | null;
+        };
+        /** BrokerSidecarStatus */
+        BrokerSidecarStatus: {
+            /**
+             * Broker
+             * @enum {string}
+             */
+            broker: "ibkr" | "futu" | "schwab";
+            /** Connected */
+            connected: boolean;
+            /** Label */
+            label: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "live" | "paper";
+        };
+        /** BrokerSidecarStatusList */
+        BrokerSidecarStatusList: {
+            /** Accounts */
+            accounts: components["schemas"]["BrokerSidecarStatus"][];
         };
         /** ConfigIn */
         ConfigIn: {
@@ -1501,6 +1540,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_broker_status_api_brokers_accounts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerSidecarStatusList"];
                 };
             };
         };

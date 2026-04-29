@@ -173,3 +173,14 @@ class AccountListResponse(BaseModel):
 
 class AccountAliasUpdate(BaseModel):
     alias: str = Field(min_length=1, max_length=64, pattern=r"^[\w\s\-.&]+$")
+
+
+class BrokerSidecarStatus(BaseModel):
+    broker: Literal["ibkr", "futu", "schwab"]
+    label: str
+    mode: Literal["live", "paper"]
+    connected: bool
+
+
+class BrokerSidecarStatusList(BaseModel):
+    accounts: list[BrokerSidecarStatus]
