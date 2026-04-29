@@ -14,6 +14,7 @@ from sidecar_futu.normalize import (
     AccountMapped,
     AccountSkipped,
     account_from_futu_row,
+    position_from_futu_row,
     summary_from_futu_row,
 )
 
@@ -85,3 +86,12 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         row = await self._client.get_account_summary(request.account_number)
         summary = summary_from_futu_row(row, account_number=request.account_number)
         return broker_pb2.SummaryResponse(summary=summary)
+
+    async def GetPositions(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: Any,
+    ) -> broker_pb2.PositionsResponse:
+        rows = await self._client.get_positions(request.account_number)
+        positions = [position_from_futu_row(row) for row in rows]
+        return broker_pb2.PositionsResponse(positions=positions)

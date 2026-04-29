@@ -51,6 +51,34 @@ def _money(value: str | int | float | None, currency: str) -> broker_pb2.Money:
     return broker_pb2.Money(value=format(d, "f"), currency=(currency or "HKD"))
 
 
+def position_from_futu_row(row: dict[str, Any]) -> broker_pb2.Position:
+    currency = row.get("currency") or "HKD"
+    security_type = str(row.get("security_type", ""))
+    asset_class = {
+        "STOCK": broker_pb2.AssetClass.STOCK,
+        "ETF": broker_pb2.AssetClass.ETF,
+        "WARRANT": broker_pb2.AssetClass.WARRANT,
+        "BWRT": broker_pb2.AssetClass.CBBC,
+    }.get(security_type, broker_pb2.AssetClass.ASSET_UNSPECIFIED)
+
+    return broker_pb2.Position(
+        contract=broker_pb2.Contract(
+            symbol=str(row.get("code", "")),
+            exchange=str(row.get("code", "")).split(".", maxsplit=1)[0],
+            currency=currency,
+            asset_class=asset_class,
+            local_symbol=str(row.get("stock_name", "")),
+        ),
+        quantity=str(row.get("qty", "0")),
+        avg_cost=_money(row.get("cost_price", "0"), currency),
+        market_price=_money(row.get("nominal_price", "0"), currency),
+        market_value=_money(row.get("market_val", "0"), currency),
+        unrealized_pnl=_money(row.get("unrealized_pl", "0"), currency),
+        realized_pnl_today=_money(row.get("realized_pl", "0"), currency),
+        daily_pnl=_money(row.get("today_pl", "0"), currency),
+    )
+
+
 def summary_from_futu_row(
     row: dict[str, Any],
     *,
