@@ -62,7 +62,7 @@ interface OrdersPageProps {
   storySnapshot?: OrdersPageStorySnapshot;
 }
 
-const ACTIVE_STATUSES = new Set<UiOrderStatus>(['pending_submit', 'pending', 'submitted', 'partial', 'open']);
+const ACTIVE_STATUSES = new Set<UiOrderStatus>(['pending_submit', 'pending', 'submitted', 'modified', 'partial']);
 const TERMINAL_STATUSES = new Set<UiOrderStatus>(['filled', 'cancelled', 'rejected', 'expired']);
 const HISTORY_PAGE_SIZE = 5;
 
