@@ -414,6 +414,31 @@ async def modify_order(
             "raw_payload": json.dumps(raw_payload),
         },
     )
+    # 5c v0.5.5: HIGH-3 audit-only-write split keeps `orders.status` consumer-
+    # owned, but the *mutable* order parameters (qty, limit_price, stop_price,
+    # tif) flip immediately so the UI reflects what the user just submitted.
+    # Without this, the row shows new status=modified but old qty/price.
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+               SET qty = :qty,
+                   limit_price = :limit_price,
+                   stop_price = :stop_price,
+                   tif = :tif,
+                   notional = :notional
+             WHERE id = :order_id
+            """
+        ),
+        {
+            "order_id": order_id,
+            "qty": qty_text,
+            "limit_price": new_limit_price,
+            "stop_price": request.stop_price,
+            "tif": request.tif,
+            "notional": new_notional,
+        },
+    )
     await db.commit()
 
     client = await registry.get_client(account.gateway_label)

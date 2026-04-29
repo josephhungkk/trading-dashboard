@@ -137,6 +137,14 @@ class _Session:
         if "INSERT INTO order_events" in sql:
             self.order_events.append(dict(params))
             return _Result(row=None)
+        if "UPDATE orders" in sql and "SET qty = :qty" in sql:
+            # 5c v0.5.5: mutable-fields update from modify path
+            self.order.qty = params["qty"]
+            self.order.limit_price = params["limit_price"]
+            self.order.stop_price = params["stop_price"]
+            self.order.tif = params["tif"]
+            self.order.notional = params["notional"]
+            return _Result(row=None)
         raise AssertionError(f"unexpected SQL: {sql}")
 
     async def commit(self) -> None:
