@@ -27,6 +27,7 @@ type UiOrderStatus =
   | 'pending_submit'
   | 'pending'
   | 'submitted'
+  | 'modified'
   | 'partial'
   | 'filled'
   | 'cancelled'
@@ -485,13 +486,13 @@ function normalizeStatus(value: string): UiOrderStatus {
     value === 'pending_submit' ||
     value === 'pending' ||
     value === 'submitted' ||
+    value === 'modified' ||
     value === 'partial' ||
     value === 'filled' ||
     value === 'cancelled' ||
     value === 'rejected' ||
     value === 'expired' ||
-    value === 'inactive' ||
-    value === 'open'
+    value === 'inactive'
   ) {
     return value;
   }
