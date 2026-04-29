@@ -112,17 +112,24 @@ Order place/cancel/status for IBKR. `OrderEvent` stream subscription is a separa
 - [x] v0.5.2 hardening — 13 post-tag hotfixes (contract resolver, positions guard, currency_base fallback, trade-policy key shape, streaming-deadline) + first end-to-end paper canary validated on prod ✓
 - [x] v0.5.3 — Phase 5b.1 canary hotfix pack — Alembic 0005 positions table + discoverer fan-out, SIM cancel echo via synthetic `ib.orderStatusEvent.emit`, layered E2E tests (`e2e-mock.yml` per-PR + `nightly-real-ibkr.yml` `e2e-trade` job), Prometheus alerts. BASE-tag startup round skipped per empirical pre-flight failure; v0.5.2 `last_nlv_currency` fallback remains canonical workaround.
 
-## Phase 5c — Advanced order types + remaining canary gaps  *(next)*
+## Phase 5c — Advanced order types  *(complete — v0.5.4 · 2026-04-29)*
 
-Modify, bracket orders, fills history, multi-worker uvicorn. Builds on 5b's place/cancel + the consumer/watchdog infra. Plus the remaining canary surface area:
+Modify, bracket orders, fills history. Builds on 5b's place/cancel + the consumer/watchdog infra. 14 architect-review findings (2 CRIT + 4 HIGH + 5 MED + 3 LOW) all resolved inline.
 
-- [ ] **`AccountResponse.position_count`** — deferred from 5b.1 architect-review HIGH-3; needs Pydantic + service SQL + OpenAPI snapshot regen + frontend types regen.
-- [ ] **Periodic BASE-tag refresh for accounts added mid-run** — only relevant if a future ib_async / IBKR API revision makes BASE reachable through `reqAccountUpdates` concurrent with `reqAccountSummary`. v0.5.2 `last_nlv_currency` fallback covers steady state.
-- [ ] **Modify orders** (replace order qty/price; ib_async `placeOrder` on existing orderId).
-- [ ] **Bracket orders / OCO** — single-leg only in 5b; entries that auto-attach stop-loss + take-profit children.
-- [ ] **Fills history endpoint** — order_events has the data; needs `GET /api/fills` with date-range pagination.
-- [ ] **Multi-worker uvicorn** (Phase 9 originally; bumped here if other 5c work touches the same surfaces). Replaces the in-memory nonce store + cancel cooldown set + per-client SSE queues with Redis or PG-backed equivalents.
-- [ ] **Integration test that round-trips trade_enabled flip → preview → place → cancel** through the admin API + paper account, so v0.5.1-style bugs are caught in CI.
+- [x] Chunk A — Schema + proto (Alembic 0006 `modified` enum value; 0007 `order_status_rank()` SQL function + `parent_order_id` + `oca_group` + `fills` + `pending_fills` tables; proto: `ModifyOrder`, `PlaceBracket`, `exec_id`+`kind` on `OrderEventMessage`)
+- [x] Chunk B — Sidecar handlers (`ModifyOrder`, `PlaceBracket`, `exec_id`/`kind` emission, `commissionReport` subscription, contract tests)
+- [x] Chunk C — Backend service + endpoints (`modify_order` with replay cache, `place_bracket` two-phase commit, `list_fills` cursor pagination + `list_orders` date-range; PUT `/api/orders/{id}` + POST `/api/orders/bracket` + GET `/api/fills` + 18 unit tests + OpenAPI snapshot lock `test_openapi_schema_lock_phase5c` + frontend types regen)
+- [x] Chunk D — Consumer fills + status-rank + cascade (`order_status_rank` predicate, `pending_fills` buffer + 30s sweeper, `commission_buffer` + `commission_report` event, `broker_bracket_cancel_cascade_seconds` histogram, 6 unit tests)
+- [x] Chunk E — E2E + workflow (`FakeBrokerServicer` ModifyOrder + PlaceBracket + cascade-aware CancelOrder; `test_e2e_modify_chain.py` + `test_e2e_bracket_chain.py`; `test_real_ibkr_e2e_modify.py` + `test_real_ibkr_e2e_bracket.py` stubs)
+- [x] Chunk F — Frontend (`TradeTicketModal` mode prop with field-disable map; `useFillsHistory` cursor hook; `FillsTable` pattern with date grouping + sticky header; `OrdersPage` Modify button on non-terminal rows; `/orders/$id/fills` route)
+- [x] Chunk G — Alerts + close-out (`BrokerBracketCascadeLag` + `BrokerPendingFillsBacklog` + `CommissionBufferOverflow` alerts; CHANGELOG ✓; TASKS ✓; CLAUDE.md ✓; memory `phase5c_shipped.md`; tag v0.5.4)
+
+### Open scope deferred from 5c
+
+- [ ] **`AccountResponse.position_count`** — still deferred from 5b.1 architect-review HIGH-3; out of 5c scope per user choice "Family A only".
+- [ ] **Periodic BASE-tag refresh for accounts added mid-run** — out of 5c scope; v0.5.2 `last_nlv_currency` fallback covers steady state.
+- [ ] **Multi-worker uvicorn** (Phase 9) — single-worker still load-bearing for the in-memory replay cache + commission buffer.
+- [ ] **`broker_order_modify_duration_ms` + `broker_fills_write_failed_total`** — alert-suite surfaced these in plan §G1; metrics not yet emitted. Alerts that depend on them are skipped until the metrics exist.
 
 ## Phase 6 — Futu adapter + CJK font polish
 

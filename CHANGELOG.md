@@ -5,6 +5,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-04-29
+
+### Added — Phase 5c: advanced order types
+
+- **Modify orders** (`PUT /api/orders/{id}`) — full-payload modify with always-fresh-nonce policy. HTTP write touches only `order_events` (audit row); the consumer owns `orders.status` mutation (HIGH-3 audit-only-write split). 60s per-(order_id, nonce) replay-safety cache (HIGH-1). Child-order modify allowed even when parent partial (MED-1).
+- **Bracket orders** (`POST /api/orders/bracket`) — entry + optional stop-loss + optional take-profit, atomic OCA group via two-phase commit (HIGH-2: parent-only INSERT, RPC, then children INSERT on success). `OrderBracketResponse.parent` is a thin placement-confirmation shape (`OrderBracketParent`, parallel to `OrderBracketLeg` for children). Cancel parent cascades to children via broker OCA semantics; sidecar mock servicer emits the cascade events for E2E coverage.
+- **Fills history** (`GET /api/fills`) — cursor-paginated execution-level audit trail with date-range. New `fills` (`exec_id` UNIQUE) and `pending_fills` tables. CRIT-2 buffer pattern handles the execDetails-before-order-row race: per-event drain on order arrival + 30s `PendingFillsSweeper` for cross-path cases (e.g. order written by `reconcile_at_startup`, not by the consumer event path).
+- **Date-range filter** on `GET /api/orders` (`?from=...&to=...`).
+- **`modified` order status** in `order_status_enum` + `order_status_rank()` SQL function (CRIT-1: prevents backward transitions like `modified → submitted` via a `CASE` predicate that compares ranks before applying the new status).
+- **Commission backfill** (MED-5): consumer handles `kind="commission_report"` events; if the matching `fills` row hasn't landed yet, the commission is held in a 5-min in-memory `_COMMISSION_BUFFER` keyed by `exec_id` and applied on next fill INSERT.
+- **Cascade-lag metric** (HIGH-4): `broker_bracket_cancel_cascade_seconds` histogram observed in `_process_event` on child cancel — measures `broker_event_at − parent.cancel_requested_at`.
+- **Frontend modify + bracket + fills surface:** `TradeTicketModal` gains a `mode: "place" | "modify" | "bracket"` prop with field-disable map and submit-endpoint routing; `useFillsHistory` cursor hook + `FillsTable` pattern (date-grouped, sticky header) + `/orders/$id/fills` route + Modify button on non-terminal `OrdersPage` rows.
+- **Prometheus alerts:** `BrokerBracketCascadeLag` (p99 > 5s over 10m), `BrokerPendingFillsBacklog` (any rows > 5min), `CommissionBufferOverflow` (any > 1000-entry overflow over 15m).
+- **OpenAPI snapshot lock** extended (`test_openapi_schema_lock_phase5c`) covering 7 new wire models: `OrderModifyRequest`, `OrderBracketRequest`, `OrderBracketResponse`, `OrderBracketParent`, `OrderBracketLeg`, `FillResponse`, `FillListResponse`. Frontend `api-generated.ts` regenerated.
+- **Mock + real-IBKR E2E:** `test_e2e_modify_chain.py` and `test_e2e_bracket_chain.py` (`e2e-mock.yml`); `test_real_ibkr_e2e_modify.py` and `test_real_ibkr_e2e_bracket.py` stubs (`nightly-real-ibkr.yml`).
+
+### Architecture-review findings applied (14 total)
+
+- **2 CRITICAL:** `order_status_rank` predicate (D1); `pending_fills` buffer + sweeper (D2).
+- **4 HIGH:** modify replay cache (C2); bracket two-phase commit (C3); audit-only HTTP write (C2/C5); cascade-lag metric (D4).
+- **5 MEDIUM:** child-modify allowance (C2); bracket sequencing (C3); commission backfill (D3); replay paths (C2/C3); field-disable map for modify-vs-bracket (F1).
+- **3 LOW:** documented inline in spec.
+
+All resolved inline per the project rule "apply through MEDIUM" (memory `feedback_architect_findings_apply_through_medium.md`).
+
+### Notes
+
+- Single-worker uvicorn still load-bearing (the in-memory replay cache + commission buffer assume one process). Multi-worker is Phase 9.
+- Codex hit usage quota partway through F1/E2-E5; Claude completed all blocked tasks per `feedback_codex_fallback.md`.
+
 ## [0.5.3] — 2026-04-28
 
 ### Fixed — Phase 5b.1 canary hotfix pack
