@@ -160,6 +160,9 @@ class AccountResponse(BaseModel):
         pattern=r"^[A-Z]{3}$",
     )
     nlv_at: datetime | None = Field(default=None)
+    # 5b.1 HIGH-3 follow-up (shipped v0.5.6): live count of held positions for
+    # the account, derived from `positions` table at list time. 0 when no rows.
+    position_count: int = Field(default=0, ge=0)
 
 
 class AccountListResponse(BaseModel):

@@ -120,6 +120,7 @@ async def test_list_strips_gateway_label_and_account_number(client_with_stub):
             "nlv",
             "nlv_currency",
             "nlv_at",
+            "position_count",
         } == set(account.keys())
 
 

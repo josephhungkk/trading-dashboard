@@ -65,7 +65,7 @@ REQUIRED_ACCOUNT_FIELDS = {
     "currency_base",
     "display_order",
 }
-OPTIONAL_ACCOUNT_FIELDS = {"nlv", "nlv_currency", "nlv_at"}
+OPTIONAL_ACCOUNT_FIELDS = {"nlv", "nlv_currency", "nlv_at", "position_count"}
 FORBIDDEN_ACCOUNT_FIELDS = {"gateway_label", "account_number"}
 
 

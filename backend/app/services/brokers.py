@@ -45,6 +45,7 @@ class _AccountRow:
     last_nlv: Decimal | None = None
     last_nlv_currency: str | None = None
     last_nlv_at: datetime | None = None
+    position_count: int = 0
 
 
 class BrokerSidecarUnavailable(Exception):  # noqa: N818
@@ -635,12 +636,18 @@ class AccountService:
         account_number. degraded_sidecars from registry.degraded_labels()."""
         stmt = text(
             """
-            SELECT id, broker_id, account_number, alias, mode, gateway_label,
-                   currency_base, display_order, last_nlv, last_nlv_currency,
-                   last_nlv_at
-              FROM broker_accounts
-             WHERE deleted_at IS NULL
-             ORDER BY display_order, account_number;
+            SELECT a.id, a.broker_id, a.account_number, a.alias, a.mode,
+                   a.gateway_label, a.currency_base, a.display_order,
+                   a.last_nlv, a.last_nlv_currency, a.last_nlv_at,
+                   COALESCE(p.cnt, 0) AS position_count
+              FROM broker_accounts a
+              LEFT JOIN (
+                   SELECT account_id, count(*) AS cnt
+                     FROM positions
+                    GROUP BY account_id
+                   ) p ON p.account_id = a.id
+             WHERE a.deleted_at IS NULL
+             ORDER BY a.display_order, a.account_number;
             """
         )
         async with self._session_factory() as session:
@@ -1213,6 +1220,7 @@ def _account_row_from_mapping(row: RowMapping) -> _AccountRow:
         last_nlv=cast(Decimal | None, row.get("last_nlv")),
         last_nlv_currency=cast(str | None, row.get("last_nlv_currency")),
         last_nlv_at=cast(datetime | None, row.get("last_nlv_at")),
+        position_count=int(row.get("position_count") or 0),
     )
 
 
@@ -1239,6 +1247,7 @@ def _account_response_from_row(row: _AccountRow) -> base.AccountResponse:
         nlv=_format_nlv(row.last_nlv),
         nlv_currency=row.last_nlv_currency,
         nlv_at=row.last_nlv_at,
+        position_count=row.position_count,
     )
 
 

@@ -411,6 +411,11 @@ export interface components {
             nlv_at?: string | null;
             /** Nlv Currency */
             nlv_currency?: string | null;
+            /**
+             * Position Count
+             * @default 0
+             */
+            position_count: number;
         };
         /**
          * BrokerMaintenance
