@@ -150,12 +150,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         version: str,
         last_tick_ref: dict[str, datetime],
         simulator_only: bool = True,
+        started_at: datetime | None = None,
     ) -> None:
         self.ib: IB = ib
         self.pnl_cache: PnLCache = pnl_cache
         self.label: str = label
         self.version: str = version
         self.last_tick_ref: dict[str, datetime] = last_tick_ref
+        self._started_at: datetime = started_at or datetime.now(UTC)
         self._place_locks: dict[str, asyncio.Lock] = {}
         self._simulator_only: bool = simulator_only
         # Maps SIM-<uuid> broker_order_id -> {"client_order_id": ..., "account_number": ...}.
@@ -202,15 +204,30 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 )
                 gateway_version = ""
 
+        ts = Timestamp()
+        ts.FromDatetime(self._started_at)
         response: broker_pb2.HealthResponse = broker_pb2.HealthResponse(
             label=self.label,
             gateway_connected=gateway_connected,
             gateway_version=gateway_version,
             sidecar_version=self.version,
+            started_at=ts,
+            broker_id="ibkr",
         )
         if last_tick_at is not None:
             response.last_tick_at.CopyFrom(last_tick_at)
         return response
+
+    async def Configure(  # noqa: N802
+        self,
+        request: broker_pb2.ConfigureRequest,
+        context: object,
+    ) -> broker_pb2.ConfigureResponse:
+        del request, context
+        # IBKR sidecars get their config via CLI flags + mTLS material, not the
+        # Configure RPC. Return ok=True so the backend's BrokerConfigurer flow
+        # treats IBKR labels as already-configured.
+        return broker_pb2.ConfigureResponse(ok=True, detail="")
 
     async def ListManagedAccounts(  # noqa: N802 — gRPC rpc name
         self,

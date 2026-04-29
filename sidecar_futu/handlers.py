@@ -194,6 +194,26 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 pass
             log.info("orderevent_unsubscribed", account=request.account_number)
 
+    async def ModifyOrder(  # noqa: N802
+        self,
+        request: broker_pb2.ModifyOrderRequest,
+        context: Any,
+    ) -> broker_pb2.ModifyOrderResponse:
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Modify deferred to Phase 7"
+        )
+        raise AssertionError("unreachable: abort raises")  # mypy guard
+
+    async def PlaceBracket(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceBracketRequest,
+        context: Any,
+    ) -> broker_pb2.PlaceBracketResponse:
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Bracket deferred to Phase 7"
+        )
+        raise AssertionError("unreachable: abort raises")
+
     async def _sim_place(
         self,
         request: broker_pb2.PlaceOrderRequest,
