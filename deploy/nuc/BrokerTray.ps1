@@ -272,6 +272,34 @@ function Classify-HttpError {
   return @{ Kind = 'unknown'; Tip = $msg }
 }
 
+# CF Access service-token loader. Tray hits the public CF path
+# (https://dashboard.kiusinghung.com/...) with CF-Access-Client-Id +
+# CF-Access-Client-Secret headers; backend's require_admin_jwt accepts the
+# resulting service-token JWT (kind=service_token), same path CI uses.
+#
+# Resolution order:
+#   1. $env:CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET (interactive operator
+#      runs only - the Scheduled Task user context typically has neither).
+#   2. C:\dashboard\secrets\cf-access-tray.env (key=value lines:
+#         CF_ACCESS_CLIENT_ID=<token>.access
+#         CF_ACCESS_CLIENT_SECRET=<secret>)
+$script:CFHeaders = $null
+function Get-CFAccessHeaders {
+  if ($script:CFHeaders -ne $null) { return $script:CFHeaders }
+  $clientId = $env:CF_ACCESS_CLIENT_ID
+  $clientSecret = $env:CF_ACCESS_CLIENT_SECRET
+  $envFile = 'C:\dashboard\secrets\cf-access-tray.env'
+  if ((-not $clientId -or -not $clientSecret) -and (Test-Path $envFile)) {
+    Get-Content $envFile | ForEach-Object {
+      if ($_ -match '^\s*CF_ACCESS_CLIENT_ID\s*=\s*(.+?)\s*$') { $clientId = $matches[1] }
+      elseif ($_ -match '^\s*CF_ACCESS_CLIENT_SECRET\s*=\s*(.+?)\s*$') { $clientSecret = $matches[1] }
+    }
+  }
+  if (-not $clientId -or -not $clientSecret) { return $null }
+  $script:CFHeaders = @{ Id = $clientId; Secret = $clientSecret }
+  return $script:CFHeaders
+}
+
 # Cached for 5s so IBKR Live + IBKR Paper probes (which both read this
 # endpoint) don't each make a separate HTTP call each tick.
 $script:AccountsCache = @{ Accounts = $null; Reachable = $false; Error = $null; ErrorKind = $null; TickMs = 0 }
@@ -281,15 +309,19 @@ function Get-BrokerAccounts {
     return $script:AccountsCache
   }
   $result = @{ Accounts = $null; Reachable = $false; Error = $null; ErrorKind = $null; TickMs = $now }
+  $cf = Get-CFAccessHeaders
+  if (-not $cf) {
+    $result.Error = 'CF service token not configured (drop creds in C:\dashboard\secrets\cf-access-tray.env)'
+    $result.ErrorKind = 'auth'
+    $script:AccountsCache = $result
+    return $result
+  }
   try {
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = { param($a,$b,$c,$d) $true }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    # WG path is HTTP-only: nginx on the VPS binds :80, TLS is terminated by
-    # Cloudflare Tunnel on the public path. WG already encrypts at the network
-    # layer, so https here is both broken (no listener on :443) and redundant.
-    $req = [Net.HttpWebRequest]::Create('http://10.10.0.1/api/brokers/accounts')
-    $req.Host = 'dashboard.kiusinghung.com'
-    $req.Timeout = 3000
+    $req = [Net.HttpWebRequest]::Create('https://dashboard.kiusinghung.com/api/brokers/accounts')
+    $req.Headers.Add('CF-Access-Client-Id', $cf.Id)
+    $req.Headers.Add('CF-Access-Client-Secret', $cf.Secret)
+    $req.Timeout = 5000
     $req.Method  = 'GET'
     $resp = $req.GetResponse()
     $reader = New-Object IO.StreamReader $resp.GetResponseStream()
@@ -308,22 +340,28 @@ function Get-BrokerAccounts {
 }
 
 function Test-Schwab {
-  # Hit the VPS nginx directly over WireGuard (10.10.0.1) with a Host header
-  # so nginx routes to the dashboard vhost. Cert CN=dashboard.kiusinghung.com
-  # won't match 10.10.0.1 - we accept any cert. Cloudflare is NOT in this path.
-  #
-  # Reachable vs. Configured are separate dimensions. When the VPS is
-  # unreachable (WireGuard not up yet post-boot, nginx restarting, ...)
-  # the tray used to flatten that into "not configured", which is a
-  # misleading message - the secrets are fine, we just can't see them.
-  # The caller now distinguishes the two cases and surfaces the right
-  # tooltip.
+  # Hit the public CF Access path with the service-token headers loaded by
+  # Get-CFAccessHeaders. Reachable vs. Configured are separate dimensions:
+  # when CF is unreachable or auth fails the tray surfaces the precise
+  # tooltip via Classify-HttpError instead of falsely flattening to
+  # "not configured".
+  $cf = Get-CFAccessHeaders
+  if (-not $cf) {
+    return @{
+      Reachable  = $false
+      Configured = $false
+      Connected  = $false
+      ExpiresDays = $null
+      Error      = 'CF service token not configured (drop creds in C:\dashboard\secrets\cf-access-tray.env)'
+      ErrorKind  = 'auth'
+    }
+  }
   try {
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = { param($a,$b,$c,$d) $true }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    $req = [Net.HttpWebRequest]::Create('http://10.10.0.1/api/schwab/health')
-    $req.Host = 'dashboard.kiusinghung.com'
-    $req.Timeout = 3000
+    $req = [Net.HttpWebRequest]::Create('https://dashboard.kiusinghung.com/api/schwab/health')
+    $req.Headers.Add('CF-Access-Client-Id', $cf.Id)
+    $req.Headers.Add('CF-Access-Client-Secret', $cf.Secret)
+    $req.Timeout = 5000
     $req.Method  = 'GET'
     $resp = $req.GetResponse()
     $reader = New-Object IO.StreamReader $resp.GetResponseStream()

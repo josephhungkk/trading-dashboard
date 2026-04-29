@@ -31,3 +31,8 @@ scripts/cloudflare/.state/
 backend/app/_generated/
 sidecar/_generated/
 frontend/src/proto-gen/
+
+# Operator secrets (CF Access service tokens, mTLS material, etc.) -
+# directory tracked so example templates can ship; everything else ignored.
+secrets/*
+!secrets/*.example
