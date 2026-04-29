@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Link } from '@tanstack/react-router';
 import { Search } from 'lucide-react';
 import { ModeToggle } from '@/components/patterns/ModeToggle';
-import { AccountPicker } from '@/components/patterns/AccountPicker';
+import { AccountPicker } from '@/features/accounts/AccountPicker';
 import { ConnectedDropdown } from '@/components/patterns/ConnectedDropdown';
 import { Button } from '@/components/primitives/Button';
 import { Icon } from '@/components/primitives/Icon';
