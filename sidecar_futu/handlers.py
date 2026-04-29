@@ -8,7 +8,7 @@ import grpc  # type: ignore[import-untyped]
 import structlog
 from google.protobuf.timestamp_pb2 import Timestamp
 
-from sidecar_futu import metrics
+from sidecar_futu import metrics, sim
 from sidecar_futu._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from sidecar_futu.futu_client import FutuClient
 from sidecar_futu.normalize import (
@@ -33,6 +33,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self._started_at = started_at
         self._sim_mode = simulator
         self._client = FutuClient()
+        self._sim_orders: dict[str, dict[str, str]] = {}
 
     async def Health(  # noqa: N802
         self,
@@ -142,7 +143,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         context: Any,
     ) -> broker_pb2.PlaceOrderResponse:
         if self._sim_mode:
-            raise NotImplementedError("sim PlaceOrder is implemented in C7")
+            return await self._sim_place(request)
         if not self._client.gateway_connected:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
 
@@ -158,10 +159,48 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         context: Any,
     ) -> broker_pb2.CancelOrderResponse:
         if self._sim_mode:
-            raise NotImplementedError("sim CancelOrder is implemented in C7")
+            return await self._sim_cancel(request)
 
         accepted = await self._client.cancel_order(
             request.account_number,
             request.broker_order_id,
         )
         return broker_pb2.CancelOrderResponse(accepted=accepted)
+
+    async def _sim_place(
+        self,
+        request: broker_pb2.PlaceOrderRequest,
+    ) -> broker_pb2.PlaceOrderResponse:
+        sim_id = sim.make_sim_id()
+        self._sim_orders[sim_id] = {
+            "client_order_id": request.client_order_id,
+            "account_number": request.account_number,
+        }
+        queues = self._client._order_event_queues.get(request.account_number, [])
+        sim.dispatch(
+            queues,
+            sim.synthetic_place_event(
+                broker_order_id=sim_id,
+                client_order_id=request.client_order_id,
+            ),
+        )
+        return broker_pb2.PlaceOrderResponse(broker_order_id=sim_id, status="submitted")
+
+    async def _sim_cancel(
+        self,
+        request: broker_pb2.CancelOrderRequest,
+    ) -> broker_pb2.CancelOrderResponse:
+        if not request.broker_order_id.startswith("SIM-"):
+            return broker_pb2.CancelOrderResponse(accepted=False)
+        entry = self._sim_orders.pop(request.broker_order_id, None)
+        if entry is None:
+            return broker_pb2.CancelOrderResponse(accepted=False)
+        queues = self._client._order_event_queues.get(entry["account_number"], [])
+        sim.dispatch(
+            queues,
+            sim.synthetic_cancel_event(
+                broker_order_id=request.broker_order_id,
+                client_order_id=entry["client_order_id"],
+            ),
+        )
+        return broker_pb2.CancelOrderResponse(accepted=True)
