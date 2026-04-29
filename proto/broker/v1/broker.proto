@@ -28,6 +28,9 @@ service Broker {
   rpc SearchContracts(SearchContractsRequest) returns (SearchContractsResponse);
   rpc ModifyOrder(ModifyOrderRequest) returns (ModifyOrderResponse);
   rpc PlaceBracket(PlaceBracketRequest) returns (PlaceBracketResponse);
+  // Phase 6: backend ships per-sidecar credentials (futu unlock + RSA priv)
+  // at registry boot. IBKR sidecars implement as no-op-returning-ok.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
 }
 
 enum BrokerId {
@@ -54,6 +57,7 @@ enum AssetClass {
   BOND = 7;
   MUTUAL_FUND = 8;
   WARRANT = 9;
+  CBBC = 10;  // HK callable bull/bear contract (牛熊證) — Phase 6 (M1)
 }
 
 enum OrderSide {
@@ -102,6 +106,13 @@ message HealthResponse {
   google.protobuf.Timestamp last_tick_at = 4;
   // git SHA at sidecar build time; lets the watchdog detect drift
   string sidecar_version = 5;
+  // Phase 6 H2: sidecar process boot time. Backend keys _configured by this
+  // value so a sidecar restart triggers a fresh Configure RPC.
+  google.protobuf.Timestamp started_at = 6;
+  // Phase 6 H4: sidecar self-reports broker_id; backend cross-checks against
+  // SIDECAR_BROKERS map. Mismatch fires BrokerLabelMismatch page alert.
+  // Values: "ibkr" | "futu" | "schwab".
+  string broker_id = 7;
 }
 
 // gateway_label and account_number are sidecar->backend internal.
@@ -273,4 +284,28 @@ message SearchContractsRequest {
 
 message SearchContractsResponse {
   repeated Contract contracts = 1; // existing Contract message reused
+}
+
+// Phase 6: per-sidecar credential bootstrap. Validation-only at the sidecar
+// side (parses RSA PEM, regex-checks MD5 hex). InitConnect runs in a
+// background task; ok=true does NOT mean OpenD reachable. See spec §4.2.
+message ConfigureRequest {
+  // 32-char lowercase hex MD5 of the trading password (for futu unlock_trade).
+  string unlock_pwd_md5 = 1;
+  // PEM-encoded RSA private key (1024-bit per Futu requirement; 2048-bit
+  // fails InitConnect per memory futu_1024_rsa_key.md). ~1.2KB ASCII PEM,
+  // well under gRPC default 4MB; `string` is correct, not `bytes`.
+  string rsa_priv_pem = 2;
+  string opend_host = 3;
+  int32 opend_port = 4;
+  string connection_id = 5;
+  // Future creds without proto edits.
+  map<string, string> metadata = 6;
+}
+
+message ConfigureResponse {
+  bool ok = 1;
+  // Empty on success; "invalid_unlock_pwd_md5" or "invalid_rsa_pem" on
+  // validation rejection.
+  string detail = 2;
 }
