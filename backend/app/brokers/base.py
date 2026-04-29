@@ -23,6 +23,7 @@ AssetClass = Literal[
     "BOND",
     "MUTUAL_FUND",
     "WARRANT",
+    "CBBC",  # Phase 6 (M1): HK callable bull/bear contract
 ]
 OrderSide = Literal["SIDE_UNSPECIFIED", "BUY", "SELL"]
 OrderType = Literal["TYPE_UNSPECIFIED", "MARKET", "LIMIT", "STOP", "STOP_LIMIT"]
