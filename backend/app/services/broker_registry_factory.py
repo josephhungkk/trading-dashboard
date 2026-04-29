@@ -17,7 +17,8 @@ SIDECAR_PORTS: dict[str, int] = {
     "futu": 18005,
 }
 
-# H4: used by BrokerRegistry to detect Health.broker_id mismatches against the registered label
+# H4: backend cross-checks Health.broker_id against this map at every probe.
+# Mismatch -> CRITICAL log + degraded label + BrokerLabelMismatch page alert.
 SIDECAR_BROKERS: dict[str, str] = {
     "isa-live": "ibkr",
     "isa-paper": "ibkr",

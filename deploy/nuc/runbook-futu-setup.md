@@ -89,7 +89,13 @@ curl -sf -X POST https://dashboard.kiusinghung.com/api/admin/config \
 ```powershell
 Remove-Item C:\dashboard\secrets\futu-pub.pem
 Clear-History
+Remove-Item "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt" -ErrorAction SilentlyContinue
+exit
 ```
+
+`Clear-History` only clears in-session `Get-History` output; the PSReadLine
+file on disk and any current-session variables (`$plain`, `$pwd`, `$md5`) live
+on until the shell exits, so close + reopen the terminal after this step.
 
 (Optional: wipe `futu-priv.pem` too — it already lives in `app_secrets` after step 5.)
 
