@@ -455,7 +455,7 @@ async def list_orders(
     result = await db.execute(
         text(
             f"""
-            SELECT id, account_id, broker_order_id, symbol, side, order_type, tif, qty,
+            SELECT id, account_id, broker_order_id, conid, symbol, side, order_type, tif, qty,
                    limit_price, stop_price, status, filled_qty, avg_fill_price, notional,
                    created_at, updated_at, last_event_at
               FROM orders
@@ -479,7 +479,7 @@ async def get_order_by_id(*, db: AsyncSession, order_id: UUID) -> OrderResponse 
     order_result = await db.execute(
         text(
             """
-            SELECT id, account_id, broker_order_id, symbol, side, order_type, tif, qty,
+            SELECT id, account_id, broker_order_id, conid, symbol, side, order_type, tif, qty,
                    limit_price, stop_price, status, filled_qty, avg_fill_price, notional,
                    created_at, updated_at, last_event_at
               FROM orders
@@ -989,6 +989,7 @@ def _order_response_from_mapping(
         id=row["id"],
         account_id=row["account_id"],
         broker_order_id=row["broker_order_id"],
+        conid=row["conid"],
         symbol=row["symbol"],
         side=row["side"],
         order_type=row["order_type"],

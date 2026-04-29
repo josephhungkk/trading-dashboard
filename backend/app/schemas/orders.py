@@ -131,6 +131,7 @@ class OrderResponse(BaseModel):
     id: UUID
     account_id: UUID
     broker_order_id: str | None
+    conid: str
     symbol: str
     side: Literal["BUY", "SELL"]
     order_type: Literal["MARKET", "LIMIT", "STOP"]

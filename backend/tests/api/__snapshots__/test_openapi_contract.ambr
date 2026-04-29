@@ -148,6 +148,10 @@
               ],
               "title": "Broker Order Id"
             },
+            "conid": {
+              "title": "Conid",
+              "type": "string"
+            },
             "created_at": {
               "format": "date-time",
               "title": "Created At",
@@ -275,6 +279,7 @@
             "id",
             "account_id",
             "broker_order_id",
+            "conid",
             "symbol",
             "side",
             "order_type",
@@ -403,6 +408,10 @@
           ],
           "title": "Broker Order Id"
         },
+        "conid": {
+          "title": "Conid",
+          "type": "string"
+        },
         "created_at": {
           "format": "date-time",
           "title": "Created At",
@@ -530,6 +539,7 @@
         "id",
         "account_id",
         "broker_order_id",
+        "conid",
         "symbol",
         "side",
         "order_type",

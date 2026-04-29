@@ -677,6 +677,8 @@ export interface components {
             avg_fill_price: string | null;
             /** Broker Order Id */
             broker_order_id: string | null;
+            /** Conid */
+            conid: string;
             /**
              * Created At
              * Format: date-time
