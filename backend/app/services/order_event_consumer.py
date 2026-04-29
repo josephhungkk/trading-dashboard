@@ -330,6 +330,7 @@ class OrderEventConsumer:
                 "rejected": "rejected",
                 "expired": "expired",
                 "inactive": "inactive",
+                "modified": "modified",
                 "unspecified": "pending_submit",
                 "status_unspecified": "pending_submit",
             }
@@ -960,6 +961,7 @@ def _normalize_status(status: str) -> str:
         "rejected": "rejected",
         "expired": "expired",
         "inactive": "inactive",
+        "modified": "modified",
     }
     try:
         return aliases[normalized]
