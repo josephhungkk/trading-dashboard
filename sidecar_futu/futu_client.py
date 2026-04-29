@@ -11,7 +11,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -110,6 +110,20 @@ class FutuClient:
                 self._init_loop(),
                 name="futu-init-connect",
             )
+
+    async def list_accounts(self) -> list[dict[str, Any]]:
+        """Return Futu account rows from the active trade context."""
+        trade_ctx = self._trade_ctx
+        if trade_ctx is None:
+            return []
+
+        def _list_accounts() -> list[dict[str, Any]]:
+            ret, data = trade_ctx.get_acc_list()
+            if ret != RET_OK:
+                raise RuntimeError(f"get_acc_list failed: {data}")
+            return cast("list[dict[str, Any]]", data.to_dict("records"))
+
+        return cast("list[dict[str, Any]]", await _run_in_worker_thread(_list_accounts))
 
     def _write_rsa_tempfile(self) -> None:
         if self._rsa_tempfile_path is not None:
