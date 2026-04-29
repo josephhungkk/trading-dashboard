@@ -130,7 +130,7 @@ Modify, bracket orders, fills history. Builds on 5b's place/cancel + the consume
 - [ ] **Periodic BASE-tag refresh for accounts added mid-run** — out of 5c scope; v0.5.2 `last_nlv_currency` fallback covers steady state.
 - [ ] **Multi-worker uvicorn** (Phase 9) — single-worker still load-bearing for the in-memory replay cache + commission buffer.
 - [ ] **On-demand quote subscribe for preview** — `_get_market_mid()` reads `mkt:mid:<conid>` from Redis only; sidecar populates this only for held positions. New tickers (e.g. AAPL when no AAPL position is held) → preview returns `503 market_mid_unavailable`. SGLN/VWRP work (held). Fix: eager `reqMktData` on contract-pick in `ContractSearchInput`, or backend-side one-shot subscribe with timeout in preview path. Substantial — focused v0.5.6+ feature.
-- [ ] **Brief 502 flash after backend restart** — nginx caches the backend container IP; after manual `docker compose restart backend` (without `deploy.sh`), `/api/*` 502s for ~1-2s until nginx re-resolves. `deploy.sh` already does the reload; manual restart doesn't. Add a wrapper script or alias.
+- [x] **Brief 502 flash after backend restart** — `scripts/restart-backend.sh` (commit `11cda91`) bundles `docker compose restart backend` with `nginx -s reload` so manual restarts don't 502. Use that instead of bare `docker compose restart backend`.
 - [ ] **OrderEvent stream observability — partial:** v0.5.5 added `orderevent_subscribed`/`orderevent_unsubscribed`/`orderevent_emit_queued` in sidecar + `stream_subscribed`/`stream_closed` in backend consumer. `broker_order_events_received_total` exists. Remaining: dashboard panel + alert on stream-down.
 
 ### v0.5.5 hotfix bundle shipped (2026-04-29) — end-to-end SIM canary debug pass
