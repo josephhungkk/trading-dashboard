@@ -1,10 +1,15 @@
-"""Prometheus metrics for the Futu sidecar."""
+"""Sidecar-local Prometheus counters."""
 from __future__ import annotations
 
-from prometheus_client import Counter
+from prometheus_client import CollectorRegistry, Counter
 
-account_skip_total = Counter(
-    "futu_account_skip_total",
-    "Futu account rows skipped while normalizing account list responses.",
-    ["reason"],
+# Local registry isolates sidecar metrics from any process-wide default that
+# tests or PyInstaller-bundled deps might touch.
+registry = CollectorRegistry()
+
+broker_normalize_unknown_total = Counter(
+    "broker_normalize_unknown_total",
+    "Sidecar normalize layer received an unknown enum value from broker SDK.",
+    labelnames=["label", "field"],
+    registry=registry,
 )

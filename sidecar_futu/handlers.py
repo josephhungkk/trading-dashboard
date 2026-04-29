@@ -7,10 +7,14 @@ from typing import Any
 import structlog
 from google.protobuf.timestamp_pb2 import Timestamp
 
+from sidecar_futu import metrics
 from sidecar_futu._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from sidecar_futu.futu_client import FutuClient
-from sidecar_futu.metrics import account_skip_total
-from sidecar_futu.normalize import account_from_futu_row
+from sidecar_futu.normalize import (
+    AccountMapped,
+    AccountSkipped,
+    account_from_futu_row,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -61,10 +65,13 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
     ) -> broker_pb2.AccountsResponse:
         accounts: list[broker_pb2.Account] = []
         for row in await self._client.list_accounts():
-            account, skip = account_from_futu_row(row)
-            if skip is not None:
-                account_skip_total.labels(reason=skip.value).inc()
+            result = account_from_futu_row(row)
+            if isinstance(result, AccountSkipped):
+                metrics.broker_normalize_unknown_total.labels(
+                    label="futu", field="trd_env"
+                ).inc()
+                log.warning("futu_normalize_unknown_trd_env", row=row)
                 continue
-            if account is not None:
-                accounts.append(account)
+            assert isinstance(result, AccountMapped)
+            accounts.append(result.account)
         return broker_pb2.AccountsResponse(accounts=accounts)
