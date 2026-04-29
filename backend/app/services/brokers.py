@@ -121,6 +121,31 @@ class BrokerSidecarClient:
         )
         return _health_from_proto(response)
 
+    async def configure(
+        self,
+        *,
+        unlock_pwd_md5: str,
+        rsa_priv_pem: str,
+        opend_host: str,
+        opend_port: int,
+        connection_id: str,
+    ) -> broker_pb2.ConfigureResponse:
+        request = broker_pb2.ConfigureRequest(
+            unlock_pwd_md5=unlock_pwd_md5,
+            rsa_priv_pem=rsa_priv_pem,
+            opend_host=opend_host,
+            opend_port=opend_port,
+            connection_id=connection_id,
+        )
+        return await self._call(
+            method="Configure",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.ConfigureRequest, broker_pb2.ConfigureResponse]",
+                self.stub.Configure,
+            ),
+            request=request,
+        )
+
     async def list_managed_accounts(self) -> list[base.Account]:
         response = await self._call(
             method="ListManagedAccounts",
@@ -436,13 +461,16 @@ def _timestamp_from_proto(timestamp: _Timestamp) -> datetime | None:
 
 
 def _health_from_proto(health: broker_pb2.HealthResponse) -> base.HealthResponse:
-    return base.HealthResponse(
+    response = base.HealthResponse(
         label=health.label,
         gateway_connected=health.gateway_connected,
         gateway_version=health.gateway_version,
         last_tick_at=_timestamp_from_proto(health.last_tick_at),
         sidecar_version=health.sidecar_version,
     )
+    object.__setattr__(response, "started_at", health.started_at)
+    object.__setattr__(response, "broker_id", health.broker_id)
+    return response
 
 
 def _account_from_proto(account: broker_pb2.Account) -> base.Account:
@@ -534,6 +562,8 @@ class BrokerRegistry:
         self._health_cache: dict[str, tuple[bool, float, base.HealthResponse | None]] = {}
         self._lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
+        self._configured: dict[str, datetime] = {}
+        self._configurer: Any | None = None
 
     async def get_client(self, label: str) -> BrokerSidecarClient:
         return self._clients[label]
@@ -598,6 +628,32 @@ class BrokerRegistry:
             metrics.broker_registry_label_mismatch_total.labels(label=label).inc()
             await self._mark_health(label, ok=False, health=health)
             return
+
+        # H2: if started_at differs from cached, sidecar restarted -> re-Configure.
+        started_at_dt: datetime | None = None
+        try:
+            started_at = cast("_Timestamp | None", getattr(health, "started_at", None))
+            if started_at is not None and started_at.seconds:
+                started_at_dt = started_at.ToDatetime(tzinfo=UTC)
+        except Exception:
+            started_at_dt = None
+
+        cached = self._configured.get(label)
+        configurer = self._configurer
+        if (
+            configurer is not None
+            and started_at_dt is not None
+            and label in getattr(configurer, "targets", set())
+            and (cached is None or cached != started_at_dt)
+        ):
+            try:
+                ok = await configurer.configure(label)
+                if ok and started_at_dt is not None:
+                    self._configured[label] = started_at_dt
+                elif not ok:
+                    log.warning("broker_reconfigure_returned_not_ok", label=label)
+            except Exception as exc:
+                log.warning("broker_reconfigure_failed", label=label, error=str(exc))
 
         await self._mark_health(label, ok=True, health=health)
         log.debug("broker_registry_probe_ok", label=label)

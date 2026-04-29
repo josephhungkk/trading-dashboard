@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import cast
 
+import structlog
 from cryptography.fernet import InvalidToken
 
 from app.services.brokers import BrokerRegistry, BrokerSidecarClient
 from app.services.config import ConfigService
+
+log = structlog.get_logger(__name__)
 
 SIDECAR_PORTS: dict[str, int] = {
     "isa-live": 18001,
@@ -30,6 +34,46 @@ SIDECAR_BROKERS: dict[str, str] = {
 
 class MissingBrokerSecrets(Exception):  # noqa: N818
     """Raised when the broker mTLS secret set is incomplete."""
+
+
+@dataclass
+class BrokerConfigurer:
+    """Configures broker sidecars by reading creds from ConfigService."""
+
+    config_service: ConfigService
+    registry: BrokerRegistry
+    targets: set[str]
+
+    async def configure(self, label: str) -> bool:
+        if label not in self.targets:
+            return True
+
+        unlock_pwd_md5 = await self.config_service.reveal_secret(
+            "broker", f"{label}.unlock_pwd_md5"
+        )
+        rsa_priv_pem = await self.config_service.reveal_secret("broker", f"{label}.rsa_priv_pem")
+        opend_host = await self.config_service.get("broker", f"{label}.opend_host") or "127.0.0.1"
+        opend_port_raw = await self.config_service.get("broker", f"{label}.opend_port")
+        opend_port = int(opend_port_raw) if opend_port_raw else 11111
+        connection_id = await self.config_service.get("broker", f"{label}.connection_id") or ""
+
+        if not unlock_pwd_md5 or not rsa_priv_pem:
+            log.warning("broker_configure_creds_missing", label=label)
+            return False
+
+        client = await self.registry.get_client(label)
+        try:
+            resp = await client.configure(
+                unlock_pwd_md5=unlock_pwd_md5,
+                rsa_priv_pem=rsa_priv_pem,
+                opend_host=opend_host,
+                opend_port=opend_port,
+                connection_id=connection_id,
+            )
+        except Exception as exc:
+            log.warning("broker_configure_call_failed", label=label, error=str(exc))
+            return False
+        return bool(resp.ok)
 
 
 async def build_broker_registry(
@@ -62,7 +106,7 @@ async def build_broker_registry(
     key_pem = secrets["mtls.client_key_pem"].encode()
     ca_bundle_pem = secrets["mtls.ca_bundle_pem"].encode()
 
-    return BrokerRegistry(
+    registry = BrokerRegistry(
         {
             label: BrokerSidecarClient(
                 label=label,
@@ -74,3 +118,18 @@ async def build_broker_registry(
             for label, port in SIDECAR_PORTS.items()
         }
     )
+
+    configurer = BrokerConfigurer(
+        config_service=config_service,
+        registry=registry,
+        targets={"futu"},
+    )
+    registry._configurer = configurer
+
+    for label in configurer.targets:
+        try:
+            await configurer.configure(label)
+        except Exception as exc:
+            log.warning("broker_initial_configure_failed", label=label, error=str(exc))
+
+    return registry
