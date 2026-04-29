@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 log = structlog.get_logger(__name__)
@@ -14,7 +15,7 @@ log = structlog.get_logger(__name__)
 _MD5_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class FutuCreds:
     unlock_pwd_md5: str
     rsa_priv_pem: str
@@ -32,40 +33,44 @@ class FutuClient:
         self._trade_ctx: Any | None = None
         self.gateway_connected: bool = False
         self._order_event_queues: dict[str, list[asyncio.Queue[Any]]] = {}
+        self._configure_lock = asyncio.Lock()
 
     def validate(self, request: Any) -> str | None:
         """Return error detail string on rejection, None on success."""
         if not _MD5_PATTERN.match(request.unlock_pwd_md5):
             return "invalid_unlock_pwd_md5"
+        rsa_priv_pem = request.rsa_priv_pem.encode()
         try:
-            load_pem_private_key(request.rsa_priv_pem.encode(), password=None)
-        except Exception:  # noqa: BLE001, RUF100
+            load_pem_private_key(rsa_priv_pem, password=None)
+        except (ValueError, TypeError, UnsupportedAlgorithm):
             return "invalid_rsa_pem"
         return None
 
     async def configure(self, request: Any) -> None:
         """Cache creds and restart the InitConnect background task."""
-        if self._init_task is not None and not self._init_task.done():
-            self._init_task.cancel()
-            try:
-                await self._init_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                log.warning("futu_init_task_cleanup_error", error=str(exc))
+        async with self._configure_lock:
+            if self._init_task is not None and not self._init_task.done():
+                self._init_task.cancel()
+                try:
+                    await self._init_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    log.warning("futu_init_task_cleanup_error", error=str(exc))
+                    raise
 
-        self._creds = FutuCreds(
-            unlock_pwd_md5=request.unlock_pwd_md5,
-            rsa_priv_pem=request.rsa_priv_pem,
-            opend_host=request.opend_host,
-            opend_port=request.opend_port,
-            connection_id=request.connection_id,
-        )
-        self.gateway_connected = False
-        self._init_task = asyncio.create_task(
-            self._init_loop(),
-            name="futu-init-connect",
-        )
+            self._creds = FutuCreds(
+                unlock_pwd_md5=request.unlock_pwd_md5,
+                rsa_priv_pem=request.rsa_priv_pem,
+                opend_host=request.opend_host,
+                opend_port=request.opend_port,
+                connection_id=request.connection_id,
+            )
+            self.gateway_connected = False
+            self._init_task = asyncio.create_task(
+                self._init_loop(),
+                name="futu-init-connect",
+            )
 
     async def _init_loop(self) -> None:
         """Stub: B4 replaces this with the real InitConnect loop."""

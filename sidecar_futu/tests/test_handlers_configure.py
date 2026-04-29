@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -88,4 +89,11 @@ async def test_configure_cancels_inflight():
     second_task = handlers._client._init_task
 
     assert second_task is not first_task
-    assert first_task.cancelled() or first_task.done()
+    assert first_task.cancelled()
+
+    assert second_task is not None
+    second_task.cancel()
+    try:
+        await second_task
+    except asyncio.CancelledError:
+        pass
