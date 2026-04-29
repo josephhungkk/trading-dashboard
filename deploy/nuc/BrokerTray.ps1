@@ -284,7 +284,10 @@ function Get-BrokerAccounts {
   try {
     [Net.ServicePointManager]::ServerCertificateValidationCallback = { param($a,$b,$c,$d) $true }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    $req = [Net.HttpWebRequest]::Create('https://10.10.0.1/api/brokers/accounts')
+    # WG path is HTTP-only: nginx on the VPS binds :80, TLS is terminated by
+    # Cloudflare Tunnel on the public path. WG already encrypts at the network
+    # layer, so https here is both broken (no listener on :443) and redundant.
+    $req = [Net.HttpWebRequest]::Create('http://10.10.0.1/api/brokers/accounts')
     $req.Host = 'dashboard.kiusinghung.com'
     $req.Timeout = 3000
     $req.Method  = 'GET'
@@ -318,7 +321,7 @@ function Test-Schwab {
   try {
     [Net.ServicePointManager]::ServerCertificateValidationCallback = { param($a,$b,$c,$d) $true }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    $req = [Net.HttpWebRequest]::Create('https://10.10.0.1/api/schwab/health')
+    $req = [Net.HttpWebRequest]::Create('http://10.10.0.1/api/schwab/health')
     $req.Host = 'dashboard.kiusinghung.com'
     $req.Timeout = 3000
     $req.Method  = 'GET'
