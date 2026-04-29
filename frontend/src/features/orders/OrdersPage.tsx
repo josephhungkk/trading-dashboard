@@ -122,9 +122,22 @@ export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.E
     try {
       await cancelOrder(orderToCancel.id);
       toast({ title: 'Cancel requested', description: `Order #${orderToCancel.id}`, tone: 'success' });
+      // 5c v0.5.5: optimistic store update. Backend cancel endpoint returns 202
+      // before status flips (consumer owns status update via synthetic event,
+      // ~50-200ms later). Set status='cancelled' immediately so the UI doesn't
+      // appear stuck in 'submitted'. Consumer's terminal-sticky CASE keeps it
+      // cancelled when the synthetic event arrives.
+      const cancelledOrder = useOrdersStore.getState().orders[orderToCancel.id];
+      if (cancelledOrder) {
+        useOrdersStore.getState().applyEvent({
+          ...(cancelledOrder as Record<string, unknown>),
+          id: cancelledOrder.id,
+          order_id: cancelledOrder.id,
+          status: 'cancelled',
+          last_event_at: new Date().toISOString(),
+        });
+      }
       setOrderToCancel(null);
-      // 5c v0.5.5: refetch so the row visibly transitions to cancelled
-      // immediately instead of waiting for SSE.
       void fetchAndSync();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
