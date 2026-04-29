@@ -237,8 +237,8 @@ export function TradeTicketModal({
   // Preview (debounced) — fires on every form change
   // ------------------------------------------------------------------
 
-  const fetchPreview = React.useCallback(async (): Promise<void> => {
-    if (!canPreview) return;
+  const fetchPreview = React.useCallback(async (): Promise<PreviewResponse | null> => {
+    if (!canPreview) return null;
     const body = {
       account_id: accountId,
       conid: form.conid.trim(),
@@ -256,11 +256,13 @@ export function TradeTicketModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (!response.ok) return;
+      if (!response.ok) return null;
       const data = (await response.json()) as PreviewResponse;
       setPreview(data);
+      return data;
     } catch {
       // Preview errors are non-blocking
+      return null;
     }
   }, [accountId, canPreview, form, needsLimitPrice, needsStopPrice]);
 
@@ -296,6 +298,11 @@ export function TradeTicketModal({
 
     setSubmitting(true);
     try {
+      // 5c v0.5.5: force a fresh preview synchronously so the nonce hashes the
+      // EXACT body we're about to submit. Without this, a fast user can submit
+      // before the 300ms debounce settles and the stale nonce mismatches the
+      // current form values → backend 422 payload_mismatch.
+      const fresh = await fetchPreview();
       const body: Record<string, unknown> = {
         account_id: accountId,
         conid: form.conid.trim(),
@@ -305,7 +312,7 @@ export function TradeTicketModal({
         qty: form.qty.trim() as DecimalString,
         limit_price: needsLimitPrice ? (form.limitPrice.trim() as DecimalString) : null,
         stop_price: needsStopPrice ? (form.stopPrice.trim() as DecimalString) : null,
-        nonce: preview?.nonce ?? null,
+        nonce: fresh?.nonce ?? preview?.nonce ?? null,
       };
 
       if (isBracket) {
