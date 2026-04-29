@@ -38,6 +38,7 @@ type UiOrderStatus =
 interface UiOrder {
   id: string;
   accountId: string;
+  conid: string;
   symbol: string;
   side: 'BUY' | 'SELL' | 'buy' | 'sell';
   qty: string;
@@ -206,7 +207,7 @@ export function OrdersPage({ storySnapshot }: OrdersPageProps = {}): React.JSX.E
           orderId={modifyTarget.id}
           symbol={modifyTarget.symbol}
           initialOrder={{
-            conid: '',
+            conid: modifyTarget.conid,
             side: modifyTarget.side === 'buy' ? 'BUY' : modifyTarget.side === 'sell' ? 'SELL' : modifyTarget.side,
             order_type: modifyTarget.orderType === 'LIMIT' || modifyTarget.orderType === 'STOP' ? modifyTarget.orderType : 'MARKET',
             qty: Number(modifyTarget.qty),
@@ -445,6 +446,7 @@ function normalizeOrder(order: StoreOrderResponse): UiOrder {
   return {
     id: String(order.id),
     accountId: readString(order, 'account_id', readString(order, 'accountId', '')),
+    conid: readString(order, 'conid', ''),
     symbol: readString(order, 'symbol', '-'),
     side: normalizeSide(readString(order, 'side', 'BUY')),
     qty: readString(order, 'qty', '0'),
