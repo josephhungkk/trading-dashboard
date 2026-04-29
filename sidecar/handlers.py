@@ -161,8 +161,15 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         # Maps SIM-<uuid> broker_order_id -> {"client_order_id": ..., "account_number": ...}.
         # Required by CancelOrder (SIM branch) to (1) recognize a SIM order without
         # int-parsing the prefix, (2) reconstruct the orderRef + account for the
-        # synthetic cancellation event fired through ib.orderStatusEvent.emit().
+        # synthetic cancellation event.
         self._sim_orders: dict[str, dict[str, str]] = {}
+        # 5c v0.5.5 fix: ib.orderStatusEvent.emit() does NOT trigger externally
+        # registered listeners under ib_async's eventkit (cross-loop / IB-callback-
+        # only dispatch). SIM echo paths bypass it by writing directly to the
+        # OrderEvent gRPC stream's per-account queue list. Keyed by account_number.
+        self._order_event_queues: dict[
+            str, list[asyncio.Queue[broker_pb2.OrderEventMessage]]
+        ] = {}
 
     async def Health(  # noqa: N802 — gRPC servicer methods mirror proto rpc names
         self,
@@ -507,9 +514,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 fills=[],
                 log=[],
             )
-            self.ib.orderStatusEvent.emit(synthetic_trade)  # type: ignore[attr-defined, unused-ignore]
+            # 5c v0.5.5 fix: write directly to OrderEvent queues (see ModifyOrder).
+            self._dispatch_sim_event(
+                account_number=sim_meta["account_number"],
+                broker_order_id=broker_order_id,
+                client_order_id=sim_meta["client_order_id"],
+                status="cancelled",
+            )
             metrics.broker_sim_cancel_echo_total.labels(label=self.label).inc()
-            # 5c v0.5.5 diagnostic: confirm synthetic emit fired.
             logger.info(
                 "sim_cancel_echo_emitted",
                 label=self.label,
@@ -572,9 +584,15 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 fills=[],
                 log=[],
             )
-            self.ib.orderStatusEvent.emit(synthetic_trade)  # type: ignore[attr-defined, unused-ignore]
-            # 5c v0.5.5 diagnostic: confirm synthetic emit fired (paired with
-            # orderevent_emit_queued log to verify subscriber received it).
+            # 5c v0.5.5 fix: write the synthetic event directly to all OrderEvent
+            # queues registered for this account. ib.orderStatusEvent.emit() is
+            # one-way (IB → handlers); manual emit doesn't trigger our listeners.
+            self._dispatch_sim_event(
+                account_number=sim_meta["account_number"],
+                broker_order_id=broker_order_id,
+                client_order_id=sim_meta["client_order_id"],
+                status="modified",
+            )
             logger.info(
                 "sim_modify_echo_emitted",
                 label=self.label,
@@ -795,6 +813,9 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.ib.execDetailsEvent += _on_exec_details  # type: ignore[attr-defined, unused-ignore]
         if commission_report_event is not None:
             self.ib.commissionReportEvent += _on_commission_report  # type: ignore[attr-defined, unused-ignore]
+        # 5c v0.5.5 fix: register this queue so SIM echo paths can put directly
+        # (bypassing ib.orderStatusEvent.emit which doesn't trigger our listeners).
+        self._order_event_queues.setdefault(request.account_number, []).append(queue)
         # 5c v0.5.5 diagnostic: log subscribe/unsubscribe lifecycle so SIM-echo
         # propagation gaps are visible (paired with backend stream_subscribed log).
         logger.info(
@@ -810,6 +831,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             self.ib.execDetailsEvent -= _on_exec_details  # type: ignore[attr-defined, unused-ignore]
             if commission_report_event is not None:
                 self.ib.commissionReportEvent -= _on_commission_report  # type: ignore[attr-defined, unused-ignore]
+            queues = self._order_event_queues.get(request.account_number)
+            if queues is not None:
+                try:
+                    queues.remove(queue)
+                except ValueError:
+                    pass
+                if not queues:
+                    self._order_event_queues.pop(request.account_number, None)
             logger.info(
                 "orderevent_unsubscribed",
                 label=self.label,
@@ -924,6 +953,49 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 for entry in trade.log
             ],
         }
+
+    def _dispatch_sim_event(
+        self,
+        *,
+        account_number: str,
+        broker_order_id: str,
+        client_order_id: str,
+        status: str,
+    ) -> None:
+        """5c v0.5.5: put a synthetic SIM event into all OrderEvent queues
+        registered for ``account_number``. Bypasses ``ib.orderStatusEvent.emit``
+        which doesn't dispatch to externally-registered listeners under ib_async.
+        """
+        message = broker_pb2.OrderEventMessage(
+            broker_order_id=broker_order_id,
+            client_order_id=client_order_id,
+            status=status,
+            filled_qty="0",
+            avg_fill_price="0",
+            raw_payload=json.dumps(
+                {"sim_synthetic": True, "account_number": account_number}
+            ),
+            exec_id="",
+            kind="status",
+        )
+        message.event_at.FromDatetime(datetime.now(UTC))
+        queues = self._order_event_queues.get(account_number, [])
+        for queue in queues:
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                metrics.broker_order_events_dropped_total.labels(
+                    reason="queue_full"
+                ).inc()
+            else:
+                logger.info(
+                    "orderevent_emit_queued",
+                    label=self.label,
+                    account_number=account_number,
+                    broker_order_id=broker_order_id,
+                    status=status,
+                    kind="sim_synthetic",
+                )
 
     def _proto_event_from_trade(
         self,

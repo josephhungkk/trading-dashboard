@@ -59,12 +59,16 @@ async def test_cancel_sim_order_returns_accepted_false_when_unknown() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_sim_order_returns_accepted_true_and_removes_registry_entry() -> None:
+    import asyncio
+
     ib = FakeIB()
     h = _handlers(ib)
     h._sim_orders["SIM-123"] = {
         "client_order_id": "client-order-1",
         "account_number": "U1111111",
     }
+    queue: asyncio.Queue = asyncio.Queue()
+    h._order_event_queues["U1111111"] = [queue]
 
     response = await h.CancelOrder(
         broker_pb2.CancelOrderRequest(
@@ -76,17 +80,21 @@ async def test_cancel_sim_order_returns_accepted_true_and_removes_registry_entry
 
     assert response.accepted is True
     assert "SIM-123" not in h._sim_orders
-    assert len(ib.orderStatusEvent.emitted) == 1
+    assert queue.qsize() == 1
 
 
 @pytest.mark.asyncio
 async def test_cancel_sim_order_emits_synthetic_cancelled_trade_with_original_metadata() -> None:
+    import asyncio
+
     ib = FakeIB()
     h = _handlers(ib)
     h._sim_orders["SIM-456"] = {
         "client_order_id": "client-order-456",
         "account_number": "U2222222",
     }
+    queue: asyncio.Queue = asyncio.Queue()
+    h._order_event_queues["U2222222"] = [queue]
 
     await h.CancelOrder(
         broker_pb2.CancelOrderRequest(
@@ -96,13 +104,13 @@ async def test_cancel_sim_order_emits_synthetic_cancelled_trade_with_original_me
         context=object(),
     )
 
-    trade = ib.orderStatusEvent.emitted[0]
-    assert trade.order.permId == "SIM-456"
-    assert trade.order.orderRef == "client-order-456"
-    assert trade.order.account == "U2222222"
-    assert trade.orderStatus.status == "Cancelled"
-    assert str(trade.orderStatus.filled) == "0"
-    assert str(trade.orderStatus.avgFillPrice) == "0"
+    msg = queue.get_nowait()
+    assert msg.broker_order_id == "SIM-456"
+    assert msg.client_order_id == "client-order-456"
+    assert msg.status == "cancelled"
+    assert msg.kind == "status"
+    assert msg.filled_qty == "0"
+    assert msg.avg_fill_price == "0"
 
 
 @pytest.mark.asyncio

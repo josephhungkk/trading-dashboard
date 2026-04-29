@@ -47,13 +47,18 @@ async def test_modify_sim_unregistered_returns_not_found(handler) -> None:
 
 
 @pytest.mark.asyncio
-async def test_modify_sim_registered_emits_synthetic_modified_event(handler, mock_ib) -> None:
-    """Registered SIM-* id -> emit synthetic Modified event + return same id."""
+async def test_modify_sim_registered_emits_synthetic_modified_event(handler) -> None:
+    """Registered SIM-* id -> dispatch synthetic Modified event into the
+    OrderEvent queue for that account, return same id."""
+    import asyncio
+
     sim_id = "SIM-abc123"
     handler._sim_orders[sim_id] = {
         "client_order_id": "client-abc",
         "account_number": "DU111",
     }
+    queue: asyncio.Queue = asyncio.Queue()
+    handler._order_event_queues["DU111"] = [queue]
     request = broker_pb2.ModifyOrderRequest(
         broker_order_id=sim_id,
         account_number="DU111",
@@ -63,12 +68,12 @@ async def test_modify_sim_registered_emits_synthetic_modified_event(handler, moc
 
     assert response.broker_order_id == sim_id
     assert response.status == "Modified"
-    mock_ib.orderStatusEvent.emit.assert_called_once()
-    synthetic = mock_ib.orderStatusEvent.emit.call_args.args[0]
-    assert synthetic.orderStatus.status == "Modified"
-    assert synthetic.order.permId == sim_id
-    assert synthetic.order.orderRef == "client-abc"
-    assert synthetic.order.account == "DU111"
+    assert queue.qsize() == 1
+    msg = queue.get_nowait()
+    assert msg.broker_order_id == sim_id
+    assert msg.client_order_id == "client-abc"
+    assert msg.status == "modified"
+    assert msg.kind == "status"
 
 
 @pytest.mark.asyncio
