@@ -8,6 +8,7 @@ export interface OrderResponse {
 
 export interface OrderEventLike {
   id: string;
+  order_id?: string;
   last_event_at: string;
   [key: string]: unknown;
 }
@@ -44,15 +45,20 @@ export const useOrdersStore = create<OrdersState>((set, get) => ({
     },
   })),
   applyEvent: (event) => {
-    const existing = get().orders[event.id];
+    // SSE event's `id` is the audit-row event id; the order's id lives in
+    // `event.order_id`. Prefer order_id; fall back to id for backwards-compat.
+    const orderId = event.order_id ?? event.id;
+    if (!orderId) return;
+    const existing = get().orders[orderId];
     if (existing && existing.last_event_at >= event.last_event_at) return;
 
     set((state) => ({
       orders: {
         ...state.orders,
-        [event.id]: {
+        [orderId]: {
           ...existing,
           ...event,
+          id: orderId,
         },
       },
     }));
