@@ -35,15 +35,40 @@ def handler(mock_ib: MagicMock) -> handlers.BrokerHandlers:
 
 
 @pytest.mark.asyncio
-async def test_modify_sim_prefix_rejected(handler) -> None:
-    """SIM-prefixed broker_order_id rejected with INVALID_ARGUMENT."""
+async def test_modify_sim_unregistered_returns_not_found(handler) -> None:
+    """Unregistered SIM-* id (e.g. after sidecar restart) -> NOT_FOUND."""
     request = broker_pb2.ModifyOrderRequest(
         broker_order_id="SIM-deadbeef",
         account_number="DU111",
     )
     with pytest.raises(grpc.RpcError) as exc:
         await handler.ModifyOrder(request, context=MagicMock())
-    assert _rpc_code(exc.value) == grpc.StatusCode.INVALID_ARGUMENT
+    assert _rpc_code(exc.value) == grpc.StatusCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_modify_sim_registered_emits_synthetic_modified_event(handler, mock_ib) -> None:
+    """Registered SIM-* id -> emit synthetic Modified event + return same id."""
+    sim_id = "SIM-abc123"
+    handler._sim_orders[sim_id] = {
+        "client_order_id": "client-abc",
+        "account_number": "DU111",
+    }
+    request = broker_pb2.ModifyOrderRequest(
+        broker_order_id=sim_id,
+        account_number="DU111",
+    )
+
+    response = await handler.ModifyOrder(request, context=MagicMock())
+
+    assert response.broker_order_id == sim_id
+    assert response.status == "Modified"
+    mock_ib.orderStatusEvent.emit.assert_called_once()
+    synthetic = mock_ib.orderStatusEvent.emit.call_args.args[0]
+    assert synthetic.orderStatus.status == "Modified"
+    assert synthetic.order.permId == sim_id
+    assert synthetic.order.orderRef == "client-abc"
+    assert synthetic.order.account == "DU111"
 
 
 @pytest.mark.asyncio

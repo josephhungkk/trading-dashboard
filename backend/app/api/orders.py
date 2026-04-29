@@ -26,7 +26,7 @@ from app.schemas.orders import (
     PreviewResponse,
 )
 from app.services import orders_service
-from app.services.brokers import BrokerRegistry
+from app.services.brokers import BrokerRegistry, BrokerSidecarUnavailable
 from app.services.config import ConfigService
 from app.services.orders_service import CancelUnavailable, PreviewUnavailable, RedisLike
 from app.services.orders_sse import order_events_generator
@@ -240,6 +240,23 @@ async def modify_order(
             status_code=exc.status_code,
             content=exc.payload,
             headers=exc.headers,
+        )
+    except BrokerSidecarUnavailable as exc:
+        # 5c v0.5.5 follow-up B: sidecar INVALID_ARGUMENT (e.g. simulator-modify
+        # rejection, NOT_FOUND for unknown broker_order_id) wraps as gRPC UNKNOWN
+        # in the python client. Surface the underlying detail as a clean 422
+        # instead of letting the exception bubble to a 500.
+        if exc.grpc_code in {"UNKNOWN", "INVALID_ARGUMENT", "NOT_FOUND"}:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "broker_modify_rejected",
+                    "detail": exc.grpc_details or str(exc),
+                },
+            )
+        return JSONResponse(
+            status_code=503,
+            content={"error": "sidecar_unreachable", "label": exc.label},
         )
 
 

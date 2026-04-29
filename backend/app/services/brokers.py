@@ -48,9 +48,18 @@ class _AccountRow:
 
 
 class BrokerSidecarUnavailable(Exception):  # noqa: N818
-    def __init__(self, message: str, *, label: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        label: str = "",
+        grpc_code: str = "",
+        grpc_details: str = "",
+    ) -> None:
         super().__init__(message)
         self.label = label
+        self.grpc_code = grpc_code
+        self.grpc_details = grpc_details
 
 
 class BrokerSidecarTimeout(Exception):  # noqa: N818
@@ -352,6 +361,8 @@ class BrokerSidecarClient:
             raise BrokerSidecarUnavailable(
                 f"broker sidecar {self.label} {method} unavailable: {exc.code().name}",
                 label=self.label,
+                grpc_code=exc.code().name,
+                grpc_details=str(exc.details() or ""),
             ) from exc
 
         log.info(
@@ -401,6 +412,8 @@ class BrokerSidecarClient:
             raise BrokerSidecarUnavailable(
                 f"broker sidecar {self.label} {method} unavailable: {exc.code().name}",
                 label=self.label,
+                grpc_code=exc.code().name,
+                grpc_details=str(exc.details() or ""),
             ) from exc
 
         log.info(

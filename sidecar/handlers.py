@@ -532,9 +532,42 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         broker_order_id = request.broker_order_id
 
         if broker_order_id.startswith("SIM-"):
-            raise grpc.RpcError(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                "modify on simulator orders not supported",
+            # 5c v0.5.5 follow-up A: SIM modify echo (mirrors 5b.1 SIM cancel echo).
+            # The broker_order_id stays the same — IB-side modify reuses the perm-id;
+            # the simulator just emits a synthetic "Modified" status event so the
+            # backend consumer transitions the orders row.
+            sim_meta = self._sim_orders.get(broker_order_id)
+            if sim_meta is None:
+                raise grpc.RpcError(
+                    grpc.StatusCode.NOT_FOUND,
+                    f"sim order {broker_order_id} not registered (sidecar restart drops the map)",
+                )
+
+            from decimal import Decimal
+            from types import SimpleNamespace
+
+            synthetic_trade = SimpleNamespace(
+                order=SimpleNamespace(
+                    permId=broker_order_id,
+                    orderRef=sim_meta["client_order_id"],
+                    account=sim_meta["account_number"],
+                ),
+                orderStatus=SimpleNamespace(
+                    status="Modified",
+                    filled=Decimal("0"),
+                    avgFillPrice=Decimal("0"),
+                ),
+                contract=SimpleNamespace(
+                    currency="USD", symbol="", exchange="",
+                    conId=0, secType="STK", localSymbol="",
+                ),
+                fills=[],
+                log=[],
+            )
+            self.ib.orderStatusEvent.emit(synthetic_trade)  # type: ignore[attr-defined, unused-ignore]
+            return broker_pb2.ModifyOrderResponse(
+                broker_order_id=broker_order_id,
+                status="Modified",
             )
 
         try:

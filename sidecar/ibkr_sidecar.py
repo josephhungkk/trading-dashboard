@@ -124,6 +124,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tls-crl-pem", type=Path, default=_path_env("TLS_CRL_PEM"))
     parser.add_argument("--log-dir", type=Path, default=_path_env("LOG_DIR"))
     parser.add_argument("--state-dir", type=Path, default=_path_env("STATE_DIR"))
+    # 5c v0.5.5 follow-up C: opt-out of simulator branch so PlaceOrder + ModifyOrder
+    # + PlaceBracket route to real ib_async paper/live submission. Defaults to
+    # simulator_only=True for safety (prevents accidental real-money placement on
+    # a fresh deploy). Pass --no-simulator on paper gateways to enable real broker
+    # placement.
+    parser.add_argument(
+        "--no-simulator",
+        dest="simulator_only",
+        action="store_false",
+        default=True,
+        help="route PlaceOrder/ModifyOrder/PlaceBracket to real IBKR instead of the simulator",
+    )
     return parser
 
 
@@ -288,6 +300,7 @@ async def run(args: argparse.Namespace) -> None:
                 label=args.label,
                 version=SIDECAR_VERSION,
                 last_tick_ref=last_tick_ref,
+                simulator_only=args.simulator_only,
             ),
             server,
         )
