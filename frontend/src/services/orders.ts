@@ -209,7 +209,7 @@ export async function searchContracts(
     credentials: 'include',
   };
   if (signal !== undefined) init.signal = signal;
-  const response = await fetch(`/api/contracts?${params.toString()}`, init);
+  const response = await fetch(`/api/contracts/search?${params.toString()}`, init);
   const body = await readOrThrow<ContractSearchResponse>(response);
   return body.contracts;
 }
