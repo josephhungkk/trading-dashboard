@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import grpc  # type: ignore[import-untyped]
 import structlog
 from google.protobuf.timestamp_pb2 import Timestamp
 
@@ -14,6 +15,7 @@ from sidecar_futu.normalize import (
     AccountMapped,
     AccountSkipped,
     account_from_futu_row,
+    contract_from_futu_row,
     order_from_futu_row,
     position_from_futu_row,
     summary_from_futu_row,
@@ -105,3 +107,31 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         rows = await self._client.get_orders(request.account_number)
         orders = [order_from_futu_row(row) for row in rows]
         return broker_pb2.OrdersResponse(orders=orders)
+
+    async def SearchContracts(  # noqa: N802
+        self,
+        request: broker_pb2.SearchContractsRequest,
+        context: Any,
+    ) -> broker_pb2.SearchContractsResponse:
+        rows = await self._client.search_contracts(request.query)
+        contracts = [contract_from_futu_row(row) for row in rows]
+        for contract in contracts:
+            if contract.symbol.startswith("HK."):
+                contract.exchange = "SEHK"
+        return broker_pb2.SearchContractsResponse(contracts=contracts)
+
+    async def GetContract(  # noqa: N802
+        self,
+        request: broker_pb2.ContractRef,
+        context: Any,
+    ) -> broker_pb2.ContractResponse:
+        rows = await self._client.search_contracts(request.conid)
+        if not rows:
+            await context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"contract not found: {request.conid}",
+            )
+        contract = contract_from_futu_row(rows[0])
+        if contract.symbol.startswith("HK."):
+            contract.exchange = "SEHK"
+        return broker_pb2.ContractResponse(contract=contract)

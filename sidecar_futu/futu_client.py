@@ -27,7 +27,16 @@ except OSError:
     _futu_import_home.mkdir(parents=True, exist_ok=True)
     os.environ["HOME"] = str(_futu_import_home)
 
-from futu import RET_OK, OpenSecTradeContext, SecurityFirm, SysConfig, TrdMarket  # noqa: E402
+from futu import (  # noqa: E402
+    RET_OK,
+    Market,
+    OpenQuoteContext,
+    OpenSecTradeContext,
+    SecurityFirm,
+    SecurityType,
+    SysConfig,
+    TrdMarket,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -200,6 +209,48 @@ class FutuClient:
                 )
                 return []
             return cast("list[dict[str, Any]]", data.to_dict("records"))
+
+        return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
+
+    async def search_contracts(self, query: str) -> list[dict[str, Any]]:
+        if not self.gateway_connected or self._creds is None:
+            return []
+        creds = self._creds
+        needle = query.strip().casefold()
+        code_list = [query.strip()] if "." in query else None
+
+        def _query() -> list[dict[str, Any]]:
+            quote_ctx: Any | None = None
+            try:
+                quote_ctx = OpenQuoteContext(
+                    host=creds.opend_host,
+                    port=creds.opend_port,
+                    is_encrypt=True,
+                )
+                ret, data = quote_ctx.get_stock_basicinfo(
+                    Market.HK,
+                    SecurityType.STOCK,
+                    code_list=code_list,
+                )
+                if ret != RET_OK:
+                    log.warning("futu_get_stock_basicinfo_failed", query=query, msg=str(data))
+                    return []
+
+                rows: list[dict[str, Any]] = []
+                for row in data.to_dict("records"):
+                    code = str(row.get("code", ""))
+                    name = str(row.get("name", ""))
+                    if needle and needle not in code.casefold() and needle not in name.casefold():
+                        continue
+                    remapped = dict(row)
+                    remapped["stock_name"] = name
+                    remapped["security_type"] = row.get("stock_type", "")
+                    remapped["currency"] = "HKD"
+                    rows.append(remapped)
+                return rows
+            finally:
+                if quote_ctx is not None:
+                    quote_ctx.close()
 
         return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
 
