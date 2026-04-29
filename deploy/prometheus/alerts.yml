@@ -40,3 +40,35 @@ groups:
         annotations:
           summary: "SIM cancel echo rate diverges from cancel HTTP rate"
           description: "broker_sim_cancel_echo_total rate {{ $value }} differs from cancel HTTP 202 rate by >10% - synthetic emit may be dropping events or extra echoes are firing."
+
+  - name: phase5c_advanced_orders
+    rules:
+      - alert: BrokerBracketCascadeLag
+        expr: |
+          histogram_quantile(0.99,
+            rate(broker_bracket_cancel_cascade_seconds_bucket[5m])
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bracket cancel cascade > 5s p99"
+          description: "After parent cancel, OCA-attached children took > 5s to reach cancelled status (p99 over 5m)."
+
+      - alert: BrokerPendingFillsBacklog
+        expr: pending_fills_backlog_count > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "pending_fills has rows older than 5 min"
+          description: "pending_fills_backlog_count is {{ $value }} over 5m. Manual reconciliation may be needed - sweeper drains every 30s but couldn't resolve the broker_order_id+account_id to an orders row."
+
+      - alert: CommissionBufferOverflow
+        expr: increase(commission_buffer_overflow_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Commission buffer exceeded 1000 entries"
+          description: "In-memory _COMMISSION_BUFFER overflow - many commissionReport events arrived without matching fill rows. Indicates fills INSERT pipeline is stalled or exec_id mismatch upstream."
