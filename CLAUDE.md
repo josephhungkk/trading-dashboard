@@ -74,74 +74,23 @@ Rules:
 - **C1 race-free soft-delete:** `BrokerDiscoverer` only soft-deletes `broker_accounts` rows whose `last_seen_via` matches a label that is healthy THIS tick (`last_seen_via = ANY(:healthy_labels)`). When all sidecars are unhealthy, the predicate is empty and zero rows are soft-deleted.
 - **NUC ops surface:** `deploy/nuc/` contains all PowerShell + VBS launchers + watchdog. `provision-and-publish.ps1` is the one-shot mTLS rotation flow; `revoke-cert.ps1 -Serial <serial>` revokes; `renew-sidecar-mtls.ps1` rolls one sidecar at a time. Pester suite at `deploy/nuc/tests/SidecarLib.Tests.ps1` (21 tests) covers the reset-window + sidecar-health helpers extracted to `deploy/nuc/lib/SidecarLib.ps1`.
 
-### Phase 5a — discoverer NLV cache (v0.5.0)
+### Phase 5 shipped invariants
 
-- **Discoverer fan-out (every 30s tick):** after the upsert + soft-delete phase, `_discover_once` issues one `GetAccountSummary` per discovered account via `asyncio.gather(*calls, return_exceptions=True)` with per-call `asyncio.wait_for(timeout=10)`. `asyncio.Lock` re-entrancy guard on `_discover_once` skips a tick if the previous one is still running (logs `broker_discover_iteration_skipped_overlap`).
-- **Skip-write predicate (`_is_populated`):** an UPDATE is only issued when summary carries `currency` matching `^[A-Z]{3}$` AND non-empty value. Empty/fallback summaries leave `last_nlv_at` NULL — frontend renders "no data yet". This keeps `last_nlv = NULL` semantically distinct from a real $0.
-- **Wire format invariant:** `format(d.quantize(Decimal("1e-8")), "f")` — fixed-point, no scientific notation, 8 fractional digits. **Do not** use `.normalize()` (produces `0E-8` for zeros and breaks the contract). `_format_nlv` returns `None` for `Decimal('NaN')`/`Decimal('Infinity')`/InvalidOperation instead of 500ing the entire list endpoint.
-- **Per-row savepoint (`session.begin_nested()`):** each NLV UPDATE is wrapped so a NUMERIC(20,8) overflow on one account leaves the outer transaction alive for the other 21. Overflow detected via `getattr(exc.orig, "sqlstate", None) == "22003"` (locale-stable, not string-match the message).
-- **Resurrect-from-soft-delete clears NLV:** the upsert's `ON CONFLICT DO UPDATE SET` includes three CASE clauses that null out `last_nlv` / `last_nlv_currency` / `last_nlv_at` when `broker_accounts.deleted_at IS NOT NULL` (resurrect path). Normal upserts preserve cached NLV. Frontend doesn't briefly display week-old stale values when an account reappears.
-- **Maintenance-window helper:** `app/services/ibkr_maintenance.py:compute_broker_maintenance(now)` is the single source of truth for the `{active, window, until}` envelope. Both the list endpoint envelope (`AccountListResponse.broker_maintenance`) and `_classify_sidecar_failure` 503 path consume it. The `max(secs, 1)` floor ensures `until > now` whenever `active=true` (eliminates the boundary-second race). `BrokerMaintenance` Pydantic model has a `@model_validator(mode="after")` that rejects `active=true, window=null, until=null`.
-- **Frontend boundary discipline:** `eslint-plugin-boundaries` forbids `services` → `stores` imports. The pattern is: services return data (`{ accounts, brokerMaintenance }`); a hook at `frontend/src/hooks/useAccountsList.ts` (`fetchAccountsAndSyncMaintenance`) composes the service call with `useFleetMaintenance.getState().setMaintenance(...)`. Features call the hook, not the service directly.
-- **Architectural note (R14):** the unary-fan-out pattern in 5a is intentionally narrow to summary-style RPCs. Phase 5b's `OrderEvent` stream subscription will be a **separate background task per sidecar** (one persistent gRPC server-streaming RPC), NOT extended off `_discover_once`.
-- **Prometheus metrics:** `broker_discover_nlv_update_duration_ms` histogram (buckets 10/25/50/100/250/500/1000/2500/5000 ms; p99 expected ~110 ms at 22 accounts) and `broker_discover_nlv_overflow_total` counter.
+Phase-specific invariants (NLV cache fan-out, modify/bracket/fills wire shapes, status state machine, OCA cascade, etc.) live in auto-memory:
 
-### Phase 5b — IBKR trade execution (v0.5.1 + 5b.1 hardening)
+- `phase5a_shipped.md` — discoverer NLV cache (v0.5.0)
+- `phase5b_shipped.md` — IBKR trade execution + 5b.1 hardening (v0.5.1–v0.5.3)
+- `phase5c_shipped.md` — advanced order types: modify, bracket, fills history (v0.5.4)
 
-- **Idempotency via UUIDv7 `client_order_id`:** every order gets a sortable UUIDv7 minted client-side at preview time, returned with the nonce. `POST /api/orders` is idempotent on `client_order_id` — re-submitting the same id returns the original row with HTTP 200. Single-worker uvicorn in 5b (multi-worker → Phase 9); the in-memory nonce store assumes one process.
-- **Status state machine:** `pending_submit → submitted → working → partial → filled` plus terminal `cancelled / rejected / expired`. Terminal statuses are sticky — out-of-order events from the broker can't revert state. The `OrderEventConsumer` enforces this in `_process_event` via a CASE expression on `UPDATE`.
-- **Per-(label, account) supervisor:** `OrderEventConsumer` spawns one child task per discovered `(gateway_label, account_number)`. `BrokerDiscoverer` writes account add/remove events to `_account_changed_events()`; supervisor reacts by spawning/cancelling exactly the affected child. One stream death never affects siblings. Backoff on consecutive failures uses a per-instance counter capped at `MAX_CONSECUTIVE_FAILURES = 50`.
-- **Reconnect-and-resync (R9):** when a child stream dies, the consumer reconnects, calls `get_orders(account_number)`, and replays missed events as synthetic `OrderEventMessage`s with `broker_event_at` carried from the broker snapshot's `updated_at`. The state-machine predicate (`status > current AND broker_event_at >= last_event_at`) prevents double-counting if a real event also arrives. `reconcile_at_startup()` runs the same scan in `lifespan` BEFORE consumer streams open, closing the mid-order-bounce gap.
-- **`PendingSubmitWatchdog`:** 30s tick scans for orders stuck in `pending_submit` for > 60s. Match in broker's order list → synthesize an event through `_process_event`. No match for > 5 min → escalate to `rejected` with audit row + metric `broker_order_pending_submit_orphan_total`. Recovery metric: `broker_order_pending_submit_recovered_total`.
-- **Cancel cooldown:** `DELETE /api/orders/{id}` puts `(account_id, broker_order_id)` into a 5s cooldown set so an operator double-click doesn't double-fire. **Sidecar 503/network failure rolls the cooldown back** (H2) — operator can immediately retry instead of waiting 5s for nothing.
-- **Per-gateway trade policy:** stored under `namespace="broker"`. Per-gateway keys are dotted: `<label>.trade_enabled` (default `false` — must be flipped on per gateway), `<label>.daily_notional_cap` (USD), `<label>.max_notional_per_order` (USD), `<label>.simulator_only` (default `true` for live gateways, `false` for paper). Global keys: `kill_switch_enabled` (fleet-wide, default `false`). NAMESPACE_PATTERN forbids dots; KEY_PATTERN allows them — that's why the gateway label moved into the key, not the namespace. Policy resolver enforced at preview + place. Kill-switch returns 503 ahead of every other check (race-safe — checked first).
-- **Lifespan ordering:** `app/main.py` starts the consumer + watchdog AFTER `build_broker_registry` succeeds. Shutdown drains the watchdog, then the consumer, then the discoverer + registry — so in-flight events finish processing before broker channels close. When `MissingBrokerSecrets` fires, all of this is skipped.
-- **SSE wire shape:** `GET /api/orders/events` emits `id: <event_id>\nevent: order.update\ndata: <json>\n\n` frames + 10s `: heartbeat\n\n` keepalives. `?account_id=<uuid>` scopes to `orders:events:account:<id>`; absent → fleet-wide `orders:events:fleet`. `Last-Event-ID` header replays from `order_events WHERE id > N`. Per-client queue maxsize 1000; overflow → drop with `event: error\ndata: slow_client` final frame and `sse_dropped_clients_total++`.
-- **nginx SSE config (5b only):** `proxy_buffering off`, `X-Accel-Buffering: no`, `proxy_read_timeout 65s`, no `gzip` for `/api/orders/events`. Single-worker uvicorn assertion CI-enforced via `pgrep` on the entrypoint.
-- **OpenAPI snapshot lock (D7):** `tests/api/test_openapi_contract.py::test_openapi_schema_lock_phase5b` snapshots 5 named models via `syrupy`. Wire-shape changes show up as a snapshot diff in PRs — no silent drift between backend OpenAPI and frontend `gen-types.sh` output.
-- **Positions discoverer fan-out (5b.1, v0.5.3):** `BrokerDiscoverer._discover_positions` mirrors the Phase 5a NLV pattern — per-account `GetPositions` RPC via `asyncio.gather(return_exceptions=True)` + per-call `asyncio.wait_for(timeout=10)`, savepoint-isolated upsert via `jsonb_to_recordset` CTE, NULL-safe delta-delete via `NOT EXISTS`, sqlstate `22003` overflow → `broker_discover_positions_overflow_total{label}` metric + skip. Resurrect-from-soft-delete clears the positions cache (parallel to the existing `last_nlv*` CASE null-out). `_position_qty` reads real values; `to_regclass` defensive guard removed.
-- **SIM cancel echo (5b.1 B1+B2, v0.5.3):** sidecar `BrokerHandlers.__init__` registers `_sim_orders: dict[str, dict[str, str]]` at PlaceOrder simulator branch (key `SIM-<uuid>`, value `{client_order_id, account_number}`). `CancelOrder` recognizes `SIM-` prefix BEFORE int-parsing, pops the entry, builds a `SimpleNamespace` Trade, and fires `ib.orderStatusEvent.emit(synthetic_trade)` so the existing per-subscriber OrderEvent stream's `_on_status` callback queues the proto event for every connected backend consumer. No singleton state; reuses real-broker plumbing exactly. Idempotent: re-cancelling a missing SIM order returns `accepted=False`. Metric: `broker_sim_cancel_echo_total{label}`.
-- **Layered E2E tests (5b.1 D1+D2+D3, v0.5.3):** `e2e-mock.yml` runs the full preview→place→cancel chain on every push + PR (httpx ASGITransport + extended sidecar mock servicer in `backend/tests/fixtures/sidecar_servicer.py` + Postgres-18 + Redis-7 service containers). `nightly-real-ibkr.yml` runs daily at 12:00 UTC with `CI_USE_REAL_IBKR=1` + `CF_ACCESS_*` secrets, exercising `sidecar/tests/test_real_ibkr_e2e_trade.py` (the `@pytest.mark.real_ibkr`-gated production HTTPS chain with finally-revert of `trade_enabled`).
-- **BASE-tag startup round (5b.1 C1+C2+C3, v0.5.3):** sidecar runs sequential per-account `ib.client.reqAccountUpdates(True/False, account)` cycle BEFORE `reqAccountSummaryAsync()`. Populates `ib.accountValues()` with per-currency rows (876 for 6 isa-paper accounts in pre-flight). Base currency code is the `.currency` field of the `NetLiquidation` row — IBKR reports NLV in the account base currency only. Concurrency: the cycle MUST complete before `reqAccountSummary` opens (only one active `reqAccountUpdates` per connection). Sequential adds ~2.3s per account (~14s for 6-account paper sidecar). The high-level `ib.reqAccountUpdates(account)` wrapper hangs on the second call (single-keyed future); use `ib.client.reqAccountUpdates(subscribe, acctCode)` raw API. Backend's `_resolve_account` `last_nlv_currency` fallback (`9910e3b`) retained as defence-in-depth.
-
-### Phase 5c — Advanced order types (v0.5.4)
-
-- **Modify orders (`PUT /api/orders/{id}`):** full-payload modify with always-fresh-nonce. HTTP layer writes only `order_events` (audit row); `OrderEventConsumer._update_order` owns the `orders.status` mutation (HIGH-3 audit-only-write split). 60s per-`(order_id, nonce)` replay-safety cache (`_MODIFY_REPLAY_CACHE` in `app/services/orders_service.py`, HIGH-1) — re-submit returns the original outcome instead of double-firing the broker. Child-order modify allowed even when parent partial (MED-1: e.g. raise stop after favorable parent fill).
-- **Bracket orders (`POST /api/orders/bracket`):** entry + optional stop-loss + optional take-profit, atomic OCA group via two-phase commit (HIGH-2): parent INSERT first (status `pending_submit`), then sidecar `PlaceBracket` RPC, then children INSERT on success with `parent_order_id` self-FK + shared `oca_group = 'BRK-<8hex>'`. `OrderBracketResponse.parent` is a thin placement-confirmation shape (`OrderBracketParent` — `{id, client_order_id, broker_order_id, status}`), parallel to `OrderBracketLeg` for children — NOT the full `OrderResponse` row (caught in C8 review). Cancel parent → broker emits OCA cascade → consumer transitions all 3 to `cancelled`.
-- **`modified` status + `order_status_rank()` SQL function (CRIT-1):** new enum value `modified` slots between `submitted` and `partial`. The `order_status_rank` immutable SQL function returns `pending_submit=0, submitted/inactive=1, modified=2, partial=3, filled=4, cancelled/rejected/expired=5`. The consumer's `UPDATE` predicate compares ranks before applying the new status, preventing backward transitions like `modified → submitted` even when a stale `Submitted` event arrives after the modify confirmation.
-- **`fills` + `pending_fills` tables (CRIT-2):** `fills` keyed by `exec_id UNIQUE` for resync idempotency; `pending_fills` is the buffer when `execDetails` arrives before the matching orders row exists. `_record_fill` in the consumer attempts INSERT into `fills` inside a `session.begin_nested()` savepoint; on FK violation (sqlstate `23503`) it rolls back the savepoint and INSERTs into `pending_fills` instead. Per-event `_drain_pending_fills` runs whenever the consumer sees an event for a known `(broker_order_id, account_id)`. `PendingFillsSweeper` (30s tick, registered in `app/main.py` lifespan after the watchdog) handles the cross-path race where the orders row was written by `reconcile_at_startup`, not the consumer event path. Backlog metric `pending_fills_backlog_count` exported for the `BrokerPendingFillsBacklog` alert.
-- **Commission backfill (MED-5):** consumer handles `kind="commission_report"` events as a short-circuit before the main event flow — UPDATE `fills SET commission/commission_currency WHERE exec_id`, and if rowcount is 0, push to `_COMMISSION_BUFFER` (5-min TTL, dict keyed by `exec_id`). When the matching `_record_fill` lands later, `_commission_buffer_pop` retrieves and applies the held commission. Overflow at >1000 entries increments `commission_buffer_overflow_total`.
-- **Cascade-lag metric (HIGH-4):** `broker_bracket_cancel_cascade_seconds` histogram (buckets 0.1/0.5/1/2/5/10/30s) observed in `_process_event` when `status == "cancelled" AND order_id IS NOT NULL` — measures `broker_event_at − parent.cancel_requested_at`. Drives the `BrokerBracketCascadeLag` alert (p99 > 5s over 10m).
-- **Wire-shape evolution:** the `OrderEventMessage` Python dataclass gained `exec_id: str = ""` and `kind: str = ""` (defaults preserve backward compat with all existing call sites). `BrokerSidecarClient.order_event_stream` propagates them from the proto. `kind` is one of `"status"`, `"exec_details"`, `"commission_report"` per sidecar B3.
-- **Single-worker still load-bearing:** the in-memory `_MODIFY_REPLAY_CACHE` and `_COMMISSION_BUFFER` assume one process. Multi-worker uvicorn moves to Phase 9.
-- **OpenAPI snapshot lock (`test_openapi_schema_lock_phase5c`):** locks 7 new wire models — `OrderModifyRequest`, `OrderBracketRequest`, `OrderBracketResponse`, `OrderBracketParent`, `OrderBracketLeg`, `FillResponse`, `FillListResponse`. Re-bless via `pytest -k schema_lock_phase5c --snapshot-update` after intentional shape changes.
+Consult those before changing code on the relevant surfaces — they record the architect-review findings that have already been resolved inline. **Do not** copy that detail back into CLAUDE.md.
 
 ## Configuration Storage
 
-**The app keeps runtime settings in the database, not in `.env`.** (Active as of v0.2.0.)
+**Runtime settings live in the database (`app_config` + `app_secrets`), not in `.env`.** (Active as of v0.2.0.) `.env` only holds bootstrap values needed before the app can reach the DB.
 
-`.env` only holds bootstrap values the app needs before it can reach the DB:
-`APP_ENV`, `APP_SECRET_KEY`, `APP_SECRET_KEY_PREV`, `APP_CORS_ORIGINS`, `DATABASE_URL`, `POSTGRES_POOL_SIZE`, `POSTGRES_MAX_OVERFLOW`, `REDIS_PASSWORD`, `REDIS_URL`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUDIENCE`, `TRUSTED_DEV_NETS`.
+**Do not add new values to `.env` beyond the bootstrap list.** Read settings via the `get_config()` FastAPI dependency or `ConfigService` singleton; edit them at runtime via `POST /api/admin/config` and `POST /api/admin/secrets`.
 
-(`POSTGRES_POOL_SIZE` / `POSTGRES_MAX_OVERFLOW` are here — not in `app_config` — because SQLAlchemy reads them at engine construction, which runs before `ConfigService` can reach the DB. `REDIS_PASSWORD` is split out from `REDIS_URL` so docker-compose can interpolate it into `redis-server --requirepass ${REDIS_PASSWORD}`. `APP_SECRET_KEY_PREV` is set only during rotation windows — MultiFernet decrypts ciphertexts written under the old key and re-encrypts on next write.)
-
-Everything else (broker hosts, Ollama URLs, Telegram tokens, API keys, WoL MAC, Schwab OAuth, etc.) lives in two tables:
-
-- `app_config` — plain-text settings, readable by any admin-authed client
-- `app_secrets` — sensitive values encrypted with Fernet (key derived from `APP_SECRET_KEY` via HKDF-SHA256)
-
-Edited at runtime via `POST /api/admin/config` and `POST /api/admin/secrets` (CF Access — Google login for humans, service token for CI). An in-memory cache is invalidated across all backend workers via Redis pub/sub on every write, so changes take effect immediately.
-
-**Do not add new values to `.env` beyond the bootstrap list.** When writing code that needs a setting, read it via the `get_config()` FastAPI dependency or the `ConfigService` singleton and fall back to a sensible default:
-
-    from app.core.deps import get_config
-    svc = get_config()
-    heavy_url = await svc.get("ollama", "heavy_url", default="http://10.10.0.3:11434")
-    bot_token = await svc.reveal_secret("telegram", "bot_token")
-
-Typed accessors (`get_int`, `get_bool`, `get_json`, `reveal_secret_int`, etc.) raise `ConfigTypeError` if the stored `value_type` does not match the accessor. Secret plaintext is only ever returned by `reveal_secret*`; `GET /api/admin/secrets/...` returns metadata only (namespace, key, value_type, timestamps). Every `reveal_secret*` hit increments `admin_secret_reveal_total` with the actor kind label.
-
-Rotating `APP_SECRET_KEY` invalidates all encrypted secrets — treat it as permanent. Plan a maintenance window and pre-set `APP_SECRET_KEY_PREV` to the outgoing key so reads keep working while the backend re-encrypts on each write.
+Full bootstrap key list, code examples, typed accessors, and key-rotation procedure: see `docs/CONFIG.md`.
 
 ## Network Topology
 
@@ -272,70 +221,13 @@ See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3` for the ca
 
 ## Phase workflow (standard for every phase)
 
-Every phase follows this exact sequence:
+Every phase follows: brainstorm → spec self-review → **architect review (apply CRIT+HIGH+MED inline)** → user approval → plan → implementation (subagent-driven preferred) → close-out (update CLAUDE.md / CHANGELOG.md / TASKS.md, tag, push).
 
-1. **Brainstorm** — `superpowers:brainstorming` skill. Produces `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`.
-2. **Spec self-review** — placeholder scan, internal consistency, scope check, ambiguity check. Fix inline.
-3. **Architect review** — invoke the user-scope `ARCHITECT-REVIEW` skill adversarially on the spec. It returns findings ranked CRITICAL / HIGH / MEDIUM / LOW with concrete "change X to Y" recommendations. **Apply all CRITICAL + HIGH + MEDIUM findings before proceeding.** Only LOWs may defer or document. (Project rule established 2026-04-28; see memory `feedback_architect_findings_apply_through_medium.md`.) Record the findings table in the spec under an "Architect review — applied" section.
-4. **User spec approval.**
-5. **Writing plans** — `superpowers:writing-plans` skill. Produces `docs/superpowers/plans/YYYY-MM-DD-<topic>-plan.md`.
-6. **Implementation** — `superpowers:subagent-driven-development` (preferred) or `superpowers:executing-plans`.
-7. **Phase close-out** — update `CLAUDE.md`, `CHANGELOG.md`, `TASKS.md`; tag `vN.N.N`; commit + push.
+**Skip the architect review step only for truly trivial phases.** Phase 0 skipped it; cost ~2 hrs of preventable CI debugging.
 
-**Skip step 3 only for truly trivial phases (single-file refactors, docs-only changes).** Phases 2–9 all get the architect review. Phase 0 skipped it (~2 hrs of preventable CI debugging as a result); Phase 1 used it (10 findings, all fixed before implementation). Worth the ~5-min round-trip.
+Implementation always runs the per-commit reviewer chain (spec-compliance + code-quality + language-specific reviewer at minimum, plus security/db/type/silent-failure/a11y/build/tdd reviewers when their trigger surface is touched). Reviews fire at every commit boundary — never batched.
 
-### Proactive tooling (run without being asked, every phase)
-
-**Step 0 — Research & reuse (before any new code):** `gh search repos`, `gh search code`, Context7 MCP (`resolve-library-id` + `query-docs`) for primary docs, `everything-claude-code:search-first` skill, Exa MCP for broad research, check `/mnt/c/Dashboard_old/` for portable artifacts. Adopt or port over writing from scratch.
-
-**Step 1 — Brainstorm:** `superpowers:brainstorming` (terminal state = invoke writing-plans). Use `everything-claude-code:council` for ambiguous tradeoffs; sequential-thinking MCP for tricky multi-step decisions.
-
-**Step 3 — Architect review:** `ARCHITECT-REVIEW` skill (user-scope) — always. For high-stakes phases add `SENIOR-ARCHITECT` skill or `everything-claude-code:santa-method` (dual-voice adversarial). Record findings in spec's "Architect review — applied" section.
-
-**Step 5 — Writing plans:** `superpowers:writing-plans` + the shipped `plan-document-reviewer-prompt.md` template. `everything-claude-code:planner` agent as alternative draft helper.
-
-**Step 6 — Implementation (per-task review chain at every commit boundary):**
-
-| Order | Tool | Triggers on |
-|---|---|---|
-| 1 | Implementer subagent (uses `superpowers:subagent-driven-development/implementer-prompt.md`) | every task |
-| 2 | Spec compliance reviewer (uses `…/spec-reviewer-prompt.md`) | every task |
-| 3 | Code quality reviewer (uses `…/code-quality-reviewer-prompt.md`) | every task |
-| 4 | Language-specific review: `everything-claude-code:python-reviewer` OR `everything-claude-code:typescript-reviewer` | backend vs frontend |
-| 5 | `everything-claude-code:security-reviewer` | auth / secrets / user-input / crypto paths |
-| 6 | `everything-claude-code:database-reviewer` | schema / migration / SQL paths |
-| 7 | `everything-claude-code:type-design-analyzer` | Pydantic / TS strict surfaces |
-| 8 | `everything-claude-code:silent-failure-hunter` | async paths, critical flows (Phase 4+ broker adapters especially) |
-| 9 | `everything-claude-code:a11y-architect` | frontend UI changes (Phase 3+) |
-| 10 | `everything-claude-code:build-error-resolver` | when `pnpm build` / `uv run` / `docker compose build` fails |
-| 11 | `everything-claude-code:tdd-guide` or `superpowers:test-driven-development` | when writing new features or tests fail |
-| 12 | `everything-claude-code:pr-test-analyzer` | before merging PR once real test suites exist |
-
-**Reviews fire at EVERY commit boundary, not batched to the end of a chunk.** Velocity-driven skipping is forbidden — each commit gets at minimum #2 + #3 + the relevant language reviewer (#4) before moving to the next task. Conditional reviewers (#5–#11) fire when their trigger surface is touched. Pre-existing tests passing is NOT a substitute for a fresh reviewer pass — tests prove the wire didn't change, not that the code is well-built or matches the spec.
-
-If a review batch is skipped during a session, **catch up before the next chunk begins** — never carry unreviewed commits into the next layer (Chunk B reads schema written by A; Chunk E reads contract written by B; finding a shape bug after dependents land is much more expensive than at the commit boundary). Spec + code-quality + language reviewers can be dispatched in parallel against the unreviewed range, but the catch-up MUST happen before any new feature work.
-
-**Step 7 — Close-out:** `superpowers:finishing-a-development-branch`; `claude-md-management:claude-md-improver` for CLAUDE.md updates; `everything-claude-code:doc-updater` for README/docs refresh; `commit-commands:*` for structured commits; `gh run view` to watch CI.
-
-### Per-phase subject anchors
-
-Invoke these skills when the current phase's subject area is being touched:
-
-| Phase | Skills |
-|---|---|
-| **Phase 2 (current)** | `POSTGRES-BEST-PRACTICES`, `POSTGRESQL`, `everything-claude-code:postgres-patterns`, `everything-claude-code:database-migrations`, `SQL-INJECTION-TESTING`, `BACKEND-SECURITY-CODER`, `everything-claude-code:security-review`, `API-DESIGN-PRINCIPLES`, `everything-claude-code:api-design`, `everything-claude-code:python-patterns`, `everything-claude-code:python-testing`, `everything-claude-code:tdd-workflow`, `everything-claude-code:verification-loop` |
-| Phase 3 shell | `/frontend-design`, `REACT-PATTERNS`, `REACT-STATE-MANAGEMENT`, `UI-UX-PRO-MAX`, `RADIX-UI-DESIGN-SYSTEM`, `FRONTEND-UI-DARK-TS`, `FRONTEND-SECURITY-CODER`, `everything-claude-code:frontend-patterns`, `everything-claude-code:e2e-testing`, `everything-claude-code:accessibility` |
-| Phase 4-6, 8 adapters | `API-DESIGN-PRINCIPLES`, `BACKEND-ARCHITECT`, `ARCHITECTURE-PATTERNS`, `everything-claude-code:mcp-server-patterns`, `POWERSHELL-WINDOWS` (NUC ops glue) |
-| Phase 7 AI | `ai:building-pydantic-ai-agents`, `LLM-APP-PATTERNS`, `LLM-EVALUATION`, `LLM-APPLICATION-DEV-AI-ASSISTANT`, `everything-claude-code:eval-harness`, `everything-claude-code:ai-regression-testing`, `everything-claude-code:cost-aware-llm-pipeline`, `everything-claude-code:pytorch-patterns` |
-
-### Always-on (every tool call, every session)
-
-- **Hooks auto-fire:** `gateguard` (fact-force on Write/Edit/destructive Bash — comply with its preamble, don't fight), `commitlint` (lowercase subject; ≤100 char body lines; never `--no-verify`), `gitleaks` (secret scan), `continuous-learning-v2:observe` (captures patterns), `remember:SessionStart` (reloads session state).
-- **Rules auto-inject:** 24 files from `~/.claude/rules/` + `PYTHON/` + `TYPESCRIPT/` subdirs.
-- **Memory auto-loads:** `MEMORY.md` + subject-matched memories — in particular `project_tooling_inventory.md` (the full catalog) + `feedback_proactive_tooling.md` (this discipline).
-- **MCP servers live and ready:** `chrome-devtools`, `playwright`, `context7`, `github`, `memory`, `sequential-thinking`, `exa`. Load via ToolSearch when a task calls for them.
-
-Full catalog + user/project scope scan results live in memory at `project_tooling_inventory.md`. Consult that FIRST before reaching for the global catalog of 250+ skills and 48 agents.
+Full step-by-step + proactive tooling list + per-commit reviewer table + per-phase subject-anchor skills + always-on hooks: see `docs/PHASE-WORKFLOW.md`. Tooling catalog: memory `project_tooling_inventory.md`.
 
 ## When Claude Code Makes Changes
 

@@ -10,7 +10,7 @@
 # Run from anywhere; uses absolute paths.
 # Idempotent: --delete prunes Windows-side files that were deleted in WSL.
 #
-# Per CLAUDE.md L125 Phase 4+ work item.
+# Per CLAUDE.md "Phase 4+ work item" in Project Paths section.
 
 set -euo pipefail
 
