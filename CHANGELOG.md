@@ -5,6 +5,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-04-29
+
+### Phase 5 close-out — deferred items shipped
+
+Closes everything from the "Open scope deferred from 5c" list except the items
+explicitly re-homed to Phase 7 (quote/BASE-tag subscribe rework, bundled with
+Schwab) and Phase 9 (multi-worker uvicorn).
+
+- **`AccountResponse.position_count`** — closes the 5b.1 architect-review HIGH-3
+  deferred item. `list_accounts` SQL gains a `LEFT JOIN positions` cnt subquery;
+  field default `0` for accounts with no rows. `_AccountRow` dataclass extended,
+  OpenAPI `OPTIONAL_ACCOUNT_FIELDS` set updated.
+- **`scripts/restart-backend.sh`** — bundles `docker compose restart backend`
+  with `nginx -s reload` so manual backend restarts don't 502 for ~1-2s while
+  nginx re-resolves the new container IP. Use this instead of bare
+  `docker compose restart backend`.
+- **OrderEvent stream observability alerts** — `BrokerOrderEventStreamDown`
+  (page, `consumer_alive == 0` for 2m) and `BrokerOrderEventStreamFlapping`
+  (warning, >10 reconnects in 10m sustained for 5m) added to
+  `alerts.yml::phase5b_orders` group. Both backed by metrics that already
+  existed (`consumer_alive` Gauge, `broker_order_stream_reconnects_total`
+  Counter); lifecycle logs were added in v0.5.5.
+- **`GET /api/brokers/accounts`** — fills the missing endpoint that the Windows
+  BrokerTray (`deploy/nuc/BrokerTray.ps1`) probes every few seconds. The route
+  never existed; the tray fell into `ConnectFailure`/`Timeout` and showed
+  yellow "VPS unreachable" forever. Returns one row per (broker, gateway_label,
+  mode) sidecar with a `connected` flag derived from
+  `BrokerRegistry.degraded_labels()`. Distinct from `/api/accounts` (which
+  strips `gateway_label` per M22 boundary discipline) — this is an
+  operator-internal surface gated by `require_admin_jwt`. New Pydantic models
+  `BrokerSidecarStatus` + `BrokerSidecarStatusList`.
+
+### CLAUDE.md slim-down
+
+CLAUDE.md was 352 lines / 40K and starting to impact session-load latency.
+Extracted Phase 5a/5b/5c shipping invariants (now pointed to memory),
+phase workflow (now `docs/PHASE-WORKFLOW.md`), and Configuration Storage code
+examples (now `docs/CONFIG.md`). Net: 244 lines / 20K.
+
+### Notes
+
+- v0.5.6 deploys without schema or proto changes — straight container redeploy.
+- The two Phase 7 items (on-demand quote subscribe + periodic BASE-tag refresh)
+  remain deferred. They share the same root pattern (sidecar only subscribes at
+  startup; mid-run additions never get a subscription) and will be designed
+  once across IBKR + Futu + Schwab.
+- TASKS.md ordering swapped: Phase 7 is Schwab + market-data subscribe rework;
+  Phase 8 is Alerts + Telegram + AI router.
+
 ## [0.5.5] — 2026-04-29
 
 ### Fixed — Phase 5c canary debug pass + SIM dispatch fix
