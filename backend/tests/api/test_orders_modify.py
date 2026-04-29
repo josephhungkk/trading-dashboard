@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -315,18 +316,36 @@ async def _store_nonce(
     account_id: UUID,
     payload: dict[str, Any],
     payload_hash: str | None = None,
+    order: _OrderRow | None = None,
 ) -> None:
     key = f"nonce:order:{account_id}:{payload['nonce']}"
-    value = json.dumps(
-        {
-            "payload_hash": payload_hash
-            or orders_service._modify_nonce_payload_hash(
+    if payload_hash is None:
+        # 5c f4-fix: modify now reuses /api/orders/preview which mints an 8-field
+        # hash (account_id, conid, side, order_type, tif, qty, limit_price, stop_price).
+        # Mirror that here when an order row is provided so the modify endpoint's
+        # _consume_nonce hash matches.
+        if order is not None:
+            full_payload = {
+                "account_id": str(account_id),
+                "conid": str(order.conid),
+                "side": str(order.side),
+                "order_type": str(order.order_type),
+                "tif": payload["tif"],
+                "qty": orders_service.canonicalize_qty(payload["qty"]),
+                "limit_price": orders_service._canonical_decimal_or_none(payload["limit_price"]),
+                "stop_price": orders_service._canonical_decimal_or_none(payload.get("stop_price")),
+            }
+            payload_hash = hashlib.sha256(
+                json.dumps(full_payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        else:
+            payload_hash = orders_service._modify_nonce_payload_hash(
                 account_id=account_id,
                 qty=payload["qty"],
                 limit_price=payload["limit_price"],
-            ),
-            "rth_at_mint": True,
-        },
+            )
+    value = json.dumps(
+        {"payload_hash": payload_hash, "rth_at_mint": True},
         sort_keys=True,
     )
     await redis.set(key, value, ex=30)
@@ -352,6 +371,7 @@ async def test_modify_replay_returns_cached_response(modify_client: dict[str, An
         modify_client["redis"],
         account_id=modify_client["account"].account_id,
         payload=payload,
+        order=modify_client["order"],
     )
 
     first = await modify_client["client"].put(
@@ -396,6 +416,7 @@ async def test_modify_child_when_parent_partial_allowed(modify_client: dict[str,
         modify_client["redis"],
         account_id=modify_client["account"].account_id,
         payload=payload,
+        order=modify_client["order"],
     )
 
     response = await modify_client["client"].put(

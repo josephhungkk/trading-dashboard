@@ -350,13 +350,29 @@ async def modify_order(
         redis=redis,
         mode=account.mode,
     )
-    await _consume_nonce(
-        redis,
-        request.nonce,
-        account_id=row["account_id"],
-        qty=qty_text,
-        limit_price=request.limit_price,
-    )
+    # 5c f4-fix: modify reuses /api/orders/preview which hashes 8 fields
+    # (account_id, conid, side, order_type, tif, qty, limit_price, stop_price).
+    # Verify with the merged payload — immutable fields from the orders row,
+    # mutable fields from the modify request — so hashes align.
+    nonce_key = f"nonce:order:{row['account_id']}:{request.nonce}"
+    consumed_nonce_value = await redis.execute_command("GETDEL", nonce_key)
+    if consumed_nonce_value is None:
+        raise PreviewUnavailable(422, {"error": "unknown_nonce"})
+    expected_payload = {
+        "account_id": str(row["account_id"]),
+        "conid": str(row["conid"]),
+        "side": str(row["side"]),
+        "order_type": str(row["order_type"]),
+        "tif": request.tif,
+        "qty": qty_text,
+        "limit_price": _canonical_decimal_or_none(request.limit_price),
+        "stop_price": _canonical_decimal_or_none(request.stop_price),
+    }
+    expected_hash = hashlib.sha256(
+        json.dumps(expected_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if _decode_nonce_payload(consumed_nonce_value)["payload_hash"] != expected_hash:
+        raise PreviewUnavailable(422, {"error": "payload_mismatch"})
 
     raw_payload = {
         "client_order_id": str(row["client_order_id"]),
