@@ -92,3 +92,18 @@ def test_sse_active_connections_increments_on_connect_decrements_on_disconnect()
 
     after = REGISTRY.get_sample_value("sse_active_connections") or 0.0
     assert after - before == 1.0
+
+
+def test_broker_label_mismatch_alert_present() -> None:
+    alert = _phase5b_rule("BrokerLabelMismatch")
+    assert alert.get("for") == "1m"
+    assert alert.get("labels", {}).get("severity") == "page"
+    assert "broker_registry_label_mismatch_total" in alert["expr"]
+
+
+def test_broker_futu_normalize_unknown_alert_present() -> None:
+    alert = _phase5b_rule("BrokerFutuNormalizeUnknown")
+    assert alert.get("for") == "5m"
+    assert alert.get("labels", {}).get("severity") == "warning"
+    assert 'label="futu"' in alert["expr"]
+    assert "[15m]" in alert["expr"]

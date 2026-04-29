@@ -33,6 +33,22 @@ groups:
           summary: "OrderEvent stream flapping for {{ $labels.label }} (>10 reconnects/10m)"
           description: "Reconnect counter climbed by {{ $value }} in 10m sustained for 5m; sidecar gRPC channel or IBKR connection is unstable. Check sidecar logs for orderevent_subscribed/orderevent_unsubscribed lifecycle and broker_sidecar_stream_closed entries."
 
+      - alert: BrokerLabelMismatch
+        expr: increase(broker_registry_label_mismatch_total[5m]) > 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Broker label mismatch on {{ $labels.label }}"
+          description: "Sidecar at label {{ $labels.label }} reports a different broker_id than SIDECAR_BROKERS map. Operator misconfiguration; check deploy logs and broker_registry_factory.py."
+
+      - alert: BrokerFutuNormalizeUnknown
+        expr: increase(broker_normalize_unknown_total{label="futu"}[15m]) > 5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Futu sidecar saw >5 unknown enum values in 15m on {{ $labels.field }}"
+          description: "futu-api emitted enum values normalize.py doesn't know about. Likely a futu-api SDK upgrade introduced a new SecurityType / OrderStatus / TrdEnv. Check sidecar logs for the raw value."
+
   - name: phase5b1_canary_hotfix
     rules:
       - alert: BrokerDiscoverPositionsP99HighWarning
