@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import os
 import re
@@ -61,6 +62,7 @@ class FutuClient:
         self.gateway_connected: bool = False
         self._order_event_queues: dict[str, list[asyncio.Queue[Any]]] = {}
         self._configure_lock = asyncio.Lock()
+        atexit.register(self._cleanup_rsa_tempfile)
 
     def validate(self, request: Any) -> str | None:
         """Return error detail string on rejection, None on success."""
@@ -87,7 +89,10 @@ class FutuClient:
                     raise
 
             if self._trade_ctx is not None:
-                await _run_in_worker_thread(self._trade_ctx.close)
+                try:
+                    await _run_in_worker_thread(self._trade_ctx.close)
+                except Exception as exc:
+                    log.warning("futu_trade_ctx_close_failed", error=str(exc))
                 self._trade_ctx = None
 
             self._cleanup_rsa_tempfile()
@@ -109,7 +114,8 @@ class FutuClient:
     def _write_rsa_tempfile(self) -> None:
         if self._rsa_tempfile_path is not None:
             self._cleanup_rsa_tempfile()
-        assert self._creds is not None
+        if self._creds is None:
+            raise RuntimeError("FutuClient not configured: missing creds")
 
         with tempfile.NamedTemporaryFile(delete=False, mode="w") as rsa_file:
             rsa_file.write(self._creds.rsa_priv_pem)
@@ -128,14 +134,16 @@ class FutuClient:
         self._rsa_tempfile_path = None
 
     async def _init_attempt(self) -> None:
-        assert self._creds is not None
+        if self._creds is None:
+            raise RuntimeError("FutuClient not configured: missing creds")
         creds = self._creds
         self._write_rsa_tempfile()
+        rsa_path_str = str(self._rsa_tempfile_path)
 
-        def _connect() -> Any:
+        def _connect() -> OpenSecTradeContext:
             ctx: Any | None = None
             SysConfig.enable_proto_encrypt(True)
-            SysConfig.set_init_rsa_file(str(self._rsa_tempfile_path))
+            SysConfig.set_init_rsa_file(rsa_path_str)
             try:
                 ctx = OpenSecTradeContext(
                     filter_trdmarket=TrdMarket.HK,
