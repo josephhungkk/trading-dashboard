@@ -89,9 +89,21 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         request: broker_pb2.AccountRef,
         context: Any,
     ) -> broker_pb2.SummaryResponse:
-        row = await self._client.get_account_summary(request.account_number)
-        summary = summary_from_futu_row(row, account_number=request.account_number)
-        return broker_pb2.SummaryResponse(summary=summary)
+        try:
+            row = await self._client.get_account_summary(request.account_number)
+            summary = summary_from_futu_row(
+                row, account_number=request.account_number
+            )
+            return broker_pb2.SummaryResponse(summary=summary)
+        except Exception as exc:
+            log.error(
+                "getaccountsummary_failed",
+                account=request.account_number,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            raise
 
     async def GetPositions(  # noqa: N802
         self,
