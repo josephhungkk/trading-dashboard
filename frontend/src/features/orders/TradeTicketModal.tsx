@@ -13,6 +13,9 @@ import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 type Side = PreviewRequest['side'];
 type OrderType = PreviewRequest['order_type'];
 type Tif = PreviewRequest['tif'];
+type TradeTicketContract = ContractSearchInputValue & {
+  asset_class?: string;
+};
 
 interface MaintenanceBanner {
   kind: 'maintenance';
@@ -273,6 +276,14 @@ function TradeTicketForm({
   const limitPriceId = React.useId();
   const stopPriceId = React.useId();
   const tifId = React.useId();
+  const ac = ((form.contract as TradeTicketContract).asset_class ?? '').toUpperCase();
+  const stopDisabled = ac === 'WARRANT' || ac === 'CBBC';
+
+  React.useEffect(() => {
+    if (stopDisabled && form.orderType === 'STOP') {
+      setForm((s) => ({ ...s, orderType: 'LIMIT' }));
+    }
+  }, [stopDisabled, form.orderType, setForm]);
 
   return (
     <form
@@ -316,7 +327,9 @@ function TradeTicketForm({
         >
           <option value="MARKET">MARKET</option>
           <option value="LIMIT">LIMIT</option>
-          <option value="STOP">STOP</option>
+          <option value="STOP" disabled={stopDisabled}>
+            STOP{stopDisabled ? ' (unavailable for HK warrants/CBBC)' : ''}
+          </option>
         </select>
       </label>
 
