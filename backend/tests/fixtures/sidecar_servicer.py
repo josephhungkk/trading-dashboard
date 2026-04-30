@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
-import grpc
+import grpc  # type: ignore[import-untyped]
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
 from uuid_utils import uuid7
 
 from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
@@ -74,12 +75,12 @@ def _build_ephemeral_pki(server_san: str) -> PkiMaterial:
 
     server_cert, server_key = _issue(
         server_san,
-        eku=x509.ExtendedKeyUsageOID.SERVER_AUTH,
+        eku=ExtendedKeyUsageOID.SERVER_AUTH,
         san_dns=server_san,
     )
     client_cert, client_key = _issue(
         "test-client",
-        eku=x509.ExtendedKeyUsageOID.CLIENT_AUTH,
+        eku=ExtendedKeyUsageOID.CLIENT_AUTH,
     )
 
     return {
@@ -94,7 +95,18 @@ def _build_ephemeral_pki(server_san: str) -> PkiMaterial:
 class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
     """Canned Broker service for BrokerSidecarClient integration tests."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        label: str = "test-label",
+        broker_id: Literal["ibkr", "futu"] = "ibkr",
+        accounts: list[broker_pb2.Account] | None = None,
+    ) -> None:
+        self._label = label
+        self._broker_id = broker_id
+        self._started_at = datetime.now(UTC)
+        self._configure_call_count = 0
+        self._accounts_override = accounts
         self.place_order_response: broker_pb2.PlaceOrderResponse | None = None
         self.cancel_order_response: broker_pb2.CancelOrderResponse | None = None
         self.search_contracts_response: broker_pb2.SearchContractsResponse | None = None
@@ -126,12 +138,26 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
     ) -> broker_pb2.HealthResponse:
         del request
         await self._before_rpc("Health", context)
+        ts = Timestamp()
+        ts.FromDatetime(self._started_at)
         return broker_pb2.HealthResponse(
-            label="test-label",
+            label=self._label,
             gateway_connected=True,
             gateway_version="999",
             sidecar_version="0.4.0-test",
+            started_at=ts,
+            broker_id=self._broker_id,
         )
+
+    async def Configure(  # noqa: N802
+        self,
+        request: broker_pb2.ConfigureRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.ConfigureResponse:
+        del request
+        await self._before_rpc("Configure", context)
+        self._configure_call_count += 1
+        return broker_pb2.ConfigureResponse(ok=True, detail="")
 
     async def ListManagedAccounts(  # noqa: N802
         self,
@@ -140,6 +166,8 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
     ) -> broker_pb2.AccountsResponse:
         del request
         await self._before_rpc("ListManagedAccounts", context)
+        if self._accounts_override is not None:
+            return broker_pb2.AccountsResponse(accounts=self._accounts_override)
         return broker_pb2.AccountsResponse(
             accounts=[
                 broker_pb2.Account(
@@ -525,7 +553,7 @@ async def sidecar_server() -> AsyncIterator[tuple[FakeBrokerServicer, str]]:
     broker_pb2_grpc.add_BrokerServicer_to_server(
         _DispatchingBrokerServicer(servicer),
         server,
-    )  # type: ignore[no-untyped-call]
+    )
     server_credentials = grpc.ssl_server_credentials(
         [(pki["server_key_pem"], pki["server_cert_pem"])],
         root_certificates=pki["ca_pem"],
