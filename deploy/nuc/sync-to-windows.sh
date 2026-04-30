@@ -54,3 +54,21 @@ PROTO_DST="/mnt/c/dashboard/proto/"
 mkdir -p "$PROTO_DST"
 rsync -a --delete "$PROTO_SRC" "$PROTO_DST"
 echo "[sync] proto -> $(find "$PROTO_DST" -type f | wc -l) files"
+
+# 4. sidecar_futu/ — Phase 6 Futu sidecar. Same exclusions as sidecar/ block above.
+#    deploy/nuc/build-windows-futu.ps1 runs from C:\dashboard\sidecar_futu\.
+SIDECAR_FUTU_SRC="/home/joseph/dashboard/sidecar_futu/"
+SIDECAR_FUTU_DST="/mnt/c/dashboard/sidecar_futu/"
+mkdir -p "$SIDECAR_FUTU_DST"
+rsync -a --delete \
+    --exclude '_generated/' \
+    --exclude '__pycache__/' \
+    --exclude '.pytest_cache/' \
+    --exclude '.mypy_cache/' \
+    --exclude '.ruff_cache/' \
+    --exclude '.venv/' \
+    --exclude 'build/' \
+    --exclude 'dist/' \
+    --exclude '*.egg-info/' \
+    "$SIDECAR_FUTU_SRC" "$SIDECAR_FUTU_DST"
+echo "[sync] sidecar_futu -> $(find "$SIDECAR_FUTU_DST" -type f | wc -l) files"
