@@ -558,6 +558,7 @@ function Invoke-RestartTasks {
 $targetMenus = @{
   'FutuOpenD' = @(
     @{ Label = 'Restart FutuOpenD'; Action = { Invoke-RestartTasks @('FutuOpenDAutoStart') 'FutuOpenD' } }
+    @{ Label = 'Restart Futu sidecar'; Action = { Invoke-RestartTasks @('BrokerSidecarFutu') 'sidecar-futu' } }
   )
   'Schwab' = @(
     @{ Label = 'Re-authorize (OAuth flow)'; Action = { Start-Process "$dashboardUrl/api/schwab/oauth-start" | Out-Null } }

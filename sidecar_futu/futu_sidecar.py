@@ -68,7 +68,12 @@ async def _serve(args: argparse.Namespace) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+        # Windows asyncio doesn't support add_signal_handler — fall back to
+        # the synchronous signal.signal handler. Mirrors sidecar/ibkr_sidecar.py.
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError):
+            signal.signal(sig, lambda _sig, _frame: stop.set())
     await stop.wait()
 
     crl_task.cancel()
