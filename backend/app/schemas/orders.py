@@ -28,7 +28,9 @@ PositionSanityStatus = Literal["ok", "high", "extreme"]
 
 
 class ContractSummary(BaseModel):
-    conid: int
+    # IBKR conids are integers; Futu HK contracts are dotted strings (e.g. HK.00700).
+    # Accept both — the wire field is rendered verbatim in the trade ticket UI.
+    conid: int | str
     description: str
 
 

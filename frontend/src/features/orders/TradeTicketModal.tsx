@@ -7,6 +7,7 @@ import { useToast } from '@/hooks/use-toast';
 import { previewOrder, placeOrder } from '@/services/orders';
 import type { DecimalString, PreviewRequest, PreviewResponse } from '@/services/types';
 import { useOrdersStore, type OrderResponse as StoredOrderResponse } from '@/stores/global/orders';
+import { useActiveStores } from '@/stores/registry';
 import { ContractSearchInput, type ContractSearchInputValue } from './ContractSearchInput';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 
@@ -75,6 +76,10 @@ function TradeTicketModalContent({
   storyBanner: BlockingBanner | null;
 }): React.JSX.Element {
   const accountId = useTradeTicketStore((s) => s.accountId);
+  const accountsStore = useActiveStores().useAccounts;
+  const activeBroker = accountsStore(
+    (s) => s.accounts.find((a) => a.id === accountId)?.broker,
+  );
   const defaultConid = useTradeTicketStore((s) => s.defaultConid);
   const defaultSymbol = useTradeTicketStore((s) => s.defaultSymbol);
   const clientOrderId = useTradeTicketStore((s) => s.clientOrderId);
@@ -236,9 +241,17 @@ function TradeTicketModalContent({
           ) : null}
 
           {preview === null ? (
-            <TradeTicketForm form={form} setForm={setForm} onPreview={() => {
-              void handlePreview().catch(() => setPreviewError('Preview failed'));
-            }} previewDisabled={previewDisabled} />
+            <TradeTicketForm
+              form={form}
+              setForm={setForm}
+              onPreview={() => {
+                void handlePreview().catch(() => setPreviewError('Preview failed'));
+              }}
+              previewDisabled={previewDisabled}
+              {...(activeBroker === 'ibkr' || activeBroker === 'futu'
+                ? { broker: activeBroker }
+                : {})}
+            />
           ) : (
             <PreviewStep
               preview={preview}
@@ -261,11 +274,13 @@ function TradeTicketForm({
   setForm,
   onPreview,
   previewDisabled,
+  broker,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
   onPreview: () => void;
   previewDisabled: boolean;
+  broker?: 'ibkr' | 'futu';
 }): React.JSX.Element {
   const limitRequired = form.orderType === 'LIMIT' && form.limitPrice.trim() === '';
   const stopRequired = form.orderType === 'STOP' && form.stopPrice.trim() === '';
@@ -311,6 +326,7 @@ function TradeTicketForm({
         <ContractSearchInput
           id={contractInputId}
           onSelect={(contract) => setForm((s) => ({ ...s, contract }))}
+          {...(broker !== undefined ? { broker } : {})}
         />
       </label>
 

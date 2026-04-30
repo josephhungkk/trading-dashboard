@@ -167,7 +167,8 @@ async def preview_order(
         daily_cap_status=cap_status(filled_today, policy.daily_notional_cap),
         position_sanity=PositionSanityResult.classify(current_qty, qty, request.side),
         contract_summary=ContractSummary(
-            conid=int(contract.conid),
+            # Pass through the raw conid — IBKR is numeric, Futu is dotted (HK.00700).
+            conid=contract.conid,
             description=_contract_description(contract),
         ),
         warnings=[],

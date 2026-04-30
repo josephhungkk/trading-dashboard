@@ -969,11 +969,13 @@ class BrokerDiscoverer:
                 )
                 resurrected_ids = [cast(UUID, r[0]) for r in resurrect_rows]
 
+            from app.services.broker_registry_factory import SIDECAR_BROKERS
+
             for label, account in rows_seen:
                 await session.execute(
                     upsert_stmt,
                     {
-                        "broker_id": "ibkr",
+                        "broker_id": SIDECAR_BROKERS.get(label, "ibkr"),
                         "account_number": account.account_number,
                         "mode": self._mode_value(account.mode),
                         "gateway_label": label,
@@ -1090,6 +1092,8 @@ class BrokerDiscoverer:
         nlv_update_count = 0
         nlv_overflow_count = 0
         t_start = time.monotonic()
+        from app.services.broker_registry_factory import SIDECAR_BROKERS
+
         async with self._session_factory() as session:
             async with session.begin():
                 for r in results:
@@ -1112,7 +1116,7 @@ class BrokerDiscoverer:
                             await session.execute(
                                 nlv_update_stmt,
                                 {
-                                    "broker_id": "ibkr",
+                                    "broker_id": SIDECAR_BROKERS.get(label, "ibkr"),
                                     "account_number": account_number,
                                     "nlv": nlv_str,
                                     "currency": summary.net_liquidation.currency,
@@ -1179,6 +1183,8 @@ class BrokerDiscoverer:
             return_exceptions=True,
         )
 
+        from app.services.broker_registry_factory import SIDECAR_BROKERS
+
         async with self._session_factory() as session, session.begin():
             for r in results:
                 if r is None or isinstance(r, BaseException):
@@ -1193,7 +1199,10 @@ class BrokerDiscoverer:
                             "   AND account_number = :account_number "
                             "   AND deleted_at IS NULL"
                         ),
-                        {"broker_id": "ibkr", "account_number": account_number},
+                        {
+                            "broker_id": SIDECAR_BROKERS.get(label, "ibkr"),
+                            "account_number": account_number,
+                        },
                     )
                 ).one_or_none()
                 if acct_row is None:

@@ -147,7 +147,7 @@ describe('orders service', () => {
     await vi.advanceTimersByTimeAsync(1);
     await expect(resultPromise).resolves.toEqual(contracts);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith('/api/contracts?q=AAPL+N', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/contracts/search?q=AAPL+N', {
       credentials: 'include',
       signal: expect.any(AbortSignal) as AbortSignal,
     });

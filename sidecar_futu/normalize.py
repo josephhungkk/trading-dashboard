@@ -42,8 +42,22 @@ def account_from_futu_row(row: dict[str, Any]) -> AccountResult:
             account_number=str(row["acc_id"]),
             mode=mode,
             gateway_label="futu",
+            currency_base="HKD",
         )
     )
+
+
+def _normalize_currency(raw: str | None) -> str:
+    """Coerce Futu sentinels ("N/A", "--", "") to HKD.
+
+    accinfo_query returns currency='N/A' for paper accounts not yet bound to a
+    base currency. The backend's broker_accounts_last_nlv_currency_iso3 CHECK
+    constraint requires a 3-letter ISO code; HKD is the safe default for HK
+    sidecar accounts.
+    """
+    if not raw or raw in ("N/A", "--"):
+        return "HKD"
+    return raw
 
 
 def _money(value: str | int | float | None, currency: str) -> broker_pb2.Money:
@@ -119,7 +133,7 @@ def summary_from_futu_row(
     account_number: str,
 ) -> broker_pb2.Summary:
     del account_number  # reserved for L2 currency override
-    currency = row.get("currency") or "HKD"
+    currency = _normalize_currency(row.get("currency"))
     return broker_pb2.Summary(
         net_liquidation=_money(row.get("total_assets", "0"), currency),
         total_cash=_money(row.get("cash", "0"), currency),
