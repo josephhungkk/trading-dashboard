@@ -426,8 +426,31 @@ class FutuClient:
         if self._creds is None:
             raise RuntimeError("FutuClient not configured: missing creds")
 
-        with tempfile.NamedTemporaryFile(delete=False, mode="w") as rsa_file:
-            rsa_file.write(self._creds.rsa_priv_pem)
+        # Round-trip the PEM through cryptography to canonicalize line wrapping.
+        # PEM-as-stored-in-app_secrets often loses newlines during JSON encoding
+        # (curl/jq strip embedded LFs). cryptography parses single-line PEM
+        # tolerantly; pycryptodome (used by futu SDK) is strict and rejects
+        # anything <3 lines with "A PEM file must have at least 3 lines".
+        # Re-emitting via TraditionalOpenSSL produces canonical multi-line
+        # PKCS#1 RSA which pycryptodome accepts.
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+            load_pem_private_key,
+        )
+
+        key = load_pem_private_key(
+            self._creds.rsa_priv_pem.encode(), password=None
+        )
+        canonical_pem = key.private_bytes(
+            encoding=Encoding.PEM,
+            format=PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=NoEncryption(),
+        )
+
+        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as rsa_file:
+            rsa_file.write(canonical_pem)
             rsa_file_path = Path(rsa_file.name)
 
         os.chmod(rsa_file_path, stat.S_IRUSR | stat.S_IWUSR)
