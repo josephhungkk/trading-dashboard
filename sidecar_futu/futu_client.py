@@ -159,10 +159,20 @@ class FutuClient:
         trade_ctx = self._trade_ctx
 
         def _query() -> dict[str, Any]:
-            ret, data = trade_ctx.accinfo_query(
-                trd_env=trd_env,
-                acc_id=int(account_number),
-            )
+            try:
+                ret, data = trade_ctx.accinfo_query(
+                    trd_env=trd_env,
+                    acc_id=int(account_number),
+                )
+            except Exception as exc:
+                log.warning(
+                    "futu_accinfo_query_exception",
+                    account=account_number,
+                    trd_env=trd_env,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                return {}
             if ret != RET_OK:
                 log.warning(
                     "futu_accinfo_query_failed",
