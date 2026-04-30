@@ -5,6 +5,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-30
+
+### Phase 6 — Futu HK adapter + JP kanji font polish
+
+- New `sidecar_futu/` Python package (PyInstaller-frozen → `dist-staging-futu/futu-sidecar.exe`).
+  Single Futu sidecar at `10.10.0.2:18005` (label `"futu"`, broker_id `"futu"`); shares the
+  gRPC `Broker` contract with IBKR plus a new `Configure` RPC that ships unlock_pwd_md5 +
+  RSA priv key from `app_secrets` so creds never live on disk.
+- Read + place + cancel for HK stocks/ETFs/warrants/CBBC. Modify/Bracket return UNIMPLEMENTED
+  (deferred to Phase 7).
+- `Health.broker_id` + `Health.started_at` proto fields added; `BrokerRegistry`
+  cross-checks broker_id against the `SIDECAR_BROKERS` map (architect H4) and
+  re-Configures on sidecar restart via started_at delta (architect H2).
+- `BrokerConfigurer` lifecycle in `broker_registry_factory.py` reads creds via
+  `ConfigService` and fires the Configure RPC at startup + after every restart.
+- New `POST /api/admin/brokers/{label}/reconfigure` admin endpoint for cred rotation.
+- `?broker=ibkr|futu|schwab` Pydantic `Literal` on `/api/contracts/search`; `schwab`
+  short-circuits to 503 with `Retry-After: 86400` (deferred to Phase 7).
+- mTLS server hardening: ported `sidecar/tls.py` (TLS 1.3 enforcement, CRL hot-reload
+  via `sys.exit(64)`, cert/key matching-pair validation, file-perm guards) into
+  `sidecar_futu/tls.py`; key-perm check moved before any read for defense-in-depth.
+- futu-api 10.04.6408 SDK gotchas captured: `unlock_trade(password_md5=...)`, RSA via
+  `SysConfig.set_init_rsa_file(<tempfile>)` + `enable_proto_encrypt(True)`,
+  `is_encrypt=True`, `BWRT → CBBC` mapping (Bull/Bear-Warrant), 16-state OrderStatus
+  table including the 5 SDK values the plan missed (CANCELLING_ALL/PART, SUBMIT_FAILED,
+  FILL_CANCELLED, TIMEOUT).
+- JP kanji font split: new `Noto Sans JP` family with two `@font-face` declarations
+  (kana ~50KB + kanji ~1-2MB unicode-range-gated); `[lang|="ja"]` selector triggers
+  the JP-specific glyphs only when a Japanese ticker is rendered. Operator runs
+  `frontend/public/fonts/README.md` pyftsubset pipeline to materialize the binaries.
+- New Prometheus alerts: `BrokerLabelMismatch` (page severity, fires on
+  `broker_registry_label_mismatch_total[5m] > 0`) and `BrokerFutuNormalizeUnknown`
+  (warning, fires on `broker_normalize_unknown_total{label="futu"}[15m] > 5`).
+- Frontend: `searchContracts` accepts `broker?: 'ibkr'|'futu'` via options object;
+  `ContractSearchInput` plumbs the broker through. `TradeTicketModal` disables STOP
+  order type for HK warrants/CBBC and auto-reverts to LIMIT.
+- Deploy ops: `deploy/nuc/build-windows-futu.ps1` + `restart-futu-sidecar.ps1` +
+  `runbook-futu-setup.md` (9-section operator procedure: install OpenD, generate
+  1024-bit RSA, configure OpenD web UI, compute MD5, seed app_secrets, wipe plaintext,
+  trigger Configure, Defender exclusion, mTLS provisioning).
+
 ## [0.5.7] — 2026-04-29
 
 ### Fixed — BrokerTray switched from WG dev-bypass to CF Access service token

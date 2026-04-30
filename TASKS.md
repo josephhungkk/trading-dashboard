@@ -160,9 +160,50 @@ These three are the same shape of problem (sidecar only subscribes at startup; m
 - [x] **`ContractSearchInput` STK-first ranking** — `rankContracts` partitions STK/STOCK to the top of the search dropdown.
 - [x] **Verified `get_order_by_id` SELECT projection** — `OrderResponse` schema doesn't expose `parent_order_id`/`oca_group` (those exist in DB but aren't on the wire); the projection is correctly minimal. Earlier note was wrong.
 
-## Phase 6 — Futu adapter + CJK font polish
+## Phase 6 — Futu HK adapter + JP kanji font polish  *(complete — v0.6.0 · 2026-04-30)*
 
-- [ ] JP kanji routing: split JP @font-face into its own `font-family: "Noto Sans JP"` and select via `:lang(ja)` (or use `font-language-override: "JAN"`). Currently the TC face owns U+4E00-9FFF and precedes the JP face in source order, so Japanese kanji render from TC glyphs. Cosmetic at the Phase 3 ~10-char whitelist scale (forms coincide) but becomes user-visible once real JP tickers ship. Context: flagged by code-quality review during Phase 3 Task 3 (commit bbe97b9), 2026-04-24.
+Read+place+cancel for HK stocks/ETFs/warrants/CBBC via FutuOpenD. New `sidecar_futu/`
+PyInstaller process at `10.10.0.2:18005` with `Configure` RPC for app_secrets-driven
+creds. Modify/Bracket return UNIMPLEMENTED (Phase 7 pickup). 12 architect-review
+findings (5H + 6M + 8L) + 9 SDK-mismatch defects caught during execution all
+applied inline.
+
+- [x] Chunk A — Proto + wiring shells (Configure RPC, Health.broker_id/started_at, AssetClass.CBBC, SIDECAR_BROKERS map, alerts, runbook)
+- [x] Chunk B — Sidecar core (`sidecar_futu/` package, Health/Configure handlers, `_init_loop` with RSA tempfile + SysConfig.set_init_rsa_file + unlock_trade fix, mTLS server hardening port from `sidecar/tls.py`, PyInstaller build script with UTF-8 BOM/CRLF)
+- [x] Chunk C — Sidecar read+trade (GetAccountSummary, GetPositions+BWRT->CBBC mapping, GetOrders+16-state status table, SearchContracts via OpenQuoteContext column-remap, PlaceOrder with TIF+aux_price, CancelOrder via modify_order(CANCEL), SIM mode, OrderEvent stream with threadsafe `loop.call_soon_threadsafe` dispatch + H5 drop-pre-subscribe, Modify/Bracket UNIMPLEMENTED, IBKR Configure no-op)
+- [x] Chunk D — Backend service updates (BrokerRegistry H4 cross-check, BrokerConfigurer + H2 reconfigure on started_at delta, `POST /api/admin/brokers/{label}/reconfigure`, contracts/search `?broker=` Pydantic Literal with schwab->503)
+- [x] Chunk E — Tests (FakeBrokerServicer broker-agnostic, futu_test_data.py HK fixtures, test_reconfigure_cycle.py, sidecar_futu real-grpc contract test)
+- [x] Chunk F — Frontend (`frontend/public/fonts/README.md` pyftsubset runbook, `[lang|="ja"]` selector + Noto Sans JP two-face split in global.css, CJKText.stories.tsx visual diff, `searchContracts` broker option-bag, TradeTicketModal disables STOP for warrants/CBBC with useEffect auto-revert)
+- [x] Chunk G — Ops (`build-windows-futu.ps1` + `restart-futu-sidecar.ps1` UTF-8 BOM/CRLF; runbook-futu-setup.md 9 sections)
+
+### Plan defects caught during execution
+
+- C1/C2/C3/C5/C6: hardcoded `TrdEnv.REAL` -> `_accounts_trd_env` cache populated by list_accounts.
+- C2: `BOND->CBBC` map wrong (Chinese docstring confirms WARRANT covers CBBC; `BWRT` is canonical Bull/Bear-Warrant).
+- C3: plan missed 5 SDK OrderStatus values (CANCELLING_ALL/PART, SUBMIT_FAILED, FILL_CANCELLED, TIMEOUT).
+- C4: `OpenQuoteContext.get_stock_basicinfo` returns `name`/`stock_type` not `stock_name`/`security_type`; needs query-layer remap.
+- C5: missed `time_in_force` and `aux_price` parameters; plan only handled LIMIT/MARKET.
+- C7: proto field `broker_event_at` doesn't exist (actual: `event_at`).
+- C8: `q.put_nowait` from futu callback thread not threadsafe; switched to `loop.call_soon_threadsafe`.
+- B4: SDK kwarg is `password_md5` (plan: `unlock_password_md5`); RSA priv key needs file-path via `SysConfig.set_init_rsa_file(<tempfile>)`, plain string in dataclass not consumed by SDK; `is_encrypt=True` mandatory.
+- B6: barebones `tls.py` insufficient — ported hardened `sidecar/tls.py` (TLS 1.3, CRL hot-reload, cert/key matching pair, file-perm guard).
+
+### Reviewer-applied findings (CRIT+HIGH+MEDIUM through F)
+
+- B3: silent-failure in validate (narrowed try/except), FutuCreds repr leak (`repr=False`), concurrent Configure race (`asyncio.Lock`).
+- B4: ctx.close try-guard, RSA path captured by value (closure race), atexit cleanup, _connect typing, no `assert` in prod paths.
+- B5: metric name aligned to A6 alert (`broker_normalize_unknown_total{label,field}`), discriminated-union return type for `account_from_futu_row`.
+- B6: assert_key_file_permissions before read_bytes, ACL runbook note (Windows ACL provisioning).
+
+### Deferred to operator / Phase 7
+
+- F1 binary regen (operator runs pyftsubset pipeline documented in `frontend/public/fonts/README.md`).
+- G2 Defender exclusion + scheduled task registration (operator-only, runbook step 8 + 9).
+- G3 deploy verification (USER GATE).
+- D5 mechanical test parametrization for futu label (low value; existing tests are IBKR-specific by design).
+- E3 e2e_futu_chain HTTP test (asset-class routing covered by C2 4 unit + C5+C6 6 unit + D4 4 HTTP).
+- ModifyOrder + PlaceBracket on Futu sidecar (UNIMPLEMENTED stubs ship; Phase 7 implements).
+
 ## Phase 7 — Schwab adapter + on-demand market-data subscribe rework
 
 Schwab is the third broker via `requests-oauthlib` — same shape as Phase 6 (Futu), slot a third adapter into the sidecar/supervisor/discoverer machinery. Big delta vs IBKR/Futu: OAuth token refresh + Schwab's per-account US tax/PDT semantics.

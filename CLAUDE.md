@@ -74,13 +74,14 @@ Rules:
 - **C1 race-free soft-delete:** `BrokerDiscoverer` only soft-deletes `broker_accounts` rows whose `last_seen_via` matches a label that is healthy THIS tick (`last_seen_via = ANY(:healthy_labels)`). When all sidecars are unhealthy, the predicate is empty and zero rows are soft-deleted.
 - **NUC ops surface:** `deploy/nuc/` contains all PowerShell + VBS launchers + watchdog. `provision-and-publish.ps1` is the one-shot mTLS rotation flow; `revoke-cert.ps1 -Serial <serial>` revokes; `renew-sidecar-mtls.ps1` rolls one sidecar at a time. Pester suite at `deploy/nuc/tests/SidecarLib.Tests.ps1` (21 tests) covers the reset-window + sidecar-health helpers extracted to `deploy/nuc/lib/SidecarLib.ps1`.
 
-### Phase 5 shipped invariants
+### Phase 5 + 6 shipped invariants
 
-Phase-specific invariants (NLV cache fan-out, modify/bracket/fills wire shapes, status state machine, OCA cascade, etc.) live in auto-memory:
+Phase-specific invariants (NLV cache fan-out, modify/bracket/fills wire shapes, status state machine, OCA cascade, Futu Configure RPC + H2/H4 invariants, etc.) live in auto-memory:
 
 - `phase5a_shipped.md` — discoverer NLV cache (v0.5.0)
 - `phase5b_shipped.md` — IBKR trade execution + 5b.1 hardening (v0.5.1–v0.5.3)
 - `phase5c_shipped.md` — advanced order types: modify, bracket, fills history (v0.5.4)
+- `phase6_futu_topology.md` — Futu HK adapter sidecar topology + Configure RPC + SDK gotchas (v0.6.0)
 
 Consult those before changing code on the relevant surfaces — they record the architect-review findings that have already been resolved inline. **Do not** copy that detail back into CLAUDE.md.
 
