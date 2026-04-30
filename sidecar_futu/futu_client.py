@@ -17,7 +17,12 @@ import structlog
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-_futu_log_dir = Path(os.environ["HOME"]) / ".com.futunn.FutuOpenD" / "Log"
+# Path.home() is cross-platform: $HOME on POSIX, %USERPROFILE% on Windows.
+# `os.environ["HOME"]` raises KeyError on Windows where the env var is
+# USERPROFILE — which is exactly what futu-api's hardcoded log-dir resolver
+# checks internally. We override both HOME and USERPROFILE on the fallback
+# path so the SDK picks up our writable temp dir on either OS.
+_futu_log_dir = Path.home() / ".com.futunn.FutuOpenD" / "Log"
 try:
     _futu_log_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=_futu_log_dir):
@@ -26,6 +31,7 @@ except OSError:
     _futu_import_home = Path(tempfile.gettempdir()) / "futu-home"
     _futu_import_home.mkdir(parents=True, exist_ok=True)
     os.environ["HOME"] = str(_futu_import_home)
+    os.environ["USERPROFILE"] = str(_futu_import_home)
 
 from futu import (  # noqa: E402
     RET_OK,
