@@ -215,10 +215,24 @@ See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3` for the ca
 - Frontend never sees broker credentials. Only the backend holds them.
 - Trade execution endpoints require a confirmation token (nonce) to prevent CSRF.
 
+## Roadmap
+
+The locked Phase 7 → v1.0.0 roadmap lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). End-state: every IBKR + Futu + Schwab asset class, every relevant order type, multi-source streaming quotes, charting, AI-augmented alerts/scanner, autonomous self-refining bots (parameter-tuning + LLM-feedback ceiling — no raw RL), UK CGT (Section 104 pool + SA108 export), and PWA mobile shipping at v1.0.0.
+
+## Goals (active)
+
+- Trade every asset class supported by IBKR + Futu + Schwab
+- Cover every relevant order type per broker capability
+- AI-augmented alerts / universe scanner / news + filings / earnings handling
+- Autonomous self-refining bots (rule-based → LLM-in-loop → autonomous)
+- PWA mobile (install-to-home-screen, Web Push, offline order queue)
+
 ## Non-Goals (for now)
 
-- Mobile native apps (responsive web UI only)
+- Native React Native mobile app (PWA covers personal use; no App Store wall)
+- Raw reinforcement-learning bots (overfitting / blowup risk on a single account; production firms don't deploy raw RL on alpha)
 - Paper trading simulation (use broker-side paper accounts)
+- Multi-tenant / customer-facing — single-user dashboard
 
 ## Phase workflow (standard for every phase)
 

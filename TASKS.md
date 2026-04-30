@@ -204,23 +204,100 @@ applied inline.
 - E3 e2e_futu_chain HTTP test (asset-class routing covered by C2 4 unit + C5+C6 6 unit + D4 4 HTTP).
 - ModifyOrder + PlaceBracket on Futu sidecar (UNIMPLEMENTED stubs ship; Phase 7 implements).
 
-## Phase 7 — Schwab adapter + on-demand market-data subscribe rework
+> **Phases 7 → 25 are locked in [`docs/ROADMAP.md`](docs/ROADMAP.md).** The stubs below carry only the headline + open follow-ups inherited from prior phases. Each phase gets its full chunk breakdown when its own brainstorm runs.
 
-Schwab is the third broker via `requests-oauthlib` — same shape as Phase 6 (Futu), slot a third adapter into the sidecar/supervisor/discoverer machinery. Big delta vs IBKR/Futu: OAuth token refresh + Schwab's per-account US tax/PDT semantics.
+## Phase 7a — Streaming quote engine + IBKR/Futu sources
 
-Bundled with Schwab because both IBKR + Futu + Schwab need the same fix:
-- [ ] **On-demand quote subscribe for preview** (deferred from 5c) — eager `reqMktData` / equivalent on contract-pick, or backend one-shot subscribe with timeout in preview path. Currently new tickers return `503 market_mid_unavailable`.
-- [ ] **Periodic BASE-tag refresh for accounts added mid-run** (deferred from 5b.1) — eager account-update subscribe when discoverer detects a new account.
+Subscription registry (refcounted), Redis quote bus `quote.<source>.<canonical_id>`, frontend WebSocket gateway with conflation, `instruments` + `symbol_aliases` schema (Alembic 0008), stale detection. IBKR + Futu wired as quote sources. Watchlist/positions/trade-ticket render live ticks. Source enum is open-set.
 
-## Phase 8 — Alerts + Telegram + AI router (Ollama light + heavy-box WoL)
-## Phase 2.x — follow-ups discovered during v0.2.0 verify
+Inherits from prior deferrals:
+- [ ] **On-demand quote subscribe for preview** (deferred from 5c) — falls out of the registry pattern.
+- [ ] **Periodic BASE-tag refresh for accounts added mid-run** (deferred from 5b.1).
 
-- [ ] nginx: add `location = /metrics { proxy_pass http://backend:8000/metrics; }` so Prometheus / Grafana can scrape through CF Access + service token. Backend endpoint exists and is auth-gated; only nginx is missing the proxy. Verified in prod 2026-04-23.
+## Phase 7b — Schwab connect (data + read-only)
 
-## Phase 9 — Bots service + security hardening
+`sidecar_schwab/` on port 18006. OAuth + manual re-auth UI for the 7-day refresh-token wall + opt-in Tier-2 Playwright auto-refresher (feature-flagged). `Configure` RPC, `ListAccounts`, `StreamQuotes` (LEVELONE_*, CHART_EQUITY, ACCT_ACTIVITY). Quote-source-router flips US→Schwab. Trade execution returns UNIMPLEMENTED. Saves IBKR data fees from v0.7.1.
+
+## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket
+
+Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6).
+
+## Phase 9 — Charting v1 + bar aggregator + historical store
+
+TimescaleDB hypertable on PG-18, klineschart integration, 1s/1m/5m/15m/1h/1d bars, drag-handle stop/TP edit, historical backfill from broker APIs (Schwab CHART_EQUITY → free 1m US bars).
+
+## Phase 10 — Risk engine + position-sizing + multi-account rollup
+
+PDT counter, buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly / fixed-fractional / vol-target). Multi-account portfolio rollup. Pre-trade gate becomes mandatory chokepoint.
+
+## Phase 11 — AI router + Alerts + Telegram
+
+Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` module any subsystem can call. Price/condition alerts engine. Telegram bot. Prompt-cost tracking.
+
+## Phase 12 — Options (single-leg)
+
+Option chain viewer, strike/expiry pickers, on-demand strike-window subscribe, Greeks display, exercise/assign events. Polymorphic contract via JSONB `contract_details`.
+
+## Phase 13 — Multi-leg option combos
+
+Spread / straddle / strangle / collar / butterfly / condor / iron-condor ticket. Net-debit/credit preview. Schwab `complexOrderStrategyType` + IBKR combo legs.
+
+## Phase 14 — Futures
+
+CME on IBKR + Schwab; HKFE (HSI/HHI) on Futu. Contract-month roll UI. Settlement events. Tick-size/multiplier per contract.
+
+## Phase 15 — Forex + Crypto
+
+IBKR IDEALPRO FX. IBKR Paxos crypto. Coinbase WS as free crypto data source (data-only). 24/7 maintenance handling. Decimal qty (not integer).
+
+## Phase 16 — Bonds + Mutual Funds + CFD
+
+CUSIP search, accrued-interest, T+2. Mutual-fund EOD NAV ordering. CFD on IBKR (ex-US jurisdictions only).
+
+## Phase 17 — IBKR algos
+
+Adaptive, TWAP, VWAP, Arrival, Iceberg / Hidden / Reserve. Algo parameter UI.
+
+## Phase 18 — Universe scanner + News/filings + Earnings-event handling
+
+Rule-based scanner (RSI / breakout / volume / mcap / fundamentals) + LLM commentary. Schwab `SCREENER_EQUITY` feed. SEC EDGAR (US) + RNS (HK) filings ingest. Earnings calendar with auto-flat / auto-pause hooks.
+
+## Phase 19 — Backtesting harness
+
+Replay historical bars through strategy code. PnL / drawdown / Sharpe / MAR report. Walk-forward. Monte Carlo.
+
+## Phase 20 — Bot engine v1 (rule-based)
+
+Strategy plugin model (Python files). Bot lifecycle (create/start/stop/version). Per-bot risk caps. Paper-mode-by-default. Bot worker is a separate Docker service.
+
+## Phase 21 — Bot engine v2 (LLM-in-loop)
+
+LLM-as-analyst on bot decisions. Parameter-tuning loop with human approval. Shadow-mode strategy promotion. Per-bot perf-attribution.
+
+## Phase 22 — Bot engine v3 (autonomous, self-refining)
+
+Multi-bot orchestration. Nightly retrain. LLM-driven strategy generation with guardrails. Auto-promotion rules. **No raw RL.**
+
+## Phase 23 — UK CGT awareness + per-bot attribution + cgt-calc handoff
+
+Real-time Section 104 pool tracker (mirrors `fills` table on every fill). Same-day + 30-day "bed-and-breakfast" matcher running continuously. Pre-trade gate (Phase 10) adds "would trigger 30-day b&b matching" warning. Live £3,000 annual allowance gauge in UI. New "Tax" page: Section 104 positions per security, 30-day-window alerts, allowance gauge, per-bot / per-strategy / per-asset / per-broker PnL breakdown. Year-end export pipeline emits RAW-CSV format consumable by [`KapJI/capital-gains-calculator`](https://github.com/KapJI/capital-gains-calculator). Optional admin-page subprocess invocation of `cgt-calc` for in-place PDF. Crypto / options / futures tracked locally with "not handled by cgt-calc — calculate manually for HMRC" flag.
+
+**Contingency:** if cgt-calc proves unfit at Phase 23 start (current bug investigation pending; tracked as a side task independent of the roadmap), scope expands to include an in-house Section 104 calculation engine — back to the 23a + 23b shape from the previous draft.
+
+## Phase 24 — Infra hardening
 
 - [ ] PG client-cert auth over WireGuard — drop the plaintext `DATABASE_URL` password.
   - Edit `pg_hba.conf` on NUC: `hostssl dashboard trader 10.10.0.0/24 cert clientcert=verify-full`
   - Generate + distribute `secrets/postgres-client.{key,crt}` to VPS (600, `trader:trader`)
   - Shrink `DATABASE_URL` to `postgresql+asyncpg://trader@10.10.0.2/dashboard?ssl=require`
   - Context: user asked 2026-04-23; Phase 2 left `.env` password plaintext because `DATABASE_URL` is bootstrap. File-perms + WG isolation are current protection; cert auth eliminates the secret entirely.
+- [ ] Multi-worker uvicorn — Redis-backed nonce / replay / commission stores so single-worker constraint drops.
+- [ ] ClickHouse for tick history if TimescaleDB outgrows.
+
+## Phase 25 — PWA mobile + v1.0 ship
+
+Service worker. Install-to-home-screen. FCM / Web Push notifications. Mobile-only chart UX. Offline order queue. Biometric lock via WebAuthn. **Tag v1.0.0.**
+
+## Phase 2.x — follow-ups discovered during v0.2.0 verify
+
+- [ ] nginx: add `location = /metrics { proxy_pass http://backend:8000/metrics; }` so Prometheus / Grafana can scrape through CF Access + service token. Backend endpoint exists and is auth-gated; only nginx is missing the proxy. Verified in prod 2026-04-23.
