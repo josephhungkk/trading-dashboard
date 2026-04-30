@@ -72,7 +72,7 @@ if (-not (Test-Path $indexFile)) { [System.IO.File]::WriteAllBytes($indexFile, @
 if (-not (Test-Path $serialFile)) { [System.IO.File]::WriteAllText($serialFile, "1000`n", $utf8NoBom) }
 if (-not (Test-Path $crlNumFile)) { [System.IO.File]::WriteAllText($crlNumFile, "1000`n", $utf8NoBom) }
 
-$LABELS = @('isa-live', 'isa-paper', 'normal-live', 'normal-paper')
+$LABELS = @('isa-live', 'isa-paper', 'normal-live', 'normal-paper', 'futu')
 
 $caKeyPath = Join-Path $OutDir 'ca.key'
 $caCertPath = Join-Path $OutDir 'ca.pem'

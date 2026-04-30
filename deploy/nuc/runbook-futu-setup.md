@@ -119,18 +119,24 @@ Otherwise the kanji-rich PyInstaller payload triggers a Defender scan on every r
 
 ## 9. Provision sidecar mTLS material
 
-Run `deploy/nuc/provision-sidecar-mtls.ps1 -Label futu` to issue + sign the per-sidecar
-cert/key pair. The script writes `C:\dashboard\secrets\futu-sidecar-cert.pem`,
-`futu-sidecar-key.pem`, `ca-bundle.pem`, `crl.pem` and applies `icacls`
-restrictive ACLs (administrators + SYSTEM only).
-
-Then verify the key is not world-readable:
+Re-run the existing `provision-and-publish.ps1` orchestrator. As of v0.6.0 the
+`$LABELS` array in `provision-sidecar-mtls.ps1` includes `futu` alongside the
+4 IBKR labels, so one run produces the futu server cert + uploads the matching
+client material to `app_secrets`. The script is idempotent — IBKR certs that
+are still valid >30 days are skipped.
 
 ```powershell
-icacls C:\dashboard\secrets\futu-sidecar-key.pem
+cd C:\dashboard\deploy\nuc
+.\provision-and-publish.ps1
 ```
 
-Expected: only `BUILTIN\Administrators` and `NT AUTHORITY\SYSTEM` listed; no `Users`
-or `Everyone`. The sidecar's in-process `assert_key_file_permissions` guard is a
-no-op on Windows (POSIX-only mode-bit check); ACL hardening is enforced here at
-provisioning time and must be re-checked after any cert rotation.
+Verify the futu key is not world-readable (Windows ACL — the sidecar's in-process
+`assert_key_file_permissions` guard is a no-op on Windows, so ACL hardening is
+enforced here at provisioning time):
+
+```powershell
+icacls C:\dashboard\secrets\futu-server.key
+```
+
+Expected: only `BUILTIN\Administrators` and `NT AUTHORITY\SYSTEM` (no `Users`
+or `Everyone`). Re-check after every cert rotation.
