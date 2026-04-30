@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, NamedTuple, TypeAlias
 from zoneinfo import ZoneInfo
@@ -47,10 +47,22 @@ def account_from_futu_row(row: dict[str, Any]) -> AccountResult:
 
 
 def _money(value: str | int | float | None, currency: str) -> broker_pb2.Money:
+    """Format any numeric/string into Money(NUMERIC(20,8)).
+
+    Pandas returns numpy NaN for unset Futu account-summary fields (e.g.
+    us_cash on a HKD-only account); some Futu fields also come through as
+    sentinel strings like "--" or "N/A". Treat all non-parseable values as 0
+    rather than raising decimal.InvalidOperation up to the gRPC handler.
+    """
     if value is None or value == "":
         d = Decimal("0")
     else:
-        d = Decimal(str(value))
+        try:
+            d = Decimal(str(value))
+            if not d.is_finite():
+                d = Decimal("0")
+        except (InvalidOperation, ValueError):
+            d = Decimal("0")
     d = d.quantize(Decimal("1e-8"))
     return broker_pb2.Money(value=format(d, "f"), currency=(currency or "HKD"))
 
