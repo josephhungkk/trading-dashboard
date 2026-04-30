@@ -206,17 +206,19 @@ applied inline.
 
 > **Phases 7 → 25 are locked in [`docs/ROADMAP.md`](docs/ROADMAP.md).** The stubs below carry only the headline + open follow-ups inherited from prior phases. Each phase gets its full chunk breakdown when its own brainstorm runs.
 
-## Phase 7a — Streaming quote engine + IBKR/Futu sources
+## Phase 7a — Schwab connect (data + read-only)
 
-Subscription registry (refcounted), Redis quote bus `quote.<source>.<canonical_id>`, frontend WebSocket gateway with conflation, `instruments` + `symbol_aliases` schema (Alembic 0008), stale detection. IBKR + Futu wired as quote sources. Watchlist/positions/trade-ticket render live ticks. Source enum is open-set.
+`sidecar_schwab/` running on the **VPS** as a docker-compose service (cloud-broker pattern — no NUC, no PyInstaller, no mTLS). OAuth + manual re-auth UI for the 7-day refresh-token wall + opt-in Tier-2 Playwright auto-refresher (feature-flagged). `Configure` RPC, `ListAccounts`, `GetAccountSummary`, `GetPositions`, `GetOrders` (last 7 days, read-only). `account_hash` column on `broker_accounts` (Alembic 0008 — Schwab privacy layer; NULL for non-Schwab brokers). Trade execution + StreamQuotes return UNIMPLEMENTED.
+
+Spec: [`docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md`](docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md). Architect-reviewed (3 CRIT + 6 HIGH + 7 MED + 5 LOW; CRIT+HIGH+MED applied inline).
+
+## Phase 7b — Streaming quote engine + IBKR/Futu/Schwab/Coinbase/OANDA sources
+
+Subscription registry (refcounted), Redis quote bus `quote.<source>.<canonical_id>`, frontend WebSocket gateway with conflation (4–10/s), `instruments` + `symbol_aliases` schema (Alembic 0009), stale detection. IBKR + Futu + Schwab streamers wired in one phase. Coinbase WS + OANDA practice WS as additional sources (data-only prep for Phase 15). Quote-source-router with config-driven priority. **Saves IBKR data fees from v0.7.1.**
 
 Inherits from prior deferrals:
 - [ ] **On-demand quote subscribe for preview** (deferred from 5c) — falls out of the registry pattern.
 - [ ] **Periodic BASE-tag refresh for accounts added mid-run** (deferred from 5b.1).
-
-## Phase 7b — Schwab connect (data + read-only)
-
-`sidecar_schwab/` on port 18006. OAuth + manual re-auth UI for the 7-day refresh-token wall + opt-in Tier-2 Playwright auto-refresher (feature-flagged). `Configure` RPC, `ListAccounts`, `StreamQuotes` (LEVELONE_*, CHART_EQUITY, ACCT_ACTIVITY). Quote-source-router flips US→Schwab. Trade execution returns UNIMPLEMENTED. Saves IBKR data fees from v0.7.1.
 
 ## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket
 
