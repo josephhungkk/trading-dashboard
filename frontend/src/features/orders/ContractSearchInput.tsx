@@ -10,6 +10,7 @@ export interface ContractSearchInputValue {
 interface SelectProps {
   onSelect: (contract: { conid: string; symbol: string }) => void;
   assetClass?: string;
+  broker?: 'ibkr' | 'futu';
   id?: string;
   disabled?: boolean;
 }
@@ -17,6 +18,7 @@ interface SelectProps {
 interface LegacyProps {
   value: ContractSearchInputValue;
   onChange: (value: ContractSearchInputValue) => void;
+  broker?: 'ibkr' | 'futu';
   id?: string;
   disabled?: boolean;
 }
@@ -29,7 +31,7 @@ type DisplayContract = ContractSummary & {
   asset_class?: string;
 };
 
-type SearchFn = (q: string, assetClass?: string) => Promise<ContractSummary[]>;
+type SearchFn = (q: string, assetClass?: string, broker?: 'ibkr' | 'futu') => Promise<ContractSummary[]>;
 
 declare global {
   interface Window {
@@ -69,6 +71,7 @@ export function ContractSearchInput({
   const legacy = 'onChange' in props;
   const disabled = props.disabled ?? false;
   const assetClass = legacy ? undefined : props.assetClass;
+  const broker = props.broker;
   const listboxSeed = React.useId();
   const listboxId = `${listboxSeed}-contracts`;
   const rootRef = React.useRef<HTMLDivElement | null>(null);
@@ -147,7 +150,10 @@ export function ContractSearchInput({
 
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
-      search(nextQuery, assetClass)
+      const searchPromise = broker === undefined
+        ? search(nextQuery, assetClass)
+        : search(nextQuery, assetClass, broker);
+      searchPromise
         .then((contracts) => {
           if (requestRef.current !== requestId || controller.signal.aborted) return;
           setResults(rankContracts(contracts as DisplayContract[]));
@@ -167,7 +173,7 @@ export function ContractSearchInput({
           setLoading(false);
         });
     }, 300);
-  }, [assetClass, clearTimer, close, legacy, props, search]);
+  }, [assetClass, broker, clearTimer, close, legacy, props, search]);
 
   React.useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {

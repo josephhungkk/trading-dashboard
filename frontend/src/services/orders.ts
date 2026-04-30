@@ -49,6 +49,11 @@ interface ContractSearchResponse {
   contracts: ContractSummary[];
 }
 
+export interface SearchContractsOptions {
+  signal?: AbortSignal;
+  broker?: 'ibkr' | 'futu';
+}
+
 const USE_MOCKS = (import.meta.env.VITE_USE_MOCKS as string | undefined) === 'true';
 
 const DEFAULT_MAINTENANCE: BrokerMaintenance = {
@@ -201,26 +206,29 @@ export async function getOrderPolicy(accountId: string): Promise<PolicyResponse>
 export async function searchContracts(
   q: string,
   assetClass?: string,
-  signal?: AbortSignal,
+  signalOrOptions?: AbortSignal | SearchContractsOptions,
 ): Promise<ContractSummary[]> {
+  const signal = signalOrOptions instanceof AbortSignal ? signalOrOptions : signalOrOptions?.signal;
+  const broker = signalOrOptions instanceof AbortSignal ? undefined : signalOrOptions?.broker;
   const params = new URLSearchParams({ q });
   if (assetClass !== undefined && assetClass !== '') params.set('asset_class', assetClass);
+  if (broker !== undefined) params.set('broker', broker);
   const init: RequestInit = {
     credentials: 'include',
   };
   if (signal !== undefined) init.signal = signal;
-  const response = await fetch(`/api/contracts/search?${params.toString()}`, init);
+  const response = await fetch(`/api/contracts?${params.toString()}`, init);
   const body = await readOrThrow<ContractSearchResponse>(response);
   return body.contracts;
 }
 
 export function createDebouncedSearch(
   delayMs = 300,
-): (q: string, assetClass?: string) => Promise<ContractSummary[]> {
+): (q: string, assetClass?: string, broker?: 'ibkr' | 'futu') => Promise<ContractSummary[]> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;
 
-  return (q: string, assetClass?: string): Promise<ContractSummary[]> => {
+  return (q: string, assetClass?: string, broker?: 'ibkr' | 'futu'): Promise<ContractSummary[]> => {
     if (timer !== null) clearTimeout(timer);
     controller?.abort();
     controller = new AbortController();
@@ -229,7 +237,9 @@ export function createDebouncedSearch(
     return new Promise((resolve, reject) => {
       timer = setTimeout(() => {
         timer = null;
-        searchContracts(q, assetClass, activeController.signal).then(resolve, reject);
+        const options: SearchContractsOptions = { signal: activeController.signal };
+        if (broker !== undefined) options.broker = broker;
+        searchContracts(q, assetClass, options).then(resolve, reject);
       }, delayMs);
     });
   };
