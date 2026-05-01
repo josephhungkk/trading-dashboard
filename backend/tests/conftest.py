@@ -54,3 +54,104 @@ def _apply_migrations() -> None:
 async def client() -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
+
+
+# ── Phase 7a C0 — shared fixtures for chunks B/C/D/E/F (HIGH-5) ──────────────
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+import fakeredis.aioredis  # noqa: E402
+import pytest_asyncio  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+
+from app.core.crypto import get_fernet  # noqa: E402
+from app.core.db import SessionLocal, engine  # noqa: E402
+from app.core.deps import set_config_service  # noqa: E402
+from app.services.config import ConfigService  # noqa: E402
+from app.services.config_cache import ConfigCache  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def redis() -> AsyncIterator:
+    """In-memory fakeredis for state nonce + pubsub tests."""
+    r = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    yield r
+    await r.aclose()
+
+
+@pytest_asyncio.fixture
+async def db_session() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as s:
+        yield s
+
+
+@pytest_asyncio.fixture
+async def db_session_a() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as s:
+        yield s
+
+
+@pytest_asyncio.fixture
+async def db_session_b() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as s:
+        yield s
+
+
+@pytest_asyncio.fixture
+async def config_service(redis) -> AsyncIterator[ConfigService]:
+    """Real ConfigService against the test DB + a fakeredis."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    cc = ConfigCache(redis, "config:invalidate", "config", ttl_seconds=10)
+    sc = ConfigCache(redis, "config:invalidate:secrets", "secret", ttl_seconds=10)
+    fernet = get_fernet(settings.secret_key, settings.secret_key_prev)
+    svc = ConfigService(factory, cc, sc, fernet)
+    set_config_service(svc)
+    yield svc
+
+
+@pytest_asyncio.fixture
+async def test_client_admin() -> AsyncIterator[AsyncClient]:
+    """Async client that injects a fake admin Cf-Access-Jwt-Assertion via
+    monkeypatched verifier."""
+    from app.core import deps as deps_mod
+
+    deps_mod._verifier.verify = MagicMock(  # type: ignore[method-assign]
+        return_value=MagicMock(email="admin@test.local", kind="cf_access_jwt"),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        client.headers["Cf-Access-Jwt-Assertion"] = "test-token"
+        yield client
+
+
+@pytest_asyncio.fixture
+async def test_client_no_auth() -> AsyncIterator[AsyncClient]:
+    """Async client without the admin JWT header."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        yield client
+
+
+@pytest.fixture
+def sidecar_stubs() -> dict[str, MagicMock]:
+    """Per-label gRPC sidecar stubs for tests."""
+    return {
+        "schwab": MagicMock(),
+        "isa-live": MagicMock(),
+        "futu": MagicMock(),
+    }
+
+
+@pytest.fixture
+def mock_brokers(sidecar_stubs) -> dict[str, AsyncMock]:
+    """Per-label broker-client async mocks."""
+    return {
+        "schwab": AsyncMock(),
+        "isa-live": AsyncMock(),
+        "futu": AsyncMock(),
+    }
+
+
+@pytest.fixture
+def mock_sidecar_configure(sidecar_stubs) -> AsyncMock:
+    sidecar_stubs["schwab"].Configure = AsyncMock()
+    return sidecar_stubs["schwab"].Configure
