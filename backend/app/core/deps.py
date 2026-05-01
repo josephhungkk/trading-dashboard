@@ -29,6 +29,9 @@ from app.core.db import SessionLocal
 from app.services.brokers import AccountService, BrokerRegistry
 
 if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
+    from app.core.config import Settings
     from app.services.config import ConfigService
 
 log = logging.getLogger(__name__)
@@ -87,6 +90,17 @@ def get_config() -> ConfigService:
     if _config_service is None:
         raise RuntimeError("ConfigService not initialized — lifespan startup didn't wire it")
     return _config_service
+
+
+def get_redis(request: Request) -> Redis:
+    redis: Redis | None = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise RuntimeError("redis not initialized — lifespan startup didn't wire it")
+    return redis
+
+
+def get_settings() -> Settings:
+    return settings
 
 
 def _client_ip(request: Request) -> str:
