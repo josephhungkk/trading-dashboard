@@ -18,6 +18,7 @@ _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}"),
     re.compile(r"api_key=[^&\s]+"),
+    re.compile(r"schwab[._-]?(password|totp_secret|app_secret|refresh_token|access_token)", re.I),
 ]
 _ACCOUNT_KEYS = frozenset({"account", "account_number", "acctNumber"})
 _REDACTED = "<redacted>"
