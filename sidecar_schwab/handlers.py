@@ -224,6 +224,41 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         orders = [normalize_order(r) for r in (rows or [])]
         return broker_pb2.OrdersResponse(orders=orders)
 
+    async def GetContract(self, request, context):  # noqa: N802
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab GetContract lands in Phase 7b")
+        return broker_pb2.ContractResponse()
+
+    async def PlaceOrder(self, request, context):  # noqa: N802
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab PlaceOrder lands in Phase 8")
+        return broker_pb2.PlaceOrderResponse()
+
+    async def CancelOrder(self, request, context):  # noqa: N802
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab CancelOrder lands in Phase 8")
+        return broker_pb2.CancelOrderResponse()
+
+    async def ModifyOrder(self, request, context):  # noqa: N802
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab ModifyOrder lands in Phase 8")
+        return broker_pb2.ModifyOrderResponse()
+
+    async def PlaceBracket(self, request, context):  # noqa: N802
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab PlaceBracket lands in Phase 8")
+        return broker_pb2.PlaceBracketResponse()
+
+    async def SearchContracts(self, request, context):  # noqa: N802
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab contract search lands in Phase 7b")
+        return broker_pb2.SearchContractsResponse()
+
+    async def OrderEvent(self, request, context):  # noqa: N802
+        # Server-streaming RPC.
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab OrderEvent stream lands in Phase 8")
+
     async def _fetch_account_with_404_retry(self, account_number: str) -> dict:
         """H3 -- on typed SchwabAccountHashStaleError, invalidate cache + retry once."""
         from sidecar_schwab.client import SchwabAccountHashStaleError
