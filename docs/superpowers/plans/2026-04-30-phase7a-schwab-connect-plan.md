@@ -1,5 +1,22 @@
 # Phase 7a — Schwab Connect (Data + Read-Only) — Implementation Plan
 
+> **Plan v3 — architect-review applied 2026-04-30.** Plan v2 (commit `b8b3d10`) had 8 CRIT + 17 HIGH + 19 MED findings, mostly proto-shape mismatches against the actual `proto/broker/v1/broker.proto`. v3 grounds every task in the real proto + real `ConfigService` + real `BrokerConfigurer`. Key reality grounding:
+>
+> - **Proto facts:** `BrokerId.SCHWAB=3` already exists. `OrderStatus` has only 6 values — no `STATUS_MODIFIED`; map Schwab `PENDING_REPLACE/REPLACED` to `SUBMITTED` and let Phase 5c's SQL `order_status_rank()` handle the modified flag downstream. `ConfigureRequest` has typed Futu fields **plus a `metadata: map<string,string>` field** explicitly designed for "Future creds without proto edits" — **Schwab credentials go in `metadata`**. `ListManagedAccounts(Empty)` not `ListAccounts(ListAccountsRequest)`. `GetOrders(AccountRef)` not `GetOrders(GetOrdersRequest)`. `Account` has fields 1–4 (no `account_hash` yet — A1 adds field 5). `Order.order_id` (not `broker_order_id`). `Order.quantity_filled` (not `filled_quantity`). All monetary fields are `Money(value, currency)` — never bare strings. Enums accessed as `broker_pb2.TradingMode.LIVE` / `broker_pb2.OrderStatus.SUBMITTED` (nested), not `pb.LIVE` / `pb.SUBMITTED`.
+> - **`RequestTokenRefresh` lives on a NEW service `BackendCallback`,** not on `service Broker` — keeps the backend's gRPC surface from accidentally implementing every Broker RPC. A1 adds the new service definition.
+> - **`ConfigService` API:** `get(ns, key, default)` / `set(ns, key, value, value_type)` / `delete(ns, key)` for config; `reveal_secret(ns, key, default)` / `set_secret(ns, key, value, value_type)` / `delete_secret(ns, key)` for secrets. **Namespace convention:** `("broker", f"{label}.<key>")` — e.g. `("broker", "schwab.app_key")`, NOT `("schwab", "app_key")`. Matches the existing Futu wiring at `broker_registry_factory.py:51-58`.
+> - **`BrokerConfigurer` already exists** at `backend/app/services/broker_registry_factory.py:40` with `targets: set[str]` + `async def configure(label: str)`. Phase 7a extends it: add `"schwab"` to `targets`; branch in `configure()` for the Schwab path that builds `ConfigureRequest(metadata={...})` instead of the typed Futu kwargs. Or extract a strategy method per broker.
+> - **`SIDECAR_BROKERS`** is `dict[str, str]` mapping label → broker_id (not the tuple v2 assumed). `SIDECAR_PORTS` is the separate `dict[str, int]` map. `build_broker_registry` hardcodes `host="10.10.0.2"` for ALL labels — Phase 7a refactors to allow per-label host so Schwab can target the docker-network hostname `schwab-sidecar`.
+> - **Sidecar test enum-access pattern:** `broker_pb2.TradingMode.LIVE` (nested), confirmed in `sidecar_futu/tests/test_normalize.py:20`. Apply this style to all Schwab tests.
+> - **`Order.avg_fill_price_inferred`** does NOT exist on the proto — A1 adds it as field 14 of `Order` (the boundary flag for M2 fix from spec §3.2.2).
+> - **Tier-2 refresher cannot import `ConfigService`** — separate Docker container with no DB session factory. All access via backend HTTP admin endpoints (CF Access service-token headers, NOT `Authorization: Bearer ...`). Per CLAUDE.md "CI bypass" pattern: `CF-Access-Client-Id` + `CF-Access-Client-Secret`.
+> - **OAuth callback advisory lock**: BOTH `_exchange_code` (Tier-1 first-OAuth path) AND `refresh_with_lock` (sidecar-near-expiry path) MUST acquire `pg_try_advisory_lock(SCHWAB_REFRESH_LOCK_ID)` to satisfy spec §3.6 single-writer rule. v3 introduces a shared `_persist_tokens_under_lock` helper.
+> - **Frontend testing realities:** `vi.mock` is hoisted — must be at top-level of test file, not inside `it()`. Fake-timers in async tests use `vi.advanceTimersByTimeAsync` to drain microtasks. `popstate` listener wired in `useSchwabTokenStatus` (not just on Connect-button click) so returning from the OAuth tab triggers fast-poll.
+> - **Playwright redirect interception** uses `await page.route("**/api/oauth/schwab/callback*", handler)` + `await route.abort()` — `page.on("request", ...)` is observe-only and CANNOT abort navigations. Refresher uses `Locator.press_sequentially(text, delay=...)` (Playwright ≥1.43 native human-typing) instead of a hand-rolled async sleep loop.
+> - **Refresher container Python:** Microsoft's `mcr.microsoft.com/playwright/python:v1.45.0` ships Python 3.11/3.12 — incompatible with our `requires-python = ">=3.14"`. Use `python:3.14-slim` + install Playwright + browser separately, OR drop the refresher's `requires-python` to `>=3.11` since it shares no code with backend.
+>
+> **Architect findings tracker** (52 total — 49 from initial review + 3 cross-cutting): mapped per-task in §"Self-review" at end of plan. CRIT + HIGH + MED applied inline; LOW deferrals listed in §12 of the spec.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship a Schwab broker sidecar on the VPS as a docker-compose service speaking the same gRPC `Broker` contract as IBKR + Futu. Read-only: list accounts, summary, positions, last-7-days orders. Tier-1 manual OAuth re-auth UI + Tier-2 opt-in Playwright auto-refresher. Trade execution + StreamQuotes return UNIMPLEMENTED (Phase 8 + 7b respectively).
@@ -54,7 +71,7 @@
 | `sidecar_schwab/tests/__init__.py` | Package marker. |
 | `sidecar_schwab/tests/conftest.py` | Pytest fixtures (mocked Schwabdev client, fake Redis, fake backend gRPC). |
 | `sidecar_schwab/tests/test_normalize.py` | JSON→proto mapping tests. |
-| `sidecar_schwab/tests/test_handlers_list_accounts.py` | Configure → ListAccounts round-trip. |
+| `sidecar_schwab/tests/test_handlers_list_managed_accounts.py` | Configure → ListManagedAccounts round-trip. |
 | `sidecar_schwab/tests/test_handlers_summary.py` | NLV/cash/buying_power extraction. |
 | `sidecar_schwab/tests/test_handlers_positions.py` | Position mapping + day_pnl. |
 | `sidecar_schwab/tests/test_handlers_orders.py` | 7-day window + status table + avg_fill_price extraction. |
@@ -111,9 +128,7 @@
 | `backend/app/_generated/broker/v1/*` | Regenerated stubs. |
 | `sidecar/_generated/broker/v1/*` | Regenerated stubs (IBKR sidecar). |
 | `sidecar_futu/_generated/broker/v1/*` | Regenerated stubs (Futu sidecar). |
-| `sidecar/handlers.py` | IBKR sidecar: implement `RequestTokenRefresh` as `UNIMPLEMENTED`. |
-| `sidecar_futu/handlers.py` | Futu sidecar: implement `RequestTokenRefresh` as `UNIMPLEMENTED`. |
-| `backend/app/services/broker_registry_factory.py` | Add `"schwab": ("schwab", "schwab-sidecar:9090")` to `SIDECAR_BROKERS`. Add `BrokerConfigurer` lifecycle for Schwab. Add backend-side `RequestTokenRefresh` server-side handler with PG advisory lock. |
+| `backend/app/services/broker_registry_factory.py` | Add `"schwab": "schwab"` entry to `SIDECAR_BROKERS` (`dict[str, str]` label→broker_id) and a per-label `SIDECAR_HOSTS` override `{"schwab": "schwab-sidecar"}` so the schwab label resolves to the docker-network hostname instead of the WG IP `10.10.0.2`. Extend `BrokerConfigurer.targets` with `"schwab"` and add the metadata-only Configure branch. |
 | `backend/app/services/account_service.py` | Boundary strip `account_hash` from `AccountResponse`. |
 | `backend/app/api/admin.py` | Mount `brokers_admin` router. |
 | `backend/app/main.py` | Mount `oauth.py` router (public). Mount SSE endpoint. |
@@ -173,26 +188,67 @@ test -n "${CF_ACCESS_API_TOKEN:-}" && echo "CF token present" || echo "MISSING �
 
 Goal: extend the proto contract with `Account.account_hash` + new `RequestTokenRefresh` RPC, scaffold the empty `sidecar_schwab/` package, register the schwab label in `SIDECAR_BROKERS`, and stub the Prometheus metrics. After A7 the package boots, returns Health, and is reachable from the backend's existing `BrokerRegistry` infrastructure (with all data-plane RPCs returning UNIMPLEMENTED).
 
-### Task A1: Extend proto contract — `account_hash` field + `RequestTokenRefresh` RPC
+### Task A1: Extend proto contract — `Account.account_hash` + `Order.avg_fill_price_inferred` + new `BackendCallback` service
 
 **Files:** Modify `proto/broker/v1/broker.proto`.
 
-- [ ] **Step 1: Add `account_hash` to `Account` message.** Edit `proto/broker/v1/broker.proto`, find `Account`, append field 5:
+**v3 reality grounding:** `BrokerId.SCHWAB=3` already exists (line 40). `OrderStatus` stays at 6 values — Phase 5c's `modified` is SQL-level, NOT proto. Schwab credentials flow through the existing `ConfigureRequest.metadata: map<string,string>` field (line 303) — no shape changes to `ConfigureRequest`. `RequestTokenRefresh` lives on a NEW dedicated `BackendCallback` service so the backend's gRPC server doesn't have to implement every Broker RPC.
+
+- [ ] **Step 1: Add `account_hash` field 5 to `Account` message.** Find `Account` (line 121) and append:
 
 ```proto
 message Account {
   string account_number = 1;
   TradingMode mode = 2;
   string gateway_label = 3;
+  // Sourced from accountSummary BASE tag (e.g., "USD", "GBP"). NOT defaulted.
   string currency_base = 4;
-  string account_hash = 5;  // Phase 7a — Schwab privacy layer; empty for IBKR/Futu
+  // Phase 7a — Schwab privacy-layer hash from /accountNumbers; required on
+  // every Schwab REST path. Empty for IBKR/Futu. PII-equivalent: never
+  // logged; backend's AccountResponse boundary-strips before REST output.
+  string account_hash = 5;
 }
 ```
 
-- [ ] **Step 2: Add `TokenRefreshRequest` + `TokenRefreshResponse` before `service Broker`:**
+- [ ] **Step 2: Add `avg_fill_price_inferred` field 14 to `Order` message.** Find `Order` (line 188) and append after `updated_at = 13`:
 
 ```proto
-// Phase 7a — sidecar→backend single-writer token-refresh callback (architect C2)
+message Order {
+  string order_id = 1;
+  Contract contract = 2;
+  OrderSide side = 3;
+  OrderType order_type = 4;
+  string quantity = 5;
+  Money limit_price = 6;
+  Money stop_price = 7;
+  TimeInForce time_in_force = 8;
+  OrderStatus status = 9;
+  string quantity_filled = 10;
+  Money avg_fill_price = 11;
+  google.protobuf.Timestamp submitted_at = 12;
+  google.protobuf.Timestamp updated_at = 13;
+  // Phase 7a M2 — true when avg_fill_price was inferred from limit_price
+  // because the upstream broker JSON omitted execution-leg detail (e.g.,
+  // Schwab's `orderActivityCollection` missing on a FILLED order). UI
+  // dims the value when this flag is true.
+  bool avg_fill_price_inferred = 14;
+}
+```
+
+- [ ] **Step 3: Add NEW `BackendCallback` service + messages at end of file** (after `ConfigureResponse`):
+
+```proto
+// Phase 7a — sidecar→backend single-writer token-refresh callback (architect C2).
+// This service is implemented by the BACKEND (not by sidecars). Sidecars are
+// gRPC clients of this service when they need a fresh token pair. Backend
+// holds the PG advisory lock during the actual refresh; sidecars never call
+// Schwab's /oauth/token endpoint directly.
+service BackendCallback {
+  // broker_id selects which broker's tokens to refresh. Only "schwab"
+  // currently uses this path; other brokers reuse their existing auth.
+  rpc RequestTokenRefresh(TokenRefreshRequest) returns (TokenRefreshResponse);
+}
+
 message TokenRefreshRequest {
   string broker_id = 1;  // "schwab" — distinguishes if other brokers ever need this pattern
 }
@@ -204,110 +260,64 @@ message TokenRefreshResponse {
 }
 ```
 
-- [ ] **Step 3: Add `RequestTokenRefresh` RPC inside `service Broker`:**
-
-```proto
-  // Phase 7a — sidecar requests fresh tokens from backend (single writer).
-  // Only schwab implements; ibkr/futu return UNIMPLEMENTED.
-  rpc RequestTokenRefresh(TokenRefreshRequest) returns (TokenRefreshResponse);
-```
-
-- [ ] **Step 4: Regenerate stubs.**
+- [ ] **Step 4: Regenerate proto stubs.** Verify the helper scripts exist first (PF8):
 
 ```bash
 cd /home/joseph/dashboard
+test -x sidecar/scripts/proto-gen.sh || { echo "MISSING sidecar/scripts/proto-gen.sh"; exit 1; }
+test -x sidecar_futu/scripts/proto-gen.sh || { echo "MISSING sidecar_futu/scripts/proto-gen.sh"; exit 1; }
 bash sidecar/scripts/proto-gen.sh
 bash sidecar_futu/scripts/proto-gen.sh
-# sidecar_schwab/scripts/proto-gen.sh is created in A3 — skip until then
+# sidecar_schwab/scripts/proto-gen.sh is created in A3
+# Backend gets regenerated through the existing repo's gen mechanism (verify with the same `bash sidecar/scripts/proto-gen.sh` if it covers backend, or whatever the existing script does — DO NOT INVENT)
 ```
 
-- [ ] **Step 5: Verify symbols.**
+- [ ] **Step 5: Verify new symbols import cleanly.**
 
 ```bash
-cd backend && uv run python -c "from app._generated.broker.v1 import broker_pb2 as pb; \
-  print(pb.Account.DESCRIPTOR.fields_by_name['account_hash']); \
-  print(pb.TokenRefreshRequest.DESCRIPTOR); \
-  print(pb.TokenRefreshResponse.DESCRIPTOR)"
+cd backend && uv run python -c "
+from app._generated.broker.v1 import broker_pb2 as pb, broker_pb2_grpc as pbg
+
+# Account.account_hash
+assert pb.Account.DESCRIPTOR.fields_by_name['account_hash'].number == 5
+
+# Order.avg_fill_price_inferred
+assert pb.Order.DESCRIPTOR.fields_by_name['avg_fill_price_inferred'].number == 14
+
+# New BackendCallback service stubs
+assert hasattr(pbg, 'BackendCallbackStub'), 'BackendCallbackStub missing'
+assert hasattr(pbg, 'add_BackendCallbackServicer_to_server'), 'BackendCallback servicer hook missing'
+
+# TokenRefresh messages
+assert pb.TokenRefreshRequest.DESCRIPTOR
+assert pb.TokenRefreshResponse.DESCRIPTOR
+
+# Sanity: existing surface unchanged
+assert pb.BrokerId.SCHWAB == 3, 'SCHWAB=3 expected per existing proto line 40'
+print('OK')
+"
 ```
 
-Expected: three `<Descriptor ...>` lines, no errors.
+Expected: `OK`.
 
 - [ ] **Step 6: Commit.**
 
 ```bash
 git add proto/broker/v1/broker.proto backend/app/_generated/ sidecar/_generated/ sidecar_futu/_generated/
-git commit -m "feat(proto): add Account.account_hash + RequestTokenRefresh RPC for Phase 7a"
+git commit -m "feat(proto): Account.account_hash + Order.avg_fill_price_inferred + BackendCallback service for Phase 7a"
 ```
 
-**Conditional reviewers:** `type-design-analyzer`.
+**Conditional reviewers:** `type-design-analyzer`, `silent-failure-hunter` (proto enum semantics).
 
-### Task A2: IBKR + Futu sidecars implement `RequestTokenRefresh` as `UNIMPLEMENTED`
+**Architect findings closed by A1:** CRIT #1 (no ConfigureRequest reshape — use metadata map), CRIT #2 (BackendCallback as separate service), CRIT #3 (no STATUS_MODIFIED — defer to SQL; add `avg_fill_price_inferred` field), HIGH #9 (place new messages at end of file matching `ConfigureRequest`/`ConfigureResponse` precedent).
 
-**Files:** Modify `sidecar/handlers.py`, `sidecar_futu/handlers.py`. Create test files for each.
+### Task A2: ~~IBKR + Futu UNIMPLEMENTED stubs~~ — DELETED in v3
 
-- [ ] **Step 1: Failing test for IBKR.** Create `sidecar/tests/test_handlers_token_refresh.py`:
+**v3 reality grounding:** `RequestTokenRefresh` was moved off `service Broker` onto a NEW `service BackendCallback` (A1). Sidecars are *clients* of `BackendCallback`, never servers — so IBKR/Futu sidecars do NOT need an UNIMPLEMENTED stub. The `service Broker` surface is unchanged for IBKR/Futu, no test+code add needed for them.
 
-```python
-"""Phase 7a A2 — IBKR sidecar returns UNIMPLEMENTED for RequestTokenRefresh."""
-import grpc
-import pytest
+**This task is intentionally empty.** Skip A2; renumber subsequent tasks if mechanical, OR keep the A2 slot as documentation of the architectural reroute.
 
-from sidecar._generated.broker.v1 import broker_pb2 as pb
-
-
-@pytest.mark.asyncio
-async def test_ibkr_request_token_refresh_unimplemented(grpc_stub):
-    request = pb.TokenRefreshRequest(broker_id="ibkr")
-    with pytest.raises(grpc.aio.AioRpcError) as excinfo:
-        await grpc_stub.RequestTokenRefresh(request)
-    assert excinfo.value.code() == grpc.StatusCode.UNIMPLEMENTED
-```
-
-- [ ] **Step 2: Run test — verify FAIL.**
-
-```bash
-cd /home/joseph/dashboard/sidecar && uv run pytest tests/test_handlers_token_refresh.py -v
-```
-
-- [ ] **Step 3: Implement UNIMPLEMENTED stub in IBKR sidecar.** In `sidecar/handlers.py`'s `BrokerServicer` class, append:
-
-```python
-    async def RequestTokenRefresh(  # noqa: N802 — gRPC method naming
-        self,
-        request: pb.TokenRefreshRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> pb.TokenRefreshResponse:
-        """IBKR uses long-lived TWS sessions, not OAuth tokens."""
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED,
-            "RequestTokenRefresh is Schwab-only; IBKR uses TWS session.",
-        )
-        return pb.TokenRefreshResponse()  # unreachable but required for type checker
-```
-
-- [ ] **Step 4: Run IBKR test — PASS.**
-
-```bash
-uv run pytest tests/test_handlers_token_refresh.py -v
-```
-
-- [ ] **Step 5: Mirror for Futu.** Create `sidecar_futu/tests/test_handlers_token_refresh.py` (identical body, `broker_id="futu"`). Append the same stub to `sidecar_futu/handlers.py`'s servicer with docstring "Futu uses unlock_pwd_md5 + RSA, not OAuth tokens."
-
-- [ ] **Step 6: Run Futu test — PASS.**
-
-```bash
-cd /home/joseph/dashboard/sidecar_futu && uv run pytest tests/test_handlers_token_refresh.py -v
-```
-
-- [ ] **Step 7: Commit.**
-
-```bash
-git add sidecar/handlers.py sidecar/tests/test_handlers_token_refresh.py \
-        sidecar_futu/handlers.py sidecar_futu/tests/test_handlers_token_refresh.py
-git commit -m "feat(sidecar/futu): RequestTokenRefresh returns UNIMPLEMENTED (Schwab-only RPC)"
-```
-
-**Conditional reviewers:** `silent-failure-hunter`.
+**Architect findings closed by A2 deletion:** HIGH #10 (no need to mock `context.abort` AioRpcError — the test that motivated it is removed entirely).
 
 ### Task A3: Create `sidecar_schwab/` package skeleton + Dockerfile
 
@@ -483,7 +493,7 @@ def resolve_port() -> int:
         return DEFAULT_PORT
 ```
 
-- [ ] **Step 4: Write minimal `sidecar_schwab/handlers.py`** (chunk B fills out):
+- [ ] **Step 4: Write minimal `sidecar_schwab/handlers.py`** (chunk B fills out). **v3 fix:** import shape matches the existing IBKR/Futu sidecar pattern (`from sidecar_schwab._generated.broker.v1 import broker_pb2, broker_pb2_grpc` — no `as pb` alias since the real test pattern at `sidecar_futu/tests/test_normalize.py:20` uses `broker_pb2.TradingMode.LIVE`):
 
 ```python
 """gRPC Broker servicer for Schwab. Stubs filled out in chunk B."""
@@ -492,22 +502,26 @@ from __future__ import annotations
 import grpc
 
 from sidecar_schwab._generated.broker.v1 import (
-    broker_pb2 as pb,
-    broker_pb2_grpc as pbg,
+    broker_pb2,
+    broker_pb2_grpc,
 )
 
 
-class BrokerServicer(pbg.BrokerServicer):
+class BrokerServicer(broker_pb2_grpc.BrokerServicer):
     """Schwab gRPC service. Empty stubs in A4; chunk B fills them out."""
 
     async def Health(  # noqa: N802
         self,
-        request: pb.HealthRequest,
+        request: broker_pb2.HealthRequest,
         context: grpc.aio.ServicerContext,
-    ) -> pb.HealthResponse:
-        return pb.HealthResponse(
+    ) -> broker_pb2.HealthResponse:
+        # Minimal pre-Configure response. Real impl in B5 populates
+        # started_at + gateway_version; gateway_connected stays False until
+        # token + account_hash cache are both populated (H4 invariant).
+        return broker_pb2.HealthResponse(
             label="schwab",
             broker_id="schwab",
+            gateway_version="",
             gateway_connected=False,
             sidecar_version="0.7.0-stub",
         )
@@ -529,8 +543,8 @@ import structlog
 from grpc_reflection.v1alpha import reflection
 
 from sidecar_schwab._generated.broker.v1 import (
-    broker_pb2 as pb,
-    broker_pb2_grpc as pbg,
+    broker_pb2,
+    broker_pb2_grpc,
 )
 from sidecar_schwab.config import resolve_port
 from sidecar_schwab.handlers import BrokerServicer
@@ -543,10 +557,10 @@ async def serve() -> None:
     server = grpc.aio.server()
 
     servicer = BrokerServicer()
-    pbg.add_BrokerServicer_to_server(servicer, server)
+    broker_pb2_grpc.add_BrokerServicer_to_server(servicer, server)
 
     SERVICE_NAMES = (
-        pb.DESCRIPTOR.services_by_name["Broker"].full_name,
+        broker_pb2.DESCRIPTOR.services_by_name["Broker"].full_name,
         reflection.SERVICE_NAME,
     )
     reflection.enable_server_reflection(SERVICE_NAMES, server)
@@ -600,31 +614,54 @@ git commit -m "feat(sidecar-schwab): main.py grpc server bootstrap + config + He
 
 **Conditional reviewers:** `silent-failure-hunter` (signal handling).
 
-### Task A5: Add `schwab` to `SIDECAR_BROKERS` map (backend)
+### Task A5: Register `schwab` in `SIDECAR_BROKERS` + add `SIDECAR_HOSTS` per-label override
 
 **Files:** Modify `backend/app/services/broker_registry_factory.py`.
+
+**v3 reality grounding:** Per `broker_registry_factory.py:16-32`, the actual maps are:
+- `SIDECAR_PORTS: dict[str, int]` — label → port
+- `SIDECAR_BROKERS: dict[str, str]` — label → broker_id (NOT a tuple of `(broker_id, address)` as v2 assumed)
+
+`build_broker_registry` hardcodes `host="10.10.0.2"` for ALL labels. Schwab needs the docker-compose hostname `schwab-sidecar`. v3 introduces a `SIDECAR_HOSTS: dict[str, str]` override map: labels not in this map fall back to the registry's `host` parameter.
 
 - [ ] **Step 1: Failing test.** Create `backend/tests/services/test_sidecar_brokers_map.py`:
 
 ```python
-"""Phase 7a A5 — SIDECAR_BROKERS map includes schwab → schwab-sidecar:9090."""
-from app.services.broker_registry_factory import SIDECAR_BROKERS
+"""Phase 7a A5 — SIDECAR_BROKERS includes schwab; per-label host override works."""
+from app.services.broker_registry_factory import (
+    SIDECAR_PORTS,
+    SIDECAR_BROKERS,
+    SIDECAR_HOSTS,
+    resolve_target,
+)
 
 
 def test_schwab_in_sidecar_brokers():
-    assert "schwab" in SIDECAR_BROKERS
-    broker_id, addr = SIDECAR_BROKERS["schwab"]
-    assert broker_id == "schwab"
-    assert addr == "schwab-sidecar:9090"
+    assert SIDECAR_BROKERS["schwab"] == "schwab"
+    assert SIDECAR_PORTS["schwab"] == 9090
+    assert SIDECAR_HOSTS["schwab"] == "schwab-sidecar"
 
 
 def test_existing_brokers_unchanged():
     """Don't break Phase 4 + 6 wiring."""
-    assert ("ibkr", "10.10.0.2:18001") == SIDECAR_BROKERS["isa-live"]
-    assert ("ibkr", "10.10.0.2:18002") == SIDECAR_BROKERS["isa-paper"]
-    assert ("ibkr", "10.10.0.2:18003") == SIDECAR_BROKERS["normal-live"]
-    assert ("ibkr", "10.10.0.2:18004") == SIDECAR_BROKERS["normal-paper"]
-    assert ("futu", "10.10.0.2:18005") == SIDECAR_BROKERS["futu"]
+    assert SIDECAR_BROKERS["isa-live"] == "ibkr"
+    assert SIDECAR_BROKERS["isa-paper"] == "ibkr"
+    assert SIDECAR_BROKERS["normal-live"] == "ibkr"
+    assert SIDECAR_BROKERS["normal-paper"] == "ibkr"
+    assert SIDECAR_BROKERS["futu"] == "futu"
+    assert SIDECAR_PORTS["isa-live"] == 18001
+    assert SIDECAR_PORTS["futu"] == 18005
+
+
+def test_resolve_target_falls_back_to_default_host():
+    """IBKR labels have no SIDECAR_HOSTS entry → use the default."""
+    assert resolve_target("isa-live", default_host="10.10.0.2") == "10.10.0.2:18001"
+    assert resolve_target("futu",     default_host="10.10.0.2") == "10.10.0.2:18005"
+
+
+def test_resolve_target_uses_per_label_host_override():
+    """Schwab is overridden to schwab-sidecar (docker-compose hostname)."""
+    assert resolve_target("schwab", default_host="10.10.0.2") == "schwab-sidecar:9090"
 ```
 
 - [ ] **Step 2: Run — FAIL.**
@@ -633,31 +670,82 @@ def test_existing_brokers_unchanged():
 cd /home/joseph/dashboard/backend && uv run pytest tests/services/test_sidecar_brokers_map.py -v
 ```
 
-- [ ] **Step 3: Add row to map.** In `backend/app/services/broker_registry_factory.py`:
+- [ ] **Step 3: Edit `backend/app/services/broker_registry_factory.py`.** Add Schwab row + `SIDECAR_HOSTS` + `resolve_target` helper. Keep existing constants in place; do not change tuple shape.
 
 ```python
-SIDECAR_BROKERS = {
-    "isa-live":     ("ibkr", "10.10.0.2:18001"),
-    "isa-paper":    ("ibkr", "10.10.0.2:18002"),
-    "normal-live":  ("ibkr", "10.10.0.2:18003"),
-    "normal-paper": ("ibkr", "10.10.0.2:18004"),
-    "futu":         ("futu", "10.10.0.2:18005"),
-    "schwab":       ("schwab", "schwab-sidecar:9090"),  # Phase 7a — VPS docker-compose, plaintext gRPC
+SIDECAR_PORTS: dict[str, int] = {
+    "isa-live": 18001,
+    "isa-paper": 18002,
+    "normal-live": 18003,
+    "normal-paper": 18004,
+    "futu": 18005,
+    "schwab": 9090,    # Phase 7a — VPS docker-compose-internal port
 }
+
+# H4: backend cross-checks Health.broker_id against this map at every probe.
+SIDECAR_BROKERS: dict[str, str] = {
+    "isa-live": "ibkr",
+    "isa-paper": "ibkr",
+    "normal-live": "ibkr",
+    "normal-paper": "ibkr",
+    "futu": "futu",
+    "schwab": "schwab",   # Phase 7a
+}
+
+# Phase 7a — per-label host override. Labels NOT in this map use the
+# build_broker_registry(host=...) default (10.10.0.2 / NUC-WG). Schwab
+# lives in the same docker-compose network as backend on the VPS, so
+# its host is the compose service name "schwab-sidecar".
+SIDECAR_HOSTS: dict[str, str] = {
+    "schwab": "schwab-sidecar",
+}
+
+
+def resolve_target(label: str, *, default_host: str) -> str:
+    """Compute the gRPC target for a sidecar label.
+
+    `SIDECAR_HOSTS` overrides the default_host on a per-label basis;
+    `SIDECAR_PORTS` always provides the port.
+    """
+    host = SIDECAR_HOSTS.get(label, default_host)
+    port = SIDECAR_PORTS[label]
+    return f"{host}:{port}"
 ```
 
-- [ ] **Step 4: Run — PASS.**
+- [ ] **Step 4: Update `build_broker_registry` to use `resolve_target`** (replace the dict-comprehension that builds `target=f"{host}:{port}"`):
+
+```python
+    registry = BrokerRegistry(
+        {
+            label: BrokerSidecarClient(
+                label=label,
+                target=resolve_target(label, default_host=host),
+                client_cert_pem=cert_pem,
+                client_key_pem=key_pem,
+                ca_bundle_pem=ca_bundle_pem,
+            )
+            for label in SIDECAR_PORTS
+        }
+    )
+```
+
+- [ ] **Step 5: Run — PASS.**
 
 ```bash
 uv run pytest tests/services/test_sidecar_brokers_map.py -v
 ```
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 6: Commit.**
 
 ```bash
-git add backend/app/services/broker_registry_factory.py backend/tests/services/test_sidecar_brokers_map.py
-git commit -m "feat(backend): register schwab sidecar in SIDECAR_BROKERS map"
+git add backend/app/services/broker_registry_factory.py \
+        backend/tests/services/test_sidecar_brokers_map.py
+git commit -m "feat(backend): register schwab sidecar + SIDECAR_HOSTS per-label host override"
 ```
+
+**Architect findings closed by A5:** CRIT (v2 SIDECAR_BROKERS shape mismatch), HIGH (host hardcoding for VPS Schwab).
+
+**Open question for chunk C:** the existing Schwab sidecar has NO mTLS (same docker network as backend). `BrokerSidecarClient` currently requires `client_cert_pem`/`client_key_pem`/`ca_bundle_pem`. Either: (a) extend `BrokerSidecarClient` to accept `tls=None` for plaintext labels, OR (b) introduce a `BrokerSidecarPlaintextClient` subclass. Decision deferred to **Task C0** (added below as a chunk-C prerequisite).
 
 ### Task A6: Frontend regenerate `api-generated.ts`
 
@@ -693,9 +781,11 @@ git add frontend/src/services/api-generated.ts
 git commit -m "chore(frontend): regenerate openapi types after proto extension"
 ```
 
-### Task A7: Add Phase 7a Prometheus metric stubs
+### Task A7: Add Phase 7a Prometheus metric stubs (incl. `BROKER_CONFIGURE_TOTAL`)
 
 **Files:** Modify `backend/app/core/metrics.py`. Create `backend/tests/observability/test_metrics_phase7a.py`.
+
+**v3 reality grounding:** `grep BROKER_CONFIGURE_TOTAL backend/app/core/metrics.py` returns NOTHING — Phase 6 never registered the metric the spec §8.1 row says "extends Phase 6". A7 adds it as net-new. Also adds `SCHWAB_NORMALIZE_UNKNOWN_TOTAL` (B1 dependency) so B1 doesn't fail on import.
 
 - [ ] **Step 1: Failing test.** Create `backend/tests/observability/test_metrics_phase7a.py`:
 
@@ -759,6 +849,24 @@ cd /home/joseph/dashboard/backend && uv run pytest tests/observability/test_metr
 ```python
 # ──────────────────────── Phase 7a Schwab metrics ───────────────────────────
 # Per spec §8.1 — see docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md
+
+# v3 — net-new (Phase 6 never registered this despite spec §8.1 saying "extends").
+BROKER_CONFIGURE_TOTAL = Counter(
+    "broker_configure_total",
+    "Sidecar Configure RPC outcomes by label + reason.",
+    ["label", "reason"],  # label: futu|schwab; reason: lifespan|started_at_delta|reconfigure|oauth_callback|near_expiry|manual
+)
+
+# v3 — also net-new; consumed by sidecar_schwab/normalize.py (B1) AND by
+# sidecar_futu/normalize.py if Phase 6 didn't already register it. Verify:
+#   grep -n "broker_normalize_unknown_total\|SCHWAB_NORMALIZE_UNKNOWN_TOTAL\|FUTU_NORMALIZE_UNKNOWN_TOTAL" backend/app/core/metrics.py sidecar_futu/
+# If Phase 6 already exposes it under a different Python symbol but the
+# Prometheus name matches, do NOT redeclare here (would double-register).
+SCHWAB_NORMALIZE_UNKNOWN_TOTAL = Counter(
+    "broker_normalize_unknown_total",
+    "Schwab/Futu normalize: unknown enum encounters per field+value.",
+    ["label", "field", "value"],
+)
 
 SCHWAB_OAUTH_START_TOTAL = Counter(
     "schwab_oauth_start_total",
@@ -844,10 +952,18 @@ Goal: fill out the data plane RPCs. After B10 the sidecar can Configure, Health,
 
 **Files:** Create `sidecar_schwab/normalize.py`, `sidecar_schwab/tests/test_normalize.py`.
 
+**v3 reality grounding:**
+- `OrderStatus` proto enum has 6 values, **no `STATUS_MODIFIED`**. Map Schwab `PENDING_REPLACE`/`REPLACED` → `broker_pb2.OrderStatus.SUBMITTED`. Phase 5c's "modified" is a SQL-level enum extension on the `orders` table; backend's order-event consumer translates the wire-level SUBMITTED + presence of a replace event into the SQL `modified` rank — sidecar normalize stays at proto's 6 values.
+- All monetary fields are `Money(value, currency)` — `Position.avg_cost`, `Position.market_price`, `Position.market_value`, `Position.unrealized_pnl`, `Position.realized_pnl_today`, `Position.daily_pnl`, `Order.limit_price`, `Order.stop_price`, `Order.avg_fill_price`, `Summary.net_liquidation`, `Summary.total_cash`, `Summary.realized_pnl`, `Summary.unrealized_pnl`, `Summary.buying_power`. Plain strings only on `Order.quantity`, `Order.quantity_filled`, `Position.quantity`, `Contract.conid`, `Contract.symbol`, `Contract.local_symbol`, `Contract.multiplier`.
+- `Order.order_id` (not `broker_order_id`).
+- `Order.quantity_filled` (not `filled_quantity`).
+- New `Order.avg_fill_price_inferred` field 14 (added in A1).
+- Enum access pattern: `broker_pb2.OrderStatus.SUBMITTED`, `broker_pb2.TradingMode.LIVE`, `broker_pb2.AssetClass.STOCK` (nested, per `sidecar_futu/tests/test_normalize.py:20`).
+
 - [ ] **Step 1: Failing test for status mapping table (spec §3.2.1).** Create `sidecar_schwab/tests/test_normalize.py`:
 
 ```python
-"""Phase 7a B1 — Schwab JSON → proto mapping coverage."""
+"""Phase 7a B1 — Schwab JSON → proto mapping coverage (v3 — Money + nested enums)."""
 from decimal import Decimal
 
 import pytest
@@ -856,86 +972,99 @@ from sidecar_schwab.normalize import (
     normalize_account,
     normalize_position,
     normalize_order,
+    normalize_summary,
     map_status,
     map_order_type,
     map_tif,
     map_asset_type,
 )
-from sidecar_schwab._generated.broker.v1 import broker_pb2 as pb
+from sidecar_schwab._generated.broker.v1 import broker_pb2
 
 
 @pytest.mark.parametrize("raw,expected", [
     # SUBMITTED bucket
-    ("WORKING",                pb.SUBMITTED),
-    ("ACCEPTED",               pb.SUBMITTED),
-    ("QUEUED",                 pb.SUBMITTED),
+    ("WORKING",                broker_pb2.OrderStatus.SUBMITTED),
+    ("ACCEPTED",               broker_pb2.OrderStatus.SUBMITTED),
+    ("QUEUED",                 broker_pb2.OrderStatus.SUBMITTED),
+    # Phase 5c modified — wire-level proto stays SUBMITTED;
+    # backend's SQL `order_status_rank()` lifts to "modified".
+    ("PENDING_REPLACE",        broker_pb2.OrderStatus.SUBMITTED),
+    ("REPLACED",               broker_pb2.OrderStatus.SUBMITTED),
     # PENDING bucket
-    ("PENDING_ACTIVATION",     pb.PENDING),
-    ("AWAITING_PARENT_ORDER",  pb.PENDING),
-    ("AWAITING_CONDITION",     pb.PENDING),
-    ("AWAITING_MANUAL_REVIEW", pb.PENDING),
-    ("AWAITING_UR_OUT",        pb.PENDING),
-    ("AWAITING_RELEASE_TIME",  pb.PENDING),
-    ("AWAITING_STOP_CONDITION", pb.PENDING),
-    ("NEW",                    pb.PENDING),
-    ("FILLED",                 pb.FILLED),
-    ("CANCELED",               pb.CANCELLED),
-    ("PENDING_CANCEL",         pb.CANCELLED),
-    ("EXPIRED",                pb.CANCELLED),
-    ("REJECTED",               pb.REJECTED),
-    # Phase 5c modified
-    ("PENDING_REPLACE",        pb.STATUS_MODIFIED),
-    ("REPLACED",               pb.STATUS_MODIFIED),
-    # Unknown falls through to PENDING
-    ("WHO_KNOWS",              pb.PENDING),
+    ("PENDING_ACTIVATION",     broker_pb2.OrderStatus.PENDING),
+    ("AWAITING_PARENT_ORDER",  broker_pb2.OrderStatus.PENDING),
+    ("AWAITING_CONDITION",     broker_pb2.OrderStatus.PENDING),
+    ("AWAITING_MANUAL_REVIEW", broker_pb2.OrderStatus.PENDING),
+    ("AWAITING_UR_OUT",        broker_pb2.OrderStatus.PENDING),
+    ("AWAITING_RELEASE_TIME",  broker_pb2.OrderStatus.PENDING),
+    ("AWAITING_STOP_CONDITION", broker_pb2.OrderStatus.PENDING),
+    ("NEW",                    broker_pb2.OrderStatus.PENDING),
+    ("FILLED",                 broker_pb2.OrderStatus.FILLED),
+    ("CANCELED",               broker_pb2.OrderStatus.CANCELLED),
+    ("PENDING_CANCEL",         broker_pb2.OrderStatus.CANCELLED),
+    ("EXPIRED",                broker_pb2.OrderStatus.CANCELLED),
+    ("REJECTED",               broker_pb2.OrderStatus.REJECTED),
+    # Unknown falls through to PENDING + emits broker_normalize_unknown_total
+    ("WHO_KNOWS",              broker_pb2.OrderStatus.PENDING),
 ])
 def test_status_mapping(raw, expected):
     assert map_status(raw) == expected
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("EQUITY", pb.STOCK),
-    ("ETF", pb.ETF),
-    ("MUTUAL_FUND", pb.MUTUAL_FUND),
-    ("OPTION", pb.OPTION),
-    ("FUTURE", pb.FUTURE),
-    ("FIXED_INCOME", pb.BOND),
-    ("CURRENCY", pb.FOREX),
-    ("INDEX", pb.STOCK),                 # collapse
-    ("CASH_EQUIVALENT", pb.STOCK),       # money-market funds
-    ("COLLECTIVE_INVESTMENT", pb.ETF),   # legacy ETFs
+    ("EQUITY", broker_pb2.AssetClass.STOCK),
+    ("ETF", broker_pb2.AssetClass.ETF),
+    ("MUTUAL_FUND", broker_pb2.AssetClass.MUTUAL_FUND),
+    ("OPTION", broker_pb2.AssetClass.OPTION),
+    ("FUTURE", broker_pb2.AssetClass.FUTURE),
+    ("FIXED_INCOME", broker_pb2.AssetClass.BOND),
+    ("CURRENCY", broker_pb2.AssetClass.FOREX),
+    ("INDEX", broker_pb2.AssetClass.STOCK),                 # display collapse
+    ("CASH_EQUIVALENT", broker_pb2.AssetClass.STOCK),       # money-market funds
+    ("COLLECTIVE_INVESTMENT", broker_pb2.AssetClass.ETF),   # legacy ETFs
 ])
 def test_asset_type_mapping(raw, expected):
     assert map_asset_type(raw) == expected
 
 
-def test_normalize_account_strips_currency_to_usd():
-    """H5 — currency_base hardcoded USD; falls back on non-USD."""
-    raw = {
-        "securitiesAccount": {
-            "accountNumber": "12345678",
-            "type": "MARGIN",
-            "currentBalances": {
-                "liquidationValue": 100000.50,
-                "cashBalance": 50000.00,
-                "buyingPower": 200000.00,
-            },
-            "initialBalances": {
-                "liquidationValue": 99500.00,
-            },
-        },
-    }
+def test_normalize_account_is_LIVE_with_USD_currency_base():
+    """H5 + spec §3.2 — Schwab accounts always LIVE, currency_base hardcoded USD."""
+    raw = {"securitiesAccount": {"accountNumber": "12345678", "type": "MARGIN"}}
     result = normalize_account(raw)
     assert result.account_number == "12345678"
-    assert result.mode == pb.LIVE  # all Schwab accounts LIVE per spec §3.2
+    assert result.mode == broker_pb2.TradingMode.LIVE
+    assert result.gateway_label == "schwab"
     assert result.currency_base == "USD"
+    # account_hash is populated separately by handlers (B6); empty here
+    assert result.account_hash == ""
 
 
-def test_normalize_position():
+def test_normalize_summary_uses_money_proto():
+    """B1 — Summary fields are Money(value, currency), never bare strings."""
+    raw = {
+        "currentBalances": {
+            "liquidationValue": 100_000.50,
+            "cashBalance": 25_000.00,
+            "buyingPower": 200_000.00,
+        },
+        "initialBalances": {"liquidationValue": 99_500.00},
+    }
+    result = normalize_summary(raw)
+    # SummaryResponse wraps a Summary with Money fields
+    assert result.summary.net_liquidation.value == "100000.50"
+    assert result.summary.net_liquidation.currency == "USD"
+    assert result.summary.total_cash.value == "25000.00"
+    assert result.summary.total_cash.currency == "USD"
+    assert result.summary.buying_power.value == "200000.00"
+    assert result.summary.buying_power.currency == "USD"
+    # day_pnl flows into Summary.realized_pnl per existing IBKR shape
+
+
+def test_normalize_position_uses_money_for_all_decimal_fields():
     raw = {
         "instrument": {
-            "symbol": "AAPL",
-            "assetType": "EQUITY",
+            "symbol": "AAPL", "assetType": "EQUITY",
+            "cusip": "037833100",
         },
         "longQuantity": 100,
         "shortQuantity": 0,
@@ -944,14 +1073,20 @@ def test_normalize_position():
         "currentDayProfitLoss": 245.00,
     }
     result = normalize_position(raw)
-    assert result.symbol == "AAPL"
+    assert result.contract.symbol == "AAPL"
+    assert result.contract.asset_class == broker_pb2.AssetClass.STOCK
+    assert result.contract.currency == "USD"
     assert result.quantity == "100"
-    assert result.avg_cost == "150.25"
-    assert result.day_pnl == "245.00"
+    # All monetary as Money
+    assert result.avg_cost.value == "150.25"
+    assert result.avg_cost.currency == "USD"
+    assert result.market_value.value == "17500.00"
+    assert result.daily_pnl.value == "245.00"
 
 
 def test_normalize_order_extracts_avg_fill_from_orderActivityCollection():
-    """M2 — avg_fill_price MUST come from executionLegs, not order.price."""
+    """M2 — avg_fill_price MUST come from executionLegs, not order.price.
+    v3 — avg_fill_price is Money type; avg_fill_price_inferred is field 14."""
     raw = {
         "orderId": 999,
         "status": "FILLED",
@@ -972,14 +1107,19 @@ def test_normalize_order_extracts_avg_fill_from_orderActivityCollection():
         }],
     }
     result = normalize_order(raw)
-    assert result.status == pb.FILLED
+    # v3: order_id (not broker_order_id)
+    assert result.order_id == "999"
+    assert result.status == broker_pb2.OrderStatus.FILLED
     # weighted avg = (99.50*50 + 99.75*50) / 100 = 99.625
-    assert Decimal(result.avg_fill_price) == Decimal("99.625")
+    assert Decimal(result.avg_fill_price.value) == Decimal("99.625")
+    assert result.avg_fill_price.currency == "USD"
     assert result.avg_fill_price_inferred is False
+    # v3: quantity_filled (not filled_quantity)
+    assert result.quantity_filled == "100"
 
 
 def test_normalize_order_filled_without_orderActivityCollection_marks_inferred():
-    """M2 — when activity missing on FILLED, set avg_fill_price=null + flag."""
+    """M2 — when activity missing on FILLED, avg_fill_price empty + flag."""
     raw = {
         "orderId": 999,
         "status": "FILLED",
@@ -995,8 +1135,23 @@ def test_normalize_order_filled_without_orderActivityCollection_marks_inferred()
         # no orderActivityCollection
     }
     result = normalize_order(raw)
-    assert result.avg_fill_price == ""
+    # avg_fill_price.value empty; inferred flag true
+    assert result.avg_fill_price.value == ""
     assert result.avg_fill_price_inferred is True
+
+
+def test_normalize_modified_status_maps_to_submitted_not_modified():
+    """v3 — wire-level proto OrderStatus has no STATUS_MODIFIED.
+    Schwab PENDING_REPLACE/REPLACED → SUBMITTED; backend SQL handles 'modified'."""
+    for raw in ("PENDING_REPLACE", "REPLACED"):
+        result = normalize_order({
+            "orderId": 1, "status": raw,
+            "orderType": "LIMIT", "duration": "DAY",
+            "quantity": 10, "filledQuantity": 0, "price": 100.0,
+            "orderLegCollection": [{
+                "instrument": {"symbol": "X", "assetType": "EQUITY"}, "instruction": "BUY"}],
+        })
+        assert result.status == broker_pb2.OrderStatus.SUBMITTED
 ```
 
 - [ ] **Step 2: Run — FAIL (module not yet present).**
@@ -1005,15 +1160,20 @@ def test_normalize_order_filled_without_orderActivityCollection_marks_inferred()
 cd /home/joseph/dashboard/sidecar_schwab && uv run pytest tests/test_normalize.py -v
 ```
 
-- [ ] **Step 3: Write `sidecar_schwab/normalize.py`:**
+- [ ] **Step 3: Write `sidecar_schwab/normalize.py` (v3 — Money + nested enum access; PENDING_REPLACE/REPLACED → SUBMITTED):**
 
 ```python
-"""Schwab JSON → proto Account/Position/Order mappers.
+"""Schwab JSON → proto Account/Summary/Position/Order mappers (v3).
 
-Forked patterns from /mnt/c/Dashboard_old/backend/app/brokers/schwab.py with
-two corrections per architect-review:
-  - M2: avg_fill_price extracted from orderActivityCollection (NOT order.price)
-  - H5: currency_base hardcoded USD; non-USD falls back with metric
+v3 corrections from architect-review:
+  - All decimal fields use Money(value, currency) per real proto contract.
+  - OrderStatus enum has only 6 values; PENDING_REPLACE/REPLACED → SUBMITTED
+    (backend's SQL order_status_rank() handles the modified flag).
+  - Order.order_id (not broker_order_id), Order.quantity_filled (not
+    filled_quantity), Order.avg_fill_price_inferred field 14.
+  - Position uses Contract sub-message, not flat symbol/asset_class fields.
+  - Enum access via broker_pb2.OrderStatus.SUBMITTED (nested), per the
+    pattern in sidecar_futu/tests/test_normalize.py:20.
 """
 from __future__ import annotations
 
@@ -1021,68 +1181,65 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sidecar_schwab._generated.broker.v1 import broker_pb2 as pb
-from sidecar_schwab.metrics import (
-    SCHWAB_NORMALIZE_UNKNOWN_TOTAL,
-)
+from sidecar_schwab._generated.broker.v1 import broker_pb2
+from sidecar_schwab.metrics import SCHWAB_NORMALIZE_UNKNOWN_TOTAL
 
 log = logging.getLogger(__name__)
 
-# Schwab status → our 6-variant enum + Phase 5c `modified`. See spec §3.2.1.
+# Schwab status → wire-level proto enum (6 values). PENDING_REPLACE/REPLACED
+# map to SUBMITTED on the wire; backend's SQL `order_status_rank()` lifts
+# replacement events to the SQL `modified` rank.
 _STATUS: dict[str, int] = {
-    # SUBMITTED
-    "WORKING":                 pb.SUBMITTED,
-    "ACCEPTED":                pb.SUBMITTED,
-    "QUEUED":                  pb.SUBMITTED,
-    # PENDING
-    "PENDING_ACTIVATION":      pb.PENDING,
-    "AWAITING_PARENT_ORDER":   pb.PENDING,
-    "AWAITING_CONDITION":      pb.PENDING,
-    "AWAITING_MANUAL_REVIEW":  pb.PENDING,
-    "AWAITING_UR_OUT":         pb.PENDING,
-    "AWAITING_RELEASE_TIME":   pb.PENDING,
-    "AWAITING_STOP_CONDITION": pb.PENDING,
-    "NEW":                     pb.PENDING,
-    # Terminal
-    "FILLED":                  pb.FILLED,
-    "CANCELED":                pb.CANCELLED,
-    "PENDING_CANCEL":          pb.CANCELLED,
-    "EXPIRED":                 pb.CANCELLED,
-    "REJECTED":                pb.REJECTED,
-    # Modified (Phase 5c order_status_rank)
-    "PENDING_REPLACE":         pb.STATUS_MODIFIED,
-    "REPLACED":                pb.STATUS_MODIFIED,
+    "WORKING":                 broker_pb2.OrderStatus.SUBMITTED,
+    "ACCEPTED":                broker_pb2.OrderStatus.SUBMITTED,
+    "QUEUED":                  broker_pb2.OrderStatus.SUBMITTED,
+    "PENDING_REPLACE":         broker_pb2.OrderStatus.SUBMITTED,  # v3 — was STATUS_MODIFIED
+    "REPLACED":                broker_pb2.OrderStatus.SUBMITTED,  # v3 — was STATUS_MODIFIED
+    "PENDING_ACTIVATION":      broker_pb2.OrderStatus.PENDING,
+    "AWAITING_PARENT_ORDER":   broker_pb2.OrderStatus.PENDING,
+    "AWAITING_CONDITION":      broker_pb2.OrderStatus.PENDING,
+    "AWAITING_MANUAL_REVIEW":  broker_pb2.OrderStatus.PENDING,
+    "AWAITING_UR_OUT":         broker_pb2.OrderStatus.PENDING,
+    "AWAITING_RELEASE_TIME":   broker_pb2.OrderStatus.PENDING,
+    "AWAITING_STOP_CONDITION": broker_pb2.OrderStatus.PENDING,
+    "NEW":                     broker_pb2.OrderStatus.PENDING,
+    "FILLED":                  broker_pb2.OrderStatus.FILLED,
+    "CANCELED":                broker_pb2.OrderStatus.CANCELLED,
+    "PENDING_CANCEL":          broker_pb2.OrderStatus.CANCELLED,
+    "EXPIRED":                 broker_pb2.OrderStatus.CANCELLED,
+    "REJECTED":                broker_pb2.OrderStatus.REJECTED,
 }
 
 _ASSET_TYPE: dict[str, int] = {
-    "EQUITY":                pb.STOCK,
-    "ETF":                   pb.ETF,
-    "MUTUAL_FUND":           pb.MUTUAL_FUND,
-    "OPTION":                pb.OPTION,
-    "FUTURE":                pb.FUTURE,
-    "FIXED_INCOME":          pb.BOND,
-    "CURRENCY":              pb.FOREX,
-    "INDEX":                 pb.STOCK,         # display collapse
-    "CASH_EQUIVALENT":       pb.STOCK,         # money-market funds
-    "COLLECTIVE_INVESTMENT": pb.ETF,           # legacy ETFs
+    "EQUITY":                broker_pb2.AssetClass.STOCK,
+    "ETF":                   broker_pb2.AssetClass.ETF,
+    "MUTUAL_FUND":           broker_pb2.AssetClass.MUTUAL_FUND,
+    "OPTION":                broker_pb2.AssetClass.OPTION,
+    "FUTURE":                broker_pb2.AssetClass.FUTURE,
+    "FIXED_INCOME":          broker_pb2.AssetClass.BOND,
+    "CURRENCY":              broker_pb2.AssetClass.FOREX,
+    "INDEX":                 broker_pb2.AssetClass.STOCK,  # display collapse
+    "CASH_EQUIVALENT":       broker_pb2.AssetClass.STOCK,
+    "COLLECTIVE_INVESTMENT": broker_pb2.AssetClass.ETF,
 }
 
 _ORDER_TYPE: dict[str, int] = {
-    "MARKET":     pb.MARKET,
-    "LIMIT":      pb.LIMIT,
-    "STOP":       pb.STOP,
-    "STOP_LIMIT": pb.STOP_LIMIT,
+    "MARKET":     broker_pb2.OrderType.MARKET,
+    "LIMIT":      broker_pb2.OrderType.LIMIT,
+    "STOP":       broker_pb2.OrderType.STOP,
+    "STOP_LIMIT": broker_pb2.OrderType.STOP_LIMIT,
 }
 
 _TIF: dict[str, int] = {
-    "DAY":                 pb.DAY,
-    "GOOD_TILL_CANCEL":    pb.GTC,
-    "FILL_OR_KILL":        pb.FOK,
-    "IMMEDIATE_OR_CANCEL": pb.IOC,
+    "DAY":                 broker_pb2.TimeInForce.DAY,
+    "GOOD_TILL_CANCEL":    broker_pb2.TimeInForce.GTC,
+    "FILL_OR_KILL":        broker_pb2.TimeInForce.FOK,
+    "IMMEDIATE_OR_CANCEL": broker_pb2.TimeInForce.IOC,
 }
 
 
-def _dec(v: Any) -> str:
+def _dec_str(v: Any) -> str:
+    """Coerce JSON value to canonical decimal string. NaN/None → "" (empty Money)."""
     if v is None:
         return ""
     try:
@@ -1093,60 +1250,101 @@ def _dec(v: Any) -> str:
         return ""
 
 
+def _money(value: Any, currency: str = "USD") -> broker_pb2.Money:
+    """Build a Money message; empty value when input is null/NaN."""
+    return broker_pb2.Money(value=_dec_str(value), currency=currency)
+
+
 def map_status(raw: str) -> int:
-    """Map Schwab status to our enum. Unknown falls through to PENDING + metric."""
     if raw in _STATUS:
         return _STATUS[raw]
-    SCHWAB_NORMALIZE_UNKNOWN_TOTAL.labels(field="status", value=raw).inc()
+    SCHWAB_NORMALIZE_UNKNOWN_TOTAL.labels(label="schwab", field="status", value=raw).inc()
     log.warning("schwab_unknown_status", value=raw)
-    return pb.PENDING
+    return broker_pb2.OrderStatus.PENDING
 
 
 def map_asset_type(raw: str) -> int:
-    """Map Schwab assetType to our AssetClass. Unknown → STOCK + metric."""
     if raw in _ASSET_TYPE:
         return _ASSET_TYPE[raw]
-    SCHWAB_NORMALIZE_UNKNOWN_TOTAL.labels(field="assetType", value=raw).inc()
-    return pb.STOCK
+    SCHWAB_NORMALIZE_UNKNOWN_TOTAL.labels(label="schwab", field="assetType", value=raw).inc()
+    return broker_pb2.AssetClass.STOCK
 
 
 def map_order_type(raw: str) -> int:
-    return _ORDER_TYPE.get(raw, pb.MARKET)
+    return _ORDER_TYPE.get(raw, broker_pb2.OrderType.MARKET)
 
 
 def map_tif(raw: str) -> int:
-    return _TIF.get(raw, pb.DAY)
+    return _TIF.get(raw, broker_pb2.TimeInForce.DAY)
 
 
-def normalize_account(raw: dict[str, Any]) -> pb.Account:
+def normalize_account(raw: dict[str, Any]) -> broker_pb2.Account:
+    """H5 — currency_base hardcoded USD (Schwab is USD-only as of 2026)."""
     sa = raw.get("securitiesAccount") or {}
-    account_number = str(sa.get("accountNumber") or "")
-    # H5: Schwab Trader API is USD-only. If a non-USD account ever surfaces,
-    # emit metric + return empty string; backend's boundary handler treats
-    # that as "unknown" and surfaces a warning to the user.
-    currency_base = "USD"
-    return pb.Account(
-        account_number=account_number,
-        mode=pb.LIVE,                      # all Schwab accounts LIVE per spec §3.2
+    return broker_pb2.Account(
+        account_number=str(sa.get("accountNumber") or ""),
+        mode=broker_pb2.TradingMode.LIVE,   # spec §3.2 invariant — all Schwab accounts LIVE
         gateway_label="schwab",
-        currency_base=currency_base,
-        # account_hash is populated by handlers.ListAccounts from /accountNumbers,
-        # not from this body — left empty here.
+        currency_base="USD",
+        # account_hash is set by handlers (B6) from /accountNumbers
     )
 
 
-def normalize_position(raw: dict[str, Any]) -> pb.Position:
+def normalize_summary(raw: dict[str, Any]) -> broker_pb2.SummaryResponse:
+    """SummaryResponse wraps a Summary with Money fields."""
+    balances = raw.get("currentBalances") or {}
+    initial = raw.get("initialBalances") or {}
+
+    nlv = _dec_str(balances.get("liquidationValue"))
+    cash = _dec_str(balances.get("cashBalance") or balances.get("totalCash"))
+    bp = _dec_str(balances.get("buyingPower") or balances.get("availableFunds"))
+    # day_pnl as realized_pnl (best fit on the Summary message); compute
+    # from initialBalances when present, else empty.
+    prev_nlv_str = _dec_str(initial.get("liquidationValue"))
+    if nlv and prev_nlv_str:
+        try:
+            day_pnl = str(Decimal(nlv) - Decimal(prev_nlv_str))
+        except (InvalidOperation, ValueError):
+            day_pnl = ""
+    else:
+        day_pnl = ""
+
+    summary = broker_pb2.Summary(
+        net_liquidation=broker_pb2.Money(value=nlv, currency="USD"),
+        total_cash=broker_pb2.Money(value=cash, currency="USD"),
+        realized_pnl=broker_pb2.Money(value=day_pnl, currency="USD"),
+        unrealized_pnl=broker_pb2.Money(value="", currency="USD"),  # Schwab doesn't break this out
+        buying_power=broker_pb2.Money(value=bp, currency="USD"),
+    )
+    return broker_pb2.SummaryResponse(summary=summary)
+
+
+def _build_contract(instr: dict[str, Any]) -> broker_pb2.Contract:
+    return broker_pb2.Contract(
+        symbol=str(instr.get("symbol") or ""),
+        exchange="",  # Schwab doesn't expose primary exchange on the position object
+        currency="USD",
+        asset_class=map_asset_type(str(instr.get("assetType") or "")),
+        conid=str(instr.get("cusip") or ""),  # CUSIP is the closest stable ID
+        local_symbol=str(instr.get("symbol") or ""),
+        multiplier="1",
+    )
+
+
+def normalize_position(raw: dict[str, Any]) -> broker_pb2.Position:
     instr = raw.get("instrument") or {}
     long_qty = raw.get("longQuantity") or 0
     short_qty = raw.get("shortQuantity") or 0
     qty = long_qty - short_qty
-    return pb.Position(
-        symbol=str(instr.get("symbol") or ""),
-        asset_class=map_asset_type(str(instr.get("assetType") or "")),
+    return broker_pb2.Position(
+        contract=_build_contract(instr),
         quantity=str(qty),
-        avg_cost=_dec(raw.get("averagePrice")),
-        market_value=_dec(raw.get("marketValue")),
-        day_pnl=_dec(raw.get("currentDayProfitLoss")),
+        avg_cost=_money(raw.get("averagePrice")),
+        market_price=_money(""),  # Schwab provides marketValue/qty implicitly
+        market_value=_money(raw.get("marketValue")),
+        unrealized_pnl=_money(""),  # not separately broken out
+        realized_pnl_today=_money(""),
+        daily_pnl=_money(raw.get("currentDayProfitLoss")),
     )
 
 
@@ -1167,35 +1365,45 @@ def _avg_fill_from_activity(activity: list[dict[str, Any]]) -> tuple[str, bool]:
             legs.append((price, qty))
     if not legs:
         return "", True
-    total_qty = sum(q for _, q in legs)
+    total_qty = sum((q for _, q in legs), Decimal(0))
     if total_qty == 0:
         return "", True
-    weighted = sum(p * q for p, q in legs)
+    weighted = sum((p * q for p, q in legs), Decimal(0))
     return str(weighted / total_qty), False
 
 
-def normalize_order(raw: dict[str, Any]) -> pb.Order:
+def normalize_order(raw: dict[str, Any]) -> broker_pb2.Order:
+    """v3 — Order.order_id (not broker_order_id); quantity_filled (not
+    filled_quantity); all monetary fields as Money."""
     leg = (raw.get("orderLegCollection") or [{}])[0]
     instr = leg.get("instrument") or {}
 
     status = map_status(str(raw.get("status") or ""))
     activity = raw.get("orderActivityCollection") or []
-    avg_fill_price, inferred = "", False
-    if status == pb.FILLED or raw.get("filledQuantity"):
-        avg_fill_price, inferred = _avg_fill_from_activity(activity)
+    avg_fill_value = ""
+    inferred = False
+    is_filled_or_partial = (
+        status == broker_pb2.OrderStatus.FILLED
+        or (raw.get("filledQuantity") and raw.get("filledQuantity") != 0)
+    )
+    if is_filled_or_partial:
+        avg_fill_value, inferred = _avg_fill_from_activity(activity)
 
-    return pb.Order(
-        broker_order_id=str(raw.get("orderId") or ""),
-        symbol=str(instr.get("symbol") or ""),
-        asset_class=map_asset_type(str(instr.get("assetType") or "")),
+    side_str = str(leg.get("instruction") or "").upper()
+    side = broker_pb2.OrderSide.BUY if "BUY" in side_str else broker_pb2.OrderSide.SELL
+
+    return broker_pb2.Order(
+        order_id=str(raw.get("orderId") or ""),         # v3 — order_id, not broker_order_id
+        contract=_build_contract(instr),
+        side=side,
         order_type=map_order_type(str(raw.get("orderType") or "")),
+        quantity=_dec_str(raw.get("quantity")),
+        limit_price=_money(raw.get("price")),
+        stop_price=_money(raw.get("stopPrice")),
         time_in_force=map_tif(str(raw.get("duration") or "")),
         status=status,
-        quantity=_dec(raw.get("quantity")),
-        filled_quantity=_dec(raw.get("filledQuantity")),
-        limit_price=_dec(raw.get("price")),
-        stop_price=_dec(raw.get("stopPrice")),
-        avg_fill_price=avg_fill_price,
+        quantity_filled=_dec_str(raw.get("filledQuantity")),  # v3 — quantity_filled
+        avg_fill_price=broker_pb2.Money(value=avg_fill_value, currency="USD"),
         avg_fill_price_inferred=inferred,
     )
 ```
@@ -1306,14 +1514,46 @@ async def test_stale_token_triggers_refresh():
 
 
 @pytest.mark.asyncio
-async def test_no_self_refresh_to_schwab_endpoint():
-    """B2 invariant: sidecar must NOT call schwab.com/oauth/token directly."""
-    import sidecar_schwab.auth as auth_mod
-    src = (auth_mod.__file__ and open(auth_mod.__file__).read()) or ""
-    # Allow comments/docstrings to mention the endpoint, but no live call.
-    assert "schwabapi.com/v1/oauth/token" not in src or src.count(
-        "schwabapi.com/v1/oauth/token"
-    ) == src.count("# ") + src.count("\"\"\"")
+async def test_no_self_refresh_to_schwab_endpoint(monkeypatch):
+    """B2 invariant: sidecar must NOT call schwab.com/oauth/token directly.
+
+    v3 — real behavior test (not source-text scan): patch httpx.AsyncClient to
+    record any outbound request; trigger a stale-token refresh; assert that
+    the recording shows ZERO requests to schwabapi.com (the request goes via
+    BackendCallback gRPC instead).
+    """
+    import httpx
+    recorded: list[str] = []
+
+    class RecordingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            recorded.append(str(request.url))
+            return httpx.Response(200, content=b"{}")
+
+    monkeypatch.setattr(
+        "httpx.AsyncClient", lambda *a, **kw: httpx.AsyncClient(
+            *a, transport=RecordingTransport(), **kw),
+    )
+
+    backend_mock = AsyncMock()
+    backend_mock.RequestTokenRefresh.return_value = type("R", (), {
+        "access_token": "NEW_A", "refresh_token": "NEW_R",
+        "access_issued_at": _ts_now(),
+    })()
+    cache = TokenCache(refresh_client=backend_mock)
+    cache.set_tokens(
+        access_token="OLD_A", refresh_token="OLD_R",
+        access_issued_at=datetime.now(timezone.utc) - timedelta(minutes=26),
+    )
+    await cache.get_access_token()
+
+    # Backend callback was used.
+    backend_mock.RequestTokenRefresh.assert_called_once()
+    # Schwab token endpoint was NOT used.
+    schwab_token_calls = [u for u in recorded if "schwabapi.com" in u and "/oauth/token" in u]
+    assert schwab_token_calls == [], (
+        f"sidecar must not call Schwab token endpoint; saw: {schwab_token_calls}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1465,9 +1705,14 @@ git commit -m "feat(sidecar-schwab): auth.py — token cache + RequestTokenRefre
 
 **Conditional reviewers:** `python-reviewer`, `silent-failure-hunter`, `security-reviewer` (token handling).
 
-### Task B3: `sidecar_schwab/client.py` — Schwabdev wrapper (M3 isolation)
+### Task B3: `sidecar_schwab/client.py` — Schwabdev wrapper (M3 isolation) + typed exceptions
 
 **Files:** Create `sidecar_schwab/client.py`, `sidecar_schwab/tests/test_client_isolation.py`, `sidecar_schwab/tests/test_rate_limit_429.py`.
+
+**v3 reality grounding:**
+- **Schwabdev token-injection API verified** (cited in B3 implementation block): Schwabdev's `Client.tokens` is a `Tokens` instance with `access_token` + `refresh_token` attributes settable via the `update_tokens(access_token=..., refresh_token=...)` method. Plan v3 keeps `update_tokens` enabled (do NOT no-op it as v2 did) — call it on each access-token rotation to keep Schwabdev's internal state synced. The C2 single-writer guarantee is preserved by NEVER calling `client.tokens.update_refresh_token_from_code(...)` (which hits Schwab's token endpoint) — only call `update_tokens(access_token=X, refresh_token=Y)` directly to set already-known tokens.
+- **Explicit exception classes** replace fragile substring matches (B6 H3 cleanup): introduce `SchwabAccountHashStaleError`, `SchwabRateLimitedError`, `SchwabHTTPError` in `client.py`. B6's `_fetch_account_with_404_retry` catches `SchwabAccountHashStaleError` specifically.
+- **Targeted `monkeypatch`** (not global `asyncio.sleep` patch): `monkeypatch.setattr("sidecar_schwab.client.asyncio.sleep", fake_sleep)` so other internals' sleeps are unaffected.
 
 - [ ] **Step 1: Failing tests.** Create `sidecar_schwab/tests/test_client_isolation.py`:
 
@@ -1513,11 +1758,15 @@ from sidecar_schwab.client import SchwabClient
 
 @pytest.mark.asyncio
 async def test_429_retry_with_retry_after(monkeypatch):
-    """First call returns 429 with Retry-After: 1; second call succeeds."""
+    """First call returns 429 with Retry-After: 1; second call succeeds.
+
+    v3 — targeted monkeypatch on sidecar_schwab.client.asyncio.sleep so the
+    rest of the test infra (pytest-asyncio scheduler) keeps real sleep.
+    """
     sleep_calls: list[float] = []
     async def fake_sleep(s):
         sleep_calls.append(s)
-    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("sidecar_schwab.client.asyncio.sleep", fake_sleep)
 
     schwabdev_client = AsyncMock()
     schwabdev_client.account_details.side_effect = [
@@ -1532,12 +1781,13 @@ async def test_429_retry_with_retry_after(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_429_three_retries_then_raise(monkeypatch):
-    """After 3 retries, raise."""
-    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    """After 3 retries, raise SchwabRateLimitedError."""
+    monkeypatch.setattr("sidecar_schwab.client.asyncio.sleep", AsyncMock())
     schwabdev_client = AsyncMock()
     schwabdev_client.account_details.return_value = _make_429("1")
     client = SchwabClient(schwabdev_client=schwabdev_client, token_cache=AsyncMock())
-    with pytest.raises(RuntimeError, match="rate.limit"):
+    from sidecar_schwab.client import SchwabRateLimitedError
+    with pytest.raises(SchwabRateLimitedError):
         await client.get_account_details("HASH")
 
 
@@ -1567,8 +1817,17 @@ uv run pytest tests/test_client_isolation.py tests/test_rate_limit_429.py -v
 ```python
 """SchwabClient — the ONLY module that imports schwabdev (M3 isolation).
 
-Wraps Schwabdev.ClientAsync with our retry policy, rate-limit handling,
-and account-hash cache.
+Wraps Schwabdev's async client with our retry policy, rate-limit handling,
+account-hash cache, and explicit exception classes (v3 — replaces fragile
+substring matches).
+
+C2 single-writer rule (v3 — corrected):
+  - We KEEP `client.tokens.update_tokens` enabled — it's the local setter
+    that syncs Schwabdev's in-process state with already-known tokens. We
+    just never call `client.tokens.update_refresh_token_from_code(...)`
+    or any method that hits Schwab's token endpoint. Backend's
+    BackendCallback.RequestTokenRefresh is the only path that mints new
+    tokens.
 """
 from __future__ import annotations
 
@@ -1577,7 +1836,7 @@ import logging
 import random
 from typing import Any
 
-import schwabdev  # M3 — only here
+import schwabdev  # M3 — only file in the package that imports this
 
 from sidecar_schwab.auth import TokenCache
 from sidecar_schwab.metrics import (
@@ -1592,14 +1851,29 @@ _HTTP_CONCURRENCY = 10
 _MAX_RETRY = 3
 
 
+class SchwabHTTPError(RuntimeError):
+    """Catchall for non-2xx Schwab REST responses with status_code attr."""
+    def __init__(self, message: str, *, status_code: int, endpoint: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.endpoint = endpoint
+
+
+class SchwabAccountHashStaleError(SchwabHTTPError):
+    """Raised on 404 from a hash-keyed path — triggers H3 refresh+retry."""
+
+
+class SchwabRateLimitedError(SchwabHTTPError):
+    """Raised after _MAX_RETRY 429s — backoff exceeded."""
+
+
 class SchwabClient:
-    """Wrapper around Schwabdev's ClientAsync. Owns token-driven HTTP."""
+    """Wrapper around Schwabdev's async client. Owns token-driven HTTP."""
 
     def __init__(self, schwabdev_client: Any, token_cache: TokenCache) -> None:
         self._client = schwabdev_client
         self._tokens = token_cache
         self._sem = asyncio.Semaphore(_HTTP_CONCURRENCY)
-        # account_number → account_hash map; populated by ListAccounts.
         self._account_hashes: dict[str, str] = {}
 
     @classmethod
@@ -1609,15 +1883,19 @@ class SchwabClient:
         app_secret: str,
         token_cache: TokenCache,
     ) -> "SchwabClient":
-        """Construct a Schwabdev async client; auto-refresh disabled (M3 + C2)."""
+        """Construct a Schwabdev async client.
+
+        We do NOT disable update_tokens (v2 was wrong) — it's the local-state
+        setter we need to keep Schwabdev's internal HTTP layer in sync after
+        each backend-driven refresh. C2 single-writer is preserved by never
+        invoking Schwabdev methods that hit Schwab's token endpoint
+        (e.g., update_refresh_token_from_code) — only update_tokens(access=..., refresh=...).
+        """
         client = schwabdev.ClientAsync(  # type: ignore[attr-defined]
             app_key=app_key,
             app_secret=app_secret,
-            tokens_file=None,  # we manage tokens externally
+            tokens_file=None,  # tokens managed externally; no on-disk persistence
         )
-        # C2 — disable Schwabdev's auto-refresh; backend is the single writer.
-        if hasattr(client, "tokens") and hasattr(client.tokens, "update_tokens"):
-            client.tokens.update_tokens = lambda *a, **kw: None
         return cls(schwabdev_client=client, token_cache=token_cache)
 
     # ── Public API used by handlers ──────────────────────────────
@@ -1670,10 +1948,15 @@ class SchwabClient:
     async def _call(self, endpoint: str, fn) -> Any:
         async with self._sem:
             access = await self._tokens.get_access_token()
-            # Schwabdev manages auth internally; our token write keeps
-            # its internal state in sync via update_tokens-no-op
-            # mechanism. We pass token via Schwabdev's setter.
-            self._client.tokens.access_token = access  # type: ignore[attr-defined]
+            # Sync Schwabdev's in-process token state with the backend-managed
+            # current value. We pass refresh_token unchanged because Schwabdev
+            # may need it for header construction; backend remains sole writer
+            # of the persisted refresh_token (C2).
+            current_refresh = self._tokens._refresh_token or ""
+            self._client.tokens.update_tokens(
+                access_token=access,
+                refresh_token=current_refresh,
+            )
 
             for attempt in range(_MAX_RETRY + 1):
                 resp = await fn()
@@ -1683,22 +1966,31 @@ class SchwabClient:
                 ).inc()
                 if status == 429:
                     if attempt == _MAX_RETRY:
-                        raise RuntimeError(
-                            f"schwab rate limit exceeded after {_MAX_RETRY} retries"
+                        raise SchwabRateLimitedError(
+                            f"rate limit exceeded after {_MAX_RETRY} retries",
+                            status_code=429, endpoint=endpoint,
                         )
                     retry_after = float(resp.headers.get("Retry-After") or "1")
                     jitter = random.uniform(-0.1, 0.1)
                     await asyncio.sleep(retry_after + jitter)
                     continue
-                if status >= 400:
-                    raise RuntimeError(
-                        f"schwab {endpoint} status={status}"
+                if status == 404:
+                    raise SchwabAccountHashStaleError(
+                        f"{endpoint} 404 — account_hash may have rotated",
+                        status_code=404, endpoint=endpoint,
                     )
-                # Schwabdev returns either dict or response object.
+                if status >= 400:
+                    raise SchwabHTTPError(
+                        f"{endpoint} returned status={status}",
+                        status_code=status, endpoint=endpoint,
+                    )
                 if hasattr(resp, "json"):
                     return resp.json()
                 return resp
-            raise RuntimeError("unreachable")
+            raise SchwabRateLimitedError(
+                "unreachable retry exhaustion",
+                status_code=429, endpoint=endpoint,
+            )
 ```
 
 - [ ] **Step 4: Run — PASS.**
@@ -1717,107 +2009,144 @@ git commit -m "feat(sidecar-schwab): client.py — Schwabdev wrapper (M3 isolati
 
 **Conditional reviewers:** `python-reviewer`, `silent-failure-hunter`, `security-reviewer`.
 
-### Task B4: `Configure` RPC implementation (idempotent)
+### Task B4: `Configure` RPC implementation — uses `metadata` map (idempotent + H4 access-token freshness check)
 
 **Files:** Modify `sidecar_schwab/handlers.py`. Create `sidecar_schwab/tests/test_configure_idempotent.py`.
+
+**v3 reality grounding:**
+- `ConfigureRequest` has typed Futu fields + `metadata: map<string,string>` (proto line 303). Schwab credentials flow through `metadata` — keys: `app_key`, `app_secret`, `access_token`, `refresh_token`, `access_issued_at` (ISO datetime).
+- The typed Futu fields (`unlock_pwd_md5`, `rsa_priv_pem`, `opend_host`, `opend_port`, `connection_id`) are unused for Schwab; sidecar ignores them.
+- **H4 invariant:** if `access_issued_at` parses as <25 min ago, sidecar uses the supplied `access_token` directly. Otherwise sidecar discards it and triggers `RequestTokenRefresh` on the next call (saves a refresh-token use vs. always taking the supplied token).
 
 - [ ] **Step 1: Failing test.** Create `sidecar_schwab/tests/test_configure_idempotent.py`:
 
 ```python
-"""Phase 7a B4 — Configure twice with same tokens is a no-op."""
-from datetime import datetime, timezone
+"""Phase 7a B4 — Configure with metadata map (v3); H4 access-token age check."""
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import grpc
 import pytest
 
-from sidecar_schwab._generated.broker.v1 import broker_pb2 as pb
+from sidecar_schwab._generated.broker.v1 import broker_pb2
 from sidecar_schwab.handlers import BrokerServicer
+
+
+def _build_request(*, access_token="A", refresh_token="R", issued_at=None,
+                    app_key="K", app_secret="S") -> broker_pb2.ConfigureRequest:
+    """Build a ConfigureRequest using the metadata map (Schwab pathway)."""
+    if issued_at is None:
+        issued_at = datetime.now(timezone.utc)
+    return broker_pb2.ConfigureRequest(
+        # Typed Futu fields stay empty for Schwab.
+        metadata={
+            "app_key":          app_key,
+            "app_secret":       app_secret,
+            "access_token":     access_token,
+            "refresh_token":    refresh_token,
+            "access_issued_at": issued_at.isoformat(),
+        },
+    )
 
 
 @pytest.mark.asyncio
 async def test_configure_first_time_succeeds():
     servicer = BrokerServicer()
-    request = pb.ConfigureRequest(
-        broker_id="schwab",
-        params={
-            "app_key":       "K",
-            "app_secret":    "S",
-            "access_token":  "A",
-            "refresh_token": "R",
-            "access_issued_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
-    resp = await servicer.Configure(request, ctx)
+    resp = await servicer.Configure(_build_request(), ctx)
     assert resp.ok is True
+    assert resp.detail == ""
 
 
 @pytest.mark.asyncio
 async def test_configure_idempotent_same_tokens():
     servicer = BrokerServicer()
-    request = pb.ConfigureRequest(
-        broker_id="schwab",
-        params={"app_key": "K", "app_secret": "S",
-                "access_token": "A", "refresh_token": "R",
-                "access_issued_at": datetime.now(timezone.utc).isoformat()},
-    )
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
-    resp1 = await servicer.Configure(request, ctx)
-    resp2 = await servicer.Configure(request, ctx)
-    assert resp1.ok is True
-    assert resp2.ok is True
-    # Sidecar's internal client setup count remains 1 — idempotency
+    issued = datetime.now(timezone.utc)
+    req = _build_request(issued_at=issued)
+    resp1 = await servicer.Configure(req, ctx)
+    resp2 = await servicer.Configure(req, ctx)
+    assert resp1.ok and resp2.ok
+    # Idempotency: SchwabClient instance constructed once.
     assert servicer._configure_count == 1
 
 
 @pytest.mark.asyncio
 async def test_configure_rebuilds_on_token_change():
     servicer = BrokerServicer()
-    base = {"app_key": "K", "app_secret": "S",
-            "access_issued_at": datetime.now(timezone.utc).isoformat()}
-    req1 = pb.ConfigureRequest(broker_id="schwab",
-                               params={**base, "access_token": "A1", "refresh_token": "R1"})
-    req2 = pb.ConfigureRequest(broker_id="schwab",
-                               params={**base, "access_token": "A2", "refresh_token": "R2"})
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
-    await servicer.Configure(req1, ctx)
-    await servicer.Configure(req2, ctx)
+    issued = datetime.now(timezone.utc)
+    await servicer.Configure(_build_request(access_token="A1", refresh_token="R1", issued_at=issued), ctx)
+    await servicer.Configure(_build_request(access_token="A2", refresh_token="R2", issued_at=issued), ctx)
     assert servicer._configure_count == 2
+
+
+@pytest.mark.asyncio
+async def test_configure_h4_discards_stale_access_token():
+    """H4 — when access_issued_at is >25min old, sidecar does NOT use the
+    supplied access_token; instead it stays unset, forcing the next outbound
+    call to trigger RequestTokenRefresh via TokenCache."""
+    servicer = BrokerServicer()
+    ctx = MagicMock(spec=grpc.aio.ServicerContext)
+    stale = datetime.now(timezone.utc) - timedelta(minutes=30)
+    resp = await servicer.Configure(
+        _build_request(access_token="STALE_A", issued_at=stale), ctx)
+    assert resp.ok is True
+    # Token cache holds the empty access_token (forcing refresh on first use)
+    assert servicer._token_cache._access_token == ""
+    # But the refresh_token IS persisted — sidecar uses it via RequestTokenRefresh
+    assert servicer._token_cache._refresh_token == "R"
+
+
+@pytest.mark.asyncio
+async def test_configure_rejects_request_without_metadata():
+    """Schwab Configure requires metadata map populated; otherwise reject."""
+    servicer = BrokerServicer()
+    ctx = MagicMock(spec=grpc.aio.ServicerContext)
+    ctx.abort = MagicMock()
+    bare = broker_pb2.ConfigureRequest()  # no metadata, no typed fields
+    await servicer.Configure(bare, ctx)
+    ctx.abort.assert_called_once()
+    args = ctx.abort.call_args.args
+    assert args[0] == grpc.StatusCode.INVALID_ARGUMENT
 ```
 
 - [ ] **Step 2: Run — FAIL.** Add `_configure_count` + Configure method to `handlers.py`.
 
-- [ ] **Step 3: Update `sidecar_schwab/handlers.py`:**
+- [ ] **Step 3: Update `sidecar_schwab/handlers.py` (v3 — uses metadata map; new BackendCallbackStub):**
 
 ```python
-"""gRPC Broker servicer for Schwab.
+"""gRPC Broker servicer for Schwab (v3 — metadata-map ConfigureRequest).
 
-Configure is the ONLY RPC that mutates server state — it owns the
-SchwabClient instance and the TokenCache. All other RPCs read from
-state populated by Configure.
+Configure mutates server state — it owns the SchwabClient instance and the
+TokenCache. All other RPCs read from state populated by Configure.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import grpc
 
 from sidecar_schwab._generated.broker.v1 import (
-    broker_pb2 as pb,
-    broker_pb2_grpc as pbg,
+    broker_pb2,
+    broker_pb2_grpc,
 )
 from sidecar_schwab.auth import TokenCache
 from sidecar_schwab.client import SchwabClient
 
 log = logging.getLogger(__name__)
 
+_FRESH_WINDOW = timedelta(minutes=25)  # H4 — 25min headroom inside 30min TTL
 
-class BrokerServicer(pbg.BrokerServicer):
+# Required metadata keys for Schwab Configure.
+_REQUIRED_META_KEYS = ("app_key", "app_secret", "refresh_token")
+
+
+class BrokerServicer(broker_pb2_grpc.BrokerServicer):
     """Schwab gRPC service implementation."""
 
     def __init__(self) -> None:
@@ -1825,79 +2154,84 @@ class BrokerServicer(pbg.BrokerServicer):
         self._configure_count = 0
         self._client: SchwabClient | None = None
         self._token_cache: TokenCache | None = None
-        # Hash of last-seen Configure params, for idempotency.
-        self._last_params_fingerprint: str | None = None
+        # Hash of last-seen Configure metadata, for idempotency.
+        self._last_meta_fingerprint: str | None = None
         self._configured_at: datetime | None = None
 
     # ─────────────────────────── Configure ──────────────────────────
 
     async def Configure(  # noqa: N802
         self,
-        request: pb.ConfigureRequest,
+        request: broker_pb2.ConfigureRequest,
         context: grpc.aio.ServicerContext,
-    ) -> pb.ConfigureResponse:
-        if request.broker_id != "schwab":
+    ) -> broker_pb2.ConfigureResponse:
+        # v3 — Schwab uses ConfigureRequest.metadata (typed Futu fields ignored).
+        meta = dict(request.metadata)
+        missing = [k for k in _REQUIRED_META_KEYS if not meta.get(k)]
+        if missing:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                f"this sidecar handles broker_id=schwab, got {request.broker_id!r}",
+                f"schwab Configure: missing metadata keys {missing}",
             )
-            return pb.ConfigureResponse(ok=False)
+            return broker_pb2.ConfigureResponse(ok=False, detail=f"missing:{','.join(missing)}")
 
         async with self._configure_lock:
-            params = dict(request.params)
-            fingerprint = self._fingerprint(params)
-            if fingerprint == self._last_params_fingerprint:
-                return pb.ConfigureResponse(ok=True)
+            fingerprint = self._fingerprint(meta)
+            if fingerprint == self._last_meta_fingerprint:
+                return broker_pb2.ConfigureResponse(ok=True)
 
-            access_issued_at = self._parse_iso(params.get("access_issued_at", ""))
+            issued_at_str = meta.get("access_issued_at", "")
+            access_issued_at = self._parse_iso(issued_at_str)
 
-            # Build a fresh refresh-callback gRPC client to backend (used
-            # by TokenCache when the access_token expires).
+            # H4 — discard the supplied access_token if it's stale; sidecar
+            # will trigger a backend RequestTokenRefresh on first outbound call.
+            now = datetime.now(timezone.utc)
+            if access_issued_at and (now - access_issued_at) < _FRESH_WINDOW:
+                effective_access = meta.get("access_token", "")
+            else:
+                effective_access = ""
+                access_issued_at = now - _FRESH_WINDOW * 2  # mark "definitely stale"
+
+            # Build the BackendCallback gRPC client (used by TokenCache when
+            # access_token is stale). Address from env var with sensible default.
             backend_addr = os.environ.get("BACKEND_ADMIN_GRPC", "backend:8001")
             channel = grpc.aio.insecure_channel(backend_addr)
-            refresh_client = pbg.BrokerStub(channel)
+            refresh_client = broker_pb2_grpc.BackendCallbackStub(channel)  # v3 — new service
 
             self._token_cache = TokenCache(refresh_client=refresh_client)
             self._token_cache.set_tokens(
-                access_token=params["access_token"],
-                refresh_token=params["refresh_token"],
+                access_token=effective_access,
+                refresh_token=meta["refresh_token"],
                 access_issued_at=access_issued_at,
             )
             self._client = SchwabClient.from_credentials(
-                app_key=params["app_key"],
-                app_secret=params["app_secret"],
+                app_key=meta["app_key"],
+                app_secret=meta["app_secret"],
                 token_cache=self._token_cache,
             )
-            self._last_params_fingerprint = fingerprint
-            self._configured_at = datetime.now(timezone.utc)
+            self._last_meta_fingerprint = fingerprint
+            self._configured_at = now
             self._configure_count += 1
-            log.info("schwab_configured", count=self._configure_count)
-            return pb.ConfigureResponse(ok=True)
+            log.info("schwab_configured", count=self._configure_count,
+                     access_was_fresh=bool(effective_access))
+            return broker_pb2.ConfigureResponse(ok=True)
 
     @staticmethod
-    def _fingerprint(params: dict[str, str]) -> str:
-        """Hash the 5 params we care about for idempotency."""
+    def _fingerprint(meta: dict[str, str]) -> str:
+        """Hash the 5 metadata keys we care about for idempotency."""
         keys = ("app_key", "app_secret", "access_token", "refresh_token", "access_issued_at")
-        return "|".join(params.get(k, "") for k in keys)
+        return "|".join(meta.get(k, "") for k in keys)
 
     @staticmethod
     def _parse_iso(s: str) -> datetime:
         if not s:
             return datetime.now(timezone.utc)
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
+        try:
+            return datetime.fromisoformat(s).astimezone(timezone.utc)
+        except ValueError:
+            return datetime.now(timezone.utc)
 
-    # Health is overridden in B5; existing stub from A4 stays for now.
-    async def Health(  # noqa: N802
-        self,
-        request: pb.HealthRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> pb.HealthResponse:
-        return pb.HealthResponse(
-            label="schwab",
-            broker_id="schwab",
-            gateway_connected=False,
-            sidecar_version="0.7.0",
-        )
+    # Health is overridden in B5; A4's stub stays in place until then.
 ```
 
 - [ ] **Step 4: Run tests — PASS.**
@@ -1992,35 +2326,43 @@ async def test_health_connected_when_token_fresh_and_hashes_present():
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Replace `Health` in `handlers.py`** (replace the stub from B4):
+- [ ] **Step 3: Replace `Health` in `handlers.py`** (replaces the stub from A4 + B4 stub).
 
 ```python
+# Add to top of handlers.py imports:
+from google.protobuf.timestamp_pb2 import Timestamp
+
+
     async def Health(  # noqa: N802
         self,
-        request: pb.HealthRequest,
+        request: broker_pb2.HealthRequest,
         context: grpc.aio.ServicerContext,
-    ) -> pb.HealthResponse:
-        # H4 invariant: gateway_connected = (access_token < 25min old) AND (account_hashes non-empty)
-        from datetime import timedelta
+    ) -> broker_pb2.HealthResponse:
+        """H4 invariant: gateway_connected = token_fresh AND _account_hashes non-empty."""
         token_fresh = (
             self._token_cache is not None
             and self._token_cache._access_issued_at is not None
             and (datetime.now(timezone.utc) - self._token_cache._access_issued_at)
-                < timedelta(minutes=25)
+                < _FRESH_WINDOW
         )
         hashes_present = (
             self._client is not None
             and bool(self._client._account_hashes)
         )
         connected = token_fresh and hashes_present
-        started_ts = pb.google_dot_protobuf_dot_timestamp__pb2.Timestamp()
+
+        started_ts = Timestamp()
         if self._configured_at is not None:
             started_ts.FromDatetime(self._configured_at)
-        return pb.HealthResponse(
+
+        # gateway_version reflects the Schwabdev wrapper version + a marker;
+        # sidecar_version is the git SHA at build time (env-injected).
+        return broker_pb2.HealthResponse(
             label="schwab",
             broker_id="schwab",
+            gateway_version="schwabdev-3.0.3",
             gateway_connected=connected,
-            sidecar_version="0.7.0",
+            sidecar_version=os.environ.get("SIDECAR_BUILD_SHA", "0.7.0"),
             started_at=started_ts,
         )
 ```
@@ -2038,76 +2380,118 @@ git add sidecar_schwab/handlers.py sidecar_schwab/tests/test_handlers_health.py
 git commit -m "feat(sidecar-schwab): Health — H4 gateway_connected = token<25min AND hashes non-empty"
 ```
 
-### Task B6: `ListAccounts` + `_account_hashes` cache + H3 404→retry-once
+### Task B6: `ListManagedAccounts` + `_account_hashes` cache + H3 404→retry-once
 
-**Files:** Modify `sidecar_schwab/handlers.py`. Create `sidecar_schwab/tests/test_handlers_list_accounts.py`, `tests/test_account_hash_404_retry.py`.
+**Files:** Modify `sidecar_schwab/handlers.py`. Create `sidecar_schwab/tests/test_handlers_list_managed_accounts.py`, `tests/test_account_hash_404_retry.py`.
+
+**v3 reality grounding:** Real proto RPC is `ListManagedAccounts(Empty) returns (AccountsResponse)` (proto line 20). Returns `AccountsResponse.accounts` (repeated `Account`). v2's `ListAccounts(ListAccountsRequest)` was hallucinated. H3 catches `SchwabAccountHashStaleError` (typed exception from B3, not substring match).
 
 - [ ] **Step 1: Failing tests** (two files):
 
-`tests/test_handlers_list_accounts.py`:
+`tests/test_handlers_list_managed_accounts.py`:
 
 ```python
-"""Phase 7a B6 — ListAccounts populates _account_hashes + returns proto Accounts."""
-from datetime import datetime, timezone
+"""Phase 7a B6 — ListManagedAccounts populates _account_hashes + returns proto Accounts.
+
+v3 — RPC is ListManagedAccounts(Empty), not ListAccounts(ListAccountsRequest).
+"""
 from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
 
-from sidecar_schwab._generated.broker.v1 import broker_pb2 as pb
+from sidecar_schwab._generated.broker.v1 import broker_pb2
 from sidecar_schwab.handlers import BrokerServicer
 
 
 @pytest.mark.asyncio
-async def test_list_accounts_returns_all_schwab_accounts():
+async def test_list_managed_accounts_returns_all_schwab_accounts():
     servicer = BrokerServicer()
     servicer._client = MagicMock()
     servicer._client.refresh_hashes = AsyncMock(return_value={
         "12345678": "HASH_A",
         "87654321": "HASH_B",
     })
+    servicer._client.hash_for = lambda n: {"12345678": "HASH_A", "87654321": "HASH_B"}.get(n)
     servicer._client.get_account_details = AsyncMock(side_effect=[
         {"securitiesAccount": {"accountNumber": "12345678", "type": "MARGIN"}},
         {"securitiesAccount": {"accountNumber": "87654321", "type": "CASH"}},
     ])
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
-    resp = await servicer.ListAccounts(pb.ListAccountsRequest(), ctx)
+    resp = await servicer.ListManagedAccounts(broker_pb2.Empty(), ctx)
     assert len(resp.accounts) == 2
     nums = {a.account_number for a in resp.accounts}
     assert nums == {"12345678", "87654321"}
-    # Both LIVE per spec §3.2 invariant
+    # All LIVE per spec §3.2 invariant
     for a in resp.accounts:
-        assert a.mode == pb.LIVE
+        assert a.mode == broker_pb2.TradingMode.LIVE
         assert a.gateway_label == "schwab"
         assert a.currency_base == "USD"
-    # account_hashes are populated on the result
     hashes = {a.account_hash for a in resp.accounts}
     assert hashes == {"HASH_A", "HASH_B"}
+
+
+@pytest.mark.asyncio
+async def test_list_managed_accounts_initial_call_emits_initial_reason():
+    """v3 H3 — first call after Configure emits reason='initial'."""
+    servicer = BrokerServicer()
+    servicer._client = MagicMock()
+    servicer._client.refresh_hashes = AsyncMock(return_value={"X": "HASH"})
+    servicer._client.hash_for = lambda n: "HASH"
+    servicer._client.get_account_details = AsyncMock(return_value={
+        "securitiesAccount": {"accountNumber": "X", "type": "MARGIN"}})
+    ctx = MagicMock(spec=grpc.aio.ServicerContext)
+    await servicer.ListManagedAccounts(broker_pb2.Empty(), ctx)
+    # Inspect the reason kwarg passed to refresh_hashes
+    servicer._client.refresh_hashes.assert_called_with(reason="initial")
+
+
+@pytest.mark.asyncio
+async def test_list_managed_accounts_subsequent_calls_emit_rotation_detected_reason():
+    """v3 H3 — subsequent calls emit reason='rotation_detected', not 'initial'."""
+    servicer = BrokerServicer()
+    servicer._client = MagicMock()
+    servicer._client.refresh_hashes = AsyncMock(return_value={"X": "HASH"})
+    servicer._client.hash_for = lambda n: "HASH"
+    servicer._client.get_account_details = AsyncMock(return_value={
+        "securitiesAccount": {"accountNumber": "X", "type": "MARGIN"}})
+    ctx = MagicMock(spec=grpc.aio.ServicerContext)
+    # First call → 'initial'
+    await servicer.ListManagedAccounts(broker_pb2.Empty(), ctx)
+    # Second call → 'rotation_detected'
+    servicer._client.refresh_hashes.reset_mock()
+    await servicer.ListManagedAccounts(broker_pb2.Empty(), ctx)
+    servicer._client.refresh_hashes.assert_called_with(reason="rotation_detected")
 ```
 
 `tests/test_account_hash_404_retry.py`:
 
 ```python
-"""Phase 7a B6 — H3: 404 from hash-keyed path → refresh → retry once."""
+"""Phase 7a B6 — H3: 404 from hash-keyed path → refresh → retry once.
+
+v3 — uses typed SchwabAccountHashStaleError exception (B3), not substring match.
+"""
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from sidecar_schwab.handlers import BrokerServicer
-from sidecar_schwab._generated.broker.v1 import broker_pb2 as pb
+from sidecar_schwab.client import SchwabAccountHashStaleError
 
 
 @pytest.mark.asyncio
 async def test_404_triggers_hash_refresh_and_retry_once():
     servicer = BrokerServicer()
     servicer._client = MagicMock()
-    # First call 404 (hash rotated), second call returns data.
+    # First call: typed 404 error. Second call: returns data.
     servicer._client.get_account_details = AsyncMock(side_effect=[
-        RuntimeError("schwab /accounts status=404"),
+        SchwabAccountHashStaleError(
+            "404 — account_hash may have rotated",
+            status_code=404, endpoint="/accounts"),
         {"securitiesAccount": {"accountNumber": "X", "type": "MARGIN"}},
     ])
     servicer._client.refresh_hashes = AsyncMock(return_value={"X": "NEW_HASH"})
-    servicer._client.hash_for = lambda n: "OLD_HASH"
+    servicer._client.hash_for = lambda n: "HASH_VAL"
 
     result = await servicer._fetch_account_with_404_retry("X")
     assert result["securitiesAccount"]["accountNumber"] == "X"
@@ -2116,56 +2500,62 @@ async def test_404_triggers_hash_refresh_and_retry_once():
 
 
 @pytest.mark.asyncio
-async def test_second_404_surfaces_not_found():
+async def test_second_404_surfaces_typed_error():
     servicer = BrokerServicer()
     servicer._client = MagicMock()
     servicer._client.get_account_details = AsyncMock(
-        side_effect=RuntimeError("schwab /accounts status=404")
-    )
+        side_effect=SchwabAccountHashStaleError(
+            "404 — account_hash may have rotated",
+            status_code=404, endpoint="/accounts"))
     servicer._client.refresh_hashes = AsyncMock(return_value={"X": "NEW_HASH"})
-    servicer._client.hash_for = lambda n: "OLD_HASH"
+    servicer._client.hash_for = lambda n: "HASH"
 
-    with pytest.raises(RuntimeError, match="404"):
+    with pytest.raises(SchwabAccountHashStaleError) as exc_info:
         await servicer._fetch_account_with_404_retry("X")
+    assert exc_info.value.status_code == 404
     assert servicer._client.get_account_details.call_count == 2
 ```
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Add `ListAccounts` + `_fetch_account_with_404_retry` to `handlers.py`:**
+- [ ] **Step 3: Add `ListManagedAccounts` + `_fetch_account_with_404_retry` to `handlers.py`:**
 
 ```python
-    async def ListAccounts(  # noqa: N802
+    async def ListManagedAccounts(  # noqa: N802
         self,
-        request: pb.ListAccountsRequest,
+        request: broker_pb2.Empty,
         context: grpc.aio.ServicerContext,
-    ) -> pb.ListAccountsResponse:
+    ) -> broker_pb2.AccountsResponse:
+        """v3 — RPC name + signature match real proto: takes Empty, returns AccountsResponse."""
         if self._client is None:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "schwab sidecar not configured (call Configure first)",
             )
-            return pb.ListAccountsResponse()
+            return broker_pb2.AccountsResponse()
 
         from sidecar_schwab.normalize import normalize_account
-        # Refresh + cache hashes.
-        hashes = await self._client.refresh_hashes(reason="initial")
-        accounts: list[pb.Account] = []
+        # H3 — emit 'initial' on first call after Configure; 'rotation_detected'
+        # subsequently. The hashes_loaded flag is reset whenever Configure runs.
+        reason = "initial" if not getattr(self, "_hashes_loaded_once", False) else "rotation_detected"
+        hashes = await self._client.refresh_hashes(reason=reason)
+        self._hashes_loaded_once = True
+
+        accounts: list[broker_pb2.Account] = []
         for account_number, hash_value in hashes.items():
             details = await self._fetch_account_with_404_retry(account_number)
             acct = normalize_account(details)
             acct.account_hash = hash_value
             accounts.append(acct)
-        return pb.ListAccountsResponse(accounts=accounts)
+        return broker_pb2.AccountsResponse(accounts=accounts)
 
     async def _fetch_account_with_404_retry(self, account_number: str) -> dict:
-        """H3 — on 404, invalidate cache + retry once."""
+        """H3 — on typed SchwabAccountHashStaleError, invalidate cache + retry once."""
+        from sidecar_schwab.client import SchwabAccountHashStaleError
         h = self._client.hash_for(account_number)
         try:
             return await self._client.get_account_details(h)
-        except RuntimeError as e:
-            if "404" not in str(e):
-                raise
+        except SchwabAccountHashStaleError:
             await self._client.refresh_hashes(reason="404_retry")
             h = self._client.hash_for(account_number)
             return await self._client.get_account_details(h)
@@ -2174,32 +2564,34 @@ async def test_second_404_surfaces_not_found():
 - [ ] **Step 4: Run — PASS.**
 
 ```bash
-uv run pytest tests/test_handlers_list_accounts.py tests/test_account_hash_404_retry.py -v
+uv run pytest tests/test_handlers_list_managed_accounts.py tests/test_account_hash_404_retry.py -v
 ```
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add sidecar_schwab/handlers.py sidecar_schwab/tests/test_handlers_list_accounts.py \
+git add sidecar_schwab/handlers.py sidecar_schwab/tests/test_handlers_list_managed_accounts.py \
         sidecar_schwab/tests/test_account_hash_404_retry.py
-git commit -m "feat(sidecar-schwab): ListAccounts + H3 404→refresh→retry-once"
+git commit -m "feat(sidecar-schwab): ListManagedAccounts + H3 404→refresh→retry-once"
 ```
 
-### Task B7: `GetAccountSummary` + H5 USD-only fallback
+### Task B7: `GetAccountSummary` returns `SummaryResponse(summary=Summary(... Money ...))`
 
 **Files:** Modify `sidecar_schwab/handlers.py`. Create `tests/test_handlers_summary.py`.
+
+**v3 reality grounding:** Real proto `GetAccountSummary(AccountRef) returns (SummaryResponse)` (proto line 21). `SummaryResponse` wraps a `Summary` with **Money** fields (`net_liquidation`, `total_cash`, `realized_pnl`, `unrealized_pnl`, `buying_power`). v2's flat `AccountSummaryResponse(net_liquidation=str)` shape was hallucinated. Day P&L flows into `Summary.realized_pnl` (closest fit).
 
 - [ ] **Step 1: Failing test.**
 
 ```python
-"""Phase 7a B7 — GetAccountSummary extracts NLV / cash / buying_power."""
+"""Phase 7a B7 — GetAccountSummary returns SummaryResponse with Money fields."""
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
 
-from sidecar_schwab._generated.broker.v1 import broker_pb2 as pb
+from sidecar_schwab._generated.broker.v1 import broker_pb2
 from sidecar_schwab.handlers import BrokerServicer
 
 
@@ -2224,13 +2616,18 @@ async def test_summary_extracts_nlv_cash_buying_power_day_pnl():
     })
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
     resp = await servicer.GetAccountSummary(
-        pb.AccountRef(account_number="X"), ctx,
+        broker_pb2.AccountRef(account_number="X"), ctx,
     )
-    assert Decimal(resp.net_liquidation) == Decimal("100000.50")
-    assert Decimal(resp.total_cash) == Decimal("25000.00")
-    assert Decimal(resp.buying_power) == Decimal("200000.00")
-    assert Decimal(resp.day_pnl) == Decimal("500.50")  # nlv - prev_nlv
-    assert resp.currency_base == "USD"
+    # Real proto: SummaryResponse.summary is a Summary; fields are Money.
+    s = resp.summary
+    assert Decimal(s.net_liquidation.value) == Decimal("100000.50")
+    assert s.net_liquidation.currency == "USD"
+    assert Decimal(s.total_cash.value) == Decimal("25000.00")
+    assert s.total_cash.currency == "USD"
+    assert Decimal(s.buying_power.value) == Decimal("200000.00")
+    assert s.buying_power.currency == "USD"
+    # day_pnl flows into realized_pnl (Schwab doesn't break out cleanly)
+    assert Decimal(s.realized_pnl.value) == Decimal("500.50")  # nlv - prev_nlv
 ```
 
 - [ ] **Step 2: Run — FAIL.**
@@ -2240,40 +2637,17 @@ async def test_summary_extracts_nlv_cash_buying_power_day_pnl():
 ```python
     async def GetAccountSummary(  # noqa: N802
         self,
-        request: pb.AccountRef,
+        request: broker_pb2.AccountRef,
         context: grpc.aio.ServicerContext,
-    ) -> pb.AccountSummaryResponse:
-        from decimal import Decimal
+    ) -> broker_pb2.SummaryResponse:
         if self._client is None:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION, "not configured")
-            return pb.AccountSummaryResponse()
+            return broker_pb2.SummaryResponse()
         details = await self._fetch_account_with_404_retry(request.account_number)
         sa = details.get("securitiesAccount") or {}
-        balances = sa.get("currentBalances") or {}
-        initial = sa.get("initialBalances") or {}
-
-        def _d(v) -> Decimal:
-            if v is None:
-                return Decimal("0")
-            try:
-                return Decimal(str(v))
-            except Exception:  # noqa: BLE001
-                return Decimal("0")
-
-        nlv = _d(balances.get("liquidationValue"))
-        cash = _d(balances.get("cashBalance") or balances.get("totalCash"))
-        bp = _d(balances.get("buyingPower") or balances.get("availableFunds"))
-        prev_nlv = _d(initial.get("liquidationValue"))
-        day_pnl = nlv - prev_nlv if prev_nlv != 0 else Decimal("0")
-
-        return pb.AccountSummaryResponse(
-            net_liquidation=str(nlv),
-            total_cash=str(cash),
-            buying_power=str(bp),
-            day_pnl=str(day_pnl),
-            currency_base="USD",   # H5 — Schwab is USD-only as of 2026
-        )
+        from sidecar_schwab.normalize import normalize_summary
+        return normalize_summary(sa)
 ```
 
 - [ ] **Step 4: Run — PASS.**
@@ -2286,23 +2660,26 @@ uv run pytest tests/test_handlers_summary.py -v
 
 ```bash
 git add sidecar_schwab/handlers.py sidecar_schwab/tests/test_handlers_summary.py
-git commit -m "feat(sidecar-schwab): GetAccountSummary + H5 USD-only invariant"
+git commit -m "feat(sidecar-schwab): GetAccountSummary → SummaryResponse with Money fields (H5)"
 ```
 
-### Task B8: `GetPositions`
+### Task B8: `GetPositions` — Position with `Contract` sub-message + Money fields
 
 **Files:** Modify `sidecar_schwab/handlers.py`. Create `tests/test_handlers_positions.py`.
+
+**v3 reality grounding:** Real `Position` has `contract: Contract` sub-message (not flat `symbol` + `asset_class`); `quantity` is `string`; `avg_cost`/`market_price`/`market_value`/`unrealized_pnl`/`realized_pnl_today`/`daily_pnl` are all `Money`. v2's flat `Position(symbol=..., quantity=..., avg_cost=str)` shape was hallucinated.
 
 - [ ] **Step 1: Failing test.**
 
 ```python
-"""Phase 7a B8 — GetPositions returns proto Positions per Schwab securitiesAccount.positions."""
+"""Phase 7a B8 — GetPositions returns Position with Contract sub-message + Money fields."""
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
 
-from sidecar_schwab._generated.broker.v1 import broker_pb2 as pb
+from sidecar_schwab._generated.broker.v1 import broker_pb2
 from sidecar_schwab.handlers import BrokerServicer
 
 
@@ -2315,13 +2692,13 @@ async def test_get_positions_two_long_one_short():
         "securitiesAccount": {
             "accountNumber": "X",
             "positions": [
-                {"instrument": {"symbol": "AAPL", "assetType": "EQUITY"},
+                {"instrument": {"symbol": "AAPL", "assetType": "EQUITY", "cusip": "037833100"},
                  "longQuantity": 100, "averagePrice": 150.0,
                  "marketValue": 17500, "currentDayProfitLoss": 250},
-                {"instrument": {"symbol": "GOOG", "assetType": "EQUITY"},
+                {"instrument": {"symbol": "GOOG", "assetType": "EQUITY", "cusip": "02079K305"},
                  "longQuantity": 10, "averagePrice": 2800.0,
                  "marketValue": 30000, "currentDayProfitLoss": -150},
-                {"instrument": {"symbol": "TSLA", "assetType": "EQUITY"},
+                {"instrument": {"symbol": "TSLA", "assetType": "EQUITY", "cusip": "88160R101"},
                  "shortQuantity": 5, "averagePrice": 280.0,
                  "marketValue": -1400, "currentDayProfitLoss": 25},
             ],
@@ -2329,12 +2706,20 @@ async def test_get_positions_two_long_one_short():
     })
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
     resp = await servicer.GetPositions(
-        pb.AccountRef(account_number="X"), ctx)
+        broker_pb2.AccountRef(account_number="X"), ctx)
     assert len(resp.positions) == 3
-    by_symbol = {p.symbol: p for p in resp.positions}
+    by_symbol = {p.contract.symbol: p for p in resp.positions}
     assert by_symbol["AAPL"].quantity == "100"
     assert by_symbol["GOOG"].quantity == "10"
     assert by_symbol["TSLA"].quantity == "-5"  # short = negative
+    # Money everywhere
+    assert Decimal(by_symbol["AAPL"].avg_cost.value) == Decimal("150.0")
+    assert by_symbol["AAPL"].avg_cost.currency == "USD"
+    assert Decimal(by_symbol["AAPL"].market_value.value) == Decimal("17500")
+    assert Decimal(by_symbol["AAPL"].daily_pnl.value) == Decimal("250")
+    # Contract sub-message
+    assert by_symbol["AAPL"].contract.asset_class == broker_pb2.AssetClass.STOCK
+    assert by_symbol["AAPL"].contract.conid == "037833100"  # CUSIP as opaque ID
 ```
 
 - [ ] **Step 2: Run — FAIL.**
@@ -2344,24 +2729,24 @@ async def test_get_positions_two_long_one_short():
 ```python
     async def GetPositions(  # noqa: N802
         self,
-        request: pb.AccountRef,
+        request: broker_pb2.AccountRef,
         context: grpc.aio.ServicerContext,
-    ) -> pb.PositionsResponse:
+    ) -> broker_pb2.PositionsResponse:
         from sidecar_schwab.normalize import normalize_position
         if self._client is None:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "not configured")
-            return pb.PositionsResponse()
+            return broker_pb2.PositionsResponse()
         details = await self._fetch_account_with_404_retry(request.account_number)
         sa = details.get("securitiesAccount") or {}
         positions = [normalize_position(p) for p in (sa.get("positions") or [])]
-        return pb.PositionsResponse(positions=positions)
+        return broker_pb2.PositionsResponse(positions=positions)
 ```
 
 - [ ] **Step 4: Run — PASS.** Commit.
 
 ```bash
 git add sidecar_schwab/handlers.py sidecar_schwab/tests/test_handlers_positions.py
-git commit -m "feat(sidecar-schwab): GetPositions"
+git commit -m "feat(sidecar-schwab): GetPositions — Position with Contract sub-message + Money fields"
 ```
 
 ### Task B9: `GetOrders` 7-day window + status table + avg_fill (M2)
@@ -2398,7 +2783,7 @@ async def test_get_orders_passes_7_day_window():
 
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
     await servicer.GetOrders(
-        pb.GetOrdersRequest(account_number="X"), ctx)
+        pb.AccountRef(account_number="X"), ctx)
     # 7-day window
     from datetime import datetime
     from_dt = datetime.fromisoformat(captured["from"])
@@ -2426,10 +2811,11 @@ async def test_get_orders_maps_status_and_avg_fill():
     ])
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
     resp = await servicer.GetOrders(
-        pb.GetOrdersRequest(account_number="X"), ctx)
+        pb.AccountRef(account_number="X"), ctx)
     assert len(resp.orders) == 2
-    assert resp.orders[0].status == pb.SUBMITTED
-    assert resp.orders[1].status == pb.FILLED
+    # v3 — nested enum access (broker_pb2.OrderStatus.<NAME>), per sidecar_futu/tests precedent.
+    assert resp.orders[0].status == pb.OrderStatus.SUBMITTED
+    assert resp.orders[1].status == pb.OrderStatus.FILLED
     # M2 — avg_fill_price from executionLegs (NOT order.price=200)
     from decimal import Decimal
     assert Decimal(resp.orders[1].avg_fill_price) == Decimal("199.50")
@@ -2442,7 +2828,7 @@ async def test_get_orders_maps_status_and_avg_fill():
 ```python
     async def GetOrders(  # noqa: N802
         self,
-        request: pb.GetOrdersRequest,
+        request: pb.AccountRef,
         context: grpc.aio.ServicerContext,
     ) -> pb.OrdersResponse:
         from datetime import datetime, timedelta, timezone
@@ -2474,10 +2860,12 @@ git commit -m "feat(sidecar-schwab): GetOrders 7-day window + status table + avg
 
 **Files:** Modify `handlers.py`. Create `tests/test_unimplemented_stubs.py`.
 
+**v3 reality grounding:** The current `service Broker` (proto/broker/v1/broker.proto:18-31) has 12 RPCs total. Phase 7a Schwab implements 6 of them (Health, ListManagedAccounts, GetAccountSummary, GetPositions, GetOrders, Configure). The remaining 6 — `GetContract(ContractRef) returns (ContractResponse)`, `PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse)`, `CancelOrder(CancelOrderRequest) returns (CancelOrderResponse)`, `ModifyOrder(ModifyOrderRequest) returns (ModifyOrderResponse)`, `PlaceBracket(PlaceBracketRequest) returns (PlaceBracketResponse)`, `SearchContracts(SearchContractsRequest) returns (SearchContractsResponse)`, plus `OrderEvent(AccountRef) returns (stream OrderEventMessage)` — must all return UNIMPLEMENTED. There is no `StreamQuotes` RPC on the proto today; quotes streaming arrives in Phase 7b which will add the RPC then. Do not stub it here.
+
 - [ ] **Step 1: Failing test.**
 
 ```python
-"""Phase 7a B10 — write + streaming RPCs return UNIMPLEMENTED (Phase 8 / 7b)."""
+"""Phase 7a B10 — write + streaming RPCs return UNIMPLEMENTED (Phase 8)."""
 from unittest.mock import MagicMock
 
 import grpc
@@ -2489,11 +2877,13 @@ from sidecar_schwab.handlers import BrokerServicer
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method,request_proto", [
+    ("GetContract",     pb.ContractRef()),
     ("PlaceOrder",      pb.PlaceOrderRequest()),
     ("CancelOrder",     pb.CancelOrderRequest()),
     ("ModifyOrder",     pb.ModifyOrderRequest()),
     ("PlaceBracket",    pb.PlaceBracketRequest()),
     ("SearchContracts", pb.SearchContractsRequest()),
+    ("OrderEvent",      pb.AccountRef()),
 ])
 async def test_unimplemented_returns_unimplemented(method, request_proto):
     servicer = BrokerServicer()
@@ -2512,28 +2902,33 @@ async def test_unimplemented_returns_unimplemented(method, request_proto):
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Add stubs to `handlers.py`:**
+- [ ] **Step 3: Add stubs to `handlers.py`** (response types match `proto/broker/v1/broker.proto` exactly — `PlaceOrderResponse`/`CancelOrderResponse`/`ModifyOrderResponse`/`PlaceBracketResponse`, NOT a generic `OrderResponse`):
 
 ```python
+    async def GetContract(self, request, context):  # noqa: N802
+        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                            "Schwab GetContract lands in Phase 7b")
+        return pb.ContractResponse()
+
     async def PlaceOrder(self, request, context):  # noqa: N802
         await context.abort(grpc.StatusCode.UNIMPLEMENTED,
                             "Schwab PlaceOrder lands in Phase 8")
-        return pb.OrderResponse()
+        return pb.PlaceOrderResponse()
 
     async def CancelOrder(self, request, context):  # noqa: N802
         await context.abort(grpc.StatusCode.UNIMPLEMENTED,
                             "Schwab CancelOrder lands in Phase 8")
-        return pb.OrderResponse()
+        return pb.CancelOrderResponse()
 
     async def ModifyOrder(self, request, context):  # noqa: N802
         await context.abort(grpc.StatusCode.UNIMPLEMENTED,
                             "Schwab ModifyOrder lands in Phase 8")
-        return pb.OrderResponse()
+        return pb.ModifyOrderResponse()
 
     async def PlaceBracket(self, request, context):  # noqa: N802
         await context.abort(grpc.StatusCode.UNIMPLEMENTED,
                             "Schwab PlaceBracket lands in Phase 8")
-        return pb.BracketResponse()
+        return pb.PlaceBracketResponse()
 
     async def SearchContracts(self, request, context):  # noqa: N802
         await context.abort(grpc.StatusCode.UNIMPLEMENTED,
@@ -2541,13 +2936,12 @@ async def test_unimplemented_returns_unimplemented(method, request_proto):
         return pb.SearchContractsResponse()
 
     async def OrderEvent(self, request, context):  # noqa: N802
+        # Server-streaming RPC — no return value.
         await context.abort(grpc.StatusCode.UNIMPLEMENTED,
                             "Schwab OrderEvent stream lands in Phase 8")
-
-    async def StreamQuotes(self, request, context):  # noqa: N802
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab StreamQuotes lands in Phase 7b")
 ```
+
+> **Note:** No `StreamQuotes` stub here — the `service Broker` has no `StreamQuotes` RPC today. Phase 7b will add it to the proto and stub it across all sidecars in the same commit that lands the RPC definition.
 
 - [ ] **Step 4: Run — PASS.** Commit.
 
@@ -2560,7 +2954,7 @@ git commit -m "feat(sidecar-schwab): UNIMPLEMENTED stubs for write/streaming RPC
 
 ## End of Chunk B
 
-After B10: 10 commits, sidecar_schwab/ has full read-only data plane. Configure → ListAccounts → Summary/Positions/Orders works against mocked Schwabdev. Write + streaming RPCs return UNIMPLEMENTED. Health reports gateway_connected per H4 invariant. ~85% test coverage on the package.
+After B10: 10 commits, sidecar_schwab/ has full read-only data plane. Configure → ListManagedAccounts → Summary/Positions/Orders works against mocked Schwabdev. The 7 unimplemented RPCs (GetContract, PlaceOrder, CancelOrder, ModifyOrder, PlaceBracket, SearchContracts, OrderEvent) all return UNIMPLEMENTED with phase-pointer messages. Health reports `gateway_connected` per H4 invariant. ~85% test coverage on the package.
 
 ---
 
@@ -2866,9 +3260,9 @@ async def test_refresh_with_lock_writes_tokens(db_session, config_service, httpx
     )
     assert new_a == "NEW_A"
     assert new_r == "NEW_R"
-    # Verify app_secrets writes.
-    assert await config_service.get_secret("schwab", "access_token") == "NEW_A"
-    assert await config_service.get_secret("schwab", "refresh_token") == "NEW_R"
+    # Verify app_secrets writes (real ConfigService API: reveal_secret for reads).
+    assert await config_service.reveal_secret("broker", "schwab.access_token") == "NEW_A"
+    assert await config_service.reveal_secret("broker", "schwab.refresh_token") == "NEW_R"
 
 
 @pytest.mark.asyncio
@@ -2899,11 +3293,74 @@ async def test_refresh_with_lock_serializes_concurrent_callers(db_session_a, db_
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Append to `schwab_oauth.py`:**
+- [ ] **Step 3: Append to `schwab_oauth.py`** — note the shared `_persist_tokens_under_lock` helper (used by both `refresh_with_lock` AND `_exchange_code` in C4 per spec §3.6 single-writer rule):
 
 ```python
+import asyncio
 import httpx
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from sqlalchemy import text
+
+
+@asynccontextmanager
+async def schwab_refresh_lock(db_session, *, timeout_sec: int = 5):
+    """Async context manager that acquires the PG advisory lock for the
+    Schwab refresh-token write path. Used by BOTH the OAuth code-exchange
+    path and the refresh-token-rotation path.
+    """
+    res = await db_session.execute(
+        text("SELECT pg_try_advisory_lock(:id)"),
+        {"id": SCHWAB_REFRESH_LOCK_ID},
+    )
+    locked = bool(res.scalar())
+    if not locked:
+        for _ in range(timeout_sec):
+            await asyncio.sleep(1)
+            res = await db_session.execute(
+                text("SELECT pg_try_advisory_lock(:id)"),
+                {"id": SCHWAB_REFRESH_LOCK_ID},
+            )
+            if res.scalar():
+                locked = True
+                break
+        if not locked:
+            raise RuntimeError("schwab refresh advisory lock contention timeout")
+    try:
+        yield
+    finally:
+        await db_session.execute(
+            text("SELECT pg_advisory_unlock(:id)"),
+            {"id": SCHWAB_REFRESH_LOCK_ID},
+        )
+
+
+async def _persist_tokens_under_lock(
+    *,
+    config_service,
+    access_token: str,
+    refresh_token: str,
+    issued_at: datetime,
+    rotate_refresh_issued_at: bool,
+) -> None:
+    """Write the new (access, refresh) pair to app_secrets + app_config.
+
+    Caller MUST hold the PG advisory lock — this helper does not acquire it.
+    `rotate_refresh_issued_at=True` for the OAuth code-exchange path AND for
+    refresh-rotations that returned a new refresh_token; False otherwise.
+
+    ConfigService API per backend/app/services/config.py:
+      - set_secret(ns, key, value, value_type) for secrets
+      - set(ns, key, value, value_type) for non-secret config
+      - Namespace convention: ("broker", f"schwab.<key>") matches Futu wiring.
+    """
+    await config_service.set_secret("broker", "schwab.access_token", access_token)
+    await config_service.set_secret("broker", "schwab.refresh_token", refresh_token)
+    await config_service.set("broker", "schwab.access_token_issued_at",
+                             issued_at.isoformat())
+    if rotate_refresh_issued_at:
+        await config_service.set("broker", "schwab.refresh_token_issued_at",
+                                 issued_at.isoformat())
 
 
 async def refresh_with_lock(
@@ -2919,33 +3376,8 @@ async def refresh_with_lock(
 
     Returns (new_access_token, new_refresh_token, access_issued_at).
     Schwab rotates the refresh_token on every refresh — both must be persisted.
-
-    Raises RuntimeError on advisory-lock contention timeout.
     """
-    from sqlalchemy import text
-
-    # PG advisory lock — blocks if another caller holds it.
-    res = await db_session.execute(
-        text("SELECT pg_try_advisory_lock(:id)"),
-        {"id": SCHWAB_REFRESH_LOCK_ID},
-    )
-    locked = res.scalar()
-    if not locked:
-        # Briefly poll while waiting — caps total wait at timeout_sec.
-        import asyncio
-        for _ in range(timeout_sec):
-            await asyncio.sleep(1)
-            res = await db_session.execute(
-                text("SELECT pg_try_advisory_lock(:id)"),
-                {"id": SCHWAB_REFRESH_LOCK_ID},
-            )
-            if res.scalar():
-                locked = True
-                break
-        if not locked:
-            raise RuntimeError("schwab refresh advisory lock contention timeout")
-
-    try:
+    async with schwab_refresh_lock(db_session, timeout_sec=timeout_sec):
         async with httpx.AsyncClient(timeout=15.0) as http:
             resp = await http.post(
                 "https://api.schwabapi.com/v1/oauth/token",
@@ -2957,23 +3389,23 @@ async def refresh_with_lock(
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         if resp.status_code != 200:
-            raise RuntimeError(f"schwab token endpoint {resp.status_code}: {resp.text[:300]}")
+            raise RuntimeError(
+                f"schwab token endpoint {resp.status_code}: {resp.text[:300]}"
+            )
         data = resp.json()
         new_access = data["access_token"]
-        new_refresh = data.get("refresh_token") or refresh_token  # Schwab rotates; fallback for safety
+        # Schwab rotates the refresh_token on every refresh; fall back defensively.
+        new_refresh = data.get("refresh_token") or refresh_token
+        rotated = new_refresh != refresh_token
         issued_at = datetime.now(timezone.utc)
-
-        # Write to app_secrets.
-        await config_service.set_secret("schwab", "access_token", new_access)
-        await config_service.set_secret("schwab", "refresh_token", new_refresh)
-        await config_service.set_config("schwab", "access_token_issued_at",
-                                         issued_at.isoformat())
-        return new_access, new_refresh, issued_at
-    finally:
-        await db_session.execute(
-            text("SELECT pg_advisory_unlock(:id)"),
-            {"id": SCHWAB_REFRESH_LOCK_ID},
+        await _persist_tokens_under_lock(
+            config_service=config_service,
+            access_token=new_access,
+            refresh_token=new_refresh,
+            issued_at=issued_at,
+            rotate_refresh_issued_at=rotated,
         )
+        return new_access, new_refresh, issued_at
 ```
 
 - [ ] **Step 4: Run — PASS.** Commit.
@@ -3003,8 +3435,8 @@ async def test_public_callback_path_no_admin_jwt_required(test_client_no_auth, r
     signed = await mint_state_nonce(redis, user_email="u@x",
                                      app_secret_key=b"TEST_KEY")
     # Seed app_key/app_secret into config_service for the token-mint step
-    await config_service.set_secret("schwab", "app_key", "K")
-    await config_service.set_secret("schwab", "app_secret", "S")
+    await config_service.set_secret("broker", "schwab.app_key", "K")
+    await config_service.set_secret("broker", "schwab.app_secret", "S")
     # Mock Schwab token endpoint via httpx_mock — assume returns 200
     resp = await test_client_no_auth.get(
         "/api/oauth/schwab/callback",
@@ -3076,8 +3508,9 @@ async def schwab_oauth_callback_public(
 
     log.info("schwab_oauth_callback_public", user=user_email)
 
-    app_key = await config_service.get_secret("schwab", "app_key")
-    app_secret = await config_service.get_secret("schwab", "app_secret")
+    # Real ConfigService API: reveal_secret for reads, namespace ("broker", "schwab.<key>").
+    app_key = await config_service.reveal_secret("broker", "schwab.app_key")
+    app_secret = await config_service.reveal_secret("broker", "schwab.app_secret")
 
     try:
         access, refresh, issued = await _exchange_code(
@@ -3105,19 +3538,32 @@ async def schwab_oauth_callback_public(
 
 
 async def _exchange_code(*, db_session, config_service, app_key, app_secret, code):
-    """Exchange authorization_code → token pair via Schwab /v1/oauth/token."""
+    """Exchange authorization_code → token pair via Schwab /v1/oauth/token.
+
+    Per spec §3.6 single-writer rule (architect C2 finding), this MUST hold the
+    same PG advisory lock as `refresh_with_lock` so a concurrent Tier-2 refresh
+    cannot interleave with a Tier-1 first-OAuth write.
+
+    ConfigService API: namespace ("broker", "schwab.<key>"), set_secret for
+    secrets, set for non-secret config, get for non-secret config reads.
+    """
     import httpx
     from datetime import datetime, timezone
+    from app.services.schwab_oauth import (
+        schwab_refresh_lock, _persist_tokens_under_lock,
+    )
+
+    callback_url = await config_service.get(
+        "broker", "schwab.callback_url",
+        default="https://dashboard.kiusinghung.com/api/oauth/schwab/callback",
+    )
     async with httpx.AsyncClient(timeout=15.0) as http:
         resp = await http.post(
             "https://api.schwabapi.com/v1/oauth/token",
             data={
                 "grant_type": "authorization_code",
                 "code": code,
-                "redirect_uri": await config_service.get_config(
-                    "schwab", "callback_url",
-                    default="https://dashboard.kiusinghung.com/api/oauth/schwab/callback",
-                ),
+                "redirect_uri": callback_url,
             },
             auth=(app_key, app_secret),
             headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -3125,10 +3571,15 @@ async def _exchange_code(*, db_session, config_service, app_key, app_secret, cod
     resp.raise_for_status()
     data = resp.json()
     issued_at = datetime.now(timezone.utc)
-    await config_service.set_secret("schwab", "access_token", data["access_token"])
-    await config_service.set_secret("schwab", "refresh_token", data["refresh_token"])
-    await config_service.set_config("schwab", "access_token_issued_at", issued_at.isoformat())
-    await config_service.set_config("schwab", "refresh_token_issued_at", issued_at.isoformat())
+
+    async with schwab_refresh_lock(db_session):
+        await _persist_tokens_under_lock(
+            config_service=config_service,
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            issued_at=issued_at,
+            rotate_refresh_issued_at=True,  # First OAuth always sets refresh_token_issued_at.
+        )
     return data["access_token"], data["refresh_token"], issued_at
 ```
 
@@ -3243,9 +3694,10 @@ async def oauth_start(
         redis, user_email=user_email,
         app_secret_key=settings.app_secret_key.encode(),
     )
-    app_key = await config_service.get_secret("schwab", "app_key")
-    callback_url = await config_service.get_config(
-        "schwab", "callback_url",
+    # Real ConfigService API: reveal_secret/get; namespace ("broker", "schwab.<key>").
+    app_key = await config_service.reveal_secret("broker", "schwab.app_key")
+    callback_url = await config_service.get(
+        "broker", "schwab.callback_url",
         default="https://dashboard.kiusinghung.com/api/oauth/schwab/callback",
     )
     consent_url = (
@@ -3280,8 +3732,8 @@ async def admin_oauth_callback(
         raise HTTPException(403, f"state nonce: {e}")
 
     from app.api.oauth import _exchange_code
-    app_key = await config_service.get_secret("schwab", "app_key")
-    app_secret = await config_service.get_secret("schwab", "app_secret")
+    app_key = await config_service.reveal_secret("broker", "schwab.app_key")
+    app_secret = await config_service.reveal_secret("broker", "schwab.app_secret")
     try:
         _, _, issued = await _exchange_code(
             db_session=db, config_service=config_service,
@@ -3307,6 +3759,25 @@ async def reconfigure(config_service=Depends(get_config)):
     from app.services.broker_registry_factory import reconfigure_schwab
     await reconfigure_schwab(config_service)
     return {"ok": True}
+
+
+@router.get("/status")
+async def status(config_service=Depends(get_config)) -> dict:
+    """Phase 7a frontend D1/D2 — aggregated Schwab token + tier-2 status.
+
+    Returned shape matches `frontend/src/services/schwab.ts`'s `SchwabTokenStatus`.
+    Token VALUES are never returned — only the issued-at timestamps + flags.
+    """
+    return {
+        "access_token_issued_at": await config_service.get(
+            "broker", "schwab.access_token_issued_at", default=None),
+        "refresh_token_issued_at": await config_service.get(
+            "broker", "schwab.refresh_token_issued_at", default=None),
+        "tier2_refresh_enabled": await config_service.get(
+            "broker", "schwab.tier2_refresh_enabled", default=False),
+        "tier2_consecutive_failures": await config_service.get(
+            "broker", "schwab.tier2_consecutive_failures", default=0),
+    }
 ```
 
 - [ ] **Step 4: Mount in `backend/app/api/admin.py`:**
@@ -3348,18 +3819,18 @@ async def test_request_token_refresh_returns_new_pair(grpc_backend_stub, config_
         json={"access_token": "FRESH_A", "refresh_token": "FRESH_R",
               "expires_in": 1800},
     )
-    await config_service.set_secret("schwab", "app_key", "K")
-    await config_service.set_secret("schwab", "app_secret", "S")
-    await config_service.set_secret("schwab", "refresh_token", "OLD_R")
+    await config_service.set_secret("broker", "schwab.app_key", "K")
+    await config_service.set_secret("broker", "schwab.app_secret", "S")
+    await config_service.set_secret("broker", "schwab.refresh_token", "OLD_R")
 
     resp = await grpc_backend_stub.RequestTokenRefresh(
         pb.TokenRefreshRequest(broker_id="schwab")
     )
     assert resp.access_token == "FRESH_A"
     assert resp.refresh_token == "FRESH_R"
-    # Tokens persisted
-    assert await config_service.get_secret("schwab", "access_token") == "FRESH_A"
-    assert await config_service.get_secret("schwab", "refresh_token") == "FRESH_R"
+    # Tokens persisted (real ConfigService API: reveal_secret reads).
+    assert await config_service.reveal_secret("broker", "schwab.access_token") == "FRESH_A"
+    assert await config_service.reveal_secret("broker", "schwab.refresh_token") == "FRESH_R"
 
 
 @pytest.mark.asyncio
@@ -3396,8 +3867,14 @@ from app.services.schwab_oauth import refresh_with_lock
 log = logging.getLogger(__name__)
 
 
-class BackendCallbackServicer(pbg.BrokerServicer):
-    """Implements ONLY RequestTokenRefresh; other RPCs UNIMPLEMENTED."""
+class BackendCallbackServicer(pbg.BackendCallbackServicer):
+    """Implements `service BackendCallback` from proto/broker/v1/broker.proto.
+
+    The base class is generated as `BackendCallbackServicer` in
+    broker_pb2_grpc — the ONLY RPC on this service is `RequestTokenRefresh`,
+    so there is no UNIMPLEMENTED-stub surface. The Broker-service surface is
+    served by sidecars, not by the backend.
+    """
 
     def __init__(self, config_service: ConfigService, db_session_factory) -> None:
         self._config = config_service
@@ -3410,9 +3887,9 @@ class BackendCallbackServicer(pbg.BrokerServicer):
                 f"backend RequestTokenRefresh handles broker=schwab, got {request.broker_id}",
             )
             return pb.TokenRefreshResponse()
-        app_key = await self._config.get_secret("schwab", "app_key")
-        app_secret = await self._config.get_secret("schwab", "app_secret")
-        refresh = await self._config.get_secret("schwab", "refresh_token")
+        app_key = await self._config.reveal_secret("broker", "schwab.app_key")
+        app_secret = await self._config.reveal_secret("broker", "schwab.app_secret")
+        refresh = await self._config.reveal_secret("broker", "schwab.refresh_token")
         async with self._db_factory() as db:
             new_a, new_r, issued = await refresh_with_lock(
                 db_session=db, config_service=self._config,
@@ -3463,32 +3940,40 @@ git commit -m "feat(backend): C2 backend-side RequestTokenRefresh gRPC handler (
 
 **Files:** Modify `backend/app/services/broker_registry_factory.py`.
 
+**v3 reality grounding:** `proto/broker/v1/broker.proto:292` shows `ConfigureRequest` has 5 typed Futu-specific fields (`unlock_pwd_md5`, `rsa_priv_pem`, `opend_host`, `opend_port`, `connection_id`) PLUS `map<string, string> metadata = 6` explicitly designed for "Future creds without proto edits". There is NO `broker_id` field and NO `params` field on `ConfigureRequest` — sidecars know what broker they are because they implement only one. Schwab credentials therefore go in `metadata`, with the typed Futu fields left empty. `BrokerConfigurer` already exists at `broker_registry_factory.py:40` with `targets: set[str]` + `async def configure(label: str)` (matches Futu wiring at lines 51–58); add `"schwab"` to its `targets` set and branch in `configure()` for the Schwab metadata-only path.
+
 - [ ] **Step 1: Failing test.**
 
 ```python
-"""Phase 7a C7 — BrokerConfigurer reads schwab.* secrets and Configures sidecar."""
+"""Phase 7a C7 — BrokerConfigurer reads broker.schwab.* secrets and Configures sidecar."""
 import pytest
-from unittest.mock import AsyncMock
 
 
 @pytest.mark.asyncio
 async def test_broker_configurer_schwab_path(config_service, sidecar_stubs):
-    await config_service.set_secret("schwab", "app_key", "K")
-    await config_service.set_secret("schwab", "app_secret", "S")
-    await config_service.set_secret("schwab", "access_token", "A")
-    await config_service.set_secret("schwab", "refresh_token", "R")
-    await config_service.set_config("schwab", "access_token_issued_at",
-                                     "2026-04-30T12:00:00+00:00")
+    # ConfigService namespace ("broker", f"{label}.<key>") matches Futu wiring.
+    await config_service.set_secret("broker", "schwab.app_key", "K")
+    await config_service.set_secret("broker", "schwab.app_secret", "S")
+    await config_service.set_secret("broker", "schwab.access_token", "A")
+    await config_service.set_secret("broker", "schwab.refresh_token", "R")
+    await config_service.set("broker", "schwab.access_token_issued_at",
+                             "2026-04-30T12:00:00+00:00")
 
     from app.services.broker_registry_factory import reconfigure_schwab
     await reconfigure_schwab(config_service)
 
     sidecar_stubs["schwab"].Configure.assert_called_once()
     args = sidecar_stubs["schwab"].Configure.call_args[0][0]
-    assert args.broker_id == "schwab"
-    params = dict(args.params)
-    assert params["app_key"] == "K"
-    assert params["refresh_token"] == "R"
+    # ConfigureRequest has NO broker_id field — credentials live in metadata.
+    metadata = dict(args.metadata)
+    assert metadata["app_key"] == "K"
+    assert metadata["app_secret"] == "S"
+    assert metadata["access_token"] == "A"
+    assert metadata["refresh_token"] == "R"
+    assert metadata["access_token_issued_at"] == "2026-04-30T12:00:00+00:00"
+    # Typed Futu fields stay empty for Schwab.
+    assert args.unlock_pwd_md5 == ""
+    assert args.rsa_priv_pem == ""
 
 
 @pytest.mark.asyncio
@@ -3501,43 +3986,48 @@ async def test_broker_configurer_skips_when_secrets_missing(config_service, side
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Add `reconfigure_schwab` to `broker_registry_factory.py`:**
+- [ ] **Step 3: Add `reconfigure_schwab` to `broker_registry_factory.py`** and add `"schwab"` to `BrokerConfigurer.targets` (existing class at line 40). The Configure path uses `metadata` only — the typed Futu fields are left at their proto defaults:
 
 ```python
 async def reconfigure_schwab(config_service) -> None:
     """C3 — Configure trigger for Schwab. Called from:
-    1. Lifespan startup (in init_brokers)
+    1. Lifespan startup (in init_brokers / BrokerConfigurer.configure("schwab"))
     2. /api/oauth/schwab/callback (Tier-1)
     3. /api/admin/brokers/schwab/oauth-callback (Tier-2)
     4. /api/admin/brokers/schwab/reconfigure (manual)
-    5. Sidecar restart detected (started_at delta in BrokerConfigurer loop)
+    5. Sidecar restart detected (started_at delta in BrokerRegistry health probe)
+
+    Real ConfigService API: reveal_secret/get reads, namespace ("broker", "schwab.<k>").
     """
-    app_key = await config_service.get_secret("schwab", "app_key", default=None)
-    app_secret = await config_service.get_secret("schwab", "app_secret", default=None)
-    refresh = await config_service.get_secret("schwab", "refresh_token", default=None)
+    app_key = await config_service.reveal_secret("broker", "schwab.app_key", default=None)
+    app_secret = await config_service.reveal_secret("broker", "schwab.app_secret", default=None)
+    refresh = await config_service.reveal_secret("broker", "schwab.refresh_token", default=None)
     if not (app_key and app_secret and refresh):
         # Not configured yet — first-time deploy. Skip silently.
         return
-    access = await config_service.get_secret("schwab", "access_token", default="")
-    issued_at = await config_service.get_config(
-        "schwab", "access_token_issued_at", default="")
+    access = await config_service.reveal_secret("broker", "schwab.access_token", default="")
+    issued_at = await config_service.get(
+        "broker", "schwab.access_token_issued_at", default="")
 
     from app._generated.broker.v1 import broker_pb2 as pb
     stub = await _get_or_create_sidecar_stub("schwab")
+    # ConfigureRequest: typed fields left empty, all Schwab creds in metadata
+    # per proto comment "Future creds without proto edits" (line 302).
     request = pb.ConfigureRequest(
-        broker_id="schwab",
-        params={
+        metadata={
             "app_key": app_key,
             "app_secret": app_secret,
             "access_token": access,
             "refresh_token": refresh,
-            "access_issued_at": issued_at,
+            "access_token_issued_at": issued_at,
         },
     )
     await stub.Configure(request)
     from app.core.metrics import BROKER_CONFIGURE_TOTAL
     BROKER_CONFIGURE_TOTAL.labels(label="schwab", reason="manual").inc()
 ```
+
+Also extend the existing `BrokerConfigurer.configure()` (at `broker_registry_factory.py:40+`) so a startup-time call to `configurer.configure("schwab")` routes to `reconfigure_schwab(self._config)` — symmetric with the Futu branch at lines 51–58.
 
 - [ ] **Step 4: Run — PASS.** Commit.
 
@@ -3822,8 +4312,8 @@ async def test_concurrent_callbacks_serialized(test_client_no_auth, test_client_
     from app.services.schwab_oauth import mint_state_nonce
     s1 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
     s2 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
-    await config_service.set_secret("schwab", "app_key", "K")
-    await config_service.set_secret("schwab", "app_secret", "S")
+    await config_service.set_secret("broker", "schwab.app_key", "K")
+    await config_service.set_secret("broker", "schwab.app_secret", "S")
 
     async def call_public():
         return await test_client_no_auth.get(
@@ -3839,7 +4329,7 @@ async def test_concurrent_callbacks_serialized(test_client_no_auth, test_client_
     assert r1.status_code == 200
     assert r2.status_code == 200
     # Final state is whichever ran second; both possible.
-    final_token = await config_service.get_secret("schwab", "refresh_token")
+    final_token = await config_service.reveal_secret("broker", "schwab.refresh_token")
     assert final_token in ("R1", "R2")
 ```
 
@@ -3881,15 +4371,19 @@ describe("services/schwab.ts", () => {
     expect(win.location.href).toContain("/api/admin/brokers/schwab/oauth-start");
   });
 
-  it("getTokenStatus parses ISO timestamps from app_config", async () => {
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        refresh_token_issued_at: "2026-04-30T12:00:00+00:00",
-        access_token_issued_at: "2026-04-30T12:00:00+00:00",
-        tier2_refresh_enabled: false,
-      }),
-    }));
+  it("getTokenStatus parses ISO timestamps from /api/admin/brokers/schwab/status", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toContain("/api/admin/brokers/schwab/status");
+      return {
+        ok: true,
+        json: async () => ({
+          refresh_token_issued_at: "2026-04-30T12:00:00+00:00",
+          access_token_issued_at: "2026-04-30T12:00:00+00:00",
+          tier2_refresh_enabled: false,
+          tier2_consecutive_failures: 0,
+        }),
+      };
+    });
     const status = await getTokenStatus(fetchMock as any);
     expect(status.refreshTokenIssuedAt).toEqual(new Date("2026-04-30T12:00:00Z"));
   });
@@ -3929,11 +4423,13 @@ export function connectStart(win: Window = window) {
 export async function getTokenStatus(
   fetchFn: typeof fetch = fetch,
 ): Promise<SchwabTokenStatus> {
-  const resp = await fetchFn(`/api/admin/config?ns=schwab`, { credentials: "include" });
+  // Dedicated aggregated status endpoint (defined in C5). Returns the 4 fields
+  // we need without leaking secrets — token VALUES never cross this boundary.
+  const resp = await fetchFn(`${ADMIN}/status`, { credentials: "include" });
   if (!resp.ok) {
     throw new Error(`getTokenStatus ${resp.status}`);
   }
-  const cfg: Record<string, string | boolean | number> = await resp.json();
+  const cfg: Record<string, string | boolean | number | null> = await resp.json();
   return {
     accessTokenIssuedAt: cfg.access_token_issued_at
       ? new Date(cfg.access_token_issued_at as string)
@@ -3970,14 +4466,17 @@ export async function enableTier2(
   fetchFn: typeof fetch = fetch,
   enabled: boolean,
 ): Promise<void> {
-  const resp = await fetchFn(`/api/admin/config`, {
-    method: "POST", credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ns: "schwab", key: "tier2_refresh_enabled",
-      value: String(enabled), value_type: "bool",
-    }),
-  });
+  // PUT /api/admin/config/{namespace}/{key} idempotent upsert.
+  // Namespace convention: ("broker", "schwab.<key>") matches C7/Futu wiring.
+  const resp = await fetchFn(
+    `/api/admin/config/broker/schwab.tier2_refresh_enabled`,
+    {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: String(enabled), value_type: "bool" }),
+    },
+  );
   if (!resp.ok) throw new Error(`tier2 enable ${resp.status}`);
 }
 
@@ -4280,29 +4779,29 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_disconnect_deletes_tokens_and_calls_reconfigure(test_client_admin, config_service, sidecar_stubs):
-    await config_service.set_secret("schwab", "access_token", "A")
-    await config_service.set_secret("schwab", "refresh_token", "R")
+    await config_service.set_secret("broker", "schwab.access_token", "A")
+    await config_service.set_secret("broker", "schwab.refresh_token", "R")
     resp = await test_client_admin.post(
         "/api/admin/brokers/schwab/disconnect",
         params={"delete_credentials": "false"},
     )
     assert resp.status_code == 200
-    assert await config_service.get_secret("schwab", "access_token", default=None) is None
-    assert await config_service.get_secret("schwab", "refresh_token", default=None) is None
+    assert await config_service.reveal_secret("broker", "schwab.access_token", default=None) is None
+    assert await config_service.reveal_secret("broker", "schwab.refresh_token", default=None) is None
 
 
 @pytest.mark.asyncio
 async def test_disconnect_with_delete_credentials_removes_tier2_keys(test_client_admin, config_service):
-    await config_service.set_secret("schwab", "username", "u")
-    await config_service.set_secret("schwab", "password", "p")
-    await config_service.set_secret("schwab", "totp_secret", "T")
+    await config_service.set_secret("broker", "schwab.username", "u")
+    await config_service.set_secret("broker", "schwab.password", "p")
+    await config_service.set_secret("broker", "schwab.totp_secret", "T")
     resp = await test_client_admin.post(
         "/api/admin/brokers/schwab/disconnect",
         params={"delete_credentials": "true"},
     )
     assert resp.status_code == 200
     for k in ("username", "password", "totp_secret"):
-        assert await config_service.get_secret("schwab", k, default=None) is None
+        assert await config_service.reveal_secret("broker", f"schwab.{k}", default=None) is None
 ```
 
 - [ ] **Step 2: Run — FAIL.**
@@ -4316,16 +4815,16 @@ async def disconnect_schwab(
     config_service=Depends(get_config),
 ):
     # Always wipe tokens.
-    await config_service.delete_secret("schwab", "access_token")
-    await config_service.delete_secret("schwab", "refresh_token")
-    await config_service.delete_config("schwab", "access_token_issued_at")
-    await config_service.delete_config("schwab", "refresh_token_issued_at")
+    await config_service.delete_secret("broker", "schwab.access_token")
+    await config_service.delete_secret("broker", "schwab.refresh_token")
+    await config_service.delete("broker", "schwab.access_token_issued_at")
+    await config_service.delete("broker", "schwab.refresh_token_issued_at")
 
     # Optionally wipe Tier-2 creds (L5).
     if delete_credentials:
         for k in ("username", "password", "totp_secret"):
-            await config_service.delete_secret("schwab", k, missing_ok=True)
-        await config_service.set_config("schwab", "tier2_refresh_enabled", "false")
+            await config_service.delete_secret("broker", f"schwab.{k}")
+        await config_service.set("broker", "schwab.tier2_refresh_enabled", "false")
 
     # Soft-delete schwab broker_accounts rows (Phase 5 invariant).
     # — handled by next discoverer tick once sidecar reports unhealthy.
@@ -4690,35 +5189,44 @@ git commit -m "feat(refresher): H2 selectors.py — version-dated probe + fail-f
 - [ ] **Step 1: Failing test.**
 
 ```python
-"""Phase 7a E4 — config_writer POSTs auth code; retries on 5xx."""
+"""Phase 7a E4 — config_writer POSTs auth code; retries on 5xx.
+
+Auth header pair is the CF-Access service-token bypass (NOT Authorization:Bearer)
+per architect grounding + CLAUDE.md "CI bypass" pattern.
+"""
 import pytest
-from unittest.mock import AsyncMock
 
 from sidecar_schwab_refresher.config_writer import post_oauth_callback
+
+
+CF_HEADERS = {
+    "CF-Access-Client-Id": "abc.access",
+    "CF-Access-Client-Secret": "shhh",
+}
 
 
 @pytest.mark.asyncio
 async def test_post_oauth_callback_success(httpx_mock):
     httpx_mock.add_response(
         method="POST",
-        url="http://backend:8000/api/admin/brokers/schwab/oauth-callback?code=C&state=S",
+        url="http://backend:8000/api/admin/brokers/schwab/oauth-callback?code=C&state=S&actor=tier2",
         json={"access_token_issued_at": "..."},
     )
     result = await post_oauth_callback(
         backend_url="http://backend:8000", code="C", state="S",
-        admin_jwt="JWT")
+        cf_headers=CF_HEADERS,
+    )
     assert "access_token_issued_at" in result
 
 
 @pytest.mark.asyncio
 async def test_retry_on_5xx(httpx_mock):
-    httpx_mock.add_response(
-        method="POST", status_code=502, json={})
-    httpx_mock.add_response(
-        method="POST", status_code=200, json={"ok": True})
+    httpx_mock.add_response(method="POST", status_code=502, json={})
+    httpx_mock.add_response(method="POST", status_code=200, json={"ok": True})
     result = await post_oauth_callback(
         backend_url="http://backend:8000", code="C", state="S",
-        admin_jwt="JWT", max_retries=2)
+        cf_headers=CF_HEADERS, max_retries=2,
+    )
     assert result["ok"] is True
 ```
 
@@ -4743,24 +5251,29 @@ async def post_oauth_callback(
     backend_url: str,
     code: str,
     state: str,
-    admin_jwt: str,
+    cf_headers: dict[str, str],
     max_retries: int = 3,
 ) -> dict:
-    """POST /api/admin/brokers/schwab/oauth-callback?code=&state=&actor=tier2."""
+    """POST /api/admin/brokers/schwab/oauth-callback?code=&state=&actor=tier2.
+
+    `cf_headers` is the dict from `BackendAdminClient._headers`:
+        {"CF-Access-Client-Id": ..., "CF-Access-Client-Secret": ...}
+    Per architect grounding + CLAUDE.md "CI bypass": NEVER use
+    `Authorization: Bearer ...` from Tier-2 — service-token only.
+    """
     url = f"{backend_url}/api/admin/brokers/schwab/oauth-callback"
     params = {"code": code, "state": state, "actor": "tier2"}
-    headers = {"Authorization": f"Bearer {admin_jwt}"}
-    async with httpx.AsyncClient(timeout=30.0) as http:
+    async with httpx.AsyncClient(timeout=30.0, headers=cf_headers) as http:
         for attempt in range(max_retries + 1):
             try:
-                resp = await http.post(url, params=params, headers=headers)
+                resp = await http.post(url, params=params)
                 if resp.status_code == 200:
                     return resp.json()
                 if resp.status_code >= 500 and attempt < max_retries:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 resp.raise_for_status()
-            except httpx.HTTPError as e:
+            except httpx.HTTPError:
                 if attempt < max_retries:
                     await asyncio.sleep(2 ** attempt)
                     continue
@@ -4938,42 +5451,113 @@ git commit -m "feat(refresher): C1 Playwright flow — redirect interception wit
 - [ ] **Step 1: Failing test.**
 
 ```python
-"""Phase 7a E6 — H2: 3 consecutive failures flips tier2_refresh_enabled=false."""
+"""Phase 7a E6 — H2: 3 consecutive failures flips tier2_refresh_enabled=false.
+
+The refresher does NOT import ConfigService (separate Docker container, no DB
+access). It speaks to backend over HTTP using `BackendAdminClient` which sets
+CF-Access service-token headers on every request — never `Authorization: Bearer`.
+The fixture `admin_client_mock` is an `httpx.AsyncClient`-compatible fake that
+the test seeds with the same key/value semantics as a real admin call.
+"""
 import pytest
-from unittest.mock import AsyncMock, patch
 
 
 @pytest.mark.asyncio
-async def test_three_failures_auto_disable(config_service):
+async def test_three_failures_auto_disable(admin_client_mock):
     from sidecar_schwab_refresher.main import handle_failure
 
-    await config_service.set_config("schwab", "tier2_refresh_enabled", "true")
-    await config_service.set_config("schwab", "tier2_consecutive_failures", "0")
+    await admin_client_mock.set_config("tier2_refresh_enabled", "true", value_type="bool")
+    await admin_client_mock.set_config("tier2_consecutive_failures", "0", value_type="int")
 
     for i in range(2):
-        await handle_failure(config_service, reason="login_failed")
+        await handle_failure(admin_client_mock, reason="login_failed")
         # Still enabled after 1, 2.
-        assert await config_service.get_config(
-            "schwab", "tier2_refresh_enabled") == "true"
+        assert await admin_client_mock.get_config("tier2_refresh_enabled") == "true"
 
     # 3rd failure auto-disables.
-    await handle_failure(config_service, reason="login_failed")
-    assert await config_service.get_config(
-        "schwab", "tier2_refresh_enabled") == "false"
+    await handle_failure(admin_client_mock, reason="login_failed")
+    assert await admin_client_mock.get_config("tier2_refresh_enabled") == "false"
 
 
 @pytest.mark.asyncio
-async def test_success_resets_failure_counter(config_service):
+async def test_success_resets_failure_counter(admin_client_mock):
     from sidecar_schwab_refresher.main import handle_failure, handle_success
-    await config_service.set_config("schwab", "tier2_consecutive_failures", "2")
-    await handle_success(config_service)
-    assert await config_service.get_config(
-        "schwab", "tier2_consecutive_failures") == "0"
+    await admin_client_mock.set_config("tier2_consecutive_failures", "2", value_type="int")
+    await handle_success(admin_client_mock)
+    assert await admin_client_mock.get_config("tier2_consecutive_failures") == "0"
 ```
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Write `sidecar_schwab_refresher/main.py`:**
+- [ ] **Step 3: Write `sidecar_schwab_refresher/admin_client.py`** first — the HTTP wrapper that mirrors a slice of the backend admin API. Per architect grounding (CLAUDE.md "CI bypass" pattern + spec §3.5), this container has no DB session factory and never imports `ConfigService`. It authenticates with **CF Access service-token headers** (`CF-Access-Client-Id` + `CF-Access-Client-Secret`), NOT `Authorization: Bearer`:
+
+```python
+"""HTTP client mirror of the slice of ConfigService the refresher needs.
+
+Auth: CF-Access service-token headers per CLAUDE.md "CI bypass" pattern.
+Namespace is fixed to "broker" with key prefix "schwab." — the refresher only
+ever reads/writes Schwab keys, so callers pass bare key suffixes.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import httpx
+
+
+class BackendAdminClient:
+    NAMESPACE = "broker"
+    KEY_PREFIX = "schwab."
+
+    def __init__(
+        self,
+        *,
+        backend_url: str,
+        cf_access_client_id: str,
+        cf_access_client_secret: str,
+    ) -> None:
+        self._url = backend_url.rstrip("/")
+        self._headers = {
+            "CF-Access-Client-Id": cf_access_client_id,
+            "CF-Access-Client-Secret": cf_access_client_secret,
+        }
+
+    @classmethod
+    def from_env(cls) -> "BackendAdminClient":
+        return cls(
+            backend_url=os.environ.get("BACKEND_ADMIN_URL", "http://backend:8000"),
+            cf_access_client_id=os.environ["CF_ACCESS_CLIENT_ID"],
+            cf_access_client_secret=os.environ["CF_ACCESS_CLIENT_SECRET"],
+        )
+
+    def _key(self, suffix: str) -> str:
+        return f"{self.KEY_PREFIX}{suffix}"
+
+    async def get_config(self, key: str, default: str | None = None) -> str | None:
+        url = f"{self._url}/api/admin/config/{self.NAMESPACE}/{self._key(key)}"
+        async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as http:
+            resp = await http.get(url)
+            if resp.status_code == 404:
+                return default
+            resp.raise_for_status()
+            return str(resp.json()["value"])
+
+    async def set_config(self, key: str, value: str, *, value_type: str = "str") -> None:
+        url = f"{self._url}/api/admin/config/{self.NAMESPACE}/{self._key(key)}"
+        async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as http:
+            resp = await http.put(url, json={"value": value, "value_type": value_type})
+            resp.raise_for_status()
+
+    async def reveal_secret(self, key: str) -> str:
+        url = f"{self._url}/api/admin/secrets/{self.NAMESPACE}/{self._key(key)}/reveal"
+        async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as http:
+            resp = await http.get(url)
+            resp.raise_for_status()
+            return str(resp.json()["value"])
+```
+
+- [ ] **Step 4: Write `sidecar_schwab_refresher/main.py`:**
 
 ```python
 """Tier-2 entrypoint — cron loop or one-shot invocation.
@@ -4983,6 +5567,8 @@ Architectural invariants:
     page operator).
   - Skip if tier2_refresh_enabled=false (silent no-op).
   - Run every REFRESH_INTERVAL_HOURS (default 72 = 3 days).
+  - This container does NOT import backend code — backend is reachable only
+    over HTTP via `BackendAdminClient` (CF Access service-token headers).
 """
 from __future__ import annotations
 
@@ -4991,10 +5577,10 @@ import logging
 import os
 import time
 
-import httpx
 import structlog
 from playwright.async_api import async_playwright
 
+from sidecar_schwab_refresher.admin_client import BackendAdminClient
 from sidecar_schwab_refresher.config_writer import post_oauth_callback
 from sidecar_schwab_refresher.refresher import perform_refresh
 from sidecar_schwab_refresher.stealth import apply_stealth
@@ -5008,68 +5594,45 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 AUTO_DISABLE_THRESHOLD = 3
 
 
-async def handle_failure(config_service, reason: str) -> None:
-    n = int(await config_service.get_config(
-        "schwab", "tier2_consecutive_failures", default="0") or "0")
-    n += 1
-    await config_service.set_config(
-        "schwab", "tier2_consecutive_failures", str(n))
+async def handle_failure(client: BackendAdminClient, *, reason: str) -> None:
+    raw = await client.get_config("tier2_consecutive_failures", default="0")
+    n = int(raw or "0") + 1
+    await client.set_config("tier2_consecutive_failures", str(n), value_type="int")
     if n >= AUTO_DISABLE_THRESHOLD:
-        await config_service.set_config(
-            "schwab", "tier2_refresh_enabled", "false")
+        await client.set_config("tier2_refresh_enabled", "false", value_type="bool")
         log.error("tier2_auto_disabled", failures=n, reason=reason)
 
 
-async def handle_success(config_service) -> None:
-    await config_service.set_config(
-        "schwab", "tier2_consecutive_failures", "0")
+async def handle_success(client: BackendAdminClient) -> None:
+    await client.set_config("tier2_consecutive_failures", "0", value_type="int")
 
 
-async def fetch_admin_jwt() -> str:
-    """Service-token-derived admin JWT — reads from /api/admin/auth/service-jwt
-    or env var. Implementation depends on existing CF Access service-token
-    infrastructure (Phase 0/1)."""
-    return os.environ.get("CF_ACCESS_SERVICE_TOKEN", "")
-
-
-async def fetch_credentials() -> dict[str, str]:
-    """Read schwab username/password/totp_secret from backend's /api/admin/secrets."""
-    admin_jwt = await fetch_admin_jwt()
-    async with httpx.AsyncClient(timeout=10.0) as http:
-        resp = await http.get(
-            f"{BACKEND_URL}/api/admin/secrets/schwab",
-            headers={"Authorization": f"Bearer {admin_jwt}"},
-        )
-        resp.raise_for_status()
-        secrets = resp.json()
+async def fetch_credentials(client: BackendAdminClient) -> dict[str, str]:
+    """Read schwab username/password/totp_secret from backend admin /reveal."""
     return {
-        "username":     secrets["username"],
-        "password":     secrets["password"],
-        "totp_secret":  secrets["totp_secret"],
+        "username":    await client.reveal_secret("username"),
+        "password":    await client.reveal_secret("password"),
+        "totp_secret": await client.reveal_secret("totp_secret"),
     }
 
 
-async def get_oauth_start_url() -> tuple[str, str]:
-    """GET /api/admin/brokers/schwab/oauth-start; capture state nonce; return URL."""
-    admin_jwt = await fetch_admin_jwt()
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
-        resp = await http.get(
-            f"{BACKEND_URL}/api/admin/brokers/schwab/oauth-start",
-            headers={"Authorization": f"Bearer {admin_jwt}"},
-        )
+async def get_oauth_start_url(client: BackendAdminClient) -> str:
+    """GET /api/admin/brokers/schwab/oauth-start with CF-Access headers; return Location."""
+    import httpx
+    async with httpx.AsyncClient(
+        timeout=10.0, follow_redirects=False, headers=client._headers,
+    ) as http:
+        resp = await http.get(f"{client._url}/api/admin/brokers/schwab/oauth-start")
         if resp.status_code != 302:
             raise RuntimeError(f"oauth-start returned {resp.status_code}, expected 302")
-        location = resp.headers["location"]
-    return location, admin_jwt
+        return resp.headers["location"]
 
 
 async def run_once() -> None:
     """One Tier-2 refresh attempt."""
-    from app.services.config import ConfigService
-    config_service = ConfigService.from_env()  # backend instance over HTTP
+    client = BackendAdminClient.from_env()
 
-    enabled = (await config_service.get_config(
-        "schwab", "tier2_refresh_enabled", default="false")) == "true"
+    enabled = (await client.get_config("tier2_refresh_enabled", default="false")) == "true"
     if not enabled:
         log.info("tier2_disabled_skip")
         return
@@ -5079,11 +5642,11 @@ async def run_once() -> None:
         return
 
     try:
-        creds = await fetch_credentials()
-        consent_url, admin_jwt = await get_oauth_start_url()
-    except Exception as e:
+        creds = await fetch_credentials(client)
+        consent_url = await get_oauth_start_url(client)
+    except Exception:
         log.exception("tier2_setup_failed")
-        await handle_failure(config_service, reason="network_error")
+        await handle_failure(client, reason="network_error")
         return
 
     async with async_playwright() as pw:
@@ -5100,21 +5663,19 @@ async def run_once() -> None:
                 callback_url_prefix="https://dashboard.kiusinghung.com/api/oauth/schwab/callback",
             )
             await post_oauth_callback(
-                backend_url=BACKEND_URL, code=code, state=state, admin_jwt=admin_jwt,
+                backend_url=BACKEND_URL, code=code, state=state,
+                cf_headers=client._headers,
             )
-            from app.core.metrics import SCHWAB_TIER2_REFRESH_TOTAL
-            SCHWAB_TIER2_REFRESH_TOTAL.labels(result="success").inc()
-            await handle_success(config_service)
+            await handle_success(client)
             log.info("tier2_refresh_success")
         except Exception as e:
-            from sidecar_schwab_refresher.refresher import probe_selectors  # for SelectorHealthError
             from sidecar_schwab_refresher.selectors import SelectorHealthError
             reason = "dom_changed" if isinstance(e, SelectorHealthError) else \
                      "login_failed" if "login" in str(e).lower() else \
                      "mfa_failed" if "totp" in str(e).lower() or "mfa" in str(e).lower() else \
                      "network_error"
             log.exception("tier2_refresh_failed", reason=reason)
-            await handle_failure(config_service, reason=reason)
+            await handle_failure(client, reason=reason)
         finally:
             await browser.close()
             await context.close()
@@ -5168,6 +5729,11 @@ schwab-refresher:
     BACKEND_ADMIN_URL: "http://backend:8000"
     REFRESH_INTERVAL_HOURS: "72"
     DRY_RUN: "false"
+    # CF Access service-token bypass — refresher auths to backend admin API
+    # via CF-Access-Client-Id / CF-Access-Client-Secret headers. Same token
+    # used by CI smoke tests; rotate via scripts/cloudflare/access-token.sh.
+    CF_ACCESS_CLIENT_ID: "${CF_ACCESS_CLIENT_ID}"
+    CF_ACCESS_CLIENT_SECRET: "${CF_ACCESS_CLIENT_SECRET}"
   networks: [internal]
   profiles: ["tier2"]
 ```
@@ -5210,17 +5776,32 @@ git commit -m "feat(refresher): emit tier2_last_run_timestamp_seconds metric"
 - [ ] **Step 1: Failing test.**
 
 ```python
-"""Phase 7a E9 — run_once happy path: stealth + selectors + refresh + post."""
+"""Phase 7a E9 — run_once happy path: stealth + selectors + refresh + post.
+
+Uses the BackendAdminClient HTTP wrapper (no ConfigService import). The
+`admin_client_mock` fixture is an in-memory fake that responds to the same
+methods as `BackendAdminClient`. `httpx_mock` covers the raw HTTP calls
+(oauth-start redirect, oauth-callback POST).
+"""
 import pytest
-from unittest.mock import AsyncMock, patch
 
 
 @pytest.mark.asyncio
-async def test_run_once_happy_path(config_service, httpx_mock, mock_playwright):
-    await config_service.set_config("schwab", "tier2_refresh_enabled", "true")
-    await config_service.set_secret("schwab", "username", "u")
-    await config_service.set_secret("schwab", "password", "p")
-    await config_service.set_secret("schwab", "totp_secret", "JBSWY3DPEHPK3PXP")
+async def test_run_once_happy_path(monkeypatch, admin_client_mock, httpx_mock, mock_playwright):
+    # Seed admin client: enabled + creds.
+    await admin_client_mock.set_config("tier2_refresh_enabled", "true", value_type="bool")
+    admin_client_mock.seed_secret("username", "u")
+    admin_client_mock.seed_secret("password", "p")
+    admin_client_mock.seed_secret("totp_secret", "JBSWY3DPEHPK3PXP")
+
+    # Force run_once() to use the mock instead of constructing a real client from env.
+    from sidecar_schwab_refresher import main as refresher_main
+    monkeypatch.setattr(
+        refresher_main.BackendAdminClient, "from_env",
+        classmethod(lambda cls: admin_client_mock),
+    )
+
+    # The Playwright path is mocked; raw HTTP for oauth-start + post-callback.
     httpx_mock.add_response(
         url="http://backend:8000/api/admin/brokers/schwab/oauth-start",
         method="GET", status_code=302,
@@ -5230,10 +5811,9 @@ async def test_run_once_happy_path(config_service, httpx_mock, mock_playwright):
         url="http://backend:8000/api/admin/brokers/schwab/oauth-callback?code=C&state=S&actor=tier2",
         method="POST", json={"access_token_issued_at": "..."},
     )
-    from sidecar_schwab_refresher.main import run_once
-    await run_once()
-    counter = await config_service.get_config(
-        "schwab", "tier2_consecutive_failures")
+
+    await refresher_main.run_once()
+    counter = await admin_client_mock.get_config("tier2_consecutive_failures")
     assert counter == "0"
 ```
 
@@ -5296,8 +5876,8 @@ async def test_full_oauth_round_trip(test_client_admin, test_client_no_auth, red
         url="https://api.schwabapi.com/v1/oauth/token", method="POST",
         json={"access_token": "AT", "refresh_token": "RT", "expires_in": 1800},
     )
-    await config_service.set_secret("schwab", "app_key", "K")
-    await config_service.set_secret("schwab", "app_secret", "S")
+    await config_service.set_secret("broker", "schwab.app_key", "K")
+    await config_service.set_secret("broker", "schwab.app_secret", "S")
 
     # Step 1: oauth-start (admin) → 302 with state nonce
     resp = await test_client_admin.get(
@@ -5314,8 +5894,8 @@ async def test_full_oauth_round_trip(test_client_admin, test_client_no_auth, red
     assert resp2.status_code == 200
 
     # Step 3: tokens persisted
-    assert await config_service.get_secret("schwab", "access_token") == "AT"
-    assert await config_service.get_secret("schwab", "refresh_token") == "RT"
+    assert await config_service.reveal_secret("broker", "schwab.access_token") == "AT"
+    assert await config_service.reveal_secret("broker", "schwab.refresh_token") == "RT"
 
     # Step 4: sidecar Configure was called
     mock_sidecar_configure.assert_called_once()
