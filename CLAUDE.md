@@ -1,46 +1,36 @@
 # Trading Dashboard — Project Constitution
 
-This file tells Claude Code how this project is structured, what conventions to follow, and which commands to use. Keep it current as the project evolves.
+Self-hosted multi-broker, multi-account trading dashboard. Trades stocks, forex, commodities, indexes, bonds, ETF, futures, crypto, CFD, options, derivatives.
 
-## Project Overview
-
-A self-hosted multi-broker, multi-account trading dashboard. The dashboard should be able to trade common assets: Stocks, Forex, Commodities, Indexes, Bonds, ETF, Futures, Crypto, CFD, Options, Derivatives.
-
-The frontend and backend run on an IONOS VPS behind Cloudflare. Broker gateways (IB Gateway, FutuOpenD) and PostgreSQL 18 run on the NUC15PRO and reach the VPS over WireGuard. A second home machine (RTX 4080 16 GB VRAM + 64 GB RAM) runs heavy Ollama models on demand.
+Frontend + backend on IONOS VPS behind Cloudflare. Broker gateways (IB Gateway, FutuOpenD) + PostgreSQL 18 on NUC15PRO over WireGuard. Heavy AI box (RTX 4080 + 64 GB) runs large Ollama models on demand.
 
 ## Stack
 
-### Runtimes
-- **Backend:** Python **3.14** + FastAPI (latest stable) + SQLAlchemy 2.0 async + Alembic + Pydantic v2 + asyncpg
-- **Frontend:** **React 19** + **Vite 7** + **TypeScript 6.0 strict**
-- **Styling:** **Tailwind v4** (CSS-first `@theme`) + **shadcn/ui** primitives (owned in-repo)
-- **State:** **Zustand** for global; `useState` for local
+- **Backend:** Python 3.14 + FastAPI + SQLAlchemy 2.0 async + Alembic + Pydantic v2 + asyncpg
+- **Frontend:** React 19 + Vite 7 + TypeScript 6.0 strict + Tailwind v4 (CSS-first `@theme`) + shadcn/ui (owned in-repo) + Zustand + Storybook 10
 - **Charting:** klineschart (Phase 3+)
-- **Component workbench:** **Storybook 10**
-- **Testing:** Vitest 4 + React Testing Library 16 (frontend); pytest 9 + pytest-asyncio + httpx (backend); Playwright deferred to Phase 5+
-- **Cache / pubsub:** Redis 7 (always containerized — dev and prod)
-- **Database:** PostgreSQL 18 running **natively on Windows on the NUC15PRO** (never containerized). Dev uses DB `dashboard`; the legacy Phase-1 deployment continues to use DB `trading` on the same server. Both dev and prod point `DATABASE_URL` at `10.10.0.2:5432` (the NUC's WireGuard IP).
-- **Broker adapters:** `ib_async` (IBKR), `futu-api` (Futu HK), `requests-oauthlib` (Schwab) — land in Phases 4, 6, 8 respectively
-- **AI:** Ollama — 7-8B models on NUC, 14-70B on the heavy box (WoL-woken on demand)
-- **Orchestration:** Docker Compose (docker-ce inside WSL on the NUC; Phase 1 adds `docker-compose.prod.yml` for the VPS)
-- **Reverse proxy & TLS:** Cloudflare Tunnel terminates TLS at CF edge (no public 80/443 on VPS); nginx runs on the VPS as defense-in-depth (rate limits, security headers, Host: strict-match). Let's Encrypt + certbot retired in Phase 1.
-- **Access gate:** CF Access with Google IdP for `josephhungkk@gmail.com` + `ispyling@gmail.com`; CF Access service token for CI bypass; WireGuard route (`http://10.10.0.1/`) for NUC-local dev bypass.
-- **Node:** Node 24 LTS via Corepack
-- **Package managers:** `pnpm` (frontend), `uv` (backend)
-- **Lint:** ruff + mypy (Python); ESLint 9 flat config + `eslint-plugin-boundaries` + `eslint-plugin-jsx-a11y` + Stylelint (frontend); `pre-commit` + `commitlint` at commit-msg
+- **Testing:** Vitest 4 + RTL 16 (FE); pytest 9 + pytest-asyncio + httpx (BE); Playwright deferred to Phase 5+
+- **Cache/pubsub:** Redis 7 (containerized, dev + prod)
+- **Database:** PostgreSQL 18 native on Windows NUC (never containerized). Dev DB `dashboard`; legacy Phase-1 DB `trading`. `DATABASE_URL` → `10.10.0.2:5432` (NUC WG IP).
+- **Broker adapters:** `ib_async` (IBKR), `futu-api` (Futu HK), `requests-oauthlib` (Schwab) — Phases 4, 6, 8.
+- **AI:** Ollama — 7-8B on NUC, 14-70B on heavy box (WoL on demand).
+- **Orchestration:** Docker Compose (docker-ce in WSL on NUC).
+- **Reverse proxy/TLS:** Cloudflare Tunnel terminates TLS at edge; nginx on VPS = defense-in-depth (rate limits, headers, strict Host). Certbot retired Phase 1.
+- **Access:** CF Access + Google IdP (`josephhungkk@gmail.com`, `ispyling@gmail.com`); CF Access service token for CI; WG bypass `http://10.10.0.1/` for NUC dev.
+- **Node:** 24 LTS via Corepack. **Pkg mgrs:** pnpm (FE), uv (BE).
+- **Lint:** ruff + mypy (BE); ESLint 9 flat + `eslint-plugin-boundaries` + `eslint-plugin-jsx-a11y` + Stylelint (FE); pre-commit + commitlint at commit-msg.
+
+**Versioning:** latest stable at scaffold time. Pin via lockfiles only.
 
 ### Fonts
-Noto only. Self-hosted `.woff2` in `frontend/public/fonts/` — 3 Latin weights + 5 CJK regional variants (TC, SC, HK, JP, KR). Loaded via `@font-face` with `unicode-range`, variants selected via `lang` attributes. When rendering stock names always set `lang` via `langForMarket(exchange)` from `src/services/lang.ts` so the correct CJK glyph variant renders. Bold CJK is synthesized via CSS `font-synthesis` for MVP. (Phase 0 ships the stub; Phase 3 ships the real fonts and mapping.)
+Noto only. Self-hosted `.woff2` in `frontend/public/fonts/` — 3 Latin weights + 5 CJK (TC, SC, HK, JP, KR). `@font-face` + `unicode-range`, variants via `lang`. Stock names: set `lang` via `langForMarket(exchange)` from `src/services/lang.ts`. Bold CJK synthesized via CSS `font-synthesis`.
 
 ### Mobile
-Mobile-first responsive design. Bottom tab bar on mobile (one-thumb reach), sidebar on desktop. Minimum 2.75 rem (44 px equivalent at default root font-size) touch targets. Tables collapse to card view below the `md` breakpoint.
-
-### Versioning policy
-**Latest stable at scaffold time.** Pin via lockfiles (`uv.lock`, `pnpm-lock.yaml`), never hand-pinned semver ranges.
+Mobile-first. Bottom tab bar (mobile) / sidebar (desktop). Min 2.75 rem touch targets. Tables collapse to cards below `md`.
 
 ## Component Architecture (Frontend)
 
-Five layers with one-way dependencies. Enforced by `eslint-plugin-boundaries`; violations break CI.
+Five layers, one-way deps. Enforced by `eslint-plugin-boundaries`; violations break CI.
 
 | Layer | Path | May import from |
 |---|---|---|
@@ -50,210 +40,175 @@ Five layers with one-way dependencies. Enforced by `eslint-plugin-boundaries`; v
 | `components/layout/` | `src/components/layout/**` | tokens, primitives, patterns, layout, features, lib |
 | `features/` | `src/features/**` | everything |
 
-Rules:
-1. `design-tokens/` is the **only** place rem values, color hex codes, and font stacks are defined as raw literals. Everything else references tokens (usually via Tailwind classes).
-2. Primitives and patterns have `Component.stories.tsx` and `Component.test.tsx` alongside them. Features do not — they're tested end-to-end.
-3. No `px` or `em` anywhere on the site. Stylelint `unit-disallowed-list` enforces this.
-4. Boundaries rules in `frontend/eslint.config.mjs` are the source of truth. Violations fail CI.
+1. `design-tokens/` is the only place rem/hex/font literals live. Else, reference tokens (Tailwind classes).
+2. Primitives + patterns ship `Component.stories.tsx` + `Component.test.tsx`. Features tested E2E.
+3. **No `px` or `em` anywhere.** Stylelint `unit-disallowed-list` enforces.
+4. Boundaries config in `frontend/eslint.config.mjs` is source of truth.
 
-## Frontend Runtime Notes (Phase 3+)
+## Frontend Runtime (Phase 3+)
 
-- **Routing:** TanStack Router file-based routes under `frontend/src/routes/`. `routeTree.gen.ts` is gitignored and regenerated by `pnpm tsr generate` (auto-runs as part of `pnpm typecheck` + `pnpm test`). Don't hand-edit it.
-- **Scoped state:** features call `useActiveStores()` to get the live or paper bundle for the current mode. Features must never import `@/stores/scoped/*` directly — enforced by `no-restricted-imports` in `frontend/eslint.config.mjs`.
-- **Service ticker:** `getServices()` is lazy. Tests + Storybook decorators call `setTickingEnabled(false)` so the rAF-throttled Quotes ticker doesn't run during render. Production callers use the default ticking behavior.
-- **Mode toggle:** paper → live requires the confirmation dialog (`Switch to LIVE mode?`); live → paper is direct. Default mode on cold load is `paper`. The active mode is reflected on `<body data-mode="...">` so design tokens can branch.
-- **Vite dev proxy:** `/api` and `/health` proxy to `http://10.10.0.2:8000` (NUC backend over WireGuard) so the local dev shell can hit CF-Access-protected endpoints via the dev-bypass network.
+- **Routing:** TanStack Router file-based under `frontend/src/routes/`. `routeTree.gen.ts` is gitignored, regenerated by `pnpm tsr generate` (auto via `pnpm typecheck`/`pnpm test`). Don't hand-edit.
+- **Scoped state:** features use `useActiveStores()` for live/paper bundle. Never import `@/stores/scoped/*` directly (no-restricted-imports).
+- **Service ticker:** `getServices()` lazy. Tests/Storybook call `setTickingEnabled(false)`. Prod uses default.
+- **Mode toggle:** paper→live needs confirm dialog; live→paper direct. Cold load = paper. Mode on `<body data-mode>`.
+- **Vite dev proxy:** `/api` + `/health` → `http://10.10.0.2:8000` (NUC backend over WG).
 
-## Broker Adapter Notes (Phase 4+)
+## Broker Adapters (Phase 4+)
 
-- **Sidecar topology:** one PyInstaller-frozen Python sidecar per IBKR gateway on the NUC at `10.10.0.2:18001-18004` (isa-live=18001, isa-paper=18002, normal-live=18003, normal-paper=18004; gateways themselves on 4001-4004). Backend reaches them over WireGuard with mTLS; CRL at `C:\dashboard\secrets\crl.pem` reloaded every 60s.
-- **Read-only in v0.4.0:** trade execution lands in Phase 5. No order placement / modify / cancel from the dashboard.
-- **avg_cost unit:** `broker.<account_number>.avg_cost_unit` config key (default `pounds`) per `app_config`. Sanity invariant `Σ(qty × avg_cost) > 1.5 × NLV` triggers `avg_cost_unit_suspected_wrong{account}` metric.
-- **Maintenance windows:** `app/services/ibkr_maintenance.py` is the source of truth; backend returns `503 + Retry-After` during reset windows; watchdog skips probes during weekend reset; tolerates daily-reset BAD reads without kill+restart.
-- **Boundary stripping (M22):** `AccountResponse` to the frontend has `id, broker_id, alias, mode, currency_base, display_order` — never `gateway_label` or `account_number`. The frontend's `account_id` UUID is the only handle; backend's `AccountService._resolve_account` is the single chokepoint that maps it back to `(gateway_label, account_number)`.
-- **C1 race-free soft-delete:** `BrokerDiscoverer` only soft-deletes `broker_accounts` rows whose `last_seen_via` matches a label that is healthy THIS tick (`last_seen_via = ANY(:healthy_labels)`). When all sidecars are unhealthy, the predicate is empty and zero rows are soft-deleted.
-- **NUC ops surface:** `deploy/nuc/` contains all PowerShell + VBS launchers + watchdog. `provision-and-publish.ps1` is the one-shot mTLS rotation flow; `revoke-cert.ps1 -Serial <serial>` revokes; `renew-sidecar-mtls.ps1` rolls one sidecar at a time. Pester suite at `deploy/nuc/tests/SidecarLib.Tests.ps1` (21 tests) covers the reset-window + sidecar-health helpers extracted to `deploy/nuc/lib/SidecarLib.ps1`.
+- **Sidecar topology:** PyInstaller-frozen Python sidecar per IBKR gateway on NUC at `10.10.0.2:18001-18004` (isa-live=18001, isa-paper=18002, normal-live=18003, normal-paper=18004; gateways on 4001-4004). mTLS over WG; CRL at `C:\dashboard\secrets\crl.pem` reloaded every 60s.
+- **avg_cost unit:** `broker.<account_number>.avg_cost_unit` config (default `pounds`). Invariant `Σ(qty × avg_cost) > 1.5 × NLV` triggers `avg_cost_unit_suspected_wrong{account}`.
+- **Maintenance windows:** `app/services/ibkr_maintenance.py` is source of truth. Backend returns `503 + Retry-After` during reset; watchdog skips weekend reset; tolerates daily-reset BAD reads without kill+restart.
+- **Boundary stripping (M22):** `AccountResponse` to FE = `id, broker_id, alias, mode, currency_base, display_order` only. Never `gateway_label`/`account_number`. FE's `account_id` UUID is the only handle; backend's `AccountService._resolve_account` is the single chokepoint.
+- **C1 race-free soft-delete:** `BrokerDiscoverer` only soft-deletes `broker_accounts` whose `last_seen_via = ANY(:healthy_labels)` THIS tick. All-unhealthy → empty predicate → zero rows deleted.
+- **NUC ops:** `deploy/nuc/` has all PowerShell + VBS launchers + watchdog. `provision-and-publish.ps1` rotates mTLS; `revoke-cert.ps1 -Serial <s>` revokes; `renew-sidecar-mtls.ps1` rolls one at a time. Pester suite at `deploy/nuc/tests/SidecarLib.Tests.ps1` (21 tests) on `deploy/nuc/lib/SidecarLib.ps1`.
 
-### Phase 5 + 6 shipped invariants
-
-Phase-specific invariants (NLV cache fan-out, modify/bracket/fills wire shapes, status state machine, OCA cascade, Futu Configure RPC + H2/H4 invariants, etc.) live in auto-memory:
+### Phase-shipped invariants → auto-memory
 
 - `phase5a_shipped.md` — discoverer NLV cache (v0.5.0)
 - `phase5b_shipped.md` — IBKR trade execution + 5b.1 hardening (v0.5.1–v0.5.3)
-- `phase5c_shipped.md` — advanced order types: modify, bracket, fills history (v0.5.4)
-- `phase6_futu_topology.md` — Futu HK adapter sidecar topology + Configure RPC + SDK gotchas (v0.6.0)
+- `phase5c_shipped.md` — modify, bracket, fills history (v0.5.4)
+- `phase6_futu_topology.md` — Futu HK adapter + Configure RPC + SDK gotchas (v0.6.0)
 
-Consult those before changing code on the relevant surfaces — they record the architect-review findings that have already been resolved inline. **Do not** copy that detail back into CLAUDE.md.
+Consult before changing those surfaces. **Don't copy that detail into CLAUDE.md.**
 
 ## Configuration Storage
 
-**Runtime settings live in the database (`app_config` + `app_secrets`), not in `.env`.** (Active as of v0.2.0.) `.env` only holds bootstrap values needed before the app can reach the DB.
-
-**Do not add new values to `.env` beyond the bootstrap list.** Read settings via the `get_config()` FastAPI dependency or `ConfigService` singleton; edit them at runtime via `POST /api/admin/config` and `POST /api/admin/secrets`.
-
-Full bootstrap key list, code examples, typed accessors, and key-rotation procedure: see `docs/CONFIG.md`.
+Runtime settings in DB (`app_config` + `app_secrets`), not `.env`. `.env` only holds bootstrap values. **Don't add new `.env` keys beyond bootstrap.** Read via `get_config()` dependency or `ConfigService`; edit at runtime via `POST /api/admin/config`/`/secrets`. See `docs/CONFIG.md`.
 
 ## Network Topology
 
 | Node | Role | LAN IP | WG IP |
-|------|------|--------|-------|
-| IONOS VPS | Prod HTTP host (Phase 1+) | 88.208.197.219 | 10.10.0.1 |
-| NUC15PRO | **Dev host + broker gateways + Postgres + light Ollama (24/7)** | 192.168.50.20 | 10.10.0.2 |
-| Heavy AI box | Large Ollama + ML training (on-demand, WoL) | 192.168.50.30 | 10.10.0.3 |
+|---|---|---|---|
+| IONOS VPS | Prod HTTP host | 88.208.197.219 | 10.10.0.1 |
+| NUC15PRO | **Dev host + brokers + Postgres + light Ollama (24/7)** | 192.168.50.20 | 10.10.0.2 |
+| Heavy AI box | Large Ollama + ML training (WoL) | 192.168.50.30 | 10.10.0.3 |
 | Router | | 192.168.50.1 | 10.10.0.254 |
 
-**The NUC is the dev host.** Claude Code runs in WSL2 on the NUC at `/home/joseph/dashboard` (native Linux ext4). The project lived at `C:\dashboard` (Windows-mounted, accessed via `/mnt/c/dashboard`) until the 2026-04-24 move to native Linux for faster filesystem semantics and reliable HMR. There is no separate Windows dev box. Docker runs as docker-ce inside WSL (not Docker Desktop).
+**NUC = dev host.** Claude runs in WSL2 at `/home/joseph/dashboard` (native ext4; moved 2026-04-24 from `C:\dashboard`/`/mnt/c/dashboard` for HMR). No separate Windows dev box. Docker = docker-ce in WSL.
 
-SSH to VPS: `ssh -p 2222 trader@88.208.197.219` (key in `.ssh/`).
+SSH VPS: `ssh -p 2222 trader@88.208.197.219`.
 
-### Postgres connectivity gotcha (dev)
-
-Containers inside WSL Docker reach PG at `10.10.0.2:5432` (WG-interface IP), NOT via `host.docker.internal`. Reasons:
-1. docker-ce in WSL (unlike Docker Desktop) doesn't tunnel `host.docker.internal` to the Windows host — it resolves to `172.17.0.1` (the Docker bridge gateway internal to WSL).
-2. When containers hit `10.10.0.2:5432`, WSL SNATs the outbound packet to the host's WG IP. PG sees the connection as coming from `10.10.0.2` itself — so `pg_hba.conf` must include `host all trader 10.10.0.0/24 scram-sha-256`.
-
-`.env.example` defaults to the working URL.
+### Postgres connectivity (dev)
+WSL Docker containers reach PG at `10.10.0.2:5432` (WG IP), NOT `host.docker.internal`:
+1. docker-ce in WSL doesn't tunnel `host.docker.internal` → resolves to bridge gateway `172.17.0.1`.
+2. Container egress to `10.10.0.2:5432` is SNATed; PG sees source = `10.10.0.2`. `pg_hba.conf` must include `host all trader 10.10.0.0/24 scram-sha-256`.
 
 ## Project Paths
 
-- **NUC (dev host):** `/home/joseph/dashboard` — where `claude`, `pnpm dev`, `docker compose`, and `scripts/deploy.sh` all run. Native WSL2 (Linux ext4) path. The project was previously at `C:\dashboard` / `/mnt/c/dashboard` until 2026-04-24.
-- **VPS (prod host):** `/home/trader/trading-dashboard` — the rsync destination for Phase 1+. Docker Compose runs here for the prod stack.
-
-Both trees contain the same repo. Deploy script rsyncs from the NUC to the VPS.
+- **NUC dev:** `/home/joseph/dashboard` (native WSL2 ext4) — claude, pnpm, docker, deploy.sh.
+- **VPS prod:** `/home/trader/trading-dashboard` (rsync target).
 
 ### Third-party services live OUTSIDE the repo
 
-Installed on the NUC via their own installers:
+| Service | NUC path |
+|---|---|
+| IB Gateway | `C:\Jts\ibgateway\<version>\` |
+| FutuOpenD | `C:\FutuOpenD\` |
+| PostgreSQL 18 | `C:\Program Files\PostgreSQL\18\` |
+| Ollama | `%LOCALAPPDATA%\Programs\Ollama\` |
 
-| Service | NUC path | Why not in the repo |
-|---------|----------|---------------------|
-| IB Gateway | `C:\Jts\ibgateway\<version>\` | Third-party binary with its own updater |
-| FutuOpenD | `C:\FutuOpenD\` | Third-party binary, login credentials in config |
-| PostgreSQL 18 | `C:\Program Files\PostgreSQL\18\` | Windows service, own data dir |
-| Ollama | `%LOCALAPPDATA%\Programs\Ollama\` | Auto-updating binary + model cache |
-
-Ops glue (PowerShell + VBS helpers for broker auto-start, TOTP fill, window hiding, watchdog, daily restart) runs from a Windows-side copy of the `deploy/nuc/` subdir, expected at `C:\dashboard\deploy\nuc\*` so Windows Scheduled Tasks can invoke the `.ps1`/`.vbs` files directly. Scheduled tasks reference those Windows paths. Not part of the Docker build and not rsync'd to the VPS. **Phase 4+ work item:** wire a sync step (or symlink/share) from `/home/joseph/dashboard/deploy/nuc/` → `C:\dashboard\deploy\nuc\` so the WSL-side dev edits stay in step with the Windows-side ops surface.
+Ops glue (PowerShell + VBS) runs from Windows-side mirror at `C:\dashboard\deploy\nuc\*` so Scheduled Tasks find `.ps1`/`.vbs`. Not in Docker build, not rsync'd to VPS. **Phase 4+ TODO:** sync `/home/joseph/dashboard/deploy/nuc/` ↔ `C:\dashboard\deploy\nuc\`.
 
 ## Directory Layout
-
-See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3` for the canonical tree.
+See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3`.
 
 ## Coding Conventions
 
-### Python (backend)
-- Python 3.14, type hints everywhere, Pydantic v2 for all I/O models.
-- Async all the way down — no sync DB calls, use `asyncpg` driver.
-- One adapter per broker file in `app/brokers/`. All adapters subclass `BrokerAdapter` in `base.py` (base lands in Phase 4 with the first concrete adapter — not speculatively earlier).
-- When adding a method to `BrokerAdapter`, update every adapter in the same commit.
-- Use dependency injection via FastAPI's `Depends` — never import singletons directly.
-- Log via `structlog`, never `print`.
-- No bare `except:` — always name the exception class.
-- Lint: `ruff` (rules `E,F,W,I,N,UP,B,A,C4,ASYNC,RUF`). Format: `ruff format`. Types: `mypy --strict` on `app/`.
+### Python
+- 3.14, type hints everywhere, Pydantic v2 for I/O.
+- Async all the way down (asyncpg, no sync DB).
+- One adapter per broker in `app/brokers/`. Subclass `BrokerAdapter` (`base.py`, lands Phase 4 with first concrete adapter).
+- Adding to `BrokerAdapter` → update every adapter same commit.
+- DI via `Depends`. Never import singletons directly.
+- structlog only, never `print`. No bare `except:`.
+- Lint: `ruff` (`E,F,W,I,N,UP,B,A,C4,ASYNC,RUF`). Format: `ruff format`. Types: `mypy --strict app/`.
 
-### TypeScript (frontend)
-- Strict mode on (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`). No `any` unless annotated with `// eslint-disable-next-line` and a comment explaining why.
-- Function components only, no class components.
-- Zustand for global state. Component-local state stays in `useState`.
-- API calls go through `services/api.ts` — never `fetch` directly from a component.
-- WebSocket subscriptions happen in `services/ws.ts` and feed Zustand stores.
-- No `px` or `em` in CSS or inline styles. Only rem, %, vh/vw, fr, auto. Enforced by Stylelint `unit-disallowed-list`.
-- Layer imports enforced by `eslint-plugin-boundaries` (see Component Architecture above).
+### TypeScript
+- Strict (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`). No `any` w/o disable + reason.
+- Function components only.
+- Zustand global, `useState` local.
+- API via `services/api.ts` only. WS via `services/ws.ts` → Zustand.
+- No `px`/`em` in CSS or inline. Only rem, %, vh/vw, fr, auto.
+- Layer imports per `eslint-plugin-boundaries`.
 
 ### SQL
-- All schema changes go through Alembic migrations. Never edit the DB manually.
-- Column names: `snake_case`. Table names: plural `snake_case` (`orders`, `portfolio_snapshots`).
-- Timestamps: `created_at`, `updated_at`, always `TIMESTAMPTZ`.
-- Money: `NUMERIC(20, 8)`. Never `FLOAT` or `REAL`.
+- Schema changes via Alembic only.
+- `snake_case` columns, plural snake_case tables.
+- Timestamps: `created_at`/`updated_at`, `TIMESTAMPTZ`.
+- Money: `NUMERIC(20, 8)`, never FLOAT/REAL.
 
 ### Git
-- Conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, `perf:`, `ci:`). Enforced by commitlint at `commit-msg`.
-- Commit body lines ≤ 100 chars (enforced by commitlint).
-- Feature branches off `main`. Squash-merge PRs.
-- Never commit `.env`, `*.key`, or anything in `secrets/`.
+- Conventional commits (`feat`/`fix`/`refactor`/`docs`/`test`/`chore`/`perf`/`ci`). Body lines ≤100 chars.
+- Feature branches off `main`. Squash-merge.
+- Never commit `.env`/`*.key`/`secrets/*`.
 
 ## Common Commands
 
-    # Local dev (on the NUC in WSL)
-    docker compose up -d                              # Start full stack
-    docker compose logs -f backend                    # Tail backend logs
-    docker compose exec backend alembic upgrade head  # Run migrations (Phase 2+)
-    docker compose exec backend pytest                # Run tests
+    docker compose up -d
+    docker compose logs -f backend
+    docker compose exec backend alembic upgrade head
+    docker compose exec backend pytest
 
-    # Frontend dev (hot reload)
-    cd frontend && pnpm dev
-
-    # Backend dev (hot reload outside docker)
+    cd frontend && pnpm dev          # FE hot reload
     cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-    # Storybook
     cd frontend && pnpm storybook
 
     # Lint
     cd frontend && pnpm lint && pnpm stylelint && pnpm typecheck
     cd backend && uv run ruff check . && uv run mypy app/
 
-    # Database (Phase 2+)
-    docker compose exec backend alembic revision --autogenerate -m "add_alerts_table"
+    # Migrations
+    docker compose exec backend alembic revision --autogenerate -m "msg"
     docker compose exec backend alembic upgrade head
 
-    # Deploy to VPS (manual; GitHub Actions auto-deploys on push-to-main)
-    ./scripts/deploy.sh
+    ./scripts/deploy.sh              # Manual deploy (GH Actions auto-deploys on push-to-main)
 
-    # Dev bypass (from NUC, over WireGuard — no CF Access needed)
+    # Dev bypass (NUC, over WG)
     curl -sf http://10.10.0.1/health
 
-    # CI bypass (from anywhere, via service token)
+    # CI bypass (anywhere, service token)
     curl -sf https://dashboard.kiusinghung.com/health \
       -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
       -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
 
 ## Security Rules
 
-- Never log API keys, OAuth tokens, or passwords — `structlog` redacts via a processor in `app/core/logging.py`.
-- All broker credentials live in `app_secrets` (Fernet-encrypted) from Phase 2 onward, never in git.
-- Postgres is only reachable via WireGuard from the VPS and directly on LAN/WSL from the NUC — never exposed publicly.
-- Frontend never sees broker credentials. Only the backend holds them.
-- Trade execution endpoints require a confirmation token (nonce) to prevent CSRF.
+- Never log API keys/tokens/passwords — structlog redacts via processor in `app/core/logging.py`.
+- Broker creds live in `app_secrets` (Fernet-encrypted) from Phase 2 on. Never in git.
+- Postgres reachable only via WG (from VPS) and LAN/WSL (from NUC). Never public.
+- FE never sees broker creds.
+- Trade-execution endpoints require confirmation nonce (CSRF).
 
 ## Roadmap
 
-The locked Phase 7 → v1.0.0 roadmap lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). End-state: every IBKR + Futu + Schwab asset class, every relevant order type, multi-source streaming quotes, charting, AI-augmented alerts/scanner, autonomous self-refining bots (parameter-tuning + LLM-feedback ceiling — no raw RL), UK CGT (Section 104 pool + SA108 export), and PWA mobile shipping at v1.0.0.
+Locked Phase 7 → v1.0.0 in [`docs/ROADMAP.md`](docs/ROADMAP.md). End-state: every IBKR/Futu/Schwab asset class + relevant order types, multi-source streaming quotes, charting, AI alerts/scanner, autonomous self-refining bots (param-tuning + LLM-feedback ceiling — no raw RL), UK CGT (S104 pool + SA108), PWA mobile at v1.0.0.
 
-## Goals (active)
+## Goals
+Trade every asset class IBKR+Futu+Schwab support; cover every relevant order type; AI alerts/scanner/news/earnings; autonomous self-refining bots (rule → LLM-in-loop → autonomous); PWA mobile (install + Web Push + offline order queue).
 
-- Trade every asset class supported by IBKR + Futu + Schwab
-- Cover every relevant order type per broker capability
-- AI-augmented alerts / universe scanner / news + filings / earnings handling
-- Autonomous self-refining bots (rule-based → LLM-in-loop → autonomous)
-- PWA mobile (install-to-home-screen, Web Push, offline order queue)
+## Non-Goals
+Native RN app (PWA covers); raw RL bots (overfit/blowup); paper sim (use broker paper accounts); multi-tenant.
 
-## Non-Goals (for now)
+## Phase workflow
 
-- Native React Native mobile app (PWA covers personal use; no App Store wall)
-- Raw reinforcement-learning bots (overfitting / blowup risk on a single account; production firms don't deploy raw RL on alpha)
-- Paper trading simulation (use broker-side paper accounts)
-- Multi-tenant / customer-facing — single-user dashboard
+Every phase: brainstorm → spec self-review → **architect review (apply CRIT+HIGH+MED inline)** → user approval → plan → implementation (subagent-driven) → close-out (update CLAUDE.md/CHANGELOG.md/TASKS.md, tag, push).
 
-## Phase workflow (standard for every phase)
+Skip architect review only for truly trivial phases (Phase 0 skipped → cost ~2hr CI debugging).
 
-Every phase follows: brainstorm → spec self-review → **architect review (apply CRIT+HIGH+MED inline)** → user approval → plan → implementation (subagent-driven preferred) → close-out (update CLAUDE.md / CHANGELOG.md / TASKS.md, tag, push).
+Implementation runs per-commit reviewer chain (spec-compliance + code-quality + lang-reviewer minimum, plus security/db/type/silent-failure/a11y/build/tdd when triggered). Reviews fire every commit, never batched.
 
-**Skip the architect review step only for truly trivial phases.** Phase 0 skipped it; cost ~2 hrs of preventable CI debugging.
+Full workflow + tooling list + reviewer table + skills + hooks: `docs/PHASE-WORKFLOW.md`. Tooling catalog: memory `project_tooling_inventory.md`.
 
-Implementation always runs the per-commit reviewer chain (spec-compliance + code-quality + language-specific reviewer at minimum, plus security/db/type/silent-failure/a11y/build/tdd reviewers when their trigger surface is touched). Reviews fire at every commit boundary — never batched.
+## When Claude Makes Changes
 
-Full step-by-step + proactive tooling list + per-commit reviewer table + per-phase subject-anchor skills + always-on hooks: see `docs/PHASE-WORKFLOW.md`. Tooling catalog: memory `project_tooling_inventory.md`.
+- Run tests after edits: `docker compose exec backend pytest` + `cd frontend && pnpm test`.
+- Regenerate types when API schemas change: `scripts/gen-types.sh` (Phase 2+).
+- Never modify `brokers/base.py` without updating every concrete adapter.
+- Prefer editing existing files.
+- Schema changes → Alembic migration, not raw model edits.
 
-## When Claude Code Makes Changes
+Use `/frontend-design` skill for FE design; discuss direction with user.
 
-- Always run tests after edits: `docker compose exec backend pytest` and `cd frontend && pnpm test`.
-- Always regenerate types when changing API schemas: see `scripts/gen-types.sh` (Phase 2+).
-- Never modify `brokers/base.py` without also updating every concrete adapter.
-- Prefer editing existing files over creating new ones.
-- For schema changes, generate an Alembic migration instead of editing models and hoping for the best.
+FE supports desktop + mobile. Rem-based CSS only.
 
-Use `/frontend-design` skill to design the frontend; discuss direction with the user.
-
-The frontend supports both desktop and mobile. Rem-based CSS only, no px anywhere.
-
-GitHub is the canonical repo. Update `CLAUDE.md`, `CHANGELOG.md`, `TASKS.md` on every phase completion; commit to repo.
+GitHub is canonical repo. Update CLAUDE.md/CHANGELOG.md/TASKS.md every phase close; commit.
