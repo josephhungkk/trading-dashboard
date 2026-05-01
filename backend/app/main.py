@@ -27,6 +27,7 @@ from app.core.crypto import get_fernet
 from app.core.db import SessionLocal, engine
 from app.core.deps import set_account_service, set_broker_registry, set_config_service
 from app.core.logging import configure_logging
+from app.services.broker_callback_server import start_backend_callback_server
 from app.services.broker_registry_factory import MissingBrokerSecrets, build_broker_registry
 from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistry
 from app.services.config import ConfigService
@@ -50,6 +51,7 @@ async def lifespan(_app: FastAPI) -> Any:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     svc = ConfigService(session_factory, config_cache, secrets_cache, fernet)
     set_config_service(svc)
+    callback_server = await start_backend_callback_server(svc, session_factory)
 
     listener_config = asyncio.create_task(config_cache.run_listener())
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
@@ -121,6 +123,10 @@ async def lifespan(_app: FastAPI) -> Any:
                 await t
             except asyncio.CancelledError:
                 pass
+        try:
+            await callback_server.stop(grace=5)
+        except Exception:
+            log.exception("callback_server_stop_failed")
         await redis.aclose()
         _app.state.redis = None
         await engine.dispose()
