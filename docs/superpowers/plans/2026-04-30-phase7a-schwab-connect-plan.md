@@ -1,6 +1,8 @@
 # Phase 7a — Schwab Connect (Data + Read-Only) — Implementation Plan
 
-> **Plan v3 — architect-review applied 2026-04-30.** Plan v2 (commit `b8b3d10`) had 8 CRIT + 17 HIGH + 19 MED findings, mostly proto-shape mismatches against the actual `proto/broker/v1/broker.proto`. v3 grounds every task in the real proto + real `ConfigService` + real `BrokerConfigurer`. Key reality grounding:
+> **Plan v3.1 — second architect-review pass applied 2026-05-01.** v3 (commit `d23e00f`) grounded chunks B/C/D/E against the real proto + ConfigService API but introduced 3 CRIT + 8 HIGH + 7 MED integration-layer bugs (wrong gRPC servicer hook, fake lifespan attrs, wrong import paths, `Depends(lambda: ...)` placeholders, missing fixture scaffold, wrong refresher URL through CF Access, double-mounted router, etc.). v3.1 closes all of those inline. Plan v2 (commit `b8b3d10`) had 8 CRIT + 17 HIGH + 19 MED proto-shape mismatches; v3 closed those.
+>
+> **Cumulative reality grounding (as of v3.1):**
 >
 > - **Proto facts:** `BrokerId.SCHWAB=3` already exists. `OrderStatus` has only 6 values — no `STATUS_MODIFIED`; map Schwab `PENDING_REPLACE/REPLACED` to `SUBMITTED` and let Phase 5c's SQL `order_status_rank()` handle the modified flag downstream. `ConfigureRequest` has typed Futu fields **plus a `metadata: map<string,string>` field** explicitly designed for "Future creds without proto edits" — **Schwab credentials go in `metadata`**. `ListManagedAccounts(Empty)` not `ListAccounts(ListAccountsRequest)`. `GetOrders(AccountRef)` not `GetOrders(GetOrdersRequest)`. `Account` has fields 1–4 (no `account_hash` yet — A1 adds field 5). `Order.order_id` (not `broker_order_id`). `Order.quantity_filled` (not `filled_quantity`). All monetary fields are `Money(value, currency)` — never bare strings. Enums accessed as `broker_pb2.TradingMode.LIVE` / `broker_pb2.OrderStatus.SUBMITTED` (nested), not `pb.LIVE` / `pb.SUBMITTED`.
 > - **`RequestTokenRefresh` lives on a NEW service `BackendCallback`,** not on `service Broker` — keeps the backend's gRPC surface from accidentally implementing every Broker RPC. A1 adds the new service definition.
@@ -14,8 +16,15 @@
 > - **Frontend testing realities:** `vi.mock` is hoisted — must be at top-level of test file, not inside `it()`. Fake-timers in async tests use `vi.advanceTimersByTimeAsync` to drain microtasks. `popstate` listener wired in `useSchwabTokenStatus` (not just on Connect-button click) so returning from the OAuth tab triggers fast-poll.
 > - **Playwright redirect interception** uses `await page.route("**/api/oauth/schwab/callback*", handler)` + `await route.abort()` — `page.on("request", ...)` is observe-only and CANNOT abort navigations. Refresher uses `Locator.press_sequentially(text, delay=...)` (Playwright ≥1.43 native human-typing) instead of a hand-rolled async sleep loop.
 > - **Refresher container Python:** Microsoft's `mcr.microsoft.com/playwright/python:v1.45.0` ships Python 3.11/3.12 — incompatible with our `requires-python = ">=3.14"`. Use `python:3.14-slim` + install Playwright + browser separately, OR drop the refresher's `requires-python` to `>=3.11` since it shares no code with backend.
+> - **(v3.1) FastAPI deps live in `app/core/deps.py`:** confirmed `get_config()` (line 86, no `Depends()` factory needed — singleton-style via `set_config_service` from lifespan), `get_db()` (line 81, async generator), `require_admin_jwt()` (line 99, requires `Cf-Access-Jwt-Assertion` header). PF6 adds two new ones: `get_redis()` (returns `_app.state.redis`) and `get_settings()` (returns `app.core.config.settings`). All Schwab routers must import from `app.core.deps`, never from `app.services.config` or `app.core.auth`.
+> - **(v3.1) `backend/app/api/brokers_admin.py` already exists** at the `/api/admin/brokers` prefix with a generic `POST /{label}/reconfigure` route (admin-JWT-gated). Phase 7a EXTENDS this file — does not create a parallel one. Schwab-specific routes (`/schwab/oauth-start`, `/schwab/oauth-callback`, `/schwab/disconnect`, `/schwab/status`) live alongside the existing `/{label}/reconfigure`. The router is already mounted in `backend/app/main.py:139` — no second mount.
+> - **(v3.1) Tier-2 refresher `BACKEND_ADMIN_URL` is the public URL `https://dashboard.kiusinghung.com`,** NOT `http://backend:8000`. CF-Access service-token headers (`CF-Access-Client-Id` + `CF-Access-Client-Secret`) are converted to a CF Access JWT only at the CF edge proxy. Calling `http://backend:8000` directly bypasses CF and the headers become dead weight; `require_admin_jwt` then rejects with 401 because no `Cf-Access-Jwt-Assertion` header is present. The refresher takes the WAN round-trip on purpose so admin auth is honoured. (Documented in CLAUDE.md "CI bypass" pattern.)
+> - **(v3.1) Tier-2 metrics flow via a new backend admin endpoint** `POST /api/admin/metrics/tier2` (introduced in E8). The refresher container has no `prometheus_client` registry of its own — it never imports `app.core.metrics`. Backend translates the POST into `SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS.set(...)` against its existing registry, which is already scraped by Prometheus.
+> - **(v3.1) Backend gRPC callback server boot:** the new `BackendCallbackServicer` is wired in `backend/app/main.py` lifespan via `start_backend_callback_server(svc, session_factory)` — passed as positional args because the real lifespan stores `svc` and `session_factory` as **locals**, not `_app.state.*`. Stop the gRPC server inside the existing `finally:` block (lines 90-125), not a separate shutdown handler.
+> - **(v3.1) Reconfigure plumbing reuses `BrokerConfigurer.configure()`** at `backend/app/services/broker_registry_factory.py:40+`. Phase 7a adds `"schwab"` to its `targets` set and a Schwab strategy branch inside `configure()`. The 5 documented Configure triggers all funnel through that one method — no `_get_or_create_sidecar_stub` helper (that name was hallucinated in v3); the existing path is `await self._registry.get_client("schwab").configure(metadata={...})`.
+> - **(v3.1) Test fixture scaffold (Task C0)** is REQUIRED before chunks B/C/D/E tests can pass. C0 creates `conftest.py` shapes for: `config_service`, `redis`, `db_session`/`db_session_a`/`db_session_b`, `sidecar_stubs`, `mock_brokers`, `grpc_backend_stub`, `mock_sidecar_configure`, `test_client_admin`, `test_client_no_auth`, `admin_client_mock`, `mock_playwright`, `httpx_mock`. Without this, half the per-chunk tests reference fixtures that don't exist.
 >
-> **Architect findings tracker** (52 total — 49 from initial review + 3 cross-cutting): mapped per-task in §"Self-review" at end of plan. CRIT + HIGH + MED applied inline; LOW deferrals listed in §12 of the spec.
+> **Architect findings tracker** (sum across both passes — 52 from initial review + 18 from v3.1 pass = 70 total): mapped per-task in §"Self-review" at end of plan. CRIT + HIGH + MED applied inline; LOW deferrals listed in §12 of the spec + §"Self-review".
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -182,6 +191,53 @@ Expected: all six files present.
 test -n "${CF_ACCESS_API_TOKEN:-}" && echo "CF token present" || echo "MISSING — needed for chunk G4"
 ```
 
+- [ ] **PF6: Add `get_redis` + `get_settings` FastAPI dependencies to `app/core/deps.py`.**
+
+v3.1 architect finding HIGH-1 — the SSE router (C10), the public OAuth router (C4), the admin OAuth routes (C5), the BackendCallback server (C6), and the SchwabCard-supporting endpoints all need redis + settings as FastAPI dependencies. Today only `get_config` / `get_db` / `get_broker_registry` / `get_account_service` exist (deps.py:60-89). Add the missing ones in a single PR-sized edit before chunk A starts:
+
+```python
+# Append to backend/app/core/deps.py:
+
+from typing import TYPE_CHECKING
+
+from fastapi import Request
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
+    from app.core.config import Settings
+
+
+def get_redis(request: Request) -> "Redis":
+    """Return the live redis client wired in main.py lifespan to _app.state.redis."""
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise RuntimeError("redis not initialized — lifespan startup didn't wire it")
+    return redis
+
+
+def get_settings() -> "Settings":
+    """Return the global settings singleton (app.core.config.settings)."""
+    from app.core.config import settings
+    return settings
+```
+
+Verify the imports compile + the singletons resolve at runtime:
+
+```bash
+cd backend && uv run python -c "
+from app.core.deps import get_config, get_db, get_redis, get_settings, require_admin_jwt
+print('deps ok')
+"
+```
+
+Expected: `deps ok`. Commit:
+
+```bash
+git add backend/app/core/deps.py
+git commit -m "feat(deps): get_redis + get_settings deps for Phase 7a routers"
+```
+
 ---
 
 ## Chunk A — Proto + sidecar shell (7 tasks)
@@ -260,16 +316,22 @@ message TokenRefreshResponse {
 }
 ```
 
-- [ ] **Step 4: Regenerate proto stubs.** Verify the helper scripts exist first (PF8):
+- [ ] **Step 4: Regenerate proto stubs across all consumers.**
+
+v3.1 MED-4 reality grounding: there are 4 separate proto-gen scripts, one per consumer. All exist on disk today (verified 2026-05-01):
+- `backend/scripts/proto-gen.sh` — backend stubs at `backend/app/_generated/broker/v1/`
+- `sidecar/scripts/proto-gen.sh` — IBKR sidecar stubs
+- `sidecar_futu/scripts/proto-gen.sh` — Futu sidecar stubs
+- `sidecar_schwab/scripts/proto-gen.sh` — created in A3
 
 ```bash
 cd /home/joseph/dashboard
-test -x sidecar/scripts/proto-gen.sh || { echo "MISSING sidecar/scripts/proto-gen.sh"; exit 1; }
-test -x sidecar_futu/scripts/proto-gen.sh || { echo "MISSING sidecar_futu/scripts/proto-gen.sh"; exit 1; }
-bash sidecar/scripts/proto-gen.sh
-bash sidecar_futu/scripts/proto-gen.sh
-# sidecar_schwab/scripts/proto-gen.sh is created in A3
-# Backend gets regenerated through the existing repo's gen mechanism (verify with the same `bash sidecar/scripts/proto-gen.sh` if it covers backend, or whatever the existing script does — DO NOT INVENT)
+for script in backend/scripts/proto-gen.sh sidecar/scripts/proto-gen.sh \
+              sidecar_futu/scripts/proto-gen.sh; do
+  test -x "$script" || { echo "MISSING $script"; exit 1; }
+  bash "$script"
+done
+# sidecar_schwab/scripts/proto-gen.sh runs in A3 once that package is scaffolded.
 ```
 
 - [ ] **Step 5: Verify new symbols import cleanly.**
@@ -2958,9 +3020,219 @@ After B10: 10 commits, sidecar_schwab/ has full read-only data plane. Configure 
 
 ---
 
-## Chunk C — Backend wiring (12 tasks)
+## Chunk C — Backend wiring (12 tasks — C0 fixture scaffold + C1–C11; C12 relocated to F0)
 
 Goal: backend can mint state nonces, accept Schwab redirects on the public path, persist tokens via PG advisory lock, Configure the sidecar synchronously on every write, serve SSE updates to the SchwabCard, and act as the single-writer authority for `RequestTokenRefresh`.
+
+### Task C0: Backend test-fixture scaffold (v3.1 HIGH-5)
+
+**Files:** Create or extend `backend/tests/conftest.py` + `sidecar_schwab_refresher/tests/conftest.py`.
+
+**v3.1 reality grounding:** Chunks B/C/D/E/F reference 12+ pytest fixtures that don't exist yet — `config_service`, `redis`, `db_session`, `db_session_a`, `db_session_b`, `sidecar_stubs`, `mock_brokers`, `grpc_backend_stub`, `mock_sidecar_configure`, `test_client_admin`, `test_client_no_auth`, `admin_client_mock`, `mock_playwright`, `httpx_mock`. C0 lands the scaffold so subsequent task tests pass without rework. Some fixtures (`httpx_mock`) come from `pytest-httpx` — add it as a dev dep first.
+
+- [ ] **Step 1: Add dev deps.**
+
+```bash
+cd backend && uv add --dev pytest-httpx pytest-asyncio fakeredis
+cd ../sidecar_schwab_refresher && uv add --dev pytest-httpx pytest-asyncio
+```
+
+- [ ] **Step 2: Write `backend/tests/conftest.py`** (or extend existing) with:
+
+```python
+"""Phase 7a C0 — shared fixtures for chunks B/C/D/E/F."""
+from __future__ import annotations
+
+import asyncio
+from typing import AsyncIterator
+from unittest.mock import AsyncMock, MagicMock
+
+import fakeredis.aioredis
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.main import app
+from app.core.db import engine, SessionLocal
+from app.core.deps import set_config_service
+from app.core.crypto import get_fernet
+from app.core.config import settings
+from app.services.config import ConfigService
+from app.services.config_cache import ConfigCache
+
+
+@pytest_asyncio.fixture
+async def redis() -> AsyncIterator:
+    """In-memory fakeredis for state nonce + pubsub tests."""
+    r = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    yield r
+    await r.aclose()
+
+
+@pytest_asyncio.fixture
+async def db_session() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as s:
+        yield s
+
+
+@pytest_asyncio.fixture
+async def db_session_a() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as s:
+        yield s
+
+
+@pytest_asyncio.fixture
+async def db_session_b() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as s:
+        yield s
+
+
+@pytest_asyncio.fixture
+async def config_service(redis) -> AsyncIterator[ConfigService]:
+    """Real ConfigService against the test DB + a fakeredis. Wires the deps
+    singleton so any Depends(get_config) call inside route handlers resolves."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    cc = ConfigCache(redis, "config:invalidate", "config", ttl_seconds=10)
+    sc = ConfigCache(redis, "config:invalidate:secrets", "secret", ttl_seconds=10)
+    fernet = get_fernet(settings.secret_key, settings.secret_key_prev)
+    svc = ConfigService(factory, cc, sc, fernet)
+    set_config_service(svc)
+    yield svc
+
+
+@pytest_asyncio.fixture
+async def test_client_admin() -> AsyncIterator[AsyncClient]:
+    """Async client that injects a fake admin Cf-Access-Jwt-Assertion via
+    monkeypatched verifier. Real JWT is too heavy for unit tests."""
+    from app.core import deps as deps_mod
+    deps_mod._verifier.verify = MagicMock(  # type: ignore[method-assign]
+        return_value=MagicMock(email="admin@test.local", kind="cf_access_jwt"),
+    )
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        client.headers["Cf-Access-Jwt-Assertion"] = "test-token"
+        yield client
+
+
+@pytest_asyncio.fixture
+async def test_client_no_auth() -> AsyncIterator[AsyncClient]:
+    """Async client without the admin JWT header — for testing public routes."""
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        yield client
+
+
+@pytest.fixture
+def sidecar_stubs() -> dict[str, MagicMock]:
+    """Per-label gRPC sidecar stubs. Tests mutate `.Configure.return_value`,
+    `.Health.return_value`, etc. Keyed by label."""
+    return {
+        "schwab": MagicMock(),
+        "isa-live": MagicMock(),
+        "futu": MagicMock(),
+    }
+
+
+@pytest.fixture
+def mock_brokers(sidecar_stubs) -> dict[str, AsyncMock]:
+    """Per-label broker-client async mocks (list_accounts, etc.)."""
+    return {
+        "schwab": AsyncMock(),
+        "isa-live": AsyncMock(),
+        "futu": AsyncMock(),
+    }
+
+
+@pytest.fixture
+def mock_sidecar_configure(sidecar_stubs) -> AsyncMock:
+    """Backed by sidecar_stubs['schwab'].Configure for the C5 reconfigure test."""
+    sidecar_stubs["schwab"].Configure = AsyncMock()
+    return sidecar_stubs["schwab"].Configure
+
+
+@pytest_asyncio.fixture
+async def grpc_backend_stub():
+    """In-memory grpc.aio test channel against BackendCallbackServicer.
+    Built per-test using grpc.aio.insecure_channel('unix-abstract://...').
+    Concrete construction: see backend/tests/services/test_request_token_refresh.py."""
+    from sidecar_schwab.tests.helpers import in_memory_backend_callback_channel
+    async with in_memory_backend_callback_channel() as stub:
+        yield stub
+```
+
+- [ ] **Step 3: Write `sidecar_schwab_refresher/tests/conftest.py`** with `admin_client_mock` + `mock_playwright`:
+
+```python
+"""Phase 7a C0 — shared fixtures for the Tier-2 refresher tests."""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import pytest_asyncio
+
+
+class _FakeAdminClient:
+    """In-memory stand-in for sidecar_schwab_refresher.admin_client.BackendAdminClient.
+    Mirrors the get_config / set_config / reveal_secret / push_tier2_metric API
+    so tests don't need an httpx_mock layer for these calls."""
+
+    def __init__(self) -> None:
+        self._config: dict[str, str] = {}
+        self._secrets: dict[str, str] = {}
+        self._headers = {"CF-Access-Client-Id": "test", "CF-Access-Client-Secret": "test"}
+        self._url = "https://dashboard.kiusinghung.com"
+
+    async def get_config(self, key: str, default: str | None = None) -> str | None:
+        return self._config.get(key, default)
+
+    async def set_config(self, key: str, value: str, *, value_type: str = "str") -> None:
+        self._config[key] = value
+
+    async def reveal_secret(self, key: str) -> str:
+        return self._secrets[key]
+
+    def seed_secret(self, key: str, value: str) -> None:
+        self._secrets[key] = value
+
+    async def push_tier2_metric(self, last_run_seconds: float) -> None:
+        pass  # no-op in unit tests; F0/E8 covers the real shape
+
+
+@pytest_asyncio.fixture
+async def admin_client_mock() -> _FakeAdminClient:
+    return _FakeAdminClient()
+
+
+@pytest.fixture
+def mock_playwright(monkeypatch):
+    """Patches async_playwright into a one-shot context manager that yields
+    a MagicMock. Tests can override page.goto / page.route via the mock."""
+    pw = MagicMock()
+    pw.chromium.launch = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(
+        "sidecar_schwab_refresher.main.async_playwright",
+        lambda: _AsyncCM(pw),
+    )
+    return pw
+
+
+class _AsyncCM:
+    def __init__(self, value): self._value = value
+    async def __aenter__(self): return self._value
+    async def __aexit__(self, *a): return False
+```
+
+- [ ] **Step 4: Run — empty (no tests yet). Commit.**
+
+```bash
+git add backend/tests/conftest.py backend/pyproject.toml backend/uv.lock \
+        sidecar_schwab_refresher/tests/conftest.py \
+        sidecar_schwab_refresher/pyproject.toml sidecar_schwab_refresher/uv.lock
+git commit -m "test(scaffold): C0 shared fixtures for chunks B/C/D/E/F (HIGH-5)"
+```
+
+**Conditional reviewers:** `python-reviewer`, `tdd-guide`.
 
 ### Task C1: Alembic 0008 — `account_hash` column + partial index + downgrade
 
@@ -3354,13 +3626,19 @@ async def _persist_tokens_under_lock(
       - set(ns, key, value, value_type) for non-secret config
       - Namespace convention: ("broker", f"schwab.<key>") matches Futu wiring.
     """
-    await config_service.set_secret("broker", "schwab.access_token", access_token)
-    await config_service.set_secret("broker", "schwab.refresh_token", refresh_token)
-    await config_service.set("broker", "schwab.access_token_issued_at",
-                             issued_at.isoformat())
+    # v3.1 MED-3: explicit value_type on every write — avoids implicit "str" drift
+    # when the column is read back by reveal_secret_int / get_int / etc.
+    await config_service.set_secret(
+        "broker", "schwab.access_token", access_token, value_type="str")
+    await config_service.set_secret(
+        "broker", "schwab.refresh_token", refresh_token, value_type="str")
+    await config_service.set(
+        "broker", "schwab.access_token_issued_at",
+        issued_at.isoformat(), value_type="str")
     if rotate_refresh_issued_at:
-        await config_service.set("broker", "schwab.refresh_token_issued_at",
-                                 issued_at.isoformat())
+        await config_service.set(
+            "broker", "schwab.refresh_token_issued_at",
+            issued_at.isoformat(), value_type="str")
 
 
 async def refresh_with_lock(
@@ -3476,7 +3754,7 @@ from app.core.metrics import (
     SCHWAB_OAUTH_CALLBACK_TOTAL,
     SCHWAB_SIDECAR_TOKEN_DRIFT_SECONDS,
 )
-from app.services.config import get_config
+from app.core.deps import get_config, get_db, get_redis, get_settings
 from app.services.schwab_oauth import (
     consume_state_nonce, refresh_with_lock, StateNonceError,
 )
@@ -3491,9 +3769,9 @@ async def schwab_oauth_callback_public(
     code: str = Query(...),
     state: str = Query(...),
     config_service=Depends(get_config),
-    redis=Depends(lambda: ...),  # wire to existing redis dep
-    db=Depends(lambda: ...),     # wire to existing db dep
-    settings=Depends(lambda: ...),  # wire to existing settings dep
+    redis=Depends(get_redis),
+    db=Depends(get_db),
+    settings=Depends(get_settings),
 ):
     """Public Schwab OAuth callback. CF-Access-bypassed."""
     try:
@@ -3650,43 +3928,46 @@ async def test_reconfigure_calls_sidecar(test_client_admin, mock_sidecar_configu
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Write `backend/app/api/brokers_admin.py`:**
+- [ ] **Step 3: Extend the existing `backend/app/api/brokers_admin.py` with Schwab-specific routes.**
+
+v3.1 reality grounding (HIGH-8): the file already exists at this path with the `/api/admin/brokers` prefix and a generic `POST /{label}/reconfigure` route — already mounted in `backend/app/main.py:139`. Phase 7a APPENDS Schwab routes under `/schwab/...` to that file. Do NOT create a parallel router and do NOT mount twice (MED-1).
+
+Append (additive — keep all existing imports + the existing `router = APIRouter(...)` declaration + the existing `/{label}/reconfigure` route):
 
 ```python
-"""Admin Schwab routes — OAuth start, OAuth callback (Tier-2), reconfigure."""
-from __future__ import annotations
-
+# Additive imports at the top of the existing brokers_admin.py:
 import urllib.parse
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import HTTPException, Query
 from fastapi.responses import RedirectResponse
 
-from app.core.auth import require_admin_jwt
+from app.core.deps import get_config, get_db, get_redis, get_settings
 from app.core.metrics import (
-    SCHWAB_OAUTH_START_TOTAL,
     SCHWAB_OAUTH_CALLBACK_TOTAL,
+    SCHWAB_OAUTH_START_TOTAL,
 )
-from app.services.config import get_config
 from app.services.schwab_oauth import (
-    consume_state_nonce, mint_state_nonce, StateNonceError,
+    consume_state_nonce,
+    mint_state_nonce,
+    StateNonceError,
 )
 
 log = structlog.get_logger(module="api.brokers_admin")
 
-router = APIRouter(
-    prefix="/api/admin/brokers/schwab",
-    tags=["admin", "brokers"],
-    dependencies=[Depends(require_admin_jwt)],
-)
+
+# ── Schwab routes (Phase 7a) ────────────────────────────────────────────
+# Existing router prefix is "/api/admin/brokers"; these decorators land at
+# /api/admin/brokers/schwab/<verb>. The router already enforces admin JWT
+# via dependencies=[Depends(require_admin_jwt)] (line 17 of this file).
 
 
-@router.get("/oauth-start")
-async def oauth_start(
+@router.get("/schwab/oauth-start")
+async def schwab_oauth_start(
+    user=Depends(require_admin_jwt),  # admin identity for state-nonce binding
     config_service=Depends(get_config),
-    redis=Depends(lambda: ...),
-    settings=Depends(lambda: ...),
-    user=Depends(require_admin_jwt),
+    redis=Depends(get_redis),
+    settings=Depends(get_settings),
 ):
     SCHWAB_OAUTH_START_TOTAL.inc()
     user_email = getattr(user, "email", "admin")
@@ -3694,7 +3975,6 @@ async def oauth_start(
         redis, user_email=user_email,
         app_secret_key=settings.app_secret_key.encode(),
     )
-    # Real ConfigService API: reveal_secret/get; namespace ("broker", "schwab.<key>").
     app_key = await config_service.reveal_secret("broker", "schwab.app_key")
     callback_url = await config_service.get(
         "broker", "schwab.callback_url",
@@ -3710,17 +3990,18 @@ async def oauth_start(
     return RedirectResponse(url=consent_url, status_code=302)
 
 
-@router.post("/oauth-callback")
-async def admin_oauth_callback(
+@router.post("/schwab/oauth-callback")
+async def schwab_oauth_callback_admin(
     code: str = Query(...),
     state: str = Query(...),
     config_service=Depends(get_config),
-    redis=Depends(lambda: ...),
-    db=Depends(lambda: ...),
-    settings=Depends(lambda: ...),
+    redis=Depends(get_redis),
+    db=Depends(get_db),
+    settings=Depends(get_settings),
 ):
-    """Tier-2 calls this with its admin JWT (service-token-derived).
-    Same semantics as /api/oauth/schwab/callback (public path)."""
+    """Tier-2 calls this with CF-Access service-token headers (which the CF
+    edge proxy converts into a Cf-Access-Jwt-Assertion before this router
+    sees the request). Same persistence semantics as the public-path callback."""
     try:
         user_email = await consume_state_nonce(
             redis, signed=state,
@@ -3744,6 +4025,8 @@ async def admin_oauth_callback(
             path="admin", result="token_exchange_fail").inc()
         raise HTTPException(502, f"schwab token exchange failed: {e}")
 
+    # Funnel through the existing BrokerConfigurer so the 5 trigger points all
+    # hit the same code path (see C7).
     from app.services.broker_registry_factory import reconfigure_schwab
     await reconfigure_schwab(config_service)
     await redis.publish("config:invalidate:schwab", "1")
@@ -3753,20 +4036,17 @@ async def admin_oauth_callback(
     return {"access_token_issued_at": issued.isoformat()}
 
 
-@router.post("/reconfigure")
-async def reconfigure(config_service=Depends(get_config)):
-    """Manual operator trigger; also called by Tier-2 after a refresh."""
-    from app.services.broker_registry_factory import reconfigure_schwab
-    await reconfigure_schwab(config_service)
-    return {"ok": True}
+# Note: there is NO @router.post("/schwab/reconfigure") here — the existing
+# generic POST /{label}/reconfigure already covers the Schwab case (MED-1).
+# Frontend `services/schwab.ts::postReconfigure` POSTs to
+# /api/admin/brokers/schwab/reconfigure which the existing route handles.
 
 
-@router.get("/status")
-async def status(config_service=Depends(get_config)) -> dict:
-    """Phase 7a frontend D1/D2 — aggregated Schwab token + tier-2 status.
+@router.get("/schwab/status")
+async def schwab_status(config_service=Depends(get_config)) -> dict:
+    """Aggregated Schwab token + tier-2 status (D1/D2 frontend consumer).
 
-    Returned shape matches `frontend/src/services/schwab.ts`'s `SchwabTokenStatus`.
-    Token VALUES are never returned — only the issued-at timestamps + flags.
+    Token VALUES are never returned — only issued-at timestamps + flags.
     """
     return {
         "access_token_issued_at": await config_service.get(
@@ -3780,20 +4060,15 @@ async def status(config_service=Depends(get_config)) -> dict:
     }
 ```
 
-- [ ] **Step 4: Mount in `backend/app/api/admin.py`:**
-
-```python
-from app.api.brokers_admin import router as schwab_admin_router
-admin_router.include_router(schwab_admin_router)
-```
+- [ ] **Step 4: No router mount needed.** `brokers_admin_router` is already mounted in `backend/app/main.py:139`. Skip the v3 plan's `admin_router.include_router(...)` step.
 
 - [ ] **Step 5: Run — PASS.** Commit.
 
 ```bash
-git add backend/app/api/brokers_admin.py backend/app/api/admin.py \
+git add backend/app/api/brokers_admin.py \
         backend/tests/api/test_oauth_callback_admin.py \
         backend/tests/api/test_brokers_admin_reconfigure.py
-git commit -m "feat(backend): admin /oauth-start + /oauth-callback + /reconfigure"
+git commit -m "feat(backend): admin schwab/oauth-start + oauth-callback + status (extends existing brokers_admin)"
 ```
 
 **Conditional reviewers:** `security-reviewer`, `python-reviewer`.
@@ -3908,23 +4183,37 @@ async def start_backend_callback_server(
 ) -> grpc.aio.Server:
     server = grpc.aio.server()
     servicer = BackendCallbackServicer(config_service, db_session_factory)
-    pbg.add_BrokerServicer_to_server(servicer, server)
+    # v3.1 — generated hook is add_BackendCallbackServicer_to_server (the new
+    # service from A1), NOT add_BrokerServicer_to_server (that's the sidecar
+    # surface). Asserted in A1 Step 5.
+    pbg.add_BackendCallbackServicer_to_server(servicer, server)
     server.add_insecure_port("0.0.0.0:8001")
     await server.start()
     log.info("backend_callback_grpc_started port=8001")
     return server
 ```
 
-- [ ] **Step 4: Wire into `app/main.py` lifespan:**
+- [ ] **Step 4: Wire into `app/main.py` lifespan.**
+
+v3.1 reality grounding: the existing `lifespan()` (`backend/app/main.py:42-126`) holds `svc` and `session_factory` as locals (lines 49-50), not `_app.state.*`. There is no `app.state.config_service` or `app.state.db_session_factory` attribute. Pass the locals positionally; stop the gRPC server inside the existing `finally:` block at lines 90-125 (no separate shutdown handler):
 
 ```python
+# Top-of-file imports (additive):
 from app.services.broker_callback_server import start_backend_callback_server
-# In lifespan startup:
-app.state.callback_server = await start_backend_callback_server(
-    app.state.config_service, app.state.db_session_factory)
-# In shutdown:
-await app.state.callback_server.stop(grace=5)
+
+# Inside lifespan, after `set_config_service(svc)` (line 51) — before the
+# `try:` block at line 65:
+callback_server = await start_backend_callback_server(svc, session_factory)
+log.info("backend_callback_started")
+
+# Inside the existing finally: (after the redis/engine teardown, around line 125):
+try:
+    await callback_server.stop(grace=5)
+except Exception:
+    log.exception("callback_server_stop_failed")
 ```
+
+Note: `callback_server` stays a function-local in `lifespan` so the `finally:` block can see it via closure. Don't store it on `_app.state` — it's only used by the lifespan itself.
 
 - [ ] **Step 5: Run — PASS.** Commit.
 
@@ -3986,55 +4275,120 @@ async def test_broker_configurer_skips_when_secrets_missing(config_service, side
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Add `reconfigure_schwab` to `broker_registry_factory.py`** and add `"schwab"` to `BrokerConfigurer.targets` (existing class at line 40). The Configure path uses `metadata` only — the typed Futu fields are left at their proto defaults:
+- [ ] **Step 3: Three coordinated edits.**
+
+**(a)** Extend `BrokerSidecarClient.configure()` in `backend/app/services/brokers.py:124` to accept a `metadata` kwarg so Schwab can reuse the existing client method. Today it only forwards typed Futu fields:
 
 ```python
-async def reconfigure_schwab(config_service) -> None:
-    """C3 — Configure trigger for Schwab. Called from:
-    1. Lifespan startup (in init_brokers / BrokerConfigurer.configure("schwab"))
-    2. /api/oauth/schwab/callback (Tier-1)
-    3. /api/admin/brokers/schwab/oauth-callback (Tier-2)
-    4. /api/admin/brokers/schwab/reconfigure (manual)
-    5. Sidecar restart detected (started_at delta in BrokerRegistry health probe)
-
-    Real ConfigService API: reveal_secret/get reads, namespace ("broker", "schwab.<k>").
-    """
-    app_key = await config_service.reveal_secret("broker", "schwab.app_key", default=None)
-    app_secret = await config_service.reveal_secret("broker", "schwab.app_secret", default=None)
-    refresh = await config_service.reveal_secret("broker", "schwab.refresh_token", default=None)
-    if not (app_key and app_secret and refresh):
-        # Not configured yet — first-time deploy. Skip silently.
-        return
-    access = await config_service.reveal_secret("broker", "schwab.access_token", default="")
-    issued_at = await config_service.get(
-        "broker", "schwab.access_token_issued_at", default="")
-
-    from app._generated.broker.v1 import broker_pb2 as pb
-    stub = await _get_or_create_sidecar_stub("schwab")
-    # ConfigureRequest: typed fields left empty, all Schwab creds in metadata
-    # per proto comment "Future creds without proto edits" (line 302).
-    request = pb.ConfigureRequest(
-        metadata={
-            "app_key": app_key,
-            "app_secret": app_secret,
-            "access_token": access,
-            "refresh_token": refresh,
-            "access_token_issued_at": issued_at,
-        },
-    )
-    await stub.Configure(request)
-    from app.core.metrics import BROKER_CONFIGURE_TOTAL
-    BROKER_CONFIGURE_TOTAL.labels(label="schwab", reason="manual").inc()
+    async def configure(
+        self,
+        *,
+        unlock_pwd_md5: str = "",
+        rsa_priv_pem: str = "",
+        opend_host: str = "",
+        opend_port: int = 0,
+        connection_id: str = "",
+        metadata: dict[str, str] | None = None,  # v3.1 HIGH-6: Schwab uses this
+    ) -> broker_pb2.ConfigureResponse:
+        request = broker_pb2.ConfigureRequest(
+            unlock_pwd_md5=unlock_pwd_md5,
+            rsa_priv_pem=rsa_priv_pem,
+            opend_host=opend_host,
+            opend_port=opend_port,
+            connection_id=connection_id,
+            metadata=metadata or {},
+        )
+        # ... existing _call dispatch unchanged ...
 ```
 
-Also extend the existing `BrokerConfigurer.configure()` (at `broker_registry_factory.py:40+`) so a startup-time call to `configurer.configure("schwab")` routes to `reconfigure_schwab(self._config)` — symmetric with the Futu branch at lines 51–58.
+The Futu kwargs are now defaulted so Schwab callers can omit them. All existing Futu callers continue to work because they use keyword args.
+
+**(b)** Extend `BrokerConfigurer.configure()` in `broker_registry_factory.py:47+` with a `"schwab"` branch — symmetric with the existing Futu branch:
+
+```python
+    async def configure(self, label: str) -> bool:
+        if label not in self.targets:
+            return True
+
+        if label == "schwab":
+            return await self._configure_schwab()
+
+        # Existing Futu branch unchanged (lines 51-76 in current file).
+        unlock_pwd_md5 = await self.config_service.reveal_secret(
+            "broker", f"{label}.unlock_pwd_md5"
+        )
+        # ... rest of existing Futu path ...
+
+    async def _configure_schwab(self) -> bool:
+        """v3.1 HIGH-6 — Schwab branch of BrokerConfigurer.configure().
+
+        ConfigureRequest is metadata-only for Schwab per proto line 302.
+        """
+        app_key = await self.config_service.reveal_secret(
+            "broker", "schwab.app_key", default=None)
+        app_secret = await self.config_service.reveal_secret(
+            "broker", "schwab.app_secret", default=None)
+        refresh = await self.config_service.reveal_secret(
+            "broker", "schwab.refresh_token", default=None)
+        if not (app_key and app_secret and refresh):
+            log.warning("schwab_configure_creds_missing")
+            return False
+        access = await self.config_service.reveal_secret(
+            "broker", "schwab.access_token", default="")
+        issued_at = await self.config_service.get(
+            "broker", "schwab.access_token_issued_at", default="")
+
+        client = await self.registry.get_client("schwab")
+        try:
+            resp = await client.configure(
+                metadata={
+                    "app_key": app_key,
+                    "app_secret": app_secret,
+                    "access_token": access,
+                    "refresh_token": refresh,
+                    "access_token_issued_at": issued_at,
+                },
+            )
+        except Exception as exc:
+            log.warning("schwab_configure_call_failed", error=str(exc))
+            return False
+        if resp.ok:
+            from app.core.metrics import BROKER_CONFIGURE_TOTAL
+            BROKER_CONFIGURE_TOTAL.labels(label="schwab", reason="apply").inc()
+        return bool(resp.ok)
+```
+
+**(c)** Add `reconfigure_schwab()` as a thin top-level helper that callers in C4/C5 use without needing to know about `BrokerConfigurer`:
+
+```python
+async def reconfigure_schwab(config_service: ConfigService) -> bool:
+    """v3.1 — public entry point that funnels into BrokerConfigurer.configure("schwab").
+    Used by C4 (public OAuth callback), C5 (admin OAuth callback), C11 (started_at
+    delta), and the existing /api/admin/brokers/schwab/reconfigure route. Lifespan
+    startup uses BrokerConfigurer directly via the existing init loop.
+    """
+    from app.core.deps import get_broker_registry
+    registry = get_broker_registry()
+    configurer = getattr(registry, "_configurer", None)
+    if configurer is None:
+        log.warning("reconfigure_schwab_no_configurer")
+        return False
+    return await configurer.configure("schwab")
+```
+
+**(d)** Update `build_broker_registry()` (line 79+) to:
+
+1. Add `"schwab"` to `SIDECAR_BROKERS` and a per-label host override so Schwab points at the docker-network hostname `schwab-sidecar` instead of the WG IP `10.10.0.2`. Recommend introducing `SIDECAR_HOSTS: dict[str, str] = {"schwab": "schwab-sidecar"}` and falling back to the `host` arg for any label not in the map.
+2. Add `"schwab"` to `configurer.targets` so the lifespan loop at lines 129-133 calls `configurer.configure("schwab")` at startup (Configure trigger #1).
+3. The Schwab sidecar is plaintext gRPC (no mTLS — VPS-internal only), so `BrokerSidecarClient` will need an optional `mtls_disabled: bool` flag. Add that surgically to `brokers.py:85+` if absent.
 
 - [ ] **Step 4: Run — PASS.** Commit.
 
 ```bash
 git add backend/app/services/broker_registry_factory.py \
+        backend/app/services/brokers.py \
         backend/tests/services/test_broker_configurer_schwab.py
-git commit -m "feat(backend): reconfigure_schwab helper + 5-trigger Configure contract (C3)"
+git commit -m "feat(backend): BrokerConfigurer schwab branch + metadata-aware client.configure (HIGH-6)"
 ```
 
 ### Task C8: Boundary-strip `account_hash` from `AccountResponse`
@@ -4177,24 +4531,38 @@ async def test_sse_forwards_config_invalidate(test_client_admin, redis):
 - [ ] **Step 3: Write `backend/app/api/sse.py`:**
 
 ```python
-"""SSE endpoint — forwards Redis pub/sub `config:invalidate:<ns>` to clients."""
+"""SSE endpoint — forwards Redis pub/sub `config:invalidate:<ns>` to clients.
+
+v3.1 hardening (HIGH-4):
+  - Try/except around the pubsub loop catches Redis disconnects + cancellations
+    without leaking a hung HTTP body. The generator exits cleanly so the
+    StreamingResponse closes, and the client receives EOF + reconnects.
+  - `Request.is_disconnected()` polled between yields so the loop exits when
+    the SchwabCard tab is closed (otherwise we leak a Redis subscription per
+    closed tab).
+  - The unsubscribe + aclose run in a final cleanup regardless of exit path.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.auth import require_admin_jwt
+from app.core.deps import get_redis, require_admin_jwt
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin", "sse"])
 
 
 @router.get("/config/stream", dependencies=[Depends(require_admin_jwt)])
 async def config_stream(
+    request: Request,
     ns: str = Query(..., regex=r"^[a-z0-9_]{1,32}$"),
-    redis=Depends(lambda: ...),
+    redis=Depends(get_redis),
 ):
     async def event_gen():
         pubsub = redis.pubsub()
@@ -4202,31 +4570,53 @@ async def config_stream(
         try:
             yield ": connected\n\n"
             while True:
-                msg = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=30.0,
-                )
+                if await request.is_disconnected():
+                    log.debug("sse_client_disconnect ns=%s", ns)
+                    return
+                try:
+                    msg = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=30.0,
+                    )
+                except (ConnectionError, asyncio.TimeoutError) as e:
+                    # Redis bounce or hard timeout — bail; client will reconnect.
+                    log.warning("sse_pubsub_error ns=%s err=%s", ns, e)
+                    return
+                except asyncio.CancelledError:
+                    # Server shutting down or upstream cancellation.
+                    raise
                 if msg is None:
                     yield ": keepalive\n\n"
                     continue
                 payload = json.dumps({"ns": ns, "event": "invalidate"})
                 yield f"data: {payload}\n\n"
         finally:
-            await pubsub.unsubscribe(f"config:invalidate:{ns}")
-            await pubsub.aclose()
+            try:
+                await pubsub.unsubscribe(f"config:invalidate:{ns}")
+                await pubsub.aclose()
+            except Exception:
+                log.exception("sse_pubsub_cleanup_failed ns=%s", ns)
+
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 ```
 
-- [ ] **Step 4: Mount + run.**
+- [ ] **Step 4: Mount in `backend/app/main.py`.**
 
-```bash
-git add backend/app/api/sse.py backend/tests/api/test_sse_config_stream.py
-# Mount in admin.py
+The SSE router is a separate file (not part of `admin_router`), so add an explicit mount alongside the others:
+
+```python
+# Top of main.py:
+from app.api.sse import router as sse_router
+
+# After the existing app.include_router(...) calls (~line 145):
+app.include_router(sse_router)
 ```
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git commit -m "feat(backend): H6 SSE forwarder for config:invalidate:<ns> pub/sub"
+git add backend/app/api/sse.py backend/app/main.py \
+        backend/tests/api/test_sse_config_stream.py
+git commit -m "feat(backend): H6 SSE forwarder + HIGH-4 disconnect/error handling"
 ```
 
 ### Task C11: Health-probe-driven Configure trigger (sidecar restart)
@@ -4265,14 +4655,19 @@ def _health(started_at):
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Extend `BrokerRegistry.health_probe_once()`** in `brokers.py` (Phase 6 already has `_configured: dict[str, datetime]`; ensure the schwab branch hits `reconfigure_schwab`):
+- [ ] **Step 3: Extend `BrokerRegistry.health_probe_once()`** in `brokers.py` (Phase 6 already has `_configured: dict[str, int]`; ensure the schwab branch hits `reconfigure_schwab`).
+
+v3.1 MED-5 fix: compare `Timestamp.seconds` (int) instead of `Timestamp.ToDatetime(timezone.utc)` (which returns a NAIVE datetime per protobuf — equality flap risk). Integer comparison is monotonic, idempotent, and TZ-free:
 
 ```python
 # Inside the per-label probe loop:
-if label == "schwab" and self._configured.get(label) != health.started_at.ToDatetime(timezone.utc):
+current = health.started_at.seconds  # google.protobuf.Timestamp epoch seconds
+if label == "schwab" and self._configured.get(label) != current:
     await reconfigure_schwab(self._config_service)
-    self._configured[label] = health.started_at.ToDatetime(timezone.utc)
+    self._configured[label] = current
 ```
+
+Also update `_configured` type annotation in `brokers.py` to `dict[str, int]` if it was `dict[str, datetime]`.
 
 - [ ] **Step 4: Run — PASS.** Commit.
 
@@ -4282,71 +4677,15 @@ git add backend/app/services/brokers.py \
 git commit -m "feat(backend): C3 trigger #2 — Configure schwab on sidecar restart (started_at delta)"
 ```
 
-### Task C12: Token-rotation atomicity integration test (C2)
+### Task C12: ~~Token-rotation atomicity integration test~~ — MOVED to F0 in v3.1
 
-**Files:** Create `backend/tests/integration/test_token_rotation_atomicity.py`.
-
-- [ ] **Step 1: Failing test.**
-
-```python
-"""Phase 7a C12 / C2 — concurrent Tier-1 + Tier-2 OAuth callbacks serialize via PG advisory lock."""
-import asyncio
-import pytest
-
-
-@pytest.mark.asyncio
-async def test_concurrent_callbacks_serialized(test_client_no_auth, test_client_admin, redis, config_service, httpx_mock):
-    """Tier-1 and Tier-2 fire callbacks at the same time; both succeed,
-    but writes are serialized so no torn refresh_token state."""
-    httpx_mock.add_response(
-        url="https://api.schwabapi.com/v1/oauth/token",
-        method="POST",
-        json={"access_token": "A1", "refresh_token": "R1", "expires_in": 1800},
-    )
-    httpx_mock.add_response(
-        url="https://api.schwabapi.com/v1/oauth/token",
-        method="POST",
-        json={"access_token": "A2", "refresh_token": "R2", "expires_in": 1800},
-    )
-
-    from app.services.schwab_oauth import mint_state_nonce
-    s1 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
-    s2 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
-    await config_service.set_secret("broker", "schwab.app_key", "K")
-    await config_service.set_secret("broker", "schwab.app_secret", "S")
-
-    async def call_public():
-        return await test_client_no_auth.get(
-            "/api/oauth/schwab/callback",
-            params={"code": "C1", "state": s1})
-
-    async def call_admin():
-        return await test_client_admin.post(
-            "/api/admin/brokers/schwab/oauth-callback",
-            params={"code": "C2", "state": s2})
-
-    r1, r2 = await asyncio.gather(call_public(), call_admin())
-    assert r1.status_code == 200
-    assert r2.status_code == 200
-    # Final state is whichever ran second; both possible.
-    final_token = await config_service.reveal_secret("broker", "schwab.refresh_token")
-    assert final_token in ("R1", "R2")
-```
-
-- [ ] **Step 2: Run — PASS** (no impl change; tests the existing C3+C5 wiring).
-
-- [ ] **Step 3: Commit.**
-
-```bash
-git add backend/tests/integration/test_token_rotation_atomicity.py
-git commit -m "test(backend): C2 atomicity — concurrent Tier-1+Tier-2 callbacks serialize via lock"
-```
+v3.1 chunk-rebalance: this is an integration test (not implementation), so it belongs in chunk F alongside the other integration suites. The actual implementation it exercises (C2 single-writer + C3 5-trigger Configure contract) is already covered by the unit tests in C2/C3. Moving the cross-task atomicity test out of chunk C also lets chunks B and C run in parallel after A. Look for **Task F0** at the head of chunk F.
 
 ---
 
 ## End of Chunk C
 
-After C12: 12 commits. Backend can mint state nonces, accept Schwab callbacks on public + admin paths, persist tokens via PG advisory lock, Configure the sidecar synchronously, serve SSE updates, and act as the single-writer authority for `RequestTokenRefresh`. All architect-applied invariants (C2 single-writer, C3 5 triggers, H1 nonce HMAC + GETDEL, H3 boundary strip, M5 redaction) are wired.
+After C11: 11 commits. Backend can mint state nonces, accept Schwab callbacks on public + admin paths, persist tokens via PG advisory lock, Configure the sidecar synchronously, serve SSE updates, and act as the single-writer authority for `RequestTokenRefresh`. All architect-applied invariants (C2 single-writer, C3 5 triggers, H1 nonce HMAC + GETDEL, H3 boundary strip, M5 redaction) are wired.
 
 ---
 
@@ -5489,19 +5828,25 @@ async def test_success_resets_failure_counter(admin_client_mock):
 
 - [ ] **Step 2: Run — FAIL.**
 
-- [ ] **Step 3: Write `sidecar_schwab_refresher/admin_client.py`** first — the HTTP wrapper that mirrors a slice of the backend admin API. Per architect grounding (CLAUDE.md "CI bypass" pattern + spec §3.5), this container has no DB session factory and never imports `ConfigService`. It authenticates with **CF Access service-token headers** (`CF-Access-Client-Id` + `CF-Access-Client-Secret`), NOT `Authorization: Bearer`:
+- [ ] **Step 3: Write `sidecar_schwab_refresher/admin_client.py`** — HTTP wrapper that mirrors the slice of the backend admin API the refresher needs. Per architect grounding (CLAUDE.md "CI bypass" pattern + spec §3.5 + v3.1 HIGH-7):
+
+  - This container has no DB session factory and never imports `ConfigService` or `app.core.metrics`.
+  - It authenticates with **CF Access service-token headers** (`CF-Access-Client-Id` + `CF-Access-Client-Secret`), NOT `Authorization: Bearer`.
+  - **`BACKEND_ADMIN_URL` defaults to the public URL `https://dashboard.kiusinghung.com`** — NOT `http://backend:8000`. CF service-token headers are converted to a CF Access JWT only at the CF edge proxy; calling `http://backend:8000` directly bypasses CF and `require_admin_jwt` will 401. The WAN round-trip is intentional.
+  - PUT body shape matches `ConfigInUpsert` (`backend/app/api/schemas.py:20`): `{value, value_type}` (HIGH-2). Same shape for `SecretInUpsert`.
+  - The reveal endpoint is `POST /api/admin/secrets/{ns}/{key}/reveal` (admin.py:233 — POST, not GET) returning `SecretRevealOut` `{namespace, key, value, value_type}` (HIGH-3).
 
 ```python
 """HTTP client mirror of the slice of ConfigService the refresher needs.
 
 Auth: CF-Access service-token headers per CLAUDE.md "CI bypass" pattern.
+URL: public dashboard URL — service-token→JWT conversion happens at the CF edge.
 Namespace is fixed to "broker" with key prefix "schwab." — the refresher only
 ever reads/writes Schwab keys, so callers pass bare key suffixes.
 """
 from __future__ import annotations
 
 import os
-from typing import Any
 
 import httpx
 
@@ -5526,7 +5871,10 @@ class BackendAdminClient:
     @classmethod
     def from_env(cls) -> "BackendAdminClient":
         return cls(
-            backend_url=os.environ.get("BACKEND_ADMIN_URL", "http://backend:8000"),
+            # v3.1 HIGH-7: public URL, not http://backend:8000.
+            backend_url=os.environ.get(
+                "BACKEND_ADMIN_URL", "https://dashboard.kiusinghung.com"
+            ),
             cf_access_client_id=os.environ["CF_ACCESS_CLIENT_ID"],
             cf_access_client_secret=os.environ["CF_ACCESS_CLIENT_SECRET"],
         )
@@ -5544,17 +5892,29 @@ class BackendAdminClient:
             return str(resp.json()["value"])
 
     async def set_config(self, key: str, value: str, *, value_type: str = "str") -> None:
+        # v3.1 HIGH-2: PUT body matches ConfigInUpsert (schemas.py:20). namespace
+        # and key are optional echo fields — omit them.
         url = f"{self._url}/api/admin/config/{self.NAMESPACE}/{self._key(key)}"
         async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as http:
             resp = await http.put(url, json={"value": value, "value_type": value_type})
             resp.raise_for_status()
 
     async def reveal_secret(self, key: str) -> str:
+        # v3.1 HIGH-3: POST (not GET) per admin.py:233. SecretRevealOut shape.
         url = f"{self._url}/api/admin/secrets/{self.NAMESPACE}/{self._key(key)}/reveal"
         async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as http:
-            resp = await http.get(url)
+            resp = await http.post(url)
             resp.raise_for_status()
             return str(resp.json()["value"])
+
+    async def push_tier2_metric(self, last_run_seconds: float) -> None:
+        """v3.1 MED-6 — refresher cannot import app.core.metrics. Push the
+        timestamp via a backend admin endpoint instead (E8). Backend translates
+        into SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS.set(last_run_seconds)."""
+        url = f"{self._url}/api/admin/metrics/tier2"
+        async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as http:
+            resp = await http.post(url, json={"last_run_seconds": last_run_seconds})
+            resp.raise_for_status()
 ```
 
 - [ ] **Step 4: Write `sidecar_schwab_refresher/main.py`:**
@@ -5726,7 +6086,10 @@ schwab-refresher:
   build: ./sidecar_schwab_refresher
   restart: unless-stopped
   environment:
-    BACKEND_ADMIN_URL: "http://backend:8000"
+    # v3.1 HIGH-7: refresher hits the PUBLIC URL (CF Access converts the
+    # service-token headers to a Cf-Access-Jwt-Assertion at the edge proxy).
+    # Calling http://backend:8000 directly would bypass CF and fail admin auth.
+    BACKEND_ADMIN_URL: "https://dashboard.kiusinghung.com"
     REFRESH_INTERVAL_HOURS: "72"
     DRY_RUN: "false"
     # CF Access service-token bypass — refresher auths to backend admin API
@@ -5751,22 +6114,105 @@ git add deploy/docker-compose.prod.yml
 git commit -m "feat(deploy): docker-compose schwab-sidecar + schwab-refresher (tier2 profile)"
 ```
 
-### Task E8: Tier-2 metric `SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS` push
+### Task E8: Tier-2 metric push via backend admin endpoint (MED-6)
 
-**Files:** Modify `sidecar_schwab_refresher/main.py` to push timestamp metric on every run.
+**Files:** Modify `sidecar_schwab_refresher/main.py`. Create `backend/app/api/admin_metrics.py`. Modify `backend/app/main.py` to mount the new router. Create `backend/tests/api/test_admin_metrics_tier2.py`.
 
-- [ ] **Step 1:** In `main.py::run_once`, before return:
+**v3.1 reality grounding (MED-6):** The refresher container has no `prometheus_client` registry of its own and never imports `app.core.metrics`. Instead, the refresher POSTs the timestamp to a new backend admin endpoint, and the backend translates the call into a gauge `.set(...)` against its existing registry (which Prometheus already scrapes). This keeps all Prometheus state inside one process and inherits the existing CF-Access service-token auth path.
+
+- [ ] **Step 1: Failing backend test** — `backend/tests/api/test_admin_metrics_tier2.py`:
 
 ```python
-from app.core.metrics import SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS
-SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS.set(time.time())
+"""Phase 7a E8 — POST /api/admin/metrics/tier2 sets the gauge."""
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_post_tier2_metric_sets_gauge(test_client_admin):
+    from app.core.metrics import SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS
+    SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS.set(0)  # baseline
+    resp = await test_client_admin.post(
+        "/api/admin/metrics/tier2",
+        json={"last_run_seconds": 1714492800.0},
+    )
+    assert resp.status_code == 204
+    # Read the gauge directly.
+    val = SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS._value.get()  # prometheus_client internal
+    assert val == 1714492800.0
+
+
+@pytest.mark.asyncio
+async def test_post_tier2_metric_requires_admin(test_client_no_auth):
+    resp = await test_client_no_auth.post(
+        "/api/admin/metrics/tier2", json={"last_run_seconds": 0.0})
+    assert resp.status_code == 401
 ```
 
-- [ ] **Step 2: Commit.**
+- [ ] **Step 2: Run — FAIL.**
+
+- [ ] **Step 3: Write `backend/app/api/admin_metrics.py`:**
+
+```python
+"""Admin metrics ingest endpoint — Tier-2 refresher POSTs heartbeats here."""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Response, status
+from pydantic import BaseModel, Field
+
+from app.core.deps import require_admin_jwt
+from app.core.metrics import SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS
+
+router = APIRouter(
+    prefix="/api/admin/metrics",
+    tags=["admin", "metrics"],
+    dependencies=[Depends(require_admin_jwt)],
+)
+
+
+class Tier2HeartbeatIn(BaseModel):
+    last_run_seconds: float = Field(ge=0)
+
+
+@router.post("/tier2", status_code=status.HTTP_204_NO_CONTENT)
+async def push_tier2_heartbeat(body: Tier2HeartbeatIn) -> Response:
+    SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS.set(body.last_run_seconds)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+```
+
+- [ ] **Step 4: Mount in `backend/app/main.py` (additive):**
+
+```python
+# Top-of-file:
+from app.api.admin_metrics import router as admin_metrics_router
+
+# After the other app.include_router(...) calls (~line 145):
+app.include_router(admin_metrics_router)
+```
+
+- [ ] **Step 5: Refresher pushes via `BackendAdminClient`** — at the END of `run_once()` (in `sidecar_schwab_refresher/main.py`), after both success and failure paths:
+
+```python
+import time
+
+# At the bottom of run_once(), inside an outer try/finally so we always emit:
+try:
+    # ... existing run_once body ...
+finally:
+    try:
+        await client.push_tier2_metric(time.time())
+    except Exception:
+        log.exception("tier2_metric_push_failed")  # never block on metric push
+```
+
+`BackendAdminClient.push_tier2_metric()` is defined in `admin_client.py` (E6 Step 3). The refresher does NOT import `app.core.metrics`.
+
+- [ ] **Step 6: Run — PASS.** Commit.
 
 ```bash
-git add sidecar_schwab_refresher/main.py
-git commit -m "feat(refresher): emit tier2_last_run_timestamp_seconds metric"
+git add backend/app/api/admin_metrics.py backend/app/main.py \
+        backend/tests/api/test_admin_metrics_tier2.py \
+        sidecar_schwab_refresher/main.py
+git commit -m "feat(refresher,backend): MED-6 tier2 heartbeat via admin endpoint (no shared metrics process)"
 ```
 
 ### Task E9: Refresher integration test (mocked Playwright + httpx)
@@ -5854,9 +6300,87 @@ After E10: 10 commits. Tier-2 refresher is fully implemented with feature-flag g
 
 ---
 
-## Chunk F — Tests + smoke (6 tasks)
+## Chunk F — Tests + smoke (7 tasks — F0 added in v3.1)
 
-Goal: integration coverage of the full Phase 7a flow + nightly real-Schwab smoke.
+Goal: integration coverage of the full Phase 7a flow + nightly real-Schwab smoke. F0 is the token-rotation atomicity test relocated from chunk C12 (v3.1 rebalance).
+
+### Task F0: Token-rotation atomicity integration test (relocated from C12)
+
+**Files:** Create `backend/tests/integration/test_token_rotation_atomicity.py`.
+
+**v3.1 reality grounding:** Validates the C2 single-writer rule under concurrent Tier-1 + Tier-2 callbacks. The fixture pins `settings.app_secret_key="K"` so the test mint and the route's `consume_state_nonce` use the same key (MED-7).
+
+- [ ] **Step 1: Write integration test.**
+
+```python
+"""Phase 7a F0 / C2 — concurrent Tier-1 + Tier-2 OAuth callbacks serialize via PG advisory lock."""
+import asyncio
+
+import pytest
+
+
+@pytest.fixture
+def app_secret_key_pin(monkeypatch):
+    """v3.1 MED-7 — pin settings.app_secret_key so the route handlers use the
+    same HMAC key that the test uses to mint state nonces."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "app_secret_key", "K", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callbacks_serialized(
+    app_secret_key_pin,
+    test_client_no_auth, test_client_admin,
+    redis, config_service, httpx_mock,
+):
+    """Tier-1 and Tier-2 fire callbacks at the same time; both succeed, but
+    writes are serialized by the PG advisory lock so no torn refresh_token state."""
+    httpx_mock.add_response(
+        url="https://api.schwabapi.com/v1/oauth/token",
+        method="POST",
+        json={"access_token": "A1", "refresh_token": "R1", "expires_in": 1800},
+    )
+    httpx_mock.add_response(
+        url="https://api.schwabapi.com/v1/oauth/token",
+        method="POST",
+        json={"access_token": "A2", "refresh_token": "R2", "expires_in": 1800},
+    )
+
+    from app.services.schwab_oauth import mint_state_nonce
+    s1 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
+    s2 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
+    await config_service.set_secret("broker", "schwab.app_key", "K")
+    await config_service.set_secret("broker", "schwab.app_secret", "S")
+
+    async def call_public():
+        return await test_client_no_auth.get(
+            "/api/oauth/schwab/callback",
+            params={"code": "C1", "state": s1})
+
+    async def call_admin():
+        return await test_client_admin.post(
+            "/api/admin/brokers/schwab/oauth-callback",
+            params={"code": "C2", "state": s2})
+
+    r1, r2 = await asyncio.gather(call_public(), call_admin())
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    # Final state is whichever ran second; both possible — but always coherent.
+    final_token = await config_service.reveal_secret("broker", "schwab.refresh_token")
+    assert final_token in ("R1", "R2")
+    final_access = await config_service.reveal_secret("broker", "schwab.access_token")
+    # Access + refresh from the SAME run survive together (single-writer invariant).
+    assert (final_token, final_access) in (("R1", "A1"), ("R2", "A2"))
+```
+
+- [ ] **Step 2: Run — PASS** (no implementation change; exercises the existing C2+C3+C5 wiring).
+
+- [ ] **Step 3: Commit.**
+
+```bash
+git add backend/tests/integration/test_token_rotation_atomicity.py
+git commit -m "test(backend): F0 single-writer atomicity — concurrent Tier-1+Tier-2 serialize via lock (MED-7 fixture pin)"
+```
 
 ### Task F1: Backend integration test — full OAuth flow round-trip
 
@@ -6297,7 +6821,7 @@ After G6: 6 commits + tag `v0.7.0`. Phase 7a is shipped.
 
 Plan complete and saved to `docs/superpowers/plans/2026-04-30-phase7a-schwab-connect-plan.md`.
 
-**Total: 59 tasks across 7 chunks** (A:7 + B:10 + C:12 + D:8 + E:10 + F:6 + G:6).
+**Total: 59 active tasks across 7 chunks** (A:7 + B:10 + C:12 incl. C0 fixture scaffold − C12 relocated + D:8 + E:10 + F:7 incl. F0 atomicity + G:6). v3.1 added Pre-flight PF6 (`get_redis`/`get_settings` deps), C0 fixture scaffold, F0 atomicity test relocated from C12, plus a backend admin metrics endpoint inside E8. A2 stays deleted (v3).
 
 **Two execution options:**
 
