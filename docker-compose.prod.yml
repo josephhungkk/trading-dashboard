@@ -142,6 +142,29 @@ services:
         max-file: "3"
     networks: [td-net]
 
+  schwab-sidecar:
+    build: ./sidecar_schwab
+    restart: unless-stopped
+    environment:
+      SCHWAB_SIDECAR_PORT: "9090"
+      BACKEND_ADMIN_GRPC: "backend:8001"
+      LOG_LEVEL: "INFO"
+    networks: [td-net]
+    depends_on:
+      backend: { condition: service_started }
+
+  schwab-refresher:
+    build: ./sidecar_schwab_refresher
+    restart: unless-stopped
+    environment:
+      BACKEND_ADMIN_URL: "https://dashboard.kiusinghung.com"
+      REFRESH_INTERVAL_HOURS: "72"
+      DRY_RUN: "false"
+      CF_ACCESS_CLIENT_ID: "${CF_ACCESS_CLIENT_ID}"
+      CF_ACCESS_CLIENT_SECRET: "${CF_ACCESS_CLIENT_SECRET}"
+    networks: [td-net]
+    profiles: ["tier2"]
+
 networks:
   td-net:
     driver: bridge
