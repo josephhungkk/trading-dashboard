@@ -202,3 +202,79 @@ broker_normalize_unknown_total = Counter(
     labelnames=["label", "field"],
     registry=registry,
 )
+
+
+# ──────────────────────── Phase 7a Schwab metrics ───────────────────────────
+# Per spec §8.1 — see docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md
+
+# v3 — net-new (Phase 6 never registered this despite spec §8.1 saying "extends").
+BROKER_CONFIGURE_TOTAL = Counter(
+    "broker_configure_total",
+    "Sidecar Configure RPC outcomes by label + reason.",
+    labelnames=["label", "reason"],
+    registry=registry,
+)
+
+SCHWAB_OAUTH_START_TOTAL = Counter(
+    "schwab_oauth_start_total",
+    "Number of Schwab OAuth flow initiations (Tier-1 path).",
+    registry=registry,
+)
+
+SCHWAB_OAUTH_CALLBACK_TOTAL = Counter(
+    "schwab_oauth_callback_total",
+    "Schwab OAuth callback outcomes by path + result.",
+    labelnames=["path", "result"],
+    registry=registry,
+)
+
+SCHWAB_ACCESS_TOKEN_AGE_SECONDS = Gauge(
+    "schwab_access_token_age_seconds",
+    "Age of the current access_token in seconds.",
+    registry=registry,
+)
+
+SCHWAB_REFRESH_TOKEN_AGE_HOURS = Gauge(
+    "schwab_refresh_token_age_hours",
+    "Age of the current refresh_token in hours.",
+    registry=registry,
+)
+
+SCHWAB_REFRESH_TOKEN_USES_PER_24H = Gauge(
+    "schwab_refresh_token_uses_per_24h",
+    "Refresh-token uses in a rolling 24h window (H4 — restart-flapping detector).",
+    registry=registry,
+)
+
+SCHWAB_ACCOUNT_HASH_REFRESH_TOTAL = Counter(
+    "schwab_account_hash_refresh_total",
+    "account_hash cache refreshes by reason.",
+    labelnames=["reason"],
+    registry=registry,
+)
+
+SCHWAB_HTTP_REQUESTS_TOTAL = Counter(
+    "schwab_http_requests_total",
+    "Schwab REST request count by endpoint + status code.",
+    labelnames=["endpoint", "status"],
+    registry=registry,
+)
+
+SCHWAB_SIDECAR_TOKEN_DRIFT_SECONDS = Gauge(
+    "schwab_sidecar_token_drift_seconds",
+    "Seconds since the last Configure call after a known token write (C3 invariant).",
+    registry=registry,
+)
+
+SCHWAB_TIER2_REFRESH_TOTAL = Counter(
+    "schwab_tier2_refresh_total",
+    "Tier-2 Playwright auto-refresh outcomes.",
+    labelnames=["result"],
+    registry=registry,
+)
+
+SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS = Gauge(
+    "schwab_tier2_last_run_timestamp_seconds",
+    "Unix timestamp of the most recent Tier-2 refresh attempt (any outcome).",
+    registry=registry,
+)
