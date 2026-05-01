@@ -161,3 +161,37 @@ async def schwab_status(config_service: ConfigDep) -> dict[str, str | None]:
             await config_service.get("broker", "schwab.tier2_consecutive_failures"),
         ),
     }
+
+
+@router.post("/schwab/disconnect")
+async def disconnect_schwab(
+    config_service: ConfigDep,
+    delete_credentials: bool = Query(False),
+) -> dict[str, bool]:
+    """Phase 7a D4 — wipe Schwab tokens (always); optionally wipe Tier-2 creds."""
+    # Always wipe tokens.
+    await config_service.delete_secret("broker", "schwab.access_token")
+    await config_service.delete_secret("broker", "schwab.refresh_token")
+    await config_service.delete("broker", "schwab.access_token_issued_at")
+    await config_service.delete("broker", "schwab.refresh_token_issued_at")
+
+    # Optionally wipe Tier-2 creds (M7 + L5).
+    if delete_credentials:
+        for k in ("username", "password", "totp_secret"):
+            await config_service.delete_secret("broker", f"schwab.{k}")
+        await config_service.set(
+            "broker",
+            "schwab.tier2_refresh_enabled",
+            "false",
+            value_type="bool",
+        )
+
+    # Soft-delete schwab broker_accounts rows handled by next discoverer tick.
+    from app.services.broker_registry_factory import reconfigure_schwab
+
+    try:
+        await reconfigure_schwab(config_service)
+    except Exception:
+        log.exception("schwab_disconnect_reconfigure_failed")
+
+    return {"ok": True}
