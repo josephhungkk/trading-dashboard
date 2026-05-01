@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { RadioGroup, RadioItem } from '@/components/primitives/Radio';
 import { Switch } from '@/components/primitives/Switch';
+import { SchwabCard } from './SchwabCard';
 
 const DENSITY_STORAGE_KEY = 'dashboard.settings.density';
 const SOUND_STORAGE_KEY = 'dashboard.settings.sound';
@@ -126,6 +127,11 @@ export function SettingsPage(): React.JSX.Element {
           </div>
         </section>
       </form>
+
+      <section>
+        <h2>Brokers</h2>
+        <SchwabCard />
+      </section>
 
       <section className="grid min-h-0 gap-3 rounded-lg border border-border bg-panel p-4" aria-labelledby="settings-about">
         <h3 id="settings-about" className="text-base font-semibold text-fg">
