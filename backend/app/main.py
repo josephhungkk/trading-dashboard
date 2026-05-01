@@ -19,6 +19,7 @@ from app.api.brokers import router as brokers_router
 from app.api.brokers_admin import router as brokers_admin_router
 from app.api.contracts import router as contracts_router
 from app.api.metrics import router as metrics_router
+from app.api.oauth import router as oauth_router
 from app.api.orders import fills_router
 from app.api.orders import router as orders_router
 from app.core.config import settings
@@ -143,6 +144,7 @@ app.include_router(metrics_router)
 app.include_router(orders_router)
 app.include_router(fills_router)
 app.include_router(contracts_router)
+app.include_router(oauth_router)
 
 
 @app.get("/health")
