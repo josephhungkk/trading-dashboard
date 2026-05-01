@@ -1,0 +1,31 @@
+name: nightly-real-schwab
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, nuc]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen --all-groups
+      - name: Pytest (real_schwab smoke)
+        working-directory: backend
+        env:
+          CI_USE_REAL_SCHWAB: '1'
+          SCHWAB_TEST_ACCESS_TOKEN: ${{ secrets.SCHWAB_TEST_ACCESS_TOKEN }}
+          APP_ENV: dev
+          APP_SECRET_KEY: ci-fake-key-not-used-in-this-job
+          APP_CORS_ORIGINS: '["http://localhost:5173"]'
+          DATABASE_URL: postgresql+asyncpg://x:x@localhost/x
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest tests/integration/test_real_schwab_smoke.py -v
