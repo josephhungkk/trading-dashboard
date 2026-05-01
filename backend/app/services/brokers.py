@@ -565,6 +565,8 @@ class BrokerRegistry:
         self._lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         self._configured: dict[str, datetime] = {}
+        self._configured_started_at: dict[str, int] = {}
+        self._config_service: Any | None = None
         self._configurer: Any | None = None
 
     async def get_client(self, label: str) -> BrokerSidecarClient:
@@ -656,6 +658,33 @@ class BrokerRegistry:
                     log.warning("broker_reconfigure_returned_not_ok", label=label)
             except Exception as exc:
                 log.warning("broker_reconfigure_failed", label=label, error=str(exc))
+
+        schwab_started_at = cast("_Timestamp | None", getattr(health, "started_at", None))
+        if label == "schwab" and schwab_started_at is not None:
+            current = schwab_started_at.seconds
+            if current > 0 and self._configured_started_at.get(label) != current:
+                config_service = self._config_service
+                if config_service is None and configurer is not None:
+                    config_service = getattr(configurer, "config_service", None)
+                    self._config_service = config_service
+                if config_service is None:
+                    structlog.get_logger().warning(
+                        "schwab_restart_detected_no_reconfigure",
+                        started_at=current,
+                        label=label,
+                    )
+                    self._configured_started_at[label] = current
+                else:
+                    from app.services.broker_registry_factory import reconfigure_schwab
+
+                    try:
+                        await reconfigure_schwab(config_service)
+                        self._configured_started_at[label] = current
+                    except Exception as exc:
+                        structlog.get_logger().warning(
+                            "schwab_reconfigure_on_started_at_delta_failed",
+                            error=str(exc),
+                        )
 
         await self._mark_health(label, ok=True, health=health)
         log.debug("broker_registry_probe_ok", label=label)
