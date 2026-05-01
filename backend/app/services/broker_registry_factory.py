@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import structlog
 from cryptography.fernet import InvalidToken
 
+from app.core.metrics import BROKER_CONFIGURE_TOTAL
 from app.services.brokers import BrokerRegistry, BrokerSidecarClient
 from app.services.config import ConfigService
 
@@ -70,6 +71,9 @@ class BrokerConfigurer:
         if label not in self.targets:
             return True
 
+        if label == "schwab":
+            return await self._configure_schwab()
+
         unlock_pwd_md5 = await self.config_service.reveal_secret(
             "broker", f"{label}.unlock_pwd_md5"
         )
@@ -96,6 +100,46 @@ class BrokerConfigurer:
             log.warning("broker_configure_call_failed", label=label, error=str(exc))
             return False
         return bool(resp.ok)
+
+    async def _configure_schwab(self) -> bool:
+        try:
+            app_key = await self.config_service.reveal_secret("broker", "schwab.app_key")
+            app_secret = await self.config_service.reveal_secret("broker", "schwab.app_secret")
+            refresh_token = await self.config_service.reveal_secret(
+                "broker", "schwab.refresh_token"
+            )
+        except Exception as exc:
+            log.warning("broker_configure_creds_missing", label="schwab", error=str(exc))
+            return False
+
+        if not app_key or not app_secret or not refresh_token:
+            log.warning("broker_configure_creds_missing", label="schwab")
+            return False
+
+        metadata = {
+            "app_key": str(app_key),
+            "app_secret": str(app_secret),
+            "refresh_token": str(refresh_token),
+        }
+        access_token = await self.config_service.get("broker", "schwab.access_token")
+        access_token_issued_at = await self.config_service.get(
+            "broker", "schwab.access_token_issued_at"
+        )
+        if access_token:
+            metadata["access_token"] = str(access_token)
+        if access_token_issued_at:
+            metadata["access_token_issued_at"] = str(access_token_issued_at)
+
+        client = await self.registry.get_client("schwab")
+        try:
+            resp = await client.configure(metadata=metadata)
+        except Exception as exc:
+            log.warning("broker_configure_call_failed", label="schwab", error=str(exc))
+            return False
+        ok = bool(resp.ok)
+        if ok:
+            BROKER_CONFIGURE_TOTAL.labels(label="schwab", reason="ok").inc()
+        return ok
 
 
 async def build_broker_registry(
@@ -144,7 +188,7 @@ async def build_broker_registry(
     configurer = BrokerConfigurer(
         config_service=config_service,
         registry=registry,
-        targets={"futu"},
+        targets={"futu", "schwab"},
     )
     registry._configurer = configurer
 
@@ -155,3 +199,13 @@ async def build_broker_registry(
             log.warning("broker_initial_configure_failed", label=label, error=str(exc))
 
     return registry
+
+
+async def reconfigure_schwab(config_service: ConfigService) -> None:
+    del config_service
+    from app.core.deps import get_broker_registry
+
+    registry = get_broker_registry()
+    configurer = cast(Any, getattr(registry, "_configurer", None))
+    if configurer is not None:
+        await configurer.configure("schwab")

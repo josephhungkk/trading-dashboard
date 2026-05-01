@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from decimal import Decimal, InvalidOperation
@@ -124,11 +124,12 @@ class BrokerSidecarClient:
     async def configure(
         self,
         *,
-        unlock_pwd_md5: str,
-        rsa_priv_pem: str,
-        opend_host: str,
-        opend_port: int,
-        connection_id: str,
+        unlock_pwd_md5: str = "",
+        rsa_priv_pem: str = "",
+        opend_host: str = "127.0.0.1",
+        opend_port: int = 11111,
+        connection_id: str = "",
+        metadata: Mapping[str, str] | None = None,
     ) -> broker_pb2.ConfigureResponse:
         request = broker_pb2.ConfigureRequest(
             unlock_pwd_md5=unlock_pwd_md5,
@@ -136,6 +137,7 @@ class BrokerSidecarClient:
             opend_host=opend_host,
             opend_port=opend_port,
             connection_id=connection_id,
+            metadata=metadata or {},
         )
         return await self._call(
             method="Configure",
@@ -1342,6 +1344,15 @@ def _format_nlv(d: Decimal | None) -> str | None:
     except InvalidOperation:
         return None
     return format(quantized, "f")
+
+
+_ACCOUNT_BOUNDARY_STRIP_FIELDS: frozenset[str] = frozenset(
+    {
+        "gateway_label",
+        "account_number",
+        "account_hash",
+    }
+)
 
 
 def _account_response_from_row(row: _AccountRow) -> base.AccountResponse:
