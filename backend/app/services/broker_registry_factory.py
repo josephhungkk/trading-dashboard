@@ -19,6 +19,7 @@ SIDECAR_PORTS: dict[str, int] = {
     "normal-live": 18003,
     "normal-paper": 18004,
     "futu": 18005,
+    "schwab": 9090,  # Phase 7a — VPS docker-compose-internal port
 }
 
 # H4: backend cross-checks Health.broker_id against this map at every probe.
@@ -29,7 +30,28 @@ SIDECAR_BROKERS: dict[str, str] = {
     "normal-live": "ibkr",
     "normal-paper": "ibkr",
     "futu": "futu",
+    "schwab": "schwab",  # Phase 7a
 }
+
+
+# Phase 7a — per-label host override. Labels NOT in this map use the
+# build_broker_registry(host=...) default (10.10.0.2 / NUC-WG). Schwab
+# lives in the same docker-compose network as backend on the VPS, so
+# its host is the compose service name "schwab-sidecar".
+SIDECAR_HOSTS: dict[str, str] = {
+    "schwab": "schwab-sidecar",
+}
+
+
+def resolve_target(label: str, *, default_host: str) -> str:
+    """Compute the gRPC target for a sidecar label.
+
+    `SIDECAR_HOSTS` overrides the default_host on a per-label basis;
+    `SIDECAR_PORTS` always provides the port.
+    """
+    host = SIDECAR_HOSTS.get(label, default_host)
+    port = SIDECAR_PORTS[label]
+    return f"{host}:{port}"
 
 
 class MissingBrokerSecrets(Exception):  # noqa: N818
@@ -110,12 +132,12 @@ async def build_broker_registry(
         {
             label: BrokerSidecarClient(
                 label=label,
-                target=f"{host}:{port}",
+                target=resolve_target(label, default_host=host),
                 client_cert_pem=cert_pem,
                 client_key_pem=key_pem,
                 ca_bundle_pem=ca_bundle_pem,
             )
-            for label, port in SIDECAR_PORTS.items()
+            for label in SIDECAR_PORTS
         }
     )
 
