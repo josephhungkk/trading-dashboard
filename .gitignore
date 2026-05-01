@@ -32,6 +32,7 @@ backend/app/_generated/
 sidecar/_generated/
 sidecar_futu/_generated/
 sidecar_schwab/_generated/
+sidecar_schwab_refresher/_generated/
 frontend/src/proto-gen/
 
 # Operator secrets (CF Access service tokens, mTLS material, etc.) -
