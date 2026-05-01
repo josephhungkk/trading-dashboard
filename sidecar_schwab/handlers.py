@@ -170,6 +170,60 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             accounts.append(acct)
         return broker_pb2.AccountsResponse(accounts=accounts)
 
+    async def GetAccountSummary(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.SummaryResponse:
+        if self._client is None:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "not configured")
+            return broker_pb2.SummaryResponse()
+
+        from sidecar_schwab.normalize import normalize_summary
+
+        details = await self._fetch_account_with_404_retry(request.account_number)
+        summary = normalize_summary(details)
+        return broker_pb2.SummaryResponse(summary=summary)
+
+    async def GetPositions(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PositionsResponse:
+        if self._client is None:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "not configured")
+            return broker_pb2.PositionsResponse()
+
+        from sidecar_schwab.normalize import normalize_position
+
+        details = await self._fetch_account_with_404_retry(request.account_number)
+        sa = details.get("securitiesAccount") or {}
+        positions = [normalize_position(p) for p in (sa.get("positions") or [])]
+        return broker_pb2.PositionsResponse(positions=positions)
+
+    async def GetOrders(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.OrdersResponse:
+        if self._client is None:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "not configured")
+            return broker_pb2.OrdersResponse()
+
+        from sidecar_schwab.normalize import normalize_order
+
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=7)
+        h = self._client.hash_for(request.account_number)
+        rows = await self._client.get_orders(
+            account_hash=h,
+            from_dt=start.isoformat(),
+            to_dt=end.isoformat(),
+            max_results=200,
+        )
+        orders = [normalize_order(r) for r in (rows or [])]
+        return broker_pb2.OrdersResponse(orders=orders)
+
     async def _fetch_account_with_404_retry(self, account_number: str) -> dict:
         """H3 -- on typed SchwabAccountHashStaleError, invalidate cache + retry once."""
         from sidecar_schwab.client import SchwabAccountHashStaleError
