@@ -29,27 +29,28 @@ describe("services/schwab.ts", () => {
   });
 
   it("disconnect passes delete_credentials flag in querystring", async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock: typeof fetch = vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => ({}),
-    }) as Response);
-    await disconnect(fetchMock as unknown as typeof fetch, { deleteCredentials: true });
-    const calls = fetchMock.mock.calls;
+    }) as Response) as unknown as typeof fetch;
+    await disconnect(fetchMock, { deleteCredentials: true });
+    const calls = (fetchMock as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     const lastCall = String(calls[calls.length - 1]?.[0] ?? "");
     expect(lastCall).toContain("delete_credentials=true");
   });
 
   it("enableTier2 PUTs to admin config endpoint", async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock: typeof fetch = vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => ({}),
-    }) as Response);
-    await enableTier2(fetchMock as unknown as typeof fetch, true);
-    expect(fetchMock).toHaveBeenCalled();
-    const firstUrl = String(fetchMock.mock.calls[0]?.[0] ?? "");
+    }) as Response) as unknown as typeof fetch;
+    await enableTier2(fetchMock, true);
+    const calls = (fetchMock as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const firstUrl = String(calls[0]?.[0] ?? "");
     expect(firstUrl).toContain("/api/admin/config/broker/schwab.tier2_refresh_enabled");
   });
 });
