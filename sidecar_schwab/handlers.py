@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import grpc
+from google.protobuf.timestamp_pb2 import Timestamp
 
 _GENERATED_ROOT = Path(__file__).resolve().parent / "_generated"
 if str(_GENERATED_ROOT) not in sys.path:
@@ -43,20 +44,37 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         self._token_cache: TokenCache | None = None
         self._last_meta_fingerprint: str | None = None
         self._configured_at: datetime | None = None
-
-    # Health stub (replaces the A4 stub; B5 will override with real impl)
+        self._hashes_loaded_once = False
 
     async def Health(  # noqa: N802
         self,
         request: broker_pb2.HealthRequest,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.HealthResponse:
+        """H4 invariant: gateway_connected = token_fresh AND _account_hashes non-empty."""
+        token_fresh = (
+            self._token_cache is not None
+            and self._token_cache._access_issued_at is not None
+            and (datetime.now(timezone.utc) - self._token_cache._access_issued_at)
+            < _FRESH_WINDOW
+        )
+        hashes_present = (
+            self._client is not None
+            and bool(self._client._account_hashes)
+        )
+        connected = token_fresh and hashes_present
+
+        started_ts = Timestamp()
+        if self._configured_at is not None:
+            started_ts.FromDatetime(self._configured_at)
+
         return broker_pb2.HealthResponse(
             label="schwab",
             broker_id="schwab",
-            gateway_version="",
-            gateway_connected=False,
-            sidecar_version="0.7.0-stub",
+            gateway_version="schwabdev-3.0.3",
+            gateway_connected=connected,
+            sidecar_version=os.environ.get("SIDECAR_BUILD_SHA", "0.7.0"),
+            started_at=started_ts,
         )
 
     # Configure
@@ -114,12 +132,55 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                     schwabdev_client=None,
                     token_cache=self._token_cache,
                 )
+            self._hashes_loaded_once = False
             self._last_meta_fingerprint = fingerprint
             self._configured_at = now
             self._configure_count += 1
             log.info("schwab_configured count=%d access_was_fresh=%s",
                      self._configure_count, bool(effective_access))
             return broker_pb2.ConfigureResponse(ok=True)
+
+    async def ListManagedAccounts(  # noqa: N802
+        self,
+        request: broker_pb2.Empty,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.AccountsResponse:
+        """v3 -- RPC name + signature match real proto: takes Empty, returns AccountsResponse."""
+        if self._client is None:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "schwab sidecar not configured (call Configure first)",
+            )
+            return broker_pb2.AccountsResponse()
+
+        from sidecar_schwab.normalize import normalize_account
+
+        # H3 -- emit 'initial' on first call after Configure; 'rotation_detected' subsequently.
+        reason = "initial" if not self._hashes_loaded_once else "rotation_detected"
+        hashes = await self._client.refresh_hashes(reason=reason)
+        self._hashes_loaded_once = True
+
+        accounts: list[broker_pb2.Account] = []
+        for account_number, hash_value in hashes.items():
+            details = await self._fetch_account_with_404_retry(account_number)
+            account_details = details.get("securitiesAccount", details)
+            acct = normalize_account(account_details)
+            acct.account_hash = hash_value
+            acct.gateway_label = "schwab"
+            accounts.append(acct)
+        return broker_pb2.AccountsResponse(accounts=accounts)
+
+    async def _fetch_account_with_404_retry(self, account_number: str) -> dict:
+        """H3 -- on typed SchwabAccountHashStaleError, invalidate cache + retry once."""
+        from sidecar_schwab.client import SchwabAccountHashStaleError
+
+        h = self._client.hash_for(account_number)
+        try:
+            return await self._client.get_account_details(h)
+        except SchwabAccountHashStaleError:
+            await self._client.refresh_hashes(reason="404_retry")
+            h = self._client.hash_for(account_number)
+            return await self._client.get_account_details(h)
 
     @staticmethod
     def _fingerprint(meta: dict[str, str]) -> str:
