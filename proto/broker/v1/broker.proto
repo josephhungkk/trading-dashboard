@@ -124,6 +124,10 @@ message Account {
   string gateway_label = 3;
   // Sourced from accountSummary BASE tag (e.g., "USD", "GBP"). NOT defaulted.
   string currency_base = 4;
+  // Phase 7a — Schwab privacy-layer hash from /accountNumbers; required on
+  // every Schwab REST path. Empty for IBKR/Futu. PII-equivalent: never
+  // logged; backend's AccountResponse boundary-strips before REST output.
+  string account_hash = 5;
 }
 message AccountsResponse {
   repeated Account accounts = 1;
@@ -199,6 +203,11 @@ message Order {
   Money avg_fill_price = 11;
   google.protobuf.Timestamp submitted_at = 12;
   google.protobuf.Timestamp updated_at = 13;
+  // Phase 7a M2 — true when avg_fill_price was inferred from limit_price
+  // because the upstream broker JSON omitted execution-leg detail (e.g.,
+  // Schwab's `orderActivityCollection` missing on a FILLED order). UI
+  // dims the value when this flag is true.
+  bool avg_fill_price_inferred = 14;
 }
 message OrdersResponse {
   repeated Order orders = 1;
@@ -308,4 +317,25 @@ message ConfigureResponse {
   // Empty on success; "invalid_unlock_pwd_md5" or "invalid_rsa_pem" on
   // validation rejection.
   string detail = 2;
+}
+
+// Phase 7a — sidecar→backend single-writer token-refresh callback (architect C2).
+// This service is implemented by the BACKEND (not by sidecars). Sidecars are
+// gRPC clients of this service when they need a fresh token pair. Backend
+// holds the PG advisory lock during the actual refresh; sidecars never call
+// Schwab's /oauth/token endpoint directly.
+service BackendCallback {
+  // broker_id selects which broker's tokens to refresh. Only "schwab"
+  // currently uses this path; other brokers reuse their existing auth.
+  rpc RequestTokenRefresh(TokenRefreshRequest) returns (TokenRefreshResponse);
+}
+
+message TokenRefreshRequest {
+  string broker_id = 1;  // "schwab" — distinguishes if other brokers ever need this pattern
+}
+
+message TokenRefreshResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  google.protobuf.Timestamp access_issued_at = 3;
 }
