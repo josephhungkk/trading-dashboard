@@ -89,6 +89,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/brokers/{label}/reconfigure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reconfigure */
+        post: operations["reconfigure_api_admin_brokers__label__reconfigure_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/config": {
         parameters: {
             query?: never;
@@ -527,7 +544,7 @@ export interface components {
              * Asset Class
              * @enum {string}
              */
-            asset_class: "ASSET_UNSPECIFIED" | "STOCK" | "ETF" | "OPTION" | "FUTURE" | "FOREX" | "CRYPTO" | "BOND" | "MUTUAL_FUND" | "WARRANT";
+            asset_class: "ASSET_UNSPECIFIED" | "STOCK" | "ETF" | "OPTION" | "FUTURE" | "FOREX" | "CRYPTO" | "BOND" | "MUTUAL_FUND" | "WARRANT" | "CBBC";
             /** Conid */
             conid: string;
             /** Currency */
@@ -547,7 +564,7 @@ export interface components {
         /** ContractSummary */
         ContractSummary: {
             /** Conid */
-            conid: number;
+            conid: number | string;
             /** Description */
             description: string;
         };
@@ -1188,6 +1205,39 @@ export interface operations {
             };
         };
     };
+    reconfigure_api_admin_brokers__label__reconfigure_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_config_api_admin_config_get: {
         parameters: {
             query?: {
@@ -1569,6 +1619,7 @@ export interface operations {
             query: {
                 q: string;
                 asset_class?: string;
+                broker?: ("ibkr" | "futu" | "schwab") | null;
             };
             header?: never;
             path?: never;
