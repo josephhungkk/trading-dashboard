@@ -86,6 +86,19 @@ def test_components_rejects_empty_field() -> None:
         canonical_id_components("stock::US")
 
 
+def test_components_rejects_trailing_colon() -> None:
+    """Trailing ``:`` produces an empty 4th segment — reject (was silently
+    accepted before B1 reviewer pass)."""
+    with pytest.raises(ValueError, match="malformed"):
+        canonical_id_components("stock:AAPL:US:")
+
+
+def test_components_rejects_five_segments() -> None:
+    """5+ segments are nonsense (no canonical form has them) — reject."""
+    with pytest.raises(ValueError, match="malformed"):
+        canonical_id_components("stock:AAPL:US:NYSE:EXTRA")
+
+
 def test_with_exchange_returns_none_when_absent() -> None:
     assert canonical_id_with_exchange("stock:AAPL:US") == ("stock", "AAPL", "US", None)
 
@@ -143,6 +156,21 @@ def test_scale_gbx_lowercase_inputs() -> None:
     assert scale_gbx_if_needed(Decimal("100"), currency="gbp", exchange="lse") == Decimal("1")
 
 
+def test_scale_gbx_rejects_nan() -> None:
+    """Non-finite floats corrupt downstream NLV math — fail fast."""
+    with pytest.raises(ValueError, match="non-finite"):
+        scale_gbx_if_needed(float("nan"), currency="GBP", exchange="LSE")
+
+
+def test_scale_gbx_rejects_inf() -> None:
+    with pytest.raises(ValueError, match="non-finite"):
+        scale_gbx_if_needed(float("inf"), currency="GBP", exchange="LSE")
+
+
+def test_scale_gbx_zero_decimal_passthrough() -> None:
+    assert scale_gbx_if_needed(Decimal("0"), currency="GBP", exchange="LSE") == Decimal("0")
+
+
 # ── country_for_exchange ─────────────────────────────────────────────────
 
 
@@ -185,23 +213,21 @@ def test_exception_hierarchy() -> None:
 
 
 def test_source_ids_are_lowercase_strings() -> None:
-    """Every constant must equal its lowercased string — sidecars emit
-    these verbatim into ``QuoteMessage.source``."""
-    for name in (
-        "IBKR",
-        "FUTU",
-        "SCHWAB",
-        "YFINANCE",
-        "COINBASE",
-        "OANDA",
-        "FINNHUB",
-        "TWELVE_DATA",
-        "ALPACA",
-        "POLYGON",
-        "BINANCE",
-        "EODHD",
-        "TRADIER",
-    ):
-        value = getattr(SourceId, name)
-        assert isinstance(value, str)
-        assert value == value.lower()
+    """Every member's string value must equal its lowercased form — sidecars
+    emit these verbatim into ``QuoteMessage.source``. Iterates the StrEnum
+    so adding a new member without lowercasing fails the test automatically.
+    """
+    members = list(SourceId)
+    assert len(members) >= 13  # current floor; new sources may extend
+    for member in members:
+        assert isinstance(member.value, str)
+        assert member.value == member.value.lower()
+        assert member == member.value  # StrEnum equality contract
+
+
+def test_source_id_strenum_membership() -> None:
+    """``SourceId.IBKR == 'ibkr'`` — callers can pass the enum or a plain
+    lowercase string interchangeably."""
+    assert SourceId.IBKR == "ibkr"
+    assert SourceId.SCHWAB == "schwab"
+    assert SourceId.ALPACA == "alpaca"

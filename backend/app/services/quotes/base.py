@@ -18,17 +18,41 @@ them. What survives:
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
+from enum import StrEnum
 from typing import NewType
+
+__all__ = [
+    "CanonicalId",
+    "NotEntitled",
+    "NotSupported",
+    "ProviderDown",
+    "QuoteError",
+    "SourceId",
+    "SubscriptionToken",
+    "canonical_id_components",
+    "canonical_id_with_exchange",
+    "canonical_key",
+    "country_for_exchange",
+    "scale_gbx_if_needed",
+]
 
 CanonicalId = NewType("CanonicalId", str)
 SubscriptionToken = str
 
 
-class SourceId:
+# Note on the proto enum: spec §3.2 calls for a ``QuoteSource`` enum but the
+# A1 commit deliberately kept ``QuoteMessage.source`` as a plain string for
+# strict open-set extensibility (a new source needs no .proto change). The
+# plan's ``source_id_to_str(int) -> str`` helper has no proto-int domain to
+# map from and is therefore not implemented; ``SourceId`` below replaces it
+# as a typed namespace for the lowercase string emitted by sidecars.
+class SourceId(StrEnum):
     """Open-set source identifiers — lowercase strings emitted by sidecars
-    in :class:`QuoteMessage.source`. Adding a new source is a constant
-    addition here + a new sidecar streamer; never a proto change.
+    in :class:`QuoteMessage.source`. ``StrEnum`` so members compare equal to
+    their string values (``SourceId.IBKR == "ibkr"``) and ``list(SourceId)``
+    gives runtime exhaustiveness for tests + source-router config.
     """
 
     IBKR = "ibkr"
@@ -67,7 +91,7 @@ class ProviderDown(QuoteError):  # noqa: N818 — name preserved from spec / das
 
 
 _UK_PENCE_EXCHANGES: frozenset[str] = frozenset({"LSE", "LSEETF"})
-_PENCE_CURRENCIES: frozenset[str] = frozenset({"GBP", "GBX", "GBP."})
+_PENCE_CURRENCIES: frozenset[str] = frozenset({"GBP", "GBX"})
 
 
 def scale_gbx_if_needed(
@@ -83,9 +107,14 @@ def scale_gbx_if_needed(
     arithmetic to stay sane (notional, NLV, allocation totals). Idempotent
     on non-UK / non-GBP / None inputs. Preserves Decimal vs float vs int
     input type — tests assert exact Decimal equality.
+
+    Raises :class:`ValueError` on non-finite ``float`` (NaN / ±inf) — silently
+    propagating those through the engine corrupts NLV totals downstream.
     """
     if value is None:
         return None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"non-finite price: {value!r}")
     if currency.upper() not in _PENCE_CURRENCIES:
         return value
     if exchange.upper() not in _UK_PENCE_EXCHANGES:
@@ -115,6 +144,18 @@ def canonical_key(
     return CanonicalId(base)
 
 
+def _parse_canonical_id(canonical_id: str) -> tuple[str, str, str, str | None]:
+    """Shared parser. 3-segment form → exchange=None; 4-segment form
+    → exchange=parts[3]. Anything else (too few, too many, empty fields,
+    trailing colon) is rejected with :class:`ValueError`.
+    """
+    parts = canonical_id.split(":")
+    if len(parts) < 3 or len(parts) > 4 or not all(parts):
+        raise ValueError(f"malformed canonical_id: {canonical_id!r}")
+    exchange = parts[3] if len(parts) == 4 else None
+    return parts[0], parts[1], parts[2], exchange
+
+
 def canonical_id_components(canonical_id: str) -> tuple[str, str, str]:
     """Parse a canonical_id → ``(asset_class, symbol, country)``.
 
@@ -122,21 +163,15 @@ def canonical_id_components(canonical_id: str) -> tuple[str, str, str]:
     the base triple. Use :func:`canonical_id_with_exchange` to retain it.
     Raises :class:`ValueError` on a malformed canonical_id.
     """
-    parts = canonical_id.split(":")
-    if len(parts) < 3 or not all(parts[:3]):
-        raise ValueError(f"malformed canonical_id: {canonical_id!r}")
-    return parts[0], parts[1], parts[2]
+    a, s, c, _ = _parse_canonical_id(canonical_id)
+    return a, s, c
 
 
 def canonical_id_with_exchange(
     canonical_id: str,
 ) -> tuple[str, str, str, str | None]:
     """Parse a canonical_id → ``(asset_class, symbol, country, exchange | None)``."""
-    parts = canonical_id.split(":")
-    if len(parts) < 3 or not all(parts[:3]):
-        raise ValueError(f"malformed canonical_id: {canonical_id!r}")
-    exchange = parts[3] if len(parts) >= 4 and parts[3] else None
-    return parts[0], parts[1], parts[2], exchange
+    return _parse_canonical_id(canonical_id)
 
 
 _EXCHANGE_TO_COUNTRY: dict[str, str] = {
