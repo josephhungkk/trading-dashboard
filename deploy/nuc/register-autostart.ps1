@@ -5,14 +5,20 @@
 $ErrorActionPreference = 'Stop'
 
 # Staggered AtLogon delays so 2FA dialogs from live accounts don't overlap.
+# Cold-boot timing: the prior 0/30/60/90s schedule races IBC's TOTP fill
+# against the SecondFactorAuthentication dialog if WG/Java is still warming
+# up - leaving isa-live parked at the 2FA prompt. Pushed to 60/120/180/240s
+# so the four gateways start AFTER the post-boot stack settles and TOTP
+# fills cleanly. Hider follows soon after; Tray is pushed to PT300S so it
+# only renders icons after the gateways and sidecars (PT150S) are up.
 $tasks = @(
-  @{ Name = 'IBGateway-isa-live';     Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-isa-live.vbs"';    Delay = 'PT0S'                 }
-  @{ Name = 'IBGateway-isa-paper';    Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-isa-paper.vbs"';   Delay = 'PT30S'                }
-  @{ Name = 'IBGateway-normal-live';  Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-normal-live.vbs"'; Delay = 'PT60S'                }
-  @{ Name = 'IBGateway-normal-paper'; Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-normal-paper.vbs"';Delay = 'PT90S'                }
-  @{ Name = 'FutuOpenDAutoStart';     Exec = 'wscript.exe'; Arg = '"C:\FutuOpenD\LaunchHidden.vbs"'; Delay = 'PT5S'                 }
-  @{ Name = 'BrokerWindowsHider';     Exec = 'wscript.exe'; Arg = '"C:\dashboard\deploy\nuc\Launch-Hider.vbs"'; Delay = 'PT15S' }
-  @{ Name = 'BrokerTray';             Exec = 'wscript.exe'; Arg = '"C:\dashboard\deploy\nuc\Launch-Tray.vbs"';  Delay = 'PT20S' }
+  @{ Name = 'IBGateway-isa-live';     Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-isa-live.vbs"';    Delay = 'PT60S'                }
+  @{ Name = 'IBGateway-isa-paper';    Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-isa-paper.vbs"';   Delay = 'PT120S'               }
+  @{ Name = 'IBGateway-normal-live';  Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-normal-live.vbs"'; Delay = 'PT180S'               }
+  @{ Name = 'IBGateway-normal-paper'; Exec = 'wscript.exe'; Arg = '"C:\IBC\Launch-normal-paper.vbs"';Delay = 'PT240S'               }
+  @{ Name = 'FutuOpenDAutoStart';     Exec = 'wscript.exe'; Arg = '"C:\FutuOpenD\LaunchHidden.vbs"'; Delay = 'PT30S'                }
+  @{ Name = 'BrokerWindowsHider';     Exec = 'wscript.exe'; Arg = '"C:\dashboard\deploy\nuc\Launch-Hider.vbs"'; Delay = 'PT45S'  }
+  @{ Name = 'BrokerTray';             Exec = 'wscript.exe'; Arg = '"C:\dashboard\deploy\nuc\Launch-Tray.vbs"';  Delay = 'PT300S' }
 )
 
 # Purge obsolete task names from the previous single-gateway setup.

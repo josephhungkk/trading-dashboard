@@ -340,11 +340,13 @@ function Get-BrokerAccounts {
 }
 
 function Test-Schwab {
-  # Hit the public CF Access path with the service-token headers loaded by
-  # Get-CFAccessHeaders. Reachable vs. Configured are separate dimensions:
-  # when CF is unreachable or auth fails the tray surfaces the precise
-  # tooltip via Classify-HttpError instead of falsely flattening to
-  # "not configured".
+  # Phase 7a: probes /api/admin/brokers/schwab/status (the only schwab status
+  # endpoint that ships in v0.7.0 - the legacy /api/schwab/health does not
+  # exist). Returns:
+  #   { access_token_issued_at, refresh_token_issued_at,
+  #     tier2_refresh_enabled, tier2_consecutive_failures }
+  # Connected ::= refresh_token_issued_at is set. ExpiresDays derived from
+  # the 168h Schwab refresh-token TTL (memory phase7a_schwab_topology.md).
   $cf = Get-CFAccessHeaders
   if (-not $cf) {
     return @{
@@ -352,13 +354,15 @@ function Test-Schwab {
       Configured = $false
       Connected  = $false
       ExpiresDays = $null
+      Tier2Enabled = $null
+      Tier2Failures = $null
       Error      = 'CF service token not configured (drop creds in C:\dashboard\secrets\cf-access-tray.env)'
       ErrorKind  = 'auth'
     }
   }
   try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    $req = [Net.HttpWebRequest]::Create('https://dashboard.kiusinghung.com/api/schwab/health')
+    $req = [Net.HttpWebRequest]::Create('https://dashboard.kiusinghung.com/api/admin/brokers/schwab/status')
     $req.Headers.Add('CF-Access-Client-Id', $cf.Id)
     $req.Headers.Add('CF-Access-Client-Secret', $cf.Secret)
     $req.Timeout = 5000
@@ -367,11 +371,32 @@ function Test-Schwab {
     $reader = New-Object IO.StreamReader $resp.GetResponseStream()
     $body = $reader.ReadToEnd(); $reader.Dispose(); $resp.Close()
     $r = $body | ConvertFrom-Json
+    # Endpoint is admin-only and 200 implies the broker secret block exists,
+    # so reachable+200 == configured. Connected = a refresh_token has been
+    # minted at least once.
+    $connected = $false
+    $expiresDays = $null
+    if ($r.refresh_token_issued_at) {
+      try {
+        $issued = [DateTime]::Parse(
+          $r.refresh_token_issued_at,
+          [Globalization.CultureInfo]::InvariantCulture,
+          ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+        )
+        $ageHours = ((Get-Date).ToUniversalTime() - $issued).TotalHours
+        $expiresDays = (168 - $ageHours) / 24.0
+        $connected = $true
+      } catch {
+        $connected = $true  # token exists, age unparseable - still connected
+      }
+    }
     return @{
       Reachable  = $true
-      Configured = $r.configured
-      Connected  = $r.connected
-      ExpiresDays = $r.expires_in_days
+      Configured = $true
+      Connected  = $connected
+      ExpiresDays = $expiresDays
+      Tier2Enabled = $r.tier2_refresh_enabled
+      Tier2Failures = $r.tier2_consecutive_failures
     }
   } catch {
     $cls = Classify-HttpError $_.Exception
@@ -380,10 +405,77 @@ function Test-Schwab {
       Configured = $false
       Connected  = $false
       ExpiresDays = $null
+      Tier2Enabled = $null
+      Tier2Failures = $null
       Error      = $cls.Tip
       ErrorKind  = $cls.Kind
     }
   }
+}
+
+# Combined IBKR pair status: gateway handshake + sidecar health + backend
+# registry, rolled up like FutuOpenD's probe (one icon for everything in the
+# trade path). $Mode = 'live' or 'paper'. $GatewayPorts maps sidecar label
+# to the IBGateway TCP port handshake target (per Phase 4 port map).
+function Get-IbkrPairStatus {
+  param(
+    [Parameter(Mandatory)][string]$Mode,
+    [Parameter(Mandatory)][hashtable]$GatewayPorts
+  )
+  $modeLabel = $Mode.Substring(0, 1).ToUpper() + $Mode.Substring(1)
+
+  # 1) Per-gateway TWS API handshake.
+  $gw = @{}
+  foreach ($lbl in $GatewayPorts.Keys) {
+    $gw[$lbl] = Test-IBKRHandshake -Port $GatewayPorts[$lbl]
+  }
+
+  # 2) Per-sidecar health.
+  $side = @{}
+  foreach ($lbl in $GatewayPorts.Keys) {
+    $side[$lbl] = (Read-SidecarHealth -Label $lbl).Status
+  }
+
+  # 3) Backend registry view (cached 5s by Get-BrokerAccounts).
+  $r = Get-BrokerAccounts
+  $beReachable = $r.Reachable
+  $be = @{}
+  if ($beReachable) {
+    $rows = @($r.Accounts | Where-Object {
+      $_.broker -eq 'ibkr' -and $_.mode -eq $Mode -and $GatewayPorts.ContainsKey($_.label)
+    })
+    foreach ($lbl in $GatewayPorts.Keys) {
+      $row = @($rows | Where-Object { $_.label -eq $lbl })
+      $be[$lbl] = if ($row.Count -gt 0 -and $row[0].connected) { 'up' } else { 'down' }
+    }
+  }
+
+  # Roll-up: each label is "up" iff gateway handshakes AND sidecar up AND
+  # (if backend reachable) backend connected. Backend-unreachable demotes to
+  # partial since we can't confirm the trade path end-to-end.
+  $perLabel = @()
+  $upCount = 0
+  $downCount = 0
+  foreach ($lbl in $GatewayPorts.Keys) {
+    $g = $gw[$lbl]
+    $s = $side[$lbl]
+    $b = if ($beReachable) { $be[$lbl] } else { 'unknown' }
+    $labelUp = ($g -eq 'up') -and ($s -eq 'up') -and (-not $beReachable -or $b -eq 'up')
+    $labelDown = ($g -eq 'down') -and ($s -ne 'up')
+    if ($labelUp) { $upCount++ }
+    elseif ($labelDown) { $downCount++ }
+    $perLabel += "{0}=gw:{1}/sc:{2}/be:{3}" -f $lbl, $g, $s, $b
+  }
+
+  $total = $GatewayPorts.Count
+  $status = if (-not $beReachable -and $upCount -lt $total) { 'partial' }
+            elseif ($upCount -eq $total) { 'up' }
+            elseif ($downCount -eq $total) { 'down' }
+            else { 'partial' }
+
+  $tip = "IBKR {0}: {1}" -f $modeLabel, ($perLabel -join ' ')
+  if (-not $beReachable -and $r.Error) { $tip += " (be:{0})" -f $r.Error }
+  return @{ Status = $status; Tip = $tip }
 }
 
 # ---------- targets ----------
@@ -444,74 +536,33 @@ $targets = @(
         return @{ Status = 'partial'; Tip = ("Schwab: {0}" -f $err) }
       }
       if (-not $r.Configured) { return @{ Status = 'gray'; Tip = 'Schwab: not configured (set schwab.app_key / app_secret in Settings)' } }
-      if (-not $r.Connected)  { return @{ Status = 'down'; Tip = 'Schwab: configured, no refresh_token yet (visit /api/schwab/oauth-start)' } }
+      if (-not $r.Connected)  { return @{ Status = 'down'; Tip = 'Schwab: configured, no refresh_token yet (visit /api/admin/brokers/schwab/oauth-start)' } }
       $days = if ($r.ExpiresDays -ne $null) { [math]::Round($r.ExpiresDays, 1) } else { '?' }
+      # Phase 7a refresh-token TTL is 168h; warn at 144h (24h grace) per
+      # SchwabRefreshTokenExpiringSoon alert. < 1d remaining = partial.
       $st   = if ($r.ExpiresDays -ne $null -and $r.ExpiresDays -lt 1) { 'partial' } else { 'up' }
-      return @{ Status = $st; Tip = ("Schwab: connected (refresh_token expires in {0}d)" -f $days) }
+      $tier2 = if ($r.Tier2Enabled -eq 'true') {
+        if ($r.Tier2Failures -and ([int]$r.Tier2Failures) -ge 3) { 'tier2:disabled' }
+        elseif ($r.Tier2Failures -and ([int]$r.Tier2Failures) -gt 0) { ("tier2:fail x{0}" -f $r.Tier2Failures) }
+        else { 'tier2:on' }
+      } else { 'tier2:off' }
+      return @{ Status = $st; Tip = ("Schwab: connected, refresh expires {0}d, {1}" -f $days, $tier2) }
     }
   }
+  # Phase 7a follow-up: collapse the previous four IBKR icons (Live/Paper
+  # gateway pair + Live/Paper sidecar triangles) into two combined icons
+  # mirroring the FutuOpenD pattern (one icon = local + sidecar + backend
+  # rolled up). Filled square = Live pair, empty square = Paper pair.
+  # Logic: green requires every gateway port in the pair to handshake AND
+  # the matching sidecar health files to be 'up' AND the backend registry
+  # to report connected. Any mismatch -> partial; everything down -> down.
   @{
     Name = 'IBKR Live'; Shape = { param($s) Draw-SquareFilled $s }
-    Probe = {
-      # Single source of truth: the backend registry's view. A gateway
-      # that passes the local Test-IBKRHandshake but refuses API
-      # connections from 10.10.0.1 (wrong Trusted-IP list) would have
-      # shown green on the old local-only probe while the user's
-      # dashboard was actually getting nothing. Backend-connected
-      # means user-visible-connected, full stop.
-      $r = Get-BrokerAccounts
-      if (-not $r.Reachable) {
-        $err = if ($r.Error) { $r.Error } else { 'unknown' }
-        return @{ Status = 'partial'; Tip = ("IBKR Live: {0}" -f $err) }
-      }
-      $live = @($r.Accounts | Where-Object { $_.broker -eq 'ibkr' -and $_.mode -eq 'live' })
-      if ($live.Count -eq 0) { return @{ Status = 'gray'; Tip = 'IBKR Live: no adapters registered' } }
-      $connected = @($live | Where-Object { $_.connected })
-      $status = if ($connected.Count -eq $live.Count) { 'up' }
-                elseif ($connected.Count -eq 0)        { 'down' }
-                else                                   { 'partial' }
-      $detail = ($live | ForEach-Object {
-        $flag = if ($_.connected) { 'up' } else { 'down' }
-        "{0}={1}" -f $_.label, $flag
-      }) -join ' '
-      return @{ Status = $status; Tip = ("IBKR Live  {0}" -f $detail) }
-    }
+    Probe = { Get-IbkrPairStatus -Mode 'live' -GatewayPorts @{ 'isa-live' = 4001; 'normal-live' = 4003 } }
   }
   @{
     Name = 'IBKR Paper'; Shape = { param($s) Draw-SquareEmpty $s }
-    Probe = {
-      $r = Get-BrokerAccounts
-      if (-not $r.Reachable) {
-        $err = if ($r.Error) { $r.Error } else { 'unknown' }
-        return @{ Status = 'partial'; Tip = ("IBKR Paper: {0}" -f $err) }
-      }
-      $paper = @($r.Accounts | Where-Object { $_.broker -eq 'ibkr' -and $_.mode -eq 'paper' })
-      if ($paper.Count -eq 0) { return @{ Status = 'gray'; Tip = 'IBKR Paper: no adapters registered' } }
-      $connected = @($paper | Where-Object { $_.connected })
-      $status = if ($connected.Count -eq $paper.Count) { 'up' }
-                elseif ($connected.Count -eq 0)         { 'down' }
-                else                                    { 'partial' }
-      $detail = ($paper | ForEach-Object {
-        $flag = if ($_.connected) { 'up' } else { 'down' }
-        "{0}={1}" -f $_.label, $flag
-      }) -join ' '
-      return @{ Status = $status; Tip = ("IBKR Paper {0}" -f $detail) }
-    }
-  }
-  # ---- Phase 4 sidecar fleet (Task 28). Two icons aggregate the four
-  #      sidecars by mode: live pair (filled triangle) = isa-live + normal-
-  #      live, paper pair (empty triangle) = isa-paper + normal-paper.
-  #      Mirrors the IBKR Live / Paper filled-vs-empty convention so the
-  #      live/paper distinction is visually consistent across the tray.
-  #      Status sourced from C:\dashboard\state\sidecar-<label>.health,
-  #      written by Probe-Sidecar.ps1 under BrokerWatchdog.
-  @{
-    Name = 'Sidecar Live'; Shape = { param($s) Draw-TriangleFilled $s }
-    Probe = { Read-SidecarPair -Labels @('isa-live', 'normal-live') -Mode 'Live' }
-  }
-  @{
-    Name = 'Sidecar Paper'; Shape = { param($s) Draw-TriangleEmpty $s }
-    Probe = { Read-SidecarPair -Labels @('isa-paper', 'normal-paper') -Mode 'Paper' }
+    Probe = { Get-IbkrPairStatus -Mode 'paper' -GatewayPorts @{ 'isa-paper' = 4002; 'normal-paper' = 4004 } }
   }
 )
 
@@ -561,30 +612,26 @@ $targetMenus = @{
     @{ Label = 'Restart Futu sidecar'; Action = { Invoke-RestartTasks @('BrokerSidecarFutu') 'sidecar-futu' } }
   )
   'Schwab' = @(
-    @{ Label = 'Re-authorize (OAuth flow)'; Action = { Start-Process "$dashboardUrl/api/schwab/oauth-start" | Out-Null } }
+    @{ Label = 'Re-authorize (OAuth flow)'; Action = { Start-Process "$dashboardUrl/api/admin/brokers/schwab/oauth-start" | Out-Null } }
   )
+  # IBKR Live/Paper now combine gateway + sidecar restart options because
+  # the icons themselves combine gateway + sidecar + backend status. Same
+  # ordering as the rolled-up tooltip: gateway first, then sidecar.
   'IBKR Live' = @(
-    @{ Label = 'Restart isa-live';    Action = { Invoke-RestartTasks @('IBGateway-isa-live')    'isa-live' } }
-    @{ Label = 'Restart normal-live'; Action = { Invoke-RestartTasks @('IBGateway-normal-live') 'normal-live' } }
-    @{ Label = 'Restart BOTH live';   Action = { Invoke-RestartTasks @('IBGateway-isa-live','IBGateway-normal-live') 'both-live' } }
+    @{ Label = 'Restart gateway isa-live';        Action = { Invoke-RestartTasks @('IBGateway-isa-live')    'isa-live' } }
+    @{ Label = 'Restart gateway normal-live';     Action = { Invoke-RestartTasks @('IBGateway-normal-live') 'normal-live' } }
+    @{ Label = 'Restart BOTH live gateways';      Action = { Invoke-RestartTasks @('IBGateway-isa-live','IBGateway-normal-live') 'both-live' } }
+    @{ Label = 'Restart sidecar isa-live';        Action = { Invoke-RestartTasks @('IBKRSidecar-isa-live')    'sidecar-isa-live' } }
+    @{ Label = 'Restart sidecar normal-live';     Action = { Invoke-RestartTasks @('IBKRSidecar-normal-live') 'sidecar-normal-live' } }
+    @{ Label = 'Restart BOTH live sidecars';      Action = { Invoke-RestartTasks @('IBKRSidecar-isa-live','IBKRSidecar-normal-live') 'sidecar-both-live' } }
   )
   'IBKR Paper' = @(
-    @{ Label = 'Restart isa-paper';    Action = { Invoke-RestartTasks @('IBGateway-isa-paper')    'isa-paper' } }
-    @{ Label = 'Restart normal-paper'; Action = { Invoke-RestartTasks @('IBGateway-normal-paper') 'normal-paper' } }
-    @{ Label = 'Restart BOTH paper';   Action = { Invoke-RestartTasks @('IBGateway-isa-paper','IBGateway-normal-paper') 'both-paper' } }
-  )
-  # Phase 4 sidecar triangles. Restart options mirror the IBKR Live/Paper
-  # split, but kick the IBKRSidecar-<label> scheduled tasks (registered by
-  # deploy/nuc/register-ibkr-sidecar.ps1) instead of the gateway tasks.
-  'Sidecar Live' = @(
-    @{ Label = 'Restart sidecar isa-live';    Action = { Invoke-RestartTasks @('IBKRSidecar-isa-live')    'sidecar-isa-live' } }
-    @{ Label = 'Restart sidecar normal-live'; Action = { Invoke-RestartTasks @('IBKRSidecar-normal-live') 'sidecar-normal-live' } }
-    @{ Label = 'Restart BOTH live sidecars';  Action = { Invoke-RestartTasks @('IBKRSidecar-isa-live','IBKRSidecar-normal-live') 'sidecar-both-live' } }
-  )
-  'Sidecar Paper' = @(
-    @{ Label = 'Restart sidecar isa-paper';    Action = { Invoke-RestartTasks @('IBKRSidecar-isa-paper')    'sidecar-isa-paper' } }
-    @{ Label = 'Restart sidecar normal-paper'; Action = { Invoke-RestartTasks @('IBKRSidecar-normal-paper') 'sidecar-normal-paper' } }
-    @{ Label = 'Restart BOTH paper sidecars';  Action = { Invoke-RestartTasks @('IBKRSidecar-isa-paper','IBKRSidecar-normal-paper') 'sidecar-both-paper' } }
+    @{ Label = 'Restart gateway isa-paper';       Action = { Invoke-RestartTasks @('IBGateway-isa-paper')    'isa-paper' } }
+    @{ Label = 'Restart gateway normal-paper';    Action = { Invoke-RestartTasks @('IBGateway-normal-paper') 'normal-paper' } }
+    @{ Label = 'Restart BOTH paper gateways';     Action = { Invoke-RestartTasks @('IBGateway-isa-paper','IBGateway-normal-paper') 'both-paper' } }
+    @{ Label = 'Restart sidecar isa-paper';       Action = { Invoke-RestartTasks @('IBKRSidecar-isa-paper')    'sidecar-isa-paper' } }
+    @{ Label = 'Restart sidecar normal-paper';    Action = { Invoke-RestartTasks @('IBKRSidecar-normal-paper') 'sidecar-normal-paper' } }
+    @{ Label = 'Restart BOTH paper sidecars';     Action = { Invoke-RestartTasks @('IBKRSidecar-isa-paper','IBKRSidecar-normal-paper') 'sidecar-both-paper' } }
   )
 }
 

@@ -510,6 +510,16 @@ class FutuClient:
         self.gateway_connected = True
         log.info("futu_init_connected", host=creds.opend_host)
 
+        # Eager-warm the trd_env cache so the first GetOrders / GetPositions /
+        # GetAccountSummary for a paper account doesn't fall back to the
+        # default "REAL" lookup (which Futu rejects with "Nonexisting acc_id"
+        # since paper IDs only exist under SIMULATE). Failure here is
+        # non-fatal: list_accounts() will repopulate on the next call.
+        try:
+            await self.list_accounts()
+        except Exception as exc:
+            log.warning("futu_trd_env_prewarm_failed", error=str(exc))
+
     async def _init_loop(self) -> None:
         await asyncio.sleep(0)
         backoff = _BACKOFF_BASE_S
