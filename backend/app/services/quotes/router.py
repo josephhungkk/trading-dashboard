@@ -46,6 +46,11 @@ class SourceHealthMap:
     Sources may be plain ids (``schwab``, ``ibkr``, ``futu``) or
     ``ibkr:<gateway>`` for per-gateway entries (MED-6). Setting a state also
     bumps ``quote_source_health_state{source}``.
+
+    Unknown sources (never registered via :meth:`set_state`) are treated as
+    DOWN — fail-closed for typo'd config keys. SidecarStream's lifespan
+    must call ``set_state(src, HEALTHY)`` at boot before any
+    :class:`SourceRouter` lookups run, otherwise routes will return None.
     """
 
     def __init__(self) -> None:
@@ -53,6 +58,10 @@ class SourceHealthMap:
         self._last_tick: dict[str, float] = {}
 
     def set_state(self, source: str, state: SourceHealthState) -> None:
+        # Single-dict assignment is atomic under the CPython GIL; readers
+        # that take a snapshot via ``get_state`` see either the old or new
+        # value, never a torn write. Compound read patterns elsewhere
+        # (e.g. compute_health_state) take a self-consistent snapshot.
         self._state[source] = state
         QUOTE_SOURCE_HEALTH_STATE.labels(source=source).set(int(state))
 
@@ -71,10 +80,24 @@ class SourceHealthMap:
         return time.monotonic() - ts
 
     def is_up(self, source: str) -> bool:
-        """``True`` iff the source is not explicitly DOWN. Sources never
-        registered are treated as up (boot grace) so a fresh deploy doesn't
-        nuke routing before the first tick lands."""
-        return self._state.get(source, SourceHealthState.HEALTHY) != SourceHealthState.DOWN
+        """``True`` iff the source is registered AND not explicitly DOWN.
+
+        Unknown sources fail closed — protects against typo'd
+        ``quote_source_priority`` config keys silently routing traffic to
+        a never-registered source.
+        """
+        state = self._state.get(source)
+        return state is not None and state != SourceHealthState.DOWN
+
+    def snapshot(self, source: str) -> tuple[SourceHealthState | None, float | None]:
+        """Atomic-ish ``(state, time_since_last_tick)`` snapshot — both
+        reads happen back-to-back so callers using both fields see a
+        consistent view (avoids torn-read race in compound checks).
+        """
+        state = self._state.get(source)
+        ts = self._last_tick.get(source)
+        since = time.monotonic() - ts if ts is not None else None
+        return state, since
 
 
 class SourceRouter:
@@ -141,7 +164,7 @@ class SourceRouter:
                 QUOTE_ROUTE_CHANGES_TOTAL.labels(
                     from_source=current,
                     to_source=src,
-                    asset_class=instrument.asset_class.value,
+                    asset_class=instrument.asset_class.value.lower(),
                 ).inc()
                 return src
         return None
@@ -151,18 +174,27 @@ class SourceRouter:
     def compute_health_state(self, source: str, *, min_threshold: float) -> SourceHealthState:
         """Compute the effective health state for ``source``.
 
-        * DOWN if explicitly marked DOWN.
+        * DOWN if unknown or explicitly marked DOWN.
         * DEGRADED if no tick has ever arrived (boot grace) OR the last tick
           is older than ``max(5 * min_threshold, 60 s)``.
         * HEALTHY otherwise.
 
+        Reads state + last-tick atomically via :meth:`SourceHealthMap.snapshot`
+        to avoid torn reads under concurrent SidecarStream callbacks.
+
+        Note: ``DEGRADED`` does NOT remove a source from rotation by itself —
+        :meth:`route` consults :meth:`SourceHealthMap.is_up`, which is True
+        for both HEALTHY and DEGRADED. The engine's reroute task (Task B5)
+        is the only path that demotes DEGRADED → DOWN when the entire
+        subscribed set goes silent past ``health_window``.
+
         The 60 s floor matches spec §5.2.2 — protects quiet symbols (idle
         warrants, after-hours US equity) from false-down flips.
         """
-        if not self._health.is_up(source):
+        state, since = self._health.snapshot(source)
+        if state is None or state == SourceHealthState.DOWN:
             return SourceHealthState.DOWN
 
-        since = self._health.time_since_last_tick(source)
         if since is None:
             return SourceHealthState.DEGRADED
 

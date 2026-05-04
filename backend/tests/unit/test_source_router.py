@@ -239,14 +239,14 @@ async def test_reroute_fires_route_change_metric(
     router = SourceRouter(config, health)
 
     before = QUOTE_ROUTE_CHANGES_TOTAL.labels(
-        from_source="schwab", to_source="ibkr", asset_class="STOCK"
+        from_source="schwab", to_source="ibkr", asset_class="stock"
     )._value.get()
 
     new_src = await router.reroute(_inst("stock:AAPL:US"), current="schwab", reason="source_down")
 
     assert new_src == "ibkr"
     after = QUOTE_ROUTE_CHANGES_TOTAL.labels(
-        from_source="schwab", to_source="ibkr", asset_class="STOCK"
+        from_source="schwab", to_source="ibkr", asset_class="stock"
     )._value.get()
     assert after - before == 1
 
@@ -260,6 +260,51 @@ async def test_reroute_returns_none_when_no_alternative(
     router = SourceRouter(config, health)
     new_src = await router.reroute(_inst("stock:AAPL:US"), current="schwab", reason="all_down")
     assert new_src is None
+
+
+# ── _derive_country fallback (defence-in-depth shim) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_derive_country_fallback_uses_exchange_when_canonical_malformed(
+    config: dict[str, Any], health: SourceHealthMap
+) -> None:
+    """If a malformed canonical_id slips through (post-A4 invariant should
+    prevent this), router falls back to country_for_exchange."""
+    health.set_state("ibkr", SourceHealthState.HEALTHY)
+    router = SourceRouter(config, health)
+    # Two-segment canonical_id is malformed → ValueError → exchange fallback.
+    inst = _inst("BROKEN:AAPL", primary_exchange="LSE", currency="GBP")
+    src = await router.route(inst)
+    assert src == "ibkr"  # stock.UK priority list, derived from LSE→UK
+
+
+@pytest.mark.asyncio
+async def test_derive_country_returns_none_when_both_paths_fail(
+    config: dict[str, Any], health: SourceHealthMap
+) -> None:
+    """Malformed canonical_id AND unknown exchange → routing returns None."""
+    router = SourceRouter(config, health)
+    inst = _inst("BROKEN:AAPL", primary_exchange="MADEUP", currency="USD")
+    src = await router.route(inst)
+    assert src is None
+
+
+# ── unknown source fail-closed (HIGH fix) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_unknown_source_in_priority_is_skipped(
+    config: dict[str, Any], health: SourceHealthMap
+) -> None:
+    """Typo'd source id in quote_source_priority must NOT route — fails
+    closed because the source was never registered via set_state."""
+    config["quote_source_priority"]["stock.US"] = ["schwab_typo", "schwab"]
+    health.set_state("schwab", SourceHealthState.HEALTHY)
+    # Note: schwab_typo is NEVER registered.
+    router = SourceRouter(config, health)
+    src = await router.route(_inst("stock:AAPL:US"))
+    assert src == "schwab"  # skips schwab_typo (unknown == fail-closed)
 
 
 # ── set_state side effect on metric ──────────────────────────────────────
