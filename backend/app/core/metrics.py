@@ -335,3 +335,16 @@ QUOTE_SIDECAR_FIRST_FRAME_TOTAL = Counter(
     labelnames=["source", "kind"],
     registry=registry,
 )
+
+QUOTE_ENGINE_TICKS_TOTAL = Counter(
+    "quote_engine_ticks_total",
+    "Ticks processed by QuoteEngine._on_quote, by source.",
+    labelnames=["source"],
+    registry=registry,
+)
+
+QUOTE_CACHE_SIZE = Gauge(
+    "quote_cache_size",
+    "Active entries in the engine's last-tick cache.",
+    registry=registry,
+)

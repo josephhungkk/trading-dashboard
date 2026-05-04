@@ -200,6 +200,31 @@ Implementation runs per-commit reviewer chain (spec-compliance + code-quality + 
 
 Full workflow + tooling list + reviewer table + skills + hooks: `docs/PHASE-WORKFLOW.md`. Tooling catalog: memory `project_tooling_inventory.md`.
 
+### Subagent model routing (locked 2026-05-04, Phase 7b.1 B5+)
+
+Implementation tasks use a **test-designer + implementer subagent split** with model tiering for cost-efficiency. Main thread (Opus 4.7) orchestrates; subagents do the bulk drafting.
+
+| Stage | Subagent | Model |
+|---|---|---|
+| Test design (per task) | `general-purpose` (or focused designer prompt) | `haiku` |
+| Implementation (per task) | `general-purpose` (or implementer-prompt skill) | `sonnet` |
+| Main-thread close-out | Opus 4.7 (in-conversation) | — |
+
+Main-thread close-out runs **on every task** and covers: `Write` test+impl files, `ruff` + `mypy --strict`, run tests, patch to green, commit (conventional-commits), then dispatch the per-commit reviewer chain.
+
+**Reviewer chain model tiering** (locked same day):
+
+| Reviewer | Model |
+|---|---|
+| spec-compliance (`general-purpose` w/ spec-prompt) | `haiku` |
+| `python-reviewer` / `typescript-reviewer` | `haiku` |
+| `code-reviewer` / `code-quality` (`general-purpose` w/ quality-prompt) | `sonnet` |
+| `security-reviewer` / `database-reviewer` / `silent-failure-hunter` | `sonnet` |
+| `ARCHITECT-REVIEW` (once-per-phase, skill) | `opus` |
+| Codex (when delegated) | `gpt-5-codex` (OpenAI; not Anthropic-tier) |
+
+Pass `model: "haiku"` / `"sonnet"` to the `Agent` tool for per-call override (option A — durable until tier-routing knobs land in plugin config). Skip the test-designer/implementer split only for trivial single-line edits or when full context is already loaded mid-conversation. See memory `feedback_test_implementer_subagent_pattern.md` for rationale.
+
 ## When Claude Makes Changes
 
 - Run tests after edits: `docker compose exec backend pytest` + `cd frontend && pnpm test`.
