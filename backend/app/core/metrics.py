@@ -278,3 +278,18 @@ SCHWAB_TIER2_LAST_RUN_TIMESTAMP_SECONDS = Gauge(
     "Unix timestamp of the most recent Tier-2 refresh attempt (any outcome).",
     registry=registry,
 )
+
+# ──────────────────────── Phase 7b.1 streaming-quotes metrics ───────────────
+QUOTE_INSTRUMENTS_CREATED_TOTAL = Counter(
+    "quote_instruments_created_total",
+    "Net-new instrument rows written by InstrumentResolver, by asset_class.",
+    labelnames=["asset_class"],
+    registry=registry,
+)
+
+QUOTE_ALIASES_CREATED_TOTAL = Counter(
+    "quote_aliases_created_total",
+    "Net-new symbol_aliases rows written by InstrumentResolver, by source.",
+    labelnames=["source"],
+    registry=registry,
+)
