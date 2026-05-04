@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import contextlib
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import Any
 
@@ -24,6 +25,11 @@ from sidecar_futu.normalize import (
 )
 
 log = structlog.get_logger(__name__)
+
+type _TickCallback = Callable[[broker_pb2.QuoteMessage], None]
+
+_STREAM_QUEUE_MAX = 2048
+_CALL_SUBS_MAX = 500
 
 
 class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
@@ -226,6 +232,176 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         )
         raise AssertionError("unreachable: abort raises")
 
+    async def _get_or_init_futu_streamer(self) -> Any:
+        lock = self.__dict__.setdefault("_streamer_lock", asyncio.Lock())
+        async with lock:
+            streamer = getattr(self, "_streamer", None)
+            if streamer is not None:
+                return streamer
+            quote_ctx = await self._resolve_quote_context()
+            if quote_ctx is None:
+                raise RuntimeError("futu quote context not configured")
+
+            from sidecar_futu.streamer import FutuStreamer
+
+            streamer = FutuStreamer(quote_ctx)
+            try:
+                await streamer.start()
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await streamer.stop()
+                raise
+            self._streamer = streamer
+            return streamer
+
+    async def StreamQuotes(  # noqa: N802
+        self,
+        request_iterator: AsyncIterator[broker_pb2.StreamQuotesRequest],
+        context: Any,
+    ) -> AsyncIterator[broker_pb2.QuoteMessage]:
+        try:
+            streamer = await self._get_or_init_futu_streamer()
+        except RuntimeError as exc:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return
+
+        queue: asyncio.Queue[broker_pb2.QuoteMessage] = asyncio.Queue(
+            maxsize=_STREAM_QUEUE_MAX
+        )
+        call_subs: set[str] = set()
+
+        def tick_callback(message: broker_pb2.QuoteMessage) -> None:
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(message)
+
+        self._add_streamer_tick_callback(streamer, tick_callback)
+        consumer_task = asyncio.create_task(
+            self._consume_stream_quote_requests(
+                request_iterator,
+                streamer,
+                call_subs,
+            ),
+            name="futu-stream-quotes-consumer",
+        )
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            consumer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(consumer_task)
+            if call_subs:
+                await streamer.on_unsubscribe(_symbol_refs(call_subs))
+            self._remove_streamer_tick_callback(streamer, tick_callback)
+
+    async def _consume_stream_quote_requests(
+        self,
+        request_iterator: AsyncIterator[broker_pb2.StreamQuotesRequest],
+        streamer: Any,
+        call_subs: set[str],
+    ) -> None:
+        async for request in request_iterator:
+            try:
+                op = request.WhichOneof("op")
+                if op == "subscribe":
+                    symbols = list(request.subscribe.symbols)
+                    if len(call_subs) + len(symbols) > _CALL_SUBS_MAX:
+                        log.warning(
+                            "futu.stream_quotes.call_subs_cap_hit",
+                            current=len(call_subs),
+                            requested=len(symbols),
+                            cap=_CALL_SUBS_MAX,
+                        )
+                        continue
+                    await streamer.on_subscribe(symbols)
+                    call_subs.update(_canonical_id(s) for s in symbols)
+                elif op == "unsubscribe":
+                    symbols = list(request.unsubscribe.symbols)
+                    await streamer.on_unsubscribe(symbols)
+                    call_subs.difference_update(_canonical_id(s) for s in symbols)
+                elif op == "resync":
+                    symbols = list(request.resync.expected)
+                    if len(symbols) > _CALL_SUBS_MAX:
+                        log.warning(
+                            "futu.stream_quotes.resync_cap_hit",
+                            requested=len(symbols),
+                            cap=_CALL_SUBS_MAX,
+                        )
+                        continue
+                    await streamer.on_resync(symbols)
+                    call_subs.clear()
+                    call_subs.update(_canonical_id(s) for s in symbols)
+            except Exception as exc:
+                log.warning(
+                    "futu.stream_quotes.request_dispatch_error",
+                    error=str(exc),
+                )
+
+    def _add_streamer_tick_callback(
+        self,
+        streamer: Any,
+        callback: _TickCallback,
+    ) -> None:
+        callbacks = getattr(streamer, "_broker_servicer_tick_callbacks", None)
+        if callbacks is None:
+            callbacks = set()
+            streamer._broker_servicer_tick_callbacks = callbacks
+            previous = getattr(streamer, "tick_callback", None)
+            streamer._broker_servicer_previous_tick_callback = previous
+
+            def dispatch(message: broker_pb2.QuoteMessage) -> None:
+                if previous is not None:
+                    try:
+                        previous(message)
+                    except Exception as exc:
+                        log.warning(
+                            "futu.stream_quotes.previous_callback_error",
+                            error=str(exc),
+                        )
+                for registered in tuple(callbacks):
+                    try:
+                        registered(message)
+                    except Exception as exc:
+                        log.warning(
+                            "futu.stream_quotes.tick_callback_error",
+                            error=str(exc),
+                        )
+
+            streamer.tick_callback = dispatch
+        callbacks.add(callback)
+
+    def _remove_streamer_tick_callback(
+        self,
+        streamer: Any,
+        callback: _TickCallback,
+    ) -> None:
+        callbacks = getattr(streamer, "_broker_servicer_tick_callbacks", None)
+        if callbacks is None:
+            return
+        callbacks.discard(callback)
+        if callbacks:
+            return
+        previous = getattr(streamer, "_broker_servicer_previous_tick_callback", None)
+        streamer.tick_callback = previous
+        del streamer._broker_servicer_tick_callbacks
+        del streamer._broker_servicer_previous_tick_callback
+
+    async def _resolve_quote_context(self) -> Any | None:
+        getter = getattr(self._client, "get_quote_context", None)
+        if getter is not None:
+            result = getter()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+        return getattr(self._client, "quote_ctx", None) or getattr(
+            self._client, "_quote_ctx", None
+        )
+
     async def _sim_place(
         self,
         request: broker_pb2.PlaceOrderRequest,
@@ -263,3 +439,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             ),
         )
         return broker_pb2.CancelOrderResponse(accepted=True)
+
+
+def _canonical_id(symbol: broker_pb2.SymbolRef) -> str:
+    return symbol.canonical_id or symbol.raw_symbol
+
+
+def _symbol_refs(canonical_ids: set[str]) -> list[broker_pb2.SymbolRef]:
+    return [
+        broker_pb2.SymbolRef(canonical_id=canonical_id)
+        for canonical_id in sorted(canonical_ids)
+    ]

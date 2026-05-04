@@ -13,3 +13,17 @@ broker_normalize_unknown_total = Counter(
     labelnames=["label", "field"],
     registry=registry,
 )
+
+futu_streamer_ticks_total = Counter(
+    "futu_streamer_ticks_total",
+    "Futu quote streamer ticks emitted by raw Futu symbol.",
+    labelnames=["symbol"],
+    registry=registry,
+)
+
+futu_streamer_subscribe_total = Counter(
+    "futu_streamer_subscribe_total",
+    "Futu quote streamer subscribe attempts by result.",
+    labelnames=["result"],
+    registry=registry,
+)

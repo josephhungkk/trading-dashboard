@@ -78,12 +78,58 @@ class FutuClient:
         self._creds: FutuCreds | None = None
         self._init_task: asyncio.Task[None] | None = None
         self._trade_ctx: Any | None = None
+        # Persistent OpenQuoteContext used by sidecar_futu/streamer.py for
+        # HK quote streaming (Phase 7b.1). Lazy-created via
+        # get_quote_context(); separate connection from _trade_ctx so a
+        # streaming-side hiccup never affects order placement.
+        self._quote_ctx: Any | None = None
+        self._quote_ctx_lock = asyncio.Lock()
         self._rsa_tempfile_path: Path | None = None
         self.gateway_connected: bool = False
         self._accounts_trd_env: dict[str, str] = {}
         self._order_event_queues: dict[str, list[asyncio.Queue[Any]]] = {}
         self._configure_lock = asyncio.Lock()
         atexit.register(self._cleanup_rsa_tempfile)
+
+    async def get_quote_context(self) -> Any:
+        """Return the persistent OpenQuoteContext used for streaming quotes.
+
+        Lazy-creates on first call; subsequent calls return the cached
+        instance. Lock-protected to serialise concurrent first-callers.
+        Raises RuntimeError if FutuClient is not yet configured.
+        """
+        if self._quote_ctx is not None:
+            return self._quote_ctx
+        async with self._quote_ctx_lock:
+            if self._quote_ctx is not None:
+                return self._quote_ctx
+            creds = self._creds
+            if creds is None:
+                raise RuntimeError(
+                    "FutuClient not configured — call configure() first"
+                )
+
+            def _open() -> Any:
+                return OpenQuoteContext(
+                    host=creds.opend_host,
+                    port=creds.opend_port,
+                    is_encrypt=True,
+                )
+
+            self._quote_ctx = await _run_in_worker_thread(_open)
+            return self._quote_ctx
+
+    async def close_quote_context(self) -> None:
+        """Best-effort close of the persistent quote context. Idempotent."""
+        async with self._quote_ctx_lock:
+            ctx = self._quote_ctx
+            self._quote_ctx = None
+        if ctx is None:
+            return
+        try:
+            await _run_in_worker_thread(ctx.close)
+        except Exception as exc:
+            log.warning("futu_quote_ctx_close_error", error=str(exc))
 
     def validate(self, request: Any) -> str | None:
         """Return error detail string on rejection, None on success."""
