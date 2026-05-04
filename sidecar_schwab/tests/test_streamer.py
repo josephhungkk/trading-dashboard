@@ -197,3 +197,35 @@ def test_tick_callback_fires_with_quote_message() -> None:
     assert quote.open == "179.5"
     assert quote.change_pct == "0.64"
     assert quote.received_at.seconds > 0
+
+
+def test_levelone_equities_golden_trace_emits_quote_messages() -> None:
+    fixture_path = (
+        __import__("pathlib").Path(__file__).parent
+        / "golden"
+        / "levelone_equities_aapl_spx.json"
+    )
+    payload = json.loads(
+        fixture_path.read_text(), parse_float=__import__("decimal").Decimal
+    )
+    streamer = SchwabStreamer.for_tests()
+    received: list[pb.QuoteMessage] = []
+    streamer.tick_callback = received.append
+    streamer._upstream_refcount = {
+        "stock:AAPL:US": _SymbolEntry("AAPL", 1),
+        "idx:$SPX:US": _SymbolEntry("$SPX", 1),
+    }
+
+    for frame in payload["frames"]:
+        streamer._dispatch_frame(json.dumps(frame, default=str))
+
+    assert len(received) == 2
+    aapl = received[0]
+    assert aapl.canonical_id == "stock:AAPL:US"
+    assert aapl.last == "213.45"
+    assert aapl.bid == "213.40"
+    assert aapl.ask == "213.46"
+    assert aapl.volume == "38291842"
+    spx = received[1]
+    assert spx.canonical_id == "idx:$SPX:US"
+    assert spx.last == "5210.52"

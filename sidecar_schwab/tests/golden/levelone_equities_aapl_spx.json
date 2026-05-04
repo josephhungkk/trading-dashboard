@@ -1,0 +1,7 @@
+{
+  "frames": [
+    {"response":[{"service":"ADMIN","command":"LOGIN","content":{"code":0,"msg":"server=...; status=ok"}}]},
+    {"data":[{"service":"LEVELONE_EQUITIES","timestamp":1714824000000,"command":"SUBS","content":[{"key":"AAPL","1":213.40,"2":213.46,"3":213.45,"8":38291842,"12":212.22,"28":214.10,"29":211.20,"30":211.50,"33":100}]}]},
+    {"data":[{"service":"LEVELONE_EQUITIES","timestamp":1714824001456,"content":[{"key":"$SPX","1":5210.50,"2":5210.55,"3":5210.52,"8":0,"12":5200.00,"28":5215.00,"29":5198.00,"30":5202.00}]}]}
+  ]
+}
