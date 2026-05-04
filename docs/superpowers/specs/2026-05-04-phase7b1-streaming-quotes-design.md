@@ -880,6 +880,7 @@ quote_ws_send_timeout_total                     counter     # HIGH-3
 quote_subscription_cap_rejected_total{cap_kind} counter     # HIGH-6 — kinds: per_ws, global, rate_limit
 quote_source_health_state{source}               gauge       # HIGH-7 — 0=down, 1=degraded, 2=healthy
 quote_instruments_created_total{asset_class}    counter     # MED-10
+quote_aliases_created_total{source}             counter     # MED-10 sibling — first-observation alias writes per source
 quote_seed_skipped_total{reason}                counter     # MED-8 — reasons: missing_exchange, unknown_asset_class, ambiguous_symbol
 schwab_index_delayed_observed                   gauge       # 0/1 from §7b.1 verification subagent
 ```

@@ -21,10 +21,15 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.metrics import (
@@ -36,39 +41,85 @@ from app.models.instruments import AssetClass, Instrument, SymbolAlias
 LOCK_CACHE_MAX = 5000
 LOCK_CACHE_TTL_SECONDS = 3600
 
+# JSONB-friendly value shape — keeps mypy strict without leaking ``Any`` into
+# public signatures. Nested dict/list allowed for asset-class-specific extensions
+# (option strikes, ISIN, etc.) per spec §4.1.
+MetaScalar = str | int | float | bool | None
+MetaDict = dict[str, "MetaScalar | list[MetaScalar] | dict[str, MetaScalar]"]
+
+_log = structlog.get_logger(__name__)
+
+
+@dataclass
+class _LockEntry:
+    """Per-canonical_id lock + last-access timestamp + in-flight ref count.
+
+    ``refcount`` is incremented while a coroutine is inside ``async with lock``
+    and decremented on exit. The eviction policy refuses to remove entries with
+    ``refcount > 0`` so a long-running holder is never disconnected from new
+    waiters for the same canonical_id.
+    """
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_access: float = 0.0
+    refcount: int = 0
+
 
 class InstrumentResolver:
     """Resolve or create an :class:`Instrument` and its :class:`SymbolAlias`."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
-        self._locks: OrderedDict[str, tuple[asyncio.Lock, float]] = OrderedDict()
+        self._locks: OrderedDict[str, _LockEntry] = OrderedDict()
         self._locks_guard = asyncio.Lock()
 
-    async def _get_lock(self, canonical_id: str) -> asyncio.Lock:
+    async def _get_or_create_entry(self, canonical_id: str) -> _LockEntry:
         async with self._locks_guard:
             now = time.monotonic()
             entry = self._locks.get(canonical_id)
-            if entry is not None:
-                lock, _ = entry
-                self._locks[canonical_id] = (lock, now)
-                self._locks.move_to_end(canonical_id)
-                return lock
+            if entry is None:
+                entry = _LockEntry(last_access=now)
+                self._locks[canonical_id] = entry
+            else:
+                entry.last_access = now
 
-            lock = asyncio.Lock()
-            self._locks[canonical_id] = (lock, now)
             self._locks.move_to_end(canonical_id)
+            entry.refcount += 1
             self._evict_locked(now)
-            return lock
+            return entry
+
+    async def _release_entry(self, canonical_id: str) -> None:
+        async with self._locks_guard:
+            entry = self._locks.get(canonical_id)
+            if entry is not None:
+                entry.refcount = max(0, entry.refcount - 1)
+
+    @asynccontextmanager
+    async def _symbol_lock(self, canonical_id: str) -> AsyncIterator[None]:
+        entry = await self._get_or_create_entry(canonical_id)
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            await self._release_entry(canonical_id)
 
     def _evict_locked(self, now: float) -> None:
+        """Caller must hold ``self._locks_guard``. Never evicts entries with
+        ``refcount > 0`` — a held lock must not be disconnected from waiters."""
         ttl_cutoff = now - LOCK_CACHE_TTL_SECONDS
-        stale = [k for k, (_, ts) in self._locks.items() if ts < ttl_cutoff]
-        for key in stale:
+        for key in [
+            k for k, e in self._locks.items() if e.last_access < ttl_cutoff and e.refcount == 0
+        ]:
             self._locks.pop(key, None)
 
-        while len(self._locks) > LOCK_CACHE_MAX:
-            self._locks.popitem(last=False)
+        if len(self._locks) <= LOCK_CACHE_MAX:
+            return
+        for key in list(self._locks.keys()):
+            if len(self._locks) <= LOCK_CACHE_MAX:
+                break
+            entry = self._locks[key]
+            if entry.refcount == 0:
+                self._locks.pop(key, None)
 
     async def resolve_or_create(
         self,
@@ -79,14 +130,13 @@ class InstrumentResolver:
         asset_class: AssetClass,
         primary_exchange: str,
         currency: str,
-        meta: dict[str, Any] | None = None,
-        alias_meta: dict[str, Any] | None = None,
+        meta: MetaDict | None = None,
+        alias_meta: MetaDict | None = None,
     ) -> Instrument:
         """Return the :class:`Instrument` for ``canonical_id``, creating
         instrument + alias rows on first observation. Idempotent.
         """
-        lock = await self._get_lock(canonical_id)
-        async with lock:
+        async with self._symbol_lock(canonical_id):
             instrument = await self._upsert_instrument(
                 canonical_id=canonical_id,
                 asset_class=asset_class,
@@ -109,7 +159,7 @@ class InstrumentResolver:
         asset_class: AssetClass,
         primary_exchange: str,
         currency: str,
-        meta: dict[str, Any],
+        meta: MetaDict,
     ) -> Instrument:
         values: dict[str, Any] = {
             "canonical_id": canonical_id,
@@ -134,13 +184,27 @@ class InstrumentResolver:
         if new_id is not None:
             QUOTE_INSTRUMENTS_CREATED_TOTAL.labels(asset_class=asset_class.value).inc()
             inst = await self._session.get(Instrument, new_id)
-            assert inst is not None
+            if inst is None:  # pragma: no cover — invariant violation, not assert
+                raise LookupError(
+                    f"INSERT RETURNING id={new_id} but session.get returned None "
+                    f"for canonical_id={canonical_id!r}"
+                )
             return inst
 
+        # Conflict path: ON CONFLICT DO NOTHING blocked until the writer that
+        # owns the existing row committed (PG row-lock semantics), so the SELECT
+        # in this transaction is guaranteed to see it.
         existing = await self._session.execute(
             select(Instrument).where(Instrument.canonical_id == canonical_id)
         )
-        return existing.scalar_one()
+        inst = existing.scalar_one_or_none()
+        if inst is None:  # pragma: no cover — would only fire if the conflicting
+            # row was concurrently deleted; the schema has no DELETE path on
+            # instruments today, so this is a defensive belt-and-braces raise.
+            raise LookupError(
+                f"INSERT conflicted on canonical_id={canonical_id!r} but no row found"
+            )
+        return inst
 
     async def _upsert_alias(
         self,
@@ -148,7 +212,7 @@ class InstrumentResolver:
         source: str,
         raw_symbol: str,
         instrument_id: int,
-        meta: dict[str, Any],
+        meta: MetaDict,
     ) -> None:
         stmt = (
             pg_insert(SymbolAlias)
@@ -197,7 +261,15 @@ class InstrumentResolver:
                 currency=currency,
                 alias_meta={"exchange": exchange, "sec_type": "STK"},
             )
-        except Exception:
+        except SQLAlchemyError, LookupError:
+            _log.warning(
+                "instrument_resolver.from_legacy_failed",
+                broker_id=broker_id,
+                raw_symbol=raw_symbol,
+                exchange=exchange,
+                currency=currency,
+                exc_info=True,
+            )
             return None
 
 

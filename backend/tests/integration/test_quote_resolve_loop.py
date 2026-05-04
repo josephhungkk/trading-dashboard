@@ -1,14 +1,18 @@
-"""Concurrency stress for InstrumentResolver — CRIT-3 mitigation.
+"""Concurrency stress for InstrumentResolver — CRIT-3 in-process mitigation.
 
-≥50 concurrent ``resolve_or_create()`` calls for the same novel canonical_id
-must produce exactly 1 instrument row + 1 alias row + zero exceptions, even
-when the in-process asyncio.Lock cache is empty on first hit.
+≥50 concurrent ``resolve_or_create()`` calls against ONE resolver instance
+sharing ONE :class:`AsyncSession` must produce exactly 1 instrument row +
+N alias rows + zero exceptions, even when the asyncio.Lock cache is empty on
+first hit. This validates the in-process layer of the two-layer guard
+(per-canonical_id ``asyncio.Lock`` serialising same-symbol concurrent
+callers); the AsyncSession is single-connection by construction so the
+asyncio.Lock has nothing to race with.
 
-The two-layer guard (per-canonical_id ``asyncio.Lock`` + DB-side
-``INSERT ... ON CONFLICT DO NOTHING``) serialises same-symbol concurrent
-callers through one lock; cross-process safety is provided by the unique
-index on ``instruments.canonical_id`` + composite PK on
-``symbol_aliases(source, raw_symbol)``.
+Cross-process / cross-resolver safety is provided by the DB layer
+(``INSERT ... ON CONFLICT DO NOTHING`` against the unique index on
+``instruments.canonical_id`` + composite PK on
+``symbol_aliases(source, raw_symbol)``) — exercised end-to-end by the
+``test_quote_engine_e2e.py`` suite added in Chunk B.
 """
 
 from __future__ import annotations
