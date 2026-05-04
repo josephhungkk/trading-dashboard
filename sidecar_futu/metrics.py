@@ -27,3 +27,9 @@ futu_streamer_subscribe_total = Counter(
     labelnames=["result"],
     registry=registry,
 )
+
+futu_stream_quote_drops_total = Counter(
+    "futu_stream_quote_drops_total",
+    "Per-call StreamQuotes queue drops (slow consumer / full queue).",
+    registry=registry,
+)

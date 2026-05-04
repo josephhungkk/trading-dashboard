@@ -65,7 +65,20 @@ class FutuStreamer:
         await self._call_ctx(self._quote_ctx.set_handler, self._handler)
 
     async def stop(self) -> None:
+        """Tear down the streamer — clears tick_callback and closes the
+        underlying OpenQuoteContext. Idempotent: safe to call multiple
+        times. Closes the context via worker thread to avoid blocking
+        the event loop on Futu SDK socket cleanup.
+        """
         self.tick_callback = None
+        ctx = self._quote_ctx
+        self._quote_ctx = None  # type: ignore[assignment]
+        if ctx is None:
+            return
+        try:
+            await self._call_ctx(ctx.close)
+        except Exception as exc:
+            log.warning("futu.streamer.close_error", error=str(exc))
 
     async def on_subscribe(self, symbols: list[pb.SymbolRef]) -> None:
         to_subscribe: list[tuple[str, str]] = []
@@ -191,10 +204,19 @@ class FutuStreamer:
         )
 
     def _dispatch_quote_row_threadsafe(self, row: dict[str, Any]) -> None:
-        if self._loop is None:
+        # Capture the loop reference BEFORE checking — stop() may set
+        # self._loop = None on another thread between the None-check and
+        # call_soon_threadsafe(), and a closed loop also raises RuntimeError.
+        loop = self._loop
+        if loop is None:
             self._dispatch_quote_row(row)
             return
-        self._loop.call_soon_threadsafe(self._dispatch_quote_row, row)
+        try:
+            loop.call_soon_threadsafe(self._dispatch_quote_row, row)
+        except RuntimeError:
+            # Loop closed mid-rotation — drop the tick rather than crash
+            # the Futu SDK worker thread.
+            log.warning("futu.streamer.dispatch_loop_closed")
 
     def _canonical_for_raw(self, raw_futu_code: str) -> str:
         for canonical_id, entry in self._upstream_refcount.items():
@@ -277,7 +299,12 @@ def canonical_to_futu_code(canonical_id: str) -> str:
     if region != "HK":
         raise ValueError(f"unsupported futu region: {region}")
     if asset_type == "stock":
-        return f"HK.{int(symbol):05d}"
+        # Numeric HK stock codes pad to 5 digits (e.g. 700 -> HK.00700).
+        # Non-numeric codes (rare HK GEM listings) pass through verbatim.
+        try:
+            return f"HK.{int(symbol):05d}"
+        except ValueError:
+            return f"HK.{symbol}"
     if asset_type == "idx" and symbol in _INDEX_CODES:
         return _INDEX_CODES[symbol]
     if asset_type in {"warrant", "cbbc"}:

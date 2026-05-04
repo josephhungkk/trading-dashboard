@@ -274,10 +274,16 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
+                # Drop oldest, then enqueue. If still full (race with
+                # competing producer), record the drop + log so the
+                # silent-failure path is visible in dashboards.
                 with contextlib.suppress(asyncio.QueueEmpty):
                     queue.get_nowait()
-                with contextlib.suppress(asyncio.QueueFull):
+                try:
                     queue.put_nowait(message)
+                except asyncio.QueueFull:
+                    metrics.futu_stream_quote_drops_total.inc()
+                    log.warning("futu.stream_quotes.dropped")
 
         self._add_streamer_tick_callback(streamer, tick_callback)
         consumer_task = asyncio.create_task(
