@@ -38,6 +38,11 @@ _FRESH_WINDOW = timedelta(minutes=25)  # H4 — 25min headroom inside 30min TTL
 # Required metadata keys for Schwab Configure.
 _REQUIRED_META_KEYS = ("app_key", "app_secret", "refresh_token")
 
+# Per-call StreamQuotes guards — prevent a misbehaving / slow consumer
+# from exhausting sidecar memory.
+_STREAM_QUEUE_MAX = 2048   # in-flight ticks before drop-oldest kicks in
+_CALL_SUBS_MAX = 500       # canonical_ids tracked per gRPC call
+
 
 class BrokerServicer(broker_pb2_grpc.BrokerServicer):
     """Schwab gRPC service implementation."""
@@ -284,7 +289,15 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 token_cache=self._token_cache,
                 tokens_refreshed=tokens_refreshed,
             )
-            await streamer.start()
+            try:
+                await streamer.start()
+            except Exception:
+                # Init failure must not leak a partially-started streamer
+                # — orphaned sockets / refcount tables would accumulate
+                # under repeated transient network errors.
+                with contextlib.suppress(Exception):
+                    await streamer.stop()
+                raise
             self._streamer = streamer
             return streamer
 
@@ -299,11 +312,25 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
             return
 
-        queue: asyncio.Queue[broker_pb2.QuoteMessage] = asyncio.Queue()
+        # Bound the per-call queue so a slow gRPC consumer cannot exhaust
+        # sidecar memory under high-frequency tick streams. On overflow we
+        # drop the OLDEST tick — fresh quotes are more useful than backlog.
+        queue: asyncio.Queue[broker_pb2.QuoteMessage] = asyncio.Queue(
+            maxsize=_STREAM_QUEUE_MAX
+        )
         call_subs: set[str] = set()
 
         def tick_callback(message: broker_pb2.QuoteMessage) -> None:
-            queue.put_nowait(message)
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                # Drop oldest, then enqueue. Best-effort — a competing
+                # producer could refill before our get_nowait, in which
+                # case this tick is silently dropped.
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(message)
 
         self._add_streamer_tick_callback(streamer, tick_callback)
         consumer_task = asyncio.create_task(
@@ -332,20 +359,44 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         call_subs: set[str],
     ) -> None:
         async for request in request_iterator:
-            op = request.WhichOneof("op")
-            if op == "subscribe":
-                symbols = list(request.subscribe.symbols)
-                await streamer.on_subscribe(symbols)
-                call_subs.update(_canonical_id(symbol) for symbol in symbols)
-            elif op == "unsubscribe":
-                symbols = list(request.unsubscribe.symbols)
-                await streamer.on_unsubscribe(symbols)
-                call_subs.difference_update(_canonical_id(symbol) for symbol in symbols)
-            elif op == "resync":
-                symbols = list(request.resync.expected)
-                await streamer.on_resync(symbols)
-                call_subs.clear()
-                call_subs.update(_canonical_id(symbol) for symbol in symbols)
+            try:
+                op = request.WhichOneof("op")
+                if op == "subscribe":
+                    symbols = list(request.subscribe.symbols)
+                    if len(call_subs) + len(symbols) > _CALL_SUBS_MAX:
+                        log.warning(
+                            "schwab.stream_quotes.call_subs_cap_hit",
+                            current=len(call_subs),
+                            requested=len(symbols),
+                            cap=_CALL_SUBS_MAX,
+                        )
+                        continue
+                    await streamer.on_subscribe(symbols)
+                    call_subs.update(_canonical_id(s) for s in symbols)
+                elif op == "unsubscribe":
+                    symbols = list(request.unsubscribe.symbols)
+                    await streamer.on_unsubscribe(symbols)
+                    call_subs.difference_update(_canonical_id(s) for s in symbols)
+                elif op == "resync":
+                    symbols = list(request.resync.expected)
+                    if len(symbols) > _CALL_SUBS_MAX:
+                        log.warning(
+                            "schwab.stream_quotes.resync_cap_hit",
+                            requested=len(symbols),
+                            cap=_CALL_SUBS_MAX,
+                        )
+                        continue
+                    await streamer.on_resync(symbols)
+                    call_subs.clear()
+                    call_subs.update(_canonical_id(s) for s in symbols)
+                # heartbeat (and any unknown op) — keep-alive only, no-op
+            except Exception as exc:  # noqa: BLE001
+                # Malformed frame must not tear the bidi call down — log
+                # and continue draining the iterator.
+                log.warning(
+                    "schwab.stream_quotes.request_dispatch_error",
+                    error=str(exc),
+                )
 
     def _add_streamer_tick_callback(
         self,
@@ -362,10 +413,25 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             streamer._broker_servicer_previous_tick_callback = previous
 
             def dispatch(message: broker_pb2.QuoteMessage) -> None:
+                # Per-callback isolation — one bad consumer must not block
+                # the others on this tick. Snapshot via tuple(...) so a
+                # concurrent register/unregister doesn't mutate mid-loop.
                 if previous is not None:
-                    previous(message)
+                    try:
+                        previous(message)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "schwab.stream_quotes.previous_callback_error",
+                            error=str(exc),
+                        )
                 for registered in tuple(callbacks):
-                    registered(message)
+                    try:
+                        registered(message)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "schwab.stream_quotes.tick_callback_error",
+                            error=str(exc),
+                        )
 
             streamer.tick_callback = dispatch
         callbacks.add(callback)
