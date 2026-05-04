@@ -122,3 +122,92 @@ groups:
         annotations:
           summary: "Fills write failures detected"
           description: "Consumer failed to insert fill rows ({{ $labels.reason }}). Check backend logs."
+
+  - name: phase7a_schwab
+    rules:
+      - alert: SchwabAccessTokenStale
+        expr: schwab_access_token_age_seconds > 1500
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Schwab access_token older than 25 min (freshness window breached)"
+          description: "Access token age {{ $value }}s exceeds the 25-min refresh threshold (H4). Tier-2 refresher should mint a new token; if Tier-2 disabled, operator must run Tier-1 manual flow before token expires at 30 min."
+
+      - alert: SchwabRefreshTokenExpiringSoon
+        expr: schwab_refresh_token_age_hours > 144
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "Schwab refresh_token > 144h (24h until 168h hard expiry)"
+          description: "Refresh token age {{ $value }}h. Schwab forces re-auth at 168h. Operator must run the Tier-1 manual OAuth flow within 24h to mint a new refresh_token."
+
+      - alert: SchwabRefreshTokenFlapping
+        expr: schwab_refresh_token_uses_per_24h > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Schwab refresh_token used > 50 times in 24h (restart-flap detector — H4)"
+          description: "Refresh-token-use rate is {{ $value }}/24h. Expected ~48 (every 25 min). Higher rate indicates sidecar restart loop or duplicate writers — check schwab-sidecar logs and PG advisory-lock contention."
+
+      - alert: SchwabSidecarTokenDriftHigh
+        expr: schwab_sidecar_token_drift_seconds > 60
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Sidecar Configure RPC drift > 60s after a known token write (C3 invariant)"
+          description: "Backend wrote a new token but sidecar never received Configure within 60s. Pub/sub forwarder may be down or sidecar is unreachable. Check SSE config_stream and broker_configure_total{reason='success'}."
+
+      - alert: SchwabOAuthCallbackFailures
+        expr: |
+          rate(schwab_oauth_callback_total{result!="success"}[5m]) >
+          0.5 * rate(schwab_oauth_callback_total[5m])
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Schwab OAuth callback failure rate > 50%"
+          description: "Most OAuth callbacks are failing on path={{ $labels.path }}. Likely state-nonce HMAC verification, replay defense (Redis GETDEL), or app_secrets missing. Check backend logs around oauth.py."
+
+      - alert: SchwabHttpErrorRateHigh
+        expr: |
+          rate(schwab_http_requests_total{status=~"5..|429"}[5m]) >
+          0.1 * rate(schwab_http_requests_total[5m])
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Schwab REST 5xx/429 rate > 10% on {{ $labels.endpoint }}"
+          description: "Sustained Schwab API errors. 429 = rate limit (sidecar should back off). 5xx = upstream incident. Check sidecar logs + Schwab status page."
+
+      - alert: SchwabTier2Stalled
+        expr: time() - schwab_tier2_last_run_timestamp_seconds > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tier-2 Schwab refresher hasn't run in > 30 min"
+          description: "Last Tier-2 attempt {{ $value }}s ago. Refresher cron should fire every 25 min. Check schwab-refresher container + selector-health probe (auto-disabled after 3 consecutive failures — H2)."
+
+      - alert: SchwabTier2FailureRateHigh
+        expr: |
+          rate(schwab_tier2_refresh_total{result!="success"}[15m]) >
+          0.5 * rate(schwab_tier2_refresh_total[15m])
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tier-2 Schwab refresher failure rate > 50%"
+          description: "Most Tier-2 refresh attempts failing (result={{ $labels.result }}). Schwab login UI selectors may have drifted (H2). Refresher will auto-disable after 3 consecutive failures — operator must fall back to Tier-1 manual."
+
+      - alert: SchwabAccountHashRefreshChurn
+        expr: increase(schwab_account_hash_refresh_total[1h]) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Schwab account_hash cache refreshing > 10×/h"
+          description: "account_hash cache refresh churn (reason={{ $labels.reason }}). Expected ~1/h (lifespan + post-write). Higher rate means cache is being invalidated unexpectedly — check broker_callback_server logs."
