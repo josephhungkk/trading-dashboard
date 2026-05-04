@@ -319,3 +319,19 @@ QUOTE_ROUTE_CHANGES_TOTAL = Counter(
     labelnames=["from_source", "to_source", "asset_class"],
     registry=registry,
 )
+
+QUOTE_SIDECAR_RECONNECT_TOTAL = Counter(
+    "quote_sidecar_reconnect_total",
+    "SidecarStream gRPC reconnects by source + reason (HIGH-1). "
+    "reason ∈ {aio_rpc_error, token_rotation, sidecar_restart, idle_timeout}.",
+    labelnames=["source", "reason"],
+    registry=registry,
+)
+
+QUOTE_SIDECAR_FIRST_FRAME_TOTAL = Counter(
+    "quote_sidecar_first_frame_total",
+    "First-frame kind sent on (re)connect: subscribe (cold/sidecar-restart) "
+    "vs resync (warm/gRPC-only reconnect). HIGH-1 mitigation observability.",
+    labelnames=["source", "kind"],
+    registry=registry,
+)
