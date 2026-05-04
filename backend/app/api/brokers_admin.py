@@ -77,12 +77,22 @@ async def schwab_oauth_start(
 ) -> RedirectResponse:
     SCHWAB_OAUTH_START_TOTAL.inc()
     user_email = user.email or "admin"
+    app_key_raw = await config_service.reveal_secret("broker", "schwab.app_key")
+    if not app_key_raw:
+        # Surfacing a 500 from urllib.parse.quote(None) was unhelpful; a 400
+        # with a precise hint matches the runbook's "seed app_key/app_secret"
+        # step (deploy/runbook-schwab-setup.md).
+        raise HTTPException(
+            400,
+            "schwab.app_key not configured - seed broker.schwab.app_key + "
+            "broker.schwab.app_secret in app_secrets before starting OAuth",
+        )
+    app_key = cast(str, app_key_raw)
     signed = await mint_state_nonce(
         redis,
         user_email=user_email,
         app_secret_key=settings.secret_key.encode(),
     )
-    app_key = cast(str, await config_service.reveal_secret("broker", "schwab.app_key"))
     callback_url = cast(str | None, await config_service.get("broker", "schwab.callback_url"))
     if not callback_url:
         callback_url = "https://dashboard.kiusinghung.com/api/oauth/schwab/callback"
