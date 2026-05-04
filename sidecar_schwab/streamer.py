@@ -34,6 +34,9 @@ _FIELD_MASK = "0,1,2,3,8,12,28,29,30,33"
 _BACKOFF_MAX_SEC = 60.0
 _LOGIN_TIMEOUT_SEC = 10.0
 _IDLE_TIMEOUT_SEC = 90.0
+# Hard cap on the per-streamer refcount table. Schwab's per-account L1
+# entitlement is well below this; the cap is a runaway-caller / DoS guard.
+_MAX_SYMBOLS = 5000
 
 
 class _WebSocket(Protocol):
@@ -100,6 +103,14 @@ class SchwabStreamer:
                 canonical_id, raw_symbol = _ids(symbol)
                 entry = self._upstream_refcount.get(canonical_id)
                 if entry is None:
+                    if len(self._upstream_refcount) >= _MAX_SYMBOLS:
+                        log.warning(
+                            "schwab.streamer.subs_cap_hit",
+                            current=len(self._upstream_refcount),
+                            cap=_MAX_SYMBOLS,
+                            canonical_id=canonical_id,
+                        )
+                        continue
                     self._upstream_refcount[canonical_id] = _SymbolEntry(raw_symbol, 1)
                     commands.extend((("SUBS", raw_symbol), ("ADD", raw_symbol)))
                     continue
@@ -150,12 +161,23 @@ class SchwabStreamer:
             reason = await self._recv_until_reconnect()
             if self._shutting_down:
                 return
+            # Token-rotation gap = full rotation cycle (event detected →
+            # reconnect + replay complete). Measured here, not inside
+            # _record_reconnect, so the metric reflects user-visible
+            # downtime, not just close_ws() duration.
+            rotation_started = (
+                time.monotonic() if reason == "token_rotation" else None
+            )
             await self._record_reconnect(reason)
             if reason != "token_rotation":
                 await asyncio.sleep(min(2**backoff_attempt, _BACKOFF_MAX_SEC))
                 backoff_attempt += 1
             if await self._reconnect_with_new_creds():
                 backoff_attempt = 0
+            if rotation_started is not None:
+                SCHWAB_STREAMER_TOKEN_ROTATION_GAP_SECONDS.observe(
+                    time.monotonic() - rotation_started
+                )
 
     async def _recv_until_reconnect(self) -> str:
         while self._ws is not None and not self._shutting_down:
@@ -166,7 +188,7 @@ class SchwabStreamer:
                 timeout=_IDLE_TIMEOUT_SEC,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            _cancel_pending(pending)
+            await _cancel_pending(pending)
             if not done:
                 return "idle"
             if rotation_task in done and self._tokens_refreshed.is_set():
@@ -182,14 +204,10 @@ class SchwabStreamer:
     async def _record_reconnect(self, reason: str) -> None:
         log.info("schwab.streamer.reconnect", reason=reason)
         SCHWAB_STREAMER_RECONNECT_TOTAL.labels(reason=reason).inc()
-        if reason != "token_rotation":
-            await self._close_ws()
-            return
-        started = time.monotonic()
-        log.info("schwab.streamer.token_rotation_reconnect")
+        if reason == "token_rotation":
+            log.info("schwab.streamer.token_rotation_reconnect")
+            self._tokens_refreshed.clear()
         await self._close_ws()
-        SCHWAB_STREAMER_TOKEN_ROTATION_GAP_SECONDS.observe(time.monotonic() - started)
-        self._tokens_refreshed.clear()
 
     async def _reconnect_with_new_creds(self) -> bool:
         try:
@@ -207,6 +225,19 @@ class SchwabStreamer:
         socket_url = str(info.get("streamerSocketUrl") or "")
         if not socket_url:
             raise RuntimeError("streamerInfo missing streamerSocketUrl")
+        # Defense-in-depth: a compromised Schwab response that returns a
+        # plaintext ws:// or attacker-controlled host would receive the
+        # bearer token in the LOGIN frame in the clear. Reject any URL
+        # that isn't WSS to a Schwab-controlled domain.
+        if not socket_url.startswith("wss://"):
+            raise RuntimeError(
+                f"streamerSocketUrl is not WSS: {socket_url!r}"
+            )
+        from urllib.parse import urlparse
+
+        host = (urlparse(socket_url).hostname or "").lower()
+        if not (host.endswith(".schwab.com") or host.endswith(".schwabapi.com")):
+            raise RuntimeError(f"streamerSocketUrl host not Schwab: {host!r}")
         self._ws = await websockets.connect(
             socket_url, ping_interval=30, ping_timeout=10, close_timeout=5
         )
@@ -286,7 +317,15 @@ class SchwabStreamer:
             quote = self._row_to_quote(row)
             if quote is None or self.tick_callback is None:
                 continue
-            self.tick_callback(quote)
+            try:
+                self.tick_callback(quote)
+            except Exception as exc:  # noqa: BLE001
+                # Isolate per-tick callback failures from the recv loop —
+                # one bad consumer must not stall the WS or kill the task.
+                log.warning(
+                    "schwab.streamer.tick_callback_error", error=str(exc)
+                )
+                continue
             raw_symbol = _row_symbol(row)
             SCHWAB_STREAMER_TICKS_TOTAL.labels(symbol=raw_symbol).inc()
             log.info("schwab.streamer.tick", symbol=raw_symbol)
@@ -386,7 +425,7 @@ def _decimal_str(value: Any) -> str:
         if isinstance(value, float) and value != value:
             return ""
         return str(Decimal(str(value)))
-    except InvalidOperation, TypeError, ValueError:
+    except (InvalidOperation, TypeError, ValueError):
         return ""
 
 
@@ -397,10 +436,17 @@ def _int_str(value: Any) -> str:
         if isinstance(value, float) and value != value:
             return ""
         return str(int(value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return ""
 
 
-def _cancel_pending(pending: set[asyncio.Task[Any]]) -> None:
+async def _cancel_pending(pending: set[asyncio.Task[Any]]) -> None:
+    """Cancel + await pending tasks so their coroutine frames are released
+    immediately instead of being kept alive until GC. Phase 7b.1 B4 lesson
+    applied here too — bare ``cancel()`` is request-only.
+    """
     for task in pending:
-        task.cancel()
+        if not task.done():
+            task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
