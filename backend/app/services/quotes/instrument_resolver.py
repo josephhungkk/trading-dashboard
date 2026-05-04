@@ -37,6 +37,7 @@ from app.core.metrics import (
     QUOTE_INSTRUMENTS_CREATED_TOTAL,
 )
 from app.models.instruments import AssetClass, Instrument, SymbolAlias
+from app.services.quotes.base import country_for_exchange as _country_for_exchange
 
 LOCK_CACHE_MAX = 5000
 LOCK_CACHE_TTL_SECONDS = 3600
@@ -271,25 +272,3 @@ class InstrumentResolver:
                 exc_info=True,
             )
             return None
-
-
-_EXCHANGE_TO_COUNTRY: dict[str, str] = {
-    "NASDAQ": "US",
-    "NYSE": "US",
-    "ARCA": "US",
-    "AMEX": "US",
-    "BATS": "US",
-    "CBOE": "US",
-    "LSE": "UK",
-    "LSEETF": "UK",
-    "SEHK": "HK",
-    "HKEX": "HK",
-    "TSE": "JP",
-    "TSEJ": "JP",
-}
-
-
-def _country_for_exchange(exchange: str) -> str | None:
-    if not exchange:
-        return None
-    return _EXCHANGE_TO_COUNTRY.get(exchange.upper())
