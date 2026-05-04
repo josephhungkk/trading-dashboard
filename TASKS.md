@@ -259,28 +259,9 @@ Scope:
 
 Tests: full Tier-1 smoke (no OAuth dance, just API-key); WS reconnect under token rotation (Alpaca tokens are long-lived but rotatable).
 
-## Phase 7d — Firstrade adapter (read-only, screen-scraper, US equities)  *(new)*
+## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket + Alpaca trade
 
-Add `sidecar_firstrade/` based on [`MaxxRK/firstrade-api`](https://github.com/MaxxRK/firstrade-api) — **unofficial screen-scraper of the Firstrade web platform; no official API exists.**
-
-**Scope (deliberately narrow):**
-- `Configure` RPC accepts username/password/PIN/MFA-token (encrypted in `app_secrets`).
-- `ListManagedAccounts`, `GetAccountSummary`, `GetPositions`, `GetOrders` — polling-only (Firstrade has no streaming).
-- **No `StreamQuotes`** — Firstrade is not a quote source. Polling cadence: 30 s for positions, 5 s for fills (configurable).
-- **Trade execution deferred to Phase 8 with explicit user opt-in** — the lib supports `place_order` but failure modes are TOS-grey-area + brittle. Read-only first.
-
-**Risks (called out in runbook from day 1):**
-- Screen-scraper breaks when Firstrade changes their UI; mitigate via `firstrade_scraper_health` alert (fires on 3× consecutive selector errors) + `firstrade_session_age_seconds` gauge.
-- TOS — Firstrade does not officially sanction third-party automation. User accepts risk.
-- 2FA — SMS/TOTP handled at `Configure` time, session cookie cached in `app_secrets` with TTL re-auth (similar to Schwab Tier-2 Playwright pattern).
-
-Tests: `sidecar_firstrade/tests/test_login_flow.py` (mocked HTTP fixtures from the upstream lib's test harness); operator manual-login smoke gated on `CI_USE_REAL_FIRSTRADE=1`.
-
-**Non-goals for 7d:** crypto, options, futures (Firstrade does support some — out of scope for first cut).
-
-## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket
-
-Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6).
+Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6). Alpaca `PlaceOrder` (US equity + crypto).
 
 ## Phase 9 — Charting v1 + bar aggregator + historical store
 
