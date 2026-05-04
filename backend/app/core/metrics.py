@@ -302,3 +302,20 @@ QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL = Counter(
     labelnames=["cap_kind"],
     registry=registry,
 )
+
+QUOTE_SOURCE_HEALTH_STATE = Gauge(
+    "quote_source_health_state",
+    "SourceRouter health gauge per upstream (HIGH-7). "
+    "Values: 0=down, 1=degraded, 2=healthy. Health-flip events drive "
+    "quote_route_changes_total.",
+    labelnames=["source"],
+    registry=registry,
+)
+
+QUOTE_ROUTE_CHANGES_TOTAL = Counter(
+    "quote_route_changes_total",
+    "Route reassignments by SourceRouter — fires on primary-down fallback "
+    "or operator override. Labels: from / to source ids + asset_class.",
+    labelnames=["from_source", "to_source", "asset_class"],
+    registry=registry,
+)
