@@ -38,15 +38,24 @@ RATE_WINDOW_SECONDS: float = 60.0
 class SubscribeDiff:
     """Result of an :meth:`SubscriptionRegistry.add` call.
 
-    ``added`` is the set whose global refcount transitioned 0→1 (the engine
-    should start an upstream subscription for each). ``rejected`` is the set
-    that hit a cap or rate-limit; ``rejected_reason`` is the *first* cap kind
-    encountered (cap_per_ws / cap_global / rate_limit) and is ``None`` only
-    when every requested symbol was accepted.
+    * ``added`` — refcount transitioned 0→1; engine starts an upstream sub.
+    * ``rejected`` — full set of rejected symbols (union of the per-cap sets
+      below).
+    * ``rejected_per_ws`` / ``rejected_global`` / ``rejected_rate_limit`` —
+      per-cap breakdown so callers can surface a different message per cap
+      kind without re-running the cap math.
+    * ``rejected_reason`` — the *first* cap encountered in the batch
+      (``per_ws`` / ``global`` / ``rate_limit``); back-compat shorthand for
+      callers that only need a single label. ``None`` iff every requested
+      symbol was accepted. Label values match the spec §8.1
+      ``quote_subscription_cap_rejected_total{cap_kind}`` set verbatim.
     """
 
     added: set[CanonicalId] = field(default_factory=set)
     rejected: set[CanonicalId] = field(default_factory=set)
+    rejected_per_ws: set[CanonicalId] = field(default_factory=set)
+    rejected_global: set[CanonicalId] = field(default_factory=set)
+    rejected_rate_limit: set[CanonicalId] = field(default_factory=set)
     rejected_reason: str | None = None
 
 
@@ -76,10 +85,12 @@ class SubscriptionRegistry:
         self._cap_global = cap_global
         self._rate_limit_per_minute = sub_rate_limit_per_minute
 
-        self._per_ws: dict[WSConnId, set[CanonicalId]] = defaultdict(set)
+        # Plain dicts (not defaultdict) — defaultdict's read-creates-entry
+        # behavior leaks phantom entries on rejected/empty batches.
+        self._per_ws: dict[WSConnId, set[CanonicalId]] = {}
         self._global_refs: dict[CanonicalId, int] = defaultdict(int)
         self._routes: dict[CanonicalId, SourceId | str] = {}
-        self._rate_buckets: dict[WSConnId, deque[float]] = defaultdict(deque)
+        self._rate_buckets: dict[WSConnId, deque[float]] = {}
         self._lock = asyncio.Lock()
 
     # ── add / remove ──────────────────────────────────────────────────────
@@ -89,42 +100,72 @@ class SubscriptionRegistry:
         ws: WSConnId,
         symbols: Iterable[str],
     ) -> SubscribeDiff:
+        """Subscribe ``ws`` to ``symbols``. Caps are evaluated per symbol in
+        order ``rate_limit → per_ws → global``; first cap kind encountered in
+        the batch wins ``rejected_reason``. Rate-limit is evaluated first so
+        a flood (whether of accepts or rejects) is bailed out early — the
+        rate window counts every attempt, not just accepts."""
         diff = SubscribeDiff()
+        # Materialise to avoid late-evaluation surprises from generators.
+        symbol_list = [CanonicalId(s) for s in symbols]
+        if not symbol_list:
+            return diff
+
         async with self._lock:
             now = time.monotonic()
             self._evict_rate_window(ws, now)
-            ws_set = self._per_ws[ws]
 
-            for sym_raw in symbols:
-                sym = CanonicalId(sym_raw)
+            # Read existing set lazily — only write back once if anything sticks.
+            ws_set = self._per_ws.get(ws)
+            ws_set_dirty = False
+            ws_set_view: set[CanonicalId] = ws_set if ws_set is not None else set()
 
-                if sym in ws_set:
+            rate_bucket = self._rate_buckets.get(ws)
+            rate_bucket_view: deque[float] = rate_bucket if rate_bucket is not None else deque()
+
+            for sym in symbol_list:
+                if sym in ws_set_view:
                     continue  # idempotent — already counted
 
-                if len(ws_set) >= self._cap_per_ws:
-                    diff.rejected.add(sym)
-                    diff.rejected_reason = diff.rejected_reason or "cap_per_ws"
-                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="cap_per_ws").inc()
-                    continue
+                # Count every attempt against the rate window — flood
+                # protection must include rejected attempts.
+                rate_bucket_view.append(now)
 
-                if len(self._global_refs) >= self._cap_global and sym not in self._global_refs:
+                if len(rate_bucket_view) > self._rate_limit_per_minute:
                     diff.rejected.add(sym)
-                    diff.rejected_reason = diff.rejected_reason or "cap_global"
-                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="cap_global").inc()
-                    continue
-
-                if len(self._rate_buckets[ws]) >= self._rate_limit_per_minute:
-                    diff.rejected.add(sym)
+                    diff.rejected_rate_limit.add(sym)
                     diff.rejected_reason = diff.rejected_reason or "rate_limit"
                     QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="rate_limit").inc()
                     continue
 
-                ws_set.add(sym)
+                if len(ws_set_view) >= self._cap_per_ws:
+                    diff.rejected.add(sym)
+                    diff.rejected_per_ws.add(sym)
+                    diff.rejected_reason = diff.rejected_reason or "per_ws"
+                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="per_ws").inc()
+                    continue
+
+                if len(self._global_refs) >= self._cap_global and sym not in self._global_refs:
+                    diff.rejected.add(sym)
+                    diff.rejected_global.add(sym)
+                    diff.rejected_reason = diff.rejected_reason or "global"
+                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="global").inc()
+                    continue
+
+                ws_set_view.add(sym)
+                ws_set_dirty = True
                 prev = self._global_refs[sym]
                 self._global_refs[sym] = prev + 1
                 if prev == 0:
                     diff.added.add(sym)
-                self._rate_buckets[ws].append(now)
+
+            # Only persist the per-WS set + rate bucket if we actually
+            # touched them — avoids phantom defaultdict entries leaking
+            # for empty / fully-rejected batches.
+            if ws_set_dirty and ws_set is None:
+                self._per_ws[ws] = ws_set_view
+            if rate_bucket is None and rate_bucket_view:
+                self._rate_buckets[ws] = rate_bucket_view
 
         return diff
 
@@ -186,8 +227,15 @@ class SubscriptionRegistry:
     # ── routing ───────────────────────────────────────────────────────────
 
     def set_route(self, canonical_id: str, source_id: SourceId | str) -> None:
-        """Set the upstream source for a canonical_id. No lock — single-writer
-        contract: only the SourceRouter's reroute task calls this."""
+        """Set the upstream source for a canonical_id.
+
+        Sync intentionally — SourceRouter (Task B3) is the only writer, and
+        because Python sync code runs uninterrupted between asyncio await
+        points, a sync write is atomic relative to any in-flight ``add`` /
+        ``remove`` (which only ``await`` on lock acquisition). Multi-worker
+        (Phase 24) will move route state to Redis and re-evaluate this
+        contract.
+        """
         self._routes[CanonicalId(canonical_id)] = source_id
 
     def get_route(self, canonical_id: str) -> SourceId | str | None:

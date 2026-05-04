@@ -296,7 +296,9 @@ QUOTE_ALIASES_CREATED_TOTAL = Counter(
 
 QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL = Counter(
     "quote_subscription_cap_rejected_total",
-    "SubscriptionRegistry rejections by cap kind (HIGH-6).",
-    labelnames=["cap_kind"],  # per_ws | global | rate_limit
+    "SubscriptionRegistry rejections by cap kind (HIGH-6). "
+    "cap_kind ∈ {per_ws, global, rate_limit} — must match spec §8.1 labels "
+    "verbatim; dashboards + alerts query by this exact set.",
+    labelnames=["cap_kind"],
     registry=registry,
 )
