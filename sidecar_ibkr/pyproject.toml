@@ -30,7 +30,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["sidecar"]
+packages = ["sidecar_ibkr"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -40,11 +40,11 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["sidecar"]
-# Glob matches both repo-rooted and sidecar-rooted invocations of pytest.
+source = ["sidecar_ibkr"]
+# Glob matches both repo-rooted and sidecar_ibkr-rooted invocations of pytest.
 omit = [
-  "sidecar/_generated/*",
-  "sidecar/scripts/*",
+  "sidecar_ibkr/_generated/*",
+  "sidecar_ibkr/scripts/*",
   "_generated/*",
   "scripts/*",
   "*/_generated/*",
@@ -71,6 +71,6 @@ exclude = ["_generated", "tests"]
 # when source modules import broker_pb2. This override silences the
 # transitive errors as a unit.
 [[tool.mypy.overrides]]
-module = "sidecar._generated.*"
+module = "sidecar_ibkr._generated.*"
 ignore_errors = true
 follow_imports = "skip"

@@ -54,7 +54,7 @@ jobs:
         working-directory: sidecar
         env:
           REAL_IBKR: ''
-        run: uv run pytest --cov=sidecar --cov-fail-under=80 -m 'not real_ibkr'
+        run: uv run pytest --cov=sidecar_ibkr --cov-fail-under=80 -m 'not real_ibkr'
 
   backend:
     runs-on: ubuntu-latest

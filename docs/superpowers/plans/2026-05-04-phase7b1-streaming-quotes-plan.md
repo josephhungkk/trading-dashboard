@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace `MockQuotesService` with a real-time multi-source streaming quote engine: backend `QuoteEngine` fans in ticks via bidi gRPC `StreamQuotes` from `sidecar_ibkr` (×4) + `sidecar_futu` + `sidecar_schwab`, fans out to Redis bus + `/ws/quotes` MessagePack gateway with focused/background conflation; new `instruments` + `symbol_aliases` schema (Alembic 0009).
+**Goal:** Replace `MockQuotesService` with a real-time multi-source streaming quote engine: backend `QuoteEngine` fans in ticks via bidi gRPC `StreamQuotes` from `sidecar_ibkr/` IBKR (×4 instances on ports 18001-4) + `sidecar_futu` + `sidecar_schwab`, fans out to Redis bus + `/ws/quotes` MessagePack gateway with focused/background conflation; new `instruments` + `symbol_aliases` schema (Alembic 0009). **Repo path note:** the IBKR sidecar source lives at `/home/joseph/dashboard/sidecar_ibkr/` (renamed from `sidecar/` on 2026-05-04 for naming consistency with the other broker sidecars).
 
 **Architecture:** Bidi gRPC `StreamQuotes(stream req) returns (stream QuoteMessage)` — backend = client, sidecar = server. Two-level subscription refcount (per-WS + global). Source-router config-driven priority via `app_config.quote_source_priority`. Per-WS `WSConflator` (10 Hz focused / 4 Hz background). Engine invariants `INV-Q-1..4` (single-worker Redis loopback suppression, M22 boundary strip, staleness-not-reroute, token-rotation Event ordering).
 
@@ -1741,7 +1741,7 @@ git commit -m "feat(sidecar_futu): StreamQuotes + HK index inclusion (Phase 7b.1
 
 ---
 
-## Chunk E — `sidecar_ibkr/streamer.py`
+## Chunk E — `sidecar_ibkr/streamer.py` (IBKR sidecar — note: lives at `sidecar_ibkr/`, not `sidecar_ibkr/`)
 
 ### Task E1: Port `ibkr.py` to ib_async + LSE GBp guard
 
@@ -1754,7 +1754,7 @@ git commit -m "feat(sidecar_futu): StreamQuotes + HK index inclusion (Phase 7b.1
 
 Codex prompt:
 
-> Read `/mnt/c/Dashboard_old/backend/app/services/quotes/providers/ibkr.py` (~236 lines) and port to `/home/joseph/dashboard/sidecar_ibkr/streamer.py`. Rewrite to `ib_async` (already used throughout sidecar_ibkr).
+> Read `/mnt/c/Dashboard_old/backend/app/services/quotes/providers/ibkr.py` (~236 lines) and port to `/home/joseph/dashboard/sidecar_ibkr/streamer.py` (note: the IBKR sidecar lives at `sidecar_ibkr/`, not `sidecar_ibkr/`). Rewrite to `ib_async` (already used throughout `sidecar_ibkr/`).
 >
 > - Reuse the existing `IB` connection from Phase 4 sidecar bootstrap (don't reconnect).
 > - `async on_subscribe(symbols)`: build `Contract` per `SymbolRef`. Mapping:
@@ -1786,7 +1786,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from sidecar_ibkr.streamer import IBKRStreamer, _normalize_gbx
+from sidecar.streamer import IBKRStreamer, _normalize_gbx
 
 
 def test_normalize_gbx_lse_gbp_below_100_divides_by_100():
@@ -1809,7 +1809,7 @@ def test_normalize_gbx_non_lse_passes_through():
 ```bash
 cd /home/joseph/dashboard/sidecar_ibkr && uv run pytest tests/test_streamer.py -v
 git add sidecar_ibkr/streamer.py sidecar_ibkr/handlers.py sidecar_ibkr/tests/test_streamer.py
-git commit -m "feat(sidecar_ibkr): StreamQuotes + LSE GBp guard (Phase 7b.1 E1)"
+git commit -m "feat(sidecar): StreamQuotes + LSE GBp guard (Phase 7b.1 E1)"
 ```
 
 ---

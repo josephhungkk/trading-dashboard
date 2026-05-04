@@ -13,7 +13,7 @@ from typing import cast
 import grpc  # type: ignore[import-untyped]
 import grpc.aio  # type: ignore[import-untyped]
 
-from sidecar._generated.broker.v1 import broker_pb2, broker_pb2_grpc
+from sidecar_ibkr._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 
 
 async def _close_channel(channel: object) -> None:

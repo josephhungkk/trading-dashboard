@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# sidecar/scripts/proto-gen.sh
+# sidecar_ibkr/scripts/proto-gen.sh
 # Regenerate Python gRPC stubs for the sidecar from proto/broker/v1/broker.proto.
 #
 # Prefers `buf` (the spec-blessed plugin chain) but falls back to a local
 # grpc_tools.protoc invocation + import rewrite for dev environments where
 # buf is unavailable. The fallback produces byte-equivalent module surface
-# for `from sidecar._generated.broker.v1 import broker_pb2` callers.
+# for `from sidecar_ibkr._generated.broker.v1 import broker_pb2` callers.
 
 set -euo pipefail
-cd "$(dirname "$0")/.."           # sidecar/
+cd "$(dirname "$0")/.."           # sidecar_ibkr/
 
 mkdir -p _generated/broker/v1
 : > _generated/__init__.py
@@ -17,7 +17,7 @@ mkdir -p _generated/broker/v1
 
 if command -v buf >/dev/null 2>&1; then
   ( cd ../proto && buf generate )
-  # `buf generate` writes to BOTH backend/app/_generated/ and sidecar/_generated/
+  # `buf generate` writes to BOTH backend/app/_generated/ and sidecar_ibkr/_generated/
   # per proto/buf.gen.yaml. Ensure package __init__.py files exist on both
   # sides and rewrite the broken `from v1 import broker_pb2` import.
   mkdir -p ../backend/app/_generated/broker/v1
@@ -26,9 +26,9 @@ if command -v buf >/dev/null 2>&1; then
   : > ../backend/app/_generated/broker/v1/__init__.py
   sed -i 's|^from v1 import broker_pb2|from app._generated.broker.v1 import broker_pb2|' \
     ../backend/app/_generated/broker/v1/broker_pb2_grpc.py
-  sed -i 's|^from v1 import broker_pb2|from sidecar._generated.broker.v1 import broker_pb2|' \
+  sed -i 's|^from v1 import broker_pb2|from sidecar_ibkr._generated.broker.v1 import broker_pb2|' \
     _generated/broker/v1/broker_pb2_grpc.py
-  echo "[ok] proto codegen complete -> backend/app/_generated/broker/v1/ + sidecar/_generated/broker/v1/"
+  echo "[ok] proto codegen complete -> backend/app/_generated/broker/v1/ + sidecar_ibkr/_generated/broker/v1/"
   exit 0
 fi
 
@@ -41,9 +41,9 @@ uv run python -m grpc_tools.protoc \
   broker/v1/broker.proto
 
 # grpc_tools generates `from broker.v1 import broker_pb2` which breaks under
-# the sidecar._generated.broker.v1 package layout. Rewrite to a fully-
+# the sidecar_ibkr._generated.broker.v1 package layout. Rewrite to a fully-
 # qualified import so the file works wherever the package is imported.
-sed -i 's|^from broker\.v1 import broker_pb2|from sidecar._generated.broker.v1 import broker_pb2|' \
+sed -i 's|^from broker\.v1 import broker_pb2|from sidecar_ibkr._generated.broker.v1 import broker_pb2|' \
   _generated/broker/v1/broker_pb2_grpc.py
 
-echo "[ok] sidecar proto codegen complete via grpc_tools -> sidecar/_generated/"
+echo "[ok] sidecar proto codegen complete via grpc_tools -> sidecar_ibkr/_generated/"

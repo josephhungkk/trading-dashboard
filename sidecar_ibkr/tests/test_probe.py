@@ -15,8 +15,8 @@ import grpc  # type: ignore[import-untyped]
 import grpc.aio  # type: ignore[import-untyped]
 import pytest
 
-from sidecar._generated.broker.v1 import broker_pb2
-from sidecar.probe import probe
+from sidecar_ibkr._generated.broker.v1 import broker_pb2
+from sidecar_ibkr.probe import probe
 
 
 @dataclass

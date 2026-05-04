@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from sidecar import handlers
-from sidecar._generated.broker.v1 import broker_pb2
+from sidecar_ibkr import handlers
+from sidecar_ibkr._generated.broker.v1 import broker_pb2
 
 
 @pytest.fixture

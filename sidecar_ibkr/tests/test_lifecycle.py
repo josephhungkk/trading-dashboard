@@ -24,8 +24,8 @@ from unittest.mock import patch
 
 import pytest
 
-from sidecar import backoff
-from sidecar.ibkr_sidecar import (
+from sidecar_ibkr import backoff
+from sidecar_ibkr.ibkr_sidecar import (
     _disconnect_watchdog,
     _fnv1a32,
     main,
@@ -111,8 +111,8 @@ async def test_disconnect_watchdog_exits_after_30s_disconnect() -> None:
     # iterates more than once before the SystemExit takes hold.
     times = [1_000_000.0, 1_000_031.0] + [1_000_031.0] * 100
 
-    with patch("sidecar.ibkr_sidecar.time.time", side_effect=times), patch(
-        "sidecar.ibkr_sidecar.sys.exit", side_effect=fake_exit
+    with patch("sidecar_ibkr.ibkr_sidecar.time.time", side_effect=times), patch(
+        "sidecar_ibkr.ibkr_sidecar.sys.exit", side_effect=fake_exit
     ):
         try:
             await asyncio.wait_for(_disconnect_watchdog(ib, stop), timeout=2.0)
@@ -171,8 +171,8 @@ def test_main_clean_run_returns_0_and_clears_failure(tmp_path: Path) -> None:
     async def fake_run(_args: object) -> None:
         return None
 
-    with patch("sidecar.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
-        "sidecar.ibkr_sidecar.run", fake_run
+    with patch("sidecar_ibkr.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
+        "sidecar_ibkr.ibkr_sidecar.run", fake_run
     ):
         assert main() == 0
 
@@ -189,8 +189,8 @@ def test_main_keyboard_interrupt_returns_0_and_clears_failure(tmp_path: Path) ->
     async def fake_run(_args: object) -> None:
         raise KeyboardInterrupt
 
-    with patch("sidecar.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
-        "sidecar.ibkr_sidecar.run", fake_run
+    with patch("sidecar_ibkr.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
+        "sidecar_ibkr.ibkr_sidecar.run", fake_run
     ):
         assert main() == 0
 
@@ -206,8 +206,8 @@ def test_main_systemexit_64_returns_64_without_recording_failure(tmp_path: Path)
     async def fake_run(_args: object) -> None:
         raise SystemExit(64)
 
-    with patch("sidecar.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
-        "sidecar.ibkr_sidecar.run", fake_run
+    with patch("sidecar_ibkr.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
+        "sidecar_ibkr.ibkr_sidecar.run", fake_run
     ):
         assert main() == 64
 
@@ -225,8 +225,8 @@ def test_main_systemexit_0_returns_0_and_clears_failure(tmp_path: Path) -> None:
     async def fake_run(_args: object) -> None:
         raise SystemExit(0)
 
-    with patch("sidecar.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
-        "sidecar.ibkr_sidecar.run", fake_run
+    with patch("sidecar_ibkr.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
+        "sidecar_ibkr.ibkr_sidecar.run", fake_run
     ):
         assert main() == 0
 
@@ -241,8 +241,8 @@ def test_main_systemexit_1_returns_1_and_records_failure(tmp_path: Path) -> None
     async def fake_run(_args: object) -> None:
         raise SystemExit(1)
 
-    with patch("sidecar.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
-        "sidecar.ibkr_sidecar.run", fake_run
+    with patch("sidecar_ibkr.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
+        "sidecar_ibkr.ibkr_sidecar.run", fake_run
     ):
         assert main() == 1
 
@@ -258,8 +258,8 @@ def test_main_unhandled_exception_returns_1_and_records_failure(tmp_path: Path) 
     async def fake_run(_args: object) -> None:
         raise RuntimeError("ibkr gateway exploded")
 
-    with patch("sidecar.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
-        "sidecar.ibkr_sidecar.run", fake_run
+    with patch("sidecar_ibkr.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
+        "sidecar_ibkr.ibkr_sidecar.run", fake_run
     ):
         assert main() == 1
 
@@ -276,8 +276,8 @@ def test_main_clientid_collision_string_returns_64(tmp_path: Path) -> None:
     async def fake_run(_args: object) -> None:
         raise RuntimeError("clientId 123 is already in use")
 
-    with patch("sidecar.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
-        "sidecar.ibkr_sidecar.run", fake_run
+    with patch("sidecar_ibkr.ibkr_sidecar.sys.argv", _argv(state_dir, log_dir)), patch(
+        "sidecar_ibkr.ibkr_sidecar.run", fake_run
     ):
         assert main() == 64
 

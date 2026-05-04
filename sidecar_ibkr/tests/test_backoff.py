@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from sidecar.backoff import (
+from sidecar_ibkr.backoff import (
     INITIAL_DELAY_SECONDS,
     MAX_DELAY_SECONDS,
     apply_startup_backoff,
@@ -26,7 +26,7 @@ def test_no_state_file_does_not_sleep(tmp_path: Path) -> None:
 def test_record_then_apply_sleeps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     record_failure(tmp_path, prev_delay=0.5)  # next delay = 1.0
     sleeps: list[float] = []
-    monkeypatch.setattr("sidecar.backoff.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("sidecar_ibkr.backoff.time.sleep", lambda s: sleeps.append(s))
     apply_startup_backoff(tmp_path)
     assert len(sleeps) == 1
     assert 0.5 < sleeps[0] <= 1.0

@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from sidecar.tls import (
+from sidecar_ibkr.tls import (
     _validate_pem_material,
     _verify_crl,
     assert_key_file_permissions,

@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from sidecar.pnl_cache import PnLCache
+from sidecar_ibkr.pnl_cache import PnLCache
 
 
 @dataclass

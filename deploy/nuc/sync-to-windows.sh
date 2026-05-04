@@ -27,11 +27,11 @@ mkdir -p "$DEPLOY_DST"
 rsync -a --delete "$DEPLOY_SRC" "$DEPLOY_DST"
 echo "[sync] deploy/nuc -> $(find "$DEPLOY_DST" -type f | wc -l) files"
 
-# 2. sidecar/ — Phase 4 IBKR sidecar (PyInstaller build, golden-trace recorder, Scheduled
+# 2. sidecar_ibkr/ — Phase 4 IBKR sidecar (PyInstaller build, golden-trace recorder, Scheduled
 #    Task launchers all run from C:\dashboard\sidecar\). Exclude Linux-built artifacts so
 #    we don't push WSL binaries/caches to a Windows path.
-SIDECAR_SRC="/home/joseph/dashboard/sidecar/"
-SIDECAR_DST="/mnt/c/dashboard/sidecar/"
+SIDECAR_SRC="/home/joseph/dashboard/sidecar_ibkr/"
+SIDECAR_DST="/mnt/c/dashboard/sidecar_ibkr/"
 mkdir -p "$SIDECAR_DST"
 rsync -a --delete \
     --exclude '_generated/' \
@@ -46,7 +46,7 @@ rsync -a --delete \
     "$SIDECAR_SRC" "$SIDECAR_DST"
 echo "[sync] sidecar -> $(find "$SIDECAR_DST" -type f | wc -l) files"
 
-# 3. proto/ - gRPC contract source consumed by sidecar/scripts/build-windows.ps1
+# 3. proto/ - gRPC contract source consumed by sidecar_ibkr/scripts/build-windows.ps1
 #    (uv run python -m grpc_tools.protoc --proto_path=../proto ...). The build
 #    script runs from C:\dashboard\sidecar\, so it expects ../proto = C:\dashboard\proto.
 PROTO_SRC="/home/joseph/dashboard/proto/"
@@ -55,7 +55,7 @@ mkdir -p "$PROTO_DST"
 rsync -a --delete "$PROTO_SRC" "$PROTO_DST"
 echo "[sync] proto -> $(find "$PROTO_DST" -type f | wc -l) files"
 
-# 4. sidecar_futu/ — Phase 6 Futu sidecar. Same exclusions as sidecar/ block above.
+# 4. sidecar_futu/ — Phase 6 Futu sidecar. Same exclusions as sidecar_ibkr/ block above.
 #    deploy/nuc/build-windows-futu.ps1 runs from C:\dashboard\sidecar_futu\.
 SIDECAR_FUTU_SRC="/home/joseph/dashboard/sidecar_futu/"
 SIDECAR_FUTU_DST="/mnt/c/dashboard/sidecar_futu/"

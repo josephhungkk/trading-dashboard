@@ -15,8 +15,8 @@ from decimal import Decimal
 import pytest
 import structlog.testing
 
-from sidecar._generated.broker.v1 import broker_pb2
-from sidecar.handlers import BrokerHandlers
+from sidecar_ibkr._generated.broker.v1 import broker_pb2
+from sidecar_ibkr.handlers import BrokerHandlers
 
 
 @dataclass

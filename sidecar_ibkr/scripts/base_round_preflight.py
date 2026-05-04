@@ -13,7 +13,7 @@ cycle: just send the protocol message and let the wrapper buffer
 account_values events into ib.accountValues() between subscribe/unsubscribe.
 
 Usage:
-    cd sidecar && uv run python scripts/base_round_preflight.py
+    cd sidecar_ibkr && uv run python scripts/base_round_preflight.py
 Exit code: 0 if BASE present for all accounts after the round, 1 otherwise.
 """
 

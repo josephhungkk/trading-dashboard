@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from sidecar.ibkr_sidecar import (
+from sidecar_ibkr.ibkr_sidecar import (
     _parse_args,
     _redact_processor,
     _redact_value,

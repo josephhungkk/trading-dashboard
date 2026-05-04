@@ -449,7 +449,7 @@ WS gateway converts decimal-string fields to JS-safe numbers at the boundary. De
 - Quote callback (`set_handler(QuoteHandlerBase)`) emits `QuoteMessage` on the gRPC stream.
 - `K_1M` (1-min bar) subscription support is **not wired in 7b.1**; Phase 9 will add.
 
-#### 5.1.3 `sidecar_ibkr/streamer.py` (port from dashboard_old `services/quotes/providers/ibkr.py` ≈ 70% reuse; rewrite to ib_async if old code used IBPy/raw ibapi)
+#### 5.1.3 `sidecar_ibkr/streamer.py` (IBKR sidecar; port from dashboard_old `services/quotes/providers/ibkr.py` ≈ 70% reuse; rewrite to ib_async if old code used IBPy/raw ibapi). Note: the IBKR sidecar lives at `sidecar_ibkr/`, not `sidecar_ibkr/`.
 
 - Per-gateway sidecar maintains its own subscription set (4 sidecars × independent universes).
 - `reqMktData(contract, generic_tick_list, snapshot=False)` for STK + IND (cash indexes via `secType="IND"` `exchange="CBOE"` for SPX/VIX/etc.; LSE UK via `exchange="LSE"` for UK stocks).
@@ -820,7 +820,7 @@ New `app_config` keys (Phase 2 admin API can edit at runtime):
 | Unit | `backend/tests/unit/test_instrument_resolver.py` | resolve-or-create, alias write-on-first-observation, GBX guard hook | ~100 lines new |
 | Sidecar golden trace | `sidecar_schwab/tests/test_streamer.py` | recorded `LEVELONE_EQUITIES` WS session + `$SPX` index session → asserts QuoteMessage bytes | port ~85% from old (~170 lines) |
 | Sidecar golden trace | `sidecar_futu/tests/test_streamer.py` | recorded SubType.QUOTE callback for HK stock + HSI index → QuoteMessage | ~150 lines new (no existing trace) |
-| Sidecar golden trace | `sidecar_ibkr/tests/test_streamer.py` | recorded `tickPrice` + `tickSize` events for AAPL + VOD (LSE GBp guard) + SPX (IND) | ~180 lines new |
+| Sidecar golden trace | `sidecar_ibkr/tests/test_streamer.py` (IBKR sidecar dir) | recorded `tickPrice` + `tickSize` events for AAPL + VOD (LSE GBp guard) + SPX (IND) | ~180 lines new |
 | Integration | `backend/tests/integration/test_quote_engine_e2e.py` | fake gRPC sidecar server emits scripted ticks → backend QuoteEngine → `/ws/quotes` MessagePack frames → asserts FE-visible frame sequence (snap → q × N → stale → q resumed → ack on unsub) | ~300 lines new |
 | Integration | `backend/tests/integration/test_alembic_0009.py` | upgrade + downgrade round-trip; partial index sanity | ~80 lines new |
 | Integration | `backend/tests/integration/test_quote_resolve_loop.py` | concurrent first-observation writes don't deadlock or duplicate rows | ~80 lines new |

@@ -21,8 +21,8 @@ from typing import Any
 
 import pytest
 
-from sidecar._generated.broker.v1 import broker_pb2
-from sidecar.handlers import BrokerHandlers
+from sidecar_ibkr._generated.broker.v1 import broker_pb2
+from sidecar_ibkr.handlers import BrokerHandlers
 
 
 def _make_handlers(ib: object, pnl_cache: object) -> BrokerHandlers:

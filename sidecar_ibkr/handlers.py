@@ -47,15 +47,15 @@ except ModuleNotFoundError:
 
     aiolimiter = SimpleNamespace(AsyncLimiter=_FallbackAsyncLimiter)
 
-from sidecar import metrics
-from sidecar._generated.broker.v1 import broker_pb2, broker_pb2_grpc
-from sidecar.normalize import (
+from sidecar_ibkr import metrics
+from sidecar_ibkr._generated.broker.v1 import broker_pb2, broker_pb2_grpc
+from sidecar_ibkr.normalize import (
     decimal_str,
     normalize_avg_cost,
     normalize_quote_currency,
     to_money_proto,
 )
-from sidecar.pnl_cache import PnLCache
+from sidecar_ibkr.pnl_cache import PnLCache
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

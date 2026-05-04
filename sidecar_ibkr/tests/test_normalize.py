@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from sidecar.normalize import (
+from sidecar_ibkr.normalize import (
     GBX_EXCHANGES,
     decimal_str,
     normalize_avg_cost,

@@ -15,9 +15,9 @@ from decimal import Decimal
 import pytest
 from ib_async import LimitOrder, MarketOrder, StopOrder
 
-from sidecar._generated.broker.v1 import broker_pb2
-from sidecar.handlers import BrokerHandlers, aiolimiter
-from sidecar.pnl_cache import PnLCache
+from sidecar_ibkr._generated.broker.v1 import broker_pb2
+from sidecar_ibkr.handlers import BrokerHandlers, aiolimiter
+from sidecar_ibkr.pnl_cache import PnLCache
 
 # ---------- ib_async-shaped fakes ----------
 
@@ -307,7 +307,7 @@ async def test_order_event_does_not_leak_cross_account() -> None:
 async def test_order_event_queue_bounded_drops_on_overflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sidecar import handlers, metrics
+    from sidecar_ibkr import handlers, metrics
 
     gate = asyncio.Event()
     real_queue = asyncio.Queue
@@ -892,7 +892,7 @@ def _clear_search_cache() -> Iterator[None]:
     (architect-review M1: ClassVar leaks across tests; rebinding instance
     attribute doesn't reach the class dict). Limiter is left intact —
     R20 mandates process-wide 5/sec."""
-    from sidecar.handlers import BrokerHandlers
+    from sidecar_ibkr.handlers import BrokerHandlers
 
     BrokerHandlers._search_cache.clear()
     yield

@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from sidecar._generated.broker.v1 import broker_pb2
-from sidecar.handlers import BrokerHandlers
-from sidecar.pnl_cache import PnLCache
+from sidecar_ibkr._generated.broker.v1 import broker_pb2
+from sidecar_ibkr.handlers import BrokerHandlers
+from sidecar_ibkr.pnl_cache import PnLCache
 
 
 @dataclass

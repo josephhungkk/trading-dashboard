@@ -29,7 +29,7 @@ scripts/cloudflare/.state/
 
 # Phase 4 — proto codegen artifacts (regenerated via `buf generate`)
 backend/app/_generated/
-sidecar/_generated/
+sidecar_ibkr/_generated/
 sidecar_futu/_generated/
 sidecar_schwab/_generated/
 sidecar_schwab_refresher/_generated/

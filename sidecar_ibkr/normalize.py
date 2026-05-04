@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     # The generated proto module may not exist before scripts/proto-gen.sh
     # has run; tolerate either state without a flapping mypy diagnostic.
-    from sidecar._generated.broker.v1 import (
+    from sidecar_ibkr._generated.broker.v1 import (
         broker_pb2,  # type: ignore[import-not-found, unused-ignore]
     )
 
@@ -59,7 +59,7 @@ def decimal_str(value: float | Decimal | None) -> str:
 def to_money_proto(value: Decimal, currency: str) -> broker_pb2.Money:
     """Build a broker.v1 Money proto without making generated code a hard import."""
     try:
-        from sidecar._generated.broker.v1 import broker_pb2
+        from sidecar_ibkr._generated.broker.v1 import broker_pb2
     except ImportError as exc:
         msg = "Generated broker proto modules are missing; run sidecar/scripts/proto-gen.sh first."
         raise ImportError(msg) from exc

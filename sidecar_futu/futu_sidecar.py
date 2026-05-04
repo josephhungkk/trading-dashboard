@@ -69,7 +69,7 @@ async def _serve(args: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         # Windows asyncio doesn't support add_signal_handler — fall back to
-        # the synchronous signal.signal handler. Mirrors sidecar/ibkr_sidecar.py.
+        # the synchronous signal.signal handler. Mirrors sidecar_ibkr/ibkr_sidecar.py.
         try:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):

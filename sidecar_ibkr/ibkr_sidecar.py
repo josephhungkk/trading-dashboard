@@ -21,17 +21,17 @@ from typing import Any
 import grpc.aio  # type: ignore[import-untyped]
 import structlog
 
-from sidecar import __version__
-from sidecar._generated.broker.v1 import broker_pb2_grpc
-from sidecar.backoff import (
+from sidecar_ibkr import __version__
+from sidecar_ibkr._generated.broker.v1 import broker_pb2_grpc
+from sidecar_ibkr.backoff import (
     apply_startup_backoff,
     clear_failure,
     read_previous_delay,
     record_failure,
 )
-from sidecar.handlers import BrokerHandlers
-from sidecar.pnl_cache import PnLCache
-from sidecar.tls import (
+from sidecar_ibkr.handlers import BrokerHandlers
+from sidecar_ibkr.pnl_cache import PnLCache
+from sidecar_ibkr.tls import (
     assert_key_file_permissions,
     build_grpc_server_credentials,
     server_options_for_tls13,
@@ -93,7 +93,7 @@ def _redact_processor(
 def configure_logging(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = TimedRotatingFileHandler(
-        log_dir / "sidecar.log",
+        log_dir / "sidecar_ibkr.log",
         when="midnight",
         backupCount=14,
         encoding="utf-8",
