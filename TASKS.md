@@ -206,11 +206,13 @@ applied inline.
 
 > **Phases 7 → 25 are locked in [`docs/ROADMAP.md`](docs/ROADMAP.md).** The stubs below carry only the headline + open follow-ups inherited from prior phases. Each phase gets its full chunk breakdown when its own brainstorm runs.
 
-## Phase 7a — Schwab connect (data + read-only)
+## Phase 7a — Schwab connect (data + read-only) ✅ shipped v0.7.0 (2026-05-04)
 
-`sidecar_schwab/` running on the **VPS** as a docker-compose service (cloud-broker pattern — no NUC, no PyInstaller, no mTLS). OAuth + manual re-auth UI for the 7-day refresh-token wall + opt-in Tier-2 Playwright auto-refresher (feature-flagged). `Configure` RPC, `ListAccounts`, `GetAccountSummary`, `GetPositions`, `GetOrders` (last 7 days, read-only). `account_hash` column on `broker_accounts` (Alembic 0008 — Schwab privacy layer; NULL for non-Schwab brokers). Trade execution + StreamQuotes return UNIMPLEMENTED.
+`sidecar_schwab/` on NUC at 18006 (PyInstaller-frozen, mTLS over WG). OAuth + manual re-auth UI for the 7-day refresh-token wall + opt-in Tier-2 Playwright auto-refresher (`sidecar_schwab_refresher/` separate cron container). `Configure` RPC, `ListManagedAccounts`, `GetAccountSummary`, `GetPositions`, `GetOrders` (read-only). `account_hash` column on `broker_accounts` (Alembic 0008; boundary-stripped before reaching FE). Trade execution + StreamQuotes return UNIMPLEMENTED (deferred to Phase 7b/8).
 
-Spec: [`docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md`](docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md). Architect-reviewed (3 CRIT + 6 HIGH + 7 MED + 5 LOW; CRIT+HIGH+MED applied inline).
+Single-writer rule (C2) enforced via `service BackendCallback` proto + PG advisory lock. HMAC-signed state nonce + Redis `GETDEL` atomic-consume for OAuth replay defense (H1). 11 metrics + 9 alerts (`phase7a_schwab` group). Operator runbook at `deploy/runbook-schwab-setup.md`. CF Access bypass for the public OAuth callback at `scripts/cloudflare/access-bypass-schwab-callback.sh`.
+
+Spec: [`docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md`](docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md). Architect-reviewed (3 CRIT + 6 HIGH + 7 MED + 5 LOW; CRIT+HIGH+MED applied inline). Phase memory: `phase7a_schwab_topology.md`.
 
 ## Phase 7b — Streaming quote engine + IBKR/Futu/Schwab/Coinbase/OANDA sources
 

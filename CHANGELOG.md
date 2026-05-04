@@ -5,6 +5,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-04
+
+### Phase 7a — Schwab broker connect (read-only OAuth + two-tier auth)
+
+- New `sidecar_schwab/` Python package (PyInstaller-frozen) at `10.10.0.2:18006`,
+  label `"schwab"`, broker_id `"schwab"`. Reuses the gRPC `Broker` contract;
+  `Configure` RPC ships `app_key`/`app_secret`/`access_token`/`refresh_token` from
+  `app_secrets`. Read-only surfaces this phase: ListManagedAccounts,
+  GetAccountSummary, GetPositions, GetOrders. Place/Cancel/Modify return UNIMPLEMENTED
+  (deferred to Phase 7b).
+- New `service BackendCallback` proto (`RequestTokenRefresh`) so the sidecar can ask
+  the backend to mint a new access_token when its cached one expires. Single-writer
+  rule enforced via PG advisory lock (C2 invariant) — backend is the only writer of
+  `app_secrets.broker.schwab.refresh_token`.
+- Two-tier auth:
+  - **Tier-1 (manual)**: `POST /api/admin/brokers/schwab/oauth-start` returns the
+    Schwab authorize URL with HMAC-SHA256-signed state nonce; public callback at
+    `/api/oauth/schwab/callback` verifies signature, atomic-consumes nonce via Redis
+    `GETDEL` (H1 — replay defense), exchanges code → tokens under advisory lock.
+  - **Tier-2 (auto-refresh)**: separate `sidecar_schwab_refresher/` Playwright cron
+    container (25-min interval), TOTP-driven login, redirect interception via
+    page.route() (C1 — never follows the redirect), selector-health probe (H2),
+    auto-disable after 3 consecutive failures.
+- New `POST /api/admin/brokers/schwab/disconnect` admin endpoint deletes both tokens;
+  `GET /api/admin/brokers/schwab/status` returns connection state + ages for the
+  `SchwabCard` settings UI.
+- `Account.account_hash` proto field 5 (Schwab PII-equivalent); boundary-stripped in
+  `AccountService` so frontend never sees it. `Order.avg_fill_price_inferred` proto
+  field 14 flags Schwab orders where `executionLeg.price` was missing and
+  avg_fill was inferred from quantity × marketValue (M2).
+- New SSE forwarder `/api/sse/config_stream` republishes `config:invalidate:<ns>`
+  Redis pub/sub events to subscribed clients (Tier-2 refresher uses this to learn
+  about token rotations the backend wrote).
+- 11 new Prometheus metrics in `app/core/metrics.py`:
+  `broker_configure_total`, `schwab_oauth_start_total`, `schwab_oauth_callback_total`,
+  `schwab_access_token_age_seconds`, `schwab_refresh_token_age_hours`,
+  `schwab_refresh_token_uses_per_24h`, `schwab_account_hash_refresh_total`,
+  `schwab_http_requests_total`, `schwab_sidecar_token_drift_seconds`,
+  `schwab_tier2_refresh_total`, `schwab_tier2_last_run_timestamp_seconds`.
+- New `phase7a_schwab` Prometheus alert group (9 alerts):
+  `SchwabAccessTokenStale` (>1500s), `SchwabRefreshTokenExpiringSoon` (>144h),
+  `SchwabRefreshTokenFlapping` (>50/24h — H4 restart-flap detector),
+  `SchwabSidecarTokenDriftHigh` (>60s — C3), `SchwabOAuthCallbackFailures`,
+  `SchwabHttpErrorRateHigh`, `SchwabTier2Stalled`, `SchwabTier2FailureRateHigh`,
+  `SchwabAccountHashRefreshChurn`.
+- Operator runbook: `deploy/runbook-schwab-setup.md` (9 steps, snapshot → app
+  registration → seed app_secrets → Tier-1 → optional Tier-2 → smoke).
+- CF Access bypass: `scripts/cloudflare/access-bypass-schwab-callback.sh` (idempotent;
+  the OAuth callback is publicly reachable but authenticated via HMAC state nonce).
+- Alembic 0008 adds `account_hash TEXT` + partial index on `broker_accounts`.
+- New `backend/tests/integration/test_token_rotation_atomicity.py` proves the
+  single-writer rule end-to-end (concurrent refresh attempts → only one mints).
+- Nightly real-Schwab smoke at `.github/workflows/nightly-real-schwab.yml`
+  (12:00 UTC, gated on `CI_USE_REAL_SCHWAB=1` + service token).
+- Schwabdev SDK 3.0.3 confined to `client.py` (M3 isolation); rest of the codebase
+  never imports it. Fork inventory: `tokens_db` not `tokens_file`,
+  `linked_accounts()` not `account_linked`, manual `_sync_tokens()` direct mutation
+  to avoid `update_tokens()` minting unwanted refresh tokens.
+
 ## [0.6.0] — 2026-04-30
 
 ### Phase 6 — Futu HK adapter + JP kanji font polish

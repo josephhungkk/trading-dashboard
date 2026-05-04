@@ -68,6 +68,7 @@ Five layers, one-way deps. Enforced by `eslint-plugin-boundaries`; violations br
 - `phase5b_shipped.md` — IBKR trade execution + 5b.1 hardening (v0.5.1–v0.5.3)
 - `phase5c_shipped.md` — modify, bracket, fills history (v0.5.4)
 - `phase6_futu_topology.md` — Futu HK adapter + Configure RPC + SDK gotchas (v0.6.0)
+- `phase7a_schwab_topology.md` — Schwab read-only OAuth + two-tier auth + BackendCallback (v0.7.0)
 
 Consult before changing those surfaces. **Don't copy that detail into CLAUDE.md.**
 
