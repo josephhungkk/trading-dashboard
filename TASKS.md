@@ -222,6 +222,62 @@ Inherits from prior deferrals:
 - [ ] **On-demand quote subscribe for preview** (deferred from 5c) — falls out of the registry pattern.
 - [ ] **Periodic BASE-tag refresh for accounts added mid-run** (deferred from 5b.1).
 
+### Phase 7b.1 progress (Chunk A — proto + schema + resolver)
+- [x] A1 — proto: `StreamQuotes` RPC + `SymbolRef` + `QuoteMessage` (`df8502a`)
+- [x] A2 — Alembic 0009 `instruments` + `symbol_aliases` (`e1c8f51`)
+- [x] A3 — SQLAlchemy ORM models (`392f7b8`)
+- [x] A4 — `InstrumentResolver` race-safe upsert (`811e4e7` + reviewer fixes `4062b1b`)
+- [ ] A5 — **deferred to Phase 7b.1.5** (see below). Plan assumed `positions.symbol` + `positions.exchange` + `watchlist_entries`; actual schema (Alembic 0005) has neither + `watchlist_entries` table doesn't exist. Resolver works fine without seed — first quote tick creates the row lazily.
+- [ ] **Chunk B in progress** — `QuoteEngine` core (B1–B5)
+
+## Phase 7b.1.5 — Instruments seed + admin alias endpoint  *(mini-phase, ~½ day, after 7b.1 ships)*
+
+Boot helper `seed_instruments_from_positions(session)` + admin endpoint `POST /api/admin/instruments` for operators to manually create aliases when the lazy creation flow surfaces `op:"err", code:"NO_INSTRUMENT"`.
+
+Schema work (Alembic 0010):
+- Add `symbol TEXT NOT NULL` + `primary_exchange TEXT NOT NULL` + `canonical_id TEXT` (nullable) to `positions` — populated by broker discoverer fan-out from contract metadata.
+- Create `watchlist_entries(id UUID PK, broker_id TEXT, symbol TEXT, exchange TEXT, currency CHAR(3), created_at)` — no model exists today.
+- Backfill positions via re-discover round on deploy (BASE-tag pattern from Phase 5b.1).
+
+Implementation:
+- `seed_instruments_from_positions` iterates `positions ∪ orders ∪ watchlist_entries`, calls `InstrumentResolver.resolve_or_create()` per row; missing/ambiguous rows bump `quote_seed_skipped_total{reason}`.
+- Admin endpoint validates payload (canonical_id format, asset_class enum, exchange whitelist) and calls resolver.
+- Lifespan wires the boot seed after `ConfigService` start, before `BrokerRegistry`.
+
+Tests: `tests/integration/test_instruments_seed.py` (per-source skip-reason coverage); `tests/api/test_admin_instruments.py` (endpoint auth + schema).
+
+## Phase 7c — Alpaca adapter (data + read-only + crypto/options-ready)  *(new)*
+
+Add `sidecar_alpaca/` (own gRPC sidecar, same proto). Alpaca's REST + WS API is well-documented and stable; SDK `alpaca-py` (Python). API-key auth (no OAuth dance). Sandbox + paper-trading endpoints from day 1.
+
+Scope:
+- `Configure` RPC, `ListManagedAccounts`, `GetAccountSummary`, `GetPositions`, `GetOrders` (read-only) — same shape as `sidecar_schwab`.
+- `StreamQuotes` wired to Alpaca's `wss://stream.data.alpaca.markets/v2/iex` (free real-time IEX feed) — registers `alpaca` in the source enum (already designed-for in 7b.1).
+- US equity + crypto in scope; options scaffolded (Alpaca added options Apr 2024) but trade execution deferred to Phase 8 alongside Schwab `PlaceOrder`.
+- `account_hash` boundary-strip same as Schwab.
+- Operator runbook at `deploy/runbook-alpaca-setup.md`.
+
+Tests: full Tier-1 smoke (no OAuth dance, just API-key); WS reconnect under token rotation (Alpaca tokens are long-lived but rotatable).
+
+## Phase 7d — Firstrade adapter (read-only, screen-scraper, US equities)  *(new)*
+
+Add `sidecar_firstrade/` based on [`MaxxRK/firstrade-api`](https://github.com/MaxxRK/firstrade-api) — **unofficial screen-scraper of the Firstrade web platform; no official API exists.**
+
+**Scope (deliberately narrow):**
+- `Configure` RPC accepts username/password/PIN/MFA-token (encrypted in `app_secrets`).
+- `ListManagedAccounts`, `GetAccountSummary`, `GetPositions`, `GetOrders` — polling-only (Firstrade has no streaming).
+- **No `StreamQuotes`** — Firstrade is not a quote source. Polling cadence: 30 s for positions, 5 s for fills (configurable).
+- **Trade execution deferred to Phase 8 with explicit user opt-in** — the lib supports `place_order` but failure modes are TOS-grey-area + brittle. Read-only first.
+
+**Risks (called out in runbook from day 1):**
+- Screen-scraper breaks when Firstrade changes their UI; mitigate via `firstrade_scraper_health` alert (fires on 3× consecutive selector errors) + `firstrade_session_age_seconds` gauge.
+- TOS — Firstrade does not officially sanction third-party automation. User accepts risk.
+- 2FA — SMS/TOTP handled at `Configure` time, session cookie cached in `app_secrets` with TTL re-auth (similar to Schwab Tier-2 Playwright pattern).
+
+Tests: `sidecar_firstrade/tests/test_login_flow.py` (mocked HTTP fixtures from the upstream lib's test harness); operator manual-login smoke gated on `CI_USE_REAL_FIRSTRADE=1`.
+
+**Non-goals for 7d:** crypto, options, futures (Firstrade does support some — out of scope for first cut).
+
 ## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket
 
 Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6).

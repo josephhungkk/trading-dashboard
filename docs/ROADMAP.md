@@ -21,7 +21,10 @@ End-state: a self-hosted personal trading dashboard covering every asset class s
 |---|---|---|---|
 | **7a** | 0.7.0 | **Schwab connect — data + read-only** | `sidecar_schwab/` on VPS as docker-compose service. OAuth + manual re-auth UI for the 7-day refresh-token wall + opt-in Tier-2 Playwright auto-refresher (feature-flagged). `Configure` RPC, `ListAccounts`, account-summary/positions/orders read-only. `account_hash` column on `broker_accounts` (Alembic 0008). Trade execution + StreamQuotes UNIMPLEMENTED. *Does not yet save IBKR data fees — that arrives with 7b.* |
 | **7b** | 0.7.1 | **Streaming quote engine + IBKR/Futu/Schwab/Coinbase/OANDA sources** | Subscription registry (refcount), Redis quote bus `quote.<source>.<canonical_id>`, frontend WebSocket gateway with conflation (4–10/s), `instruments` + `symbol_aliases` schema (Alembic 0009), stale detection. IBKR + Futu + Schwab streamers wired in one phase. Coinbase WS + OANDA practice WS as additional sources (data-only prep for Phase 15). Quote-source-router with config-driven priority. **Saves IBKR data fees from v0.7.1.** |
-| **8** | 0.8.0 | **Schwab trade + order-type expansion + Futu Modify/Bracket** | Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6). |
+| **7b.1.5** | 0.7.2 | **Instruments seed + admin alias endpoint** *(mini-phase)* | Alembic 0010 adds `symbol`/`primary_exchange`/`canonical_id` to `positions` + creates `watchlist_entries` table. Boot-time `seed_instruments_from_positions(session)` resolves canonical_ids from positions ∪ orders ∪ watchlists. Admin endpoint `POST /api/admin/instruments` for operator-driven alias creation when lazy creation surfaces `NO_INSTRUMENT`. Replaces 7b.1 Task A5 (deferred — plan-vs-schema mismatch). |
+| **7c** | 0.7.3 | **Alpaca adapter (data + read-only)** | `sidecar_alpaca/` gRPC sidecar using `alpaca-py` SDK. API-key auth (no OAuth dance). Read-only `Configure`/`ListManagedAccounts`/`GetAccountSummary`/`GetPositions`/`GetOrders` mirror of `sidecar_schwab`. `StreamQuotes` wired to free real-time IEX feed (`stream.data.alpaca.markets/v2/iex`) — registers `alpaca` source in the open-set enum (already designed-for in 7b.1). US equity + crypto in scope; options scaffolded, trade execution deferred to Phase 8. |
+| **7d** | 0.7.4 | **Firstrade adapter (read-only, screen-scraper)** | `sidecar_firstrade/` based on [`MaxxRK/firstrade-api`](https://github.com/MaxxRK/firstrade-api) — **unofficial screen-scraper, no official API.** Read-only positions/orders/balances polling (30 s / 5 s). **No `StreamQuotes`** — Firstrade is not a quote source. Encrypted username/password/PIN/MFA in `app_secrets`; cached session cookie pattern. `firstrade_scraper_health` alert + `firstrade_session_age_seconds` gauge. Trade execution deferred to Phase 8 with explicit user opt-in (TOS-grey-area). |
+| **8** | 0.8.0 | **Schwab trade + order-type expansion + Futu Modify/Bracket** | Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6). Alpaca `PlaceOrder` (US equity + crypto). Firstrade trade lands here with explicit operator opt-in. |
 | **9** | 0.9.0 | **Charting v1 + bar aggregator + historical store** | TimescaleDB hypertable on PG-18, klineschart integration, 1s/1m/5m/15m/1h/1d bars, drag-handle stop/TP edit on the chart, historical backfill from broker APIs (Schwab CHART_EQUITY → free 1m US bars). |
 | **10** | 0.10.0 | **Risk engine + position-sizing + multi-account rollup** | PDT counter (US accts), buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly, fixed-fractional, vol-targeting). Multi-account portfolio rollup (cross-broker aggregate NLV / exposure / per-asset-class delta). Pre-trade gate becomes mandatory chokepoint. |
 | **11** | 0.11.0 | **AI router + Alerts + Telegram** | Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` module any subsystem can call. Price/condition alerts engine. Telegram bot (notifications + admin commands). Prompt-cost tracking. |
@@ -63,17 +66,18 @@ Larger phases that may split during their own brainstorm: 8 (broker × order-typ
 
 | Asset / Market | Primary | Fallback | Free? |
 |---|---|---|---|
-| US equity / ETF | Schwab | IBKR (paid) / Alpaca IEX | ✓ |
-| US options L1 + chain | Schwab | IBKR (paid) | ✓ |
+| US equity / ETF | Schwab | Alpaca IEX (Phase 7c) / IBKR (paid) | ✓ |
+| US options L1 + chain | Schwab | Alpaca options (Phase 7c+) / IBKR (paid) | ✓ |
 | US futures | Schwab | IBKR | ✓ |
 | US bonds | Schwab REST | IBKR | ✓ |
 | HK equity / ETF / warrant / CBBC | Futu | IBKR | ✓ |
 | A-shares (Stock Connect) | Futu (paid Lv2) | IBKR (paid) | ✗ |
 | Global ex-US/HK equity | IBKR | Twelve Data (future-add) | ✗ |
 | Forex | IBKR IDEALPRO | OANDA practice (future-add) | partial |
-| Crypto | IBKR Paxos | Coinbase WS (Phase 15) | ✓ via Coinbase |
+| Crypto | IBKR Paxos | Coinbase WS (Phase 15) / Alpaca crypto (Phase 7c) | ✓ via Coinbase / Alpaca |
+| Firstrade positions/orders | n/a (not a quote source) | poll Firstrade web every 30 s | n/a |
 
-Source enum is open-set — Coinbase / OANDA / Alpaca / Polygon / Finnhub / Twelve Data are all designed-for from Phase 7a but only wired when their asset phase lands.
+Source enum is open-set — Alpaca / Coinbase / OANDA / Polygon / Finnhub / Twelve Data are all designed-for from Phase 7a but only wired when their asset phase lands. **Firstrade is deliberately not registered as a quote source** (Phase 7d is read-only positions/orders via screen-scraper).
 
 ## Out of scope (post-v1.0)
 
