@@ -31,6 +31,11 @@ service Broker {
   // Phase 6: backend ships per-sidecar credentials (futu unlock + RSA priv)
   // at registry boot. IBKR sidecars implement as no-op-returning-ok.
   rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  // Phase 7b.1 — bidirectional streaming quotes. Backend dials sidecar
+  // (sidecar = gRPC server, matches Health/GetPositions). Subscribe/Unsubscribe/
+  // Resync/Heartbeat travel client→server; QuoteMessage travels server→client.
+  // See spec docs/superpowers/specs/2026-05-04-phase7b1-streaming-quotes-design.md §4.2.
+  rpc StreamQuotes(stream StreamQuotesRequest) returns (stream QuoteMessage);
 }
 
 enum BrokerId {
@@ -317,6 +322,73 @@ message ConfigureResponse {
   // Empty on success; "invalid_unlock_pwd_md5" or "invalid_rsa_pem" on
   // validation rejection.
   string detail = 2;
+}
+
+// ===== Phase 7b.1 streaming quotes =====
+
+message StreamQuotesRequest {
+  oneof op {
+    Subscribe   subscribe   = 1;
+    Unsubscribe unsubscribe = 2;
+    Heartbeat   heartbeat   = 3;
+    Resync      resync      = 4;
+  }
+
+  message Subscribe   { repeated SymbolRef symbols = 1; }
+  message Unsubscribe { repeated SymbolRef symbols = 1; }
+  message Heartbeat {
+    google.protobuf.Timestamp client_time = 1;
+    int32 tick_count_received = 2;
+  }
+  // Sidecar reconciles its upstream-broker refcount against `expected`; only
+  // diff propagates to broker socket. Used when gRPC reconnects but sidecar
+  // process didn't restart (Health.started_at unchanged).
+  message Resync { repeated SymbolRef expected = 1; }
+}
+
+message SymbolRef {
+  string canonical_id = 1;
+  string raw_symbol   = 2;
+  AssetClass asset_class = 3;
+  string exchange     = 4;
+  string currency     = 5;
+  bytes  source_meta  = 6;
+  reserved 7 to 15;  // Phase 12/14 contract_extra extensions
+}
+
+message QuoteMessage {
+  string canonical_id = 1;
+  google.protobuf.Timestamp tick_time   = 2;
+  google.protobuf.Timestamp received_at = 3;
+  string source = 4;
+  // Reserved tags 5-9: future top-level metadata (e.g. sequence_number,
+  // partition_key) without disturbing the price block below.
+  reserved 5 to 9;
+
+  string last       = 10;
+  string bid        = 11;
+  string ask        = 12;
+  string volume     = 13;
+  string day_high   = 14;
+  string day_low    = 15;
+  string open       = 16;
+  string prev_close = 17;
+  string change_pct = 18;
+  string change     = 19;
+  // Reserved tags 20-29: future price-block extensions (mid, vwap, last_size,
+  // bid_size, ask_size, etc.) — kept contiguous with the price band.
+  reserved 20 to 29;
+
+  bool   is_delayed     = 30;
+  int32  delay_seconds  = 31;
+  // Reserved tags 32-89: future staleness/feed-state extensions
+  // (e.g. is_trading_halted, halt_reason, feed_status, market_session).
+  reserved 32 to 89;
+
+  bytes  raw_payload    = 90;
+  // Reserved tags 91-200: keep open for future debug/trace fields, but tag 90
+  // is the canonical "escape hatch" — bump only with a clear reason.
+  reserved 91 to 200;
 }
 
 // Phase 7a — sidecar→backend single-writer token-refresh callback (architect C2).
