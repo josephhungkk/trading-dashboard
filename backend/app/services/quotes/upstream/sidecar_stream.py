@@ -113,27 +113,31 @@ class SidecarStream:
     async def run(self) -> None:
         backoff = _BACKOFF_INITIAL_SECONDS
         while not self._stopping.is_set():
-            reason = "aio_rpc_error"
+            reason: str | None = None
             try:
                 await self._one_round()
                 backoff = _BACKOFF_INITIAL_SECONDS
-                # Token-rotation → reconnect cleanly without backoff.
-                if self._token_rotation.is_set():
-                    reason = "token_rotation"
-                    self._token_rotation.clear()
-                    QUOTE_SIDECAR_RECONNECT_TOTAL.labels(source=self._source, reason=reason).inc()
-                    continue
+
+                # Stop preempts everything — including a token-rotation event
+                # that stop() also sets to unblock the inner wait. Without
+                # this ordering, calling stop() would spuriously bump
+                # reconnect_total{reason=token_rotation}.
                 if self._stopping.is_set():
                     return
-                # Stream ended without exception (e.g. server shutdown).
-                reason = "idle_timeout"
+
+                if self._token_rotation.is_set():
+                    self._token_rotation.clear()
+                    reason = "token_rotation"
+                else:
+                    reason = "idle_timeout"
             except grpc.aio.AioRpcError as e:
                 _log.warning(
                     "sidecar_stream.aio_rpc_error",
                     source=self._source,
-                    code=getattr(e, "code", lambda: None)(),
+                    code=e.code(),
                 )
                 self._health.set_state(self._source, SourceHealthState.DOWN)
+                reason = "aio_rpc_error"
             except (ConnectionError, OSError) as e:
                 _log.warning(
                     "sidecar_stream.connection_error",
@@ -141,14 +145,27 @@ class SidecarStream:
                     error=repr(e),
                 )
                 self._health.set_state(self._source, SourceHealthState.DOWN)
+                reason = "connection_error"
+            except Exception:
+                # Surprise — log + count + keep the loop alive so the engine
+                # can recover. Re-raising would tear down the per-source
+                # task and leave the source permanently dead.
+                _log.exception(
+                    "sidecar_stream.unexpected_error",
+                    source=self._source,
+                )
+                self._health.set_state(self._source, SourceHealthState.DOWN)
+                reason = "unexpected"
 
             QUOTE_SIDECAR_RECONNECT_TOTAL.labels(source=self._source, reason=reason).inc()
 
             if self._stopping.is_set():
                 return
 
-            await asyncio.sleep(min(backoff, _BACKOFF_MAX_SECONDS))
-            backoff = min(backoff * 2.0, _BACKOFF_MAX_SECONDS)
+            # Token-rotation reconnects without backoff (CRIT-2 hot path).
+            if reason != "token_rotation":
+                await asyncio.sleep(min(backoff, _BACKOFF_MAX_SECONDS))
+                backoff = min(backoff * 2.0, _BACKOFF_MAX_SECONDS)
 
     async def _one_round(self) -> None:
         """Single connect → first-frame → drain ticks pass."""
@@ -174,14 +191,25 @@ class SidecarStream:
                 get_task = asyncio.create_task(self._pending.get())
                 stop_task = asyncio.create_task(self._stopping.wait())
                 rot_task = asyncio.create_task(self._token_rotation.wait())
-                done, pending = await asyncio.wait(
-                    {get_task, stop_task, rot_task},
-                    timeout=_HEARTBEAT_INTERVAL_SECONDS,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-                if get_task in done:
+                try:
+                    done, _ = await asyncio.wait(
+                        {get_task, stop_task, rot_task},
+                        timeout=_HEARTBEAT_INTERVAL_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    # Cancel-and-await the losers so their coroutine frames
+                    # release immediately (bare cancel() leaks until GC).
+                    for t in (get_task, stop_task, rot_task):
+                        if not t.done():
+                            t.cancel()
+                    await asyncio.gather(
+                        get_task,
+                        stop_task,
+                        rot_task,
+                        return_exceptions=True,
+                    )
+                if get_task in done and not get_task.cancelled():
                     yield get_task.result()
                     continue
                 if stop_task in done or rot_task in done:
