@@ -348,3 +348,17 @@ QUOTE_CACHE_SIZE = Gauge(
     "Active entries in the engine's last-tick cache.",
     registry=registry,
 )
+
+QUOTE_CONFLATOR_NOTIFY_FAILURES_TOTAL = Counter(
+    "quote_conflator_notify_failures_total",
+    "Per-conflator notify exceptions in QuoteEngine._notify_conflators. "
+    "Surfaces silent failures from misbehaving WS conflator callbacks.",
+    registry=registry,
+)
+
+QUOTE_REDIS_PUBLISH_FAILURES_TOTAL = Counter(
+    "quote_redis_publish_failures_total",
+    "Redis publish exceptions in QuoteEngine._on_quote. Distinct from "
+    "redis_publish_fail_total (config invalidation channel).",
+    registry=registry,
+)

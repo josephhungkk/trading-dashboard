@@ -40,7 +40,6 @@ import json
 import os
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
@@ -48,7 +47,12 @@ from google.protobuf.json_format import MessageToDict  # type: ignore[import-unt
 from redis.asyncio import Redis
 
 from app._generated.broker.v1 import broker_pb2 as pb
-from app.core.metrics import QUOTE_CACHE_SIZE, QUOTE_ENGINE_TICKS_TOTAL
+from app.core.metrics import (
+    QUOTE_CACHE_SIZE,
+    QUOTE_CONFLATOR_NOTIFY_FAILURES_TOTAL,
+    QUOTE_ENGINE_TICKS_TOTAL,
+    QUOTE_REDIS_PUBLISH_FAILURES_TOTAL,
+)
 from app.services.quotes.base import CanonicalId
 from app.services.quotes.registry import (
     SubscribeDiff,
@@ -65,6 +69,17 @@ _OPERATOR_TRACE_ENV: str = "OPERATOR_TRACE_QUOTES"
 ConflatorCallback = Callable[[pb.QuoteMessage], Awaitable[None]]
 
 _log = structlog.get_logger(__name__)
+
+
+def _route_as_str(route: object) -> str | None:
+    """Coerce a route value (``SourceId | str | None``) to ``str | None``.
+
+    The registry stores routes as ``SourceId | str``; Phase 7b.1 callers
+    treat them as plain strings.
+    """
+    if route is None:
+        return None
+    return str(route)
 
 
 class QuoteEngine:
@@ -85,9 +100,14 @@ class QuoteEngine:
         self._redis = redis
         self._streams: dict[str, SidecarStream] = streams or {}
         self._publisher_worker_id = publisher_worker_id or uuid4()
-        self._single_worker = single_worker
+        # ``single_worker`` is informational only today — Phase 24 will key
+        # ``_subscriber_task`` startup on it. Stored as a public-readable
+        # attribute so the lifespan wiring can assert the contract.
+        self.single_worker: bool = single_worker
 
-        # INV-Q-1: subscriber task is None in single-worker mode.
+        # INV-Q-1: subscriber task is None in single-worker mode. When
+        # ``single_worker=False`` lands in Phase 24 this becomes the
+        # Redis-pubsub consumer task spawned in ``start()``.
         self._subscriber_task: asyncio.Task[None] | None = None
 
         self._cache: dict[CanonicalId, tuple[pb.QuoteMessage, float]] = {}
@@ -95,22 +115,28 @@ class QuoteEngine:
         self._conflator_subs: dict[WSConnId, set[CanonicalId]] = {}
 
         self._stream_tasks: list[asyncio.Task[None]] = []
-        self._stopping = asyncio.Event()
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        if self._stream_tasks:
+            # Idempotent: a duplicate start() must not double-spawn stream
+            # tasks (would double-deliver every tick).
+            raise RuntimeError("QuoteEngine.start() already called")
         for stream in self._streams.values():
             self._stream_tasks.append(asyncio.create_task(stream.run()))
 
     async def stop(self) -> None:
-        self._stopping.set()
         for stream in self._streams.values():
             stream.stop()
         for t in self._stream_tasks:
             t.cancel()
         if self._stream_tasks:
-            await asyncio.gather(*self._stream_tasks, return_exceptions=True)
+            results = await asyncio.gather(*self._stream_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                    _log.warning("quote_engine.stream_task_exit_exception", error=repr(result))
+        self._stream_tasks.clear()
 
     # ── conflator registration ────────────────────────────────────────────
 
@@ -146,7 +172,9 @@ class QuoteEngine:
         # the route on the 1→0 transition, so a post-remove lookup would
         # miss every removed symbol's source.
         symbol_list = list(symbols)
-        pre_routes = {s: self._registry.get_route(s) for s in symbol_list}
+        pre_routes: dict[str, str | None] = {
+            str(s): _route_as_str(self._registry.get_route(s)) for s in symbol_list
+        }
 
         diff = await self._registry.remove(ws, symbol_list)
         ws_subs = self._conflator_subs.get(ws)
@@ -163,7 +191,9 @@ class QuoteEngine:
     async def disconnect_ws(self, ws: WSConnId) -> UnsubscribeDiff:
         # Snapshot routes for everything this WS held BEFORE registry mutation.
         ws_subs_snapshot = set(self._conflator_subs.get(ws, set()))
-        pre_routes = {s: self._registry.get_route(s) for s in ws_subs_snapshot}
+        pre_routes: dict[str, str | None] = {
+            str(s): _route_as_str(self._registry.get_route(s)) for s in ws_subs_snapshot
+        }
 
         diff = await self._registry.remove_ws(ws)
         self._conflators.pop(ws, None)
@@ -177,6 +207,10 @@ class QuoteEngine:
         return diff
 
     def _group_by_source(self, canonicals: Iterable[str]) -> dict[str, list[str]]:
+        """Live route lookup — safe for ``subscribe`` paths where routes
+        persist (refcount stays >0 across the call). Do NOT use from
+        ``unsubscribe`` / ``disconnect_ws`` — see ``_group_by_source_with``.
+        """
         grouped: dict[str, list[str]] = {}
         for canonical in canonicals:
             source = self._registry.get_route(canonical)
@@ -188,12 +222,13 @@ class QuoteEngine:
     @staticmethod
     def _group_by_source_with(
         canonicals: Iterable[str],
-        pre_routes: dict[Any, Any],
+        pre_routes: dict[str, str | None],
     ) -> dict[str, list[str]]:
         """Variant that uses a pre-captured route map — used by remove paths
         because :meth:`SubscriptionRegistry._decrement_locked` pops the route
         on the last unsubscribe transition, so a post-remove lookup would
-        return None for every removed symbol."""
+        return ``None`` for every removed symbol.
+        """
         grouped: dict[str, list[str]] = {}
         for canonical in canonicals:
             source = pre_routes.get(canonical)
@@ -230,16 +265,28 @@ class QuoteEngine:
             await self._redis.publish(channel, json.dumps(envelope))
         except Exception:
             _log.exception("quote_engine.redis_publish_failed", source=q.source)
+            QUOTE_REDIS_PUBLISH_FAILURES_TOTAL.inc()
 
         # In-process: fan out to every conflator subscribed to this canonical.
         await self._notify_conflators(canonical, q)
 
     async def _notify_conflators(self, canonical: CanonicalId, q: pb.QuoteMessage) -> None:
-        # Snapshot of (ws, callback) pairs to avoid mutation during iteration.
+        """Fan ``q`` out to every conflator subscribed to ``canonical``.
+
+        Takes an atomic snapshot of both ``_conflator_subs`` and
+        ``_conflators`` (synchronous; under CPython GIL no other coroutine
+        can interleave between the two ``dict()`` copies) so concurrent
+        ``disconnect_ws`` / ``unregister_conflator`` cannot leave us with
+        a stale (ws, callback) pair mid-iteration. Per-conflator failures
+        are caught + counted; one bad callback never tears down the whole
+        tick path.
+        """
+        subs_snapshot = dict(self._conflator_subs)
+        cbs_snapshot = dict(self._conflators)
         targets: list[tuple[WSConnId, ConflatorCallback]] = []
-        for ws, subs in self._conflator_subs.items():
+        for ws, subs in subs_snapshot.items():
             if canonical in subs:
-                cb = self._conflators.get(ws)
+                cb = cbs_snapshot.get(ws)
                 if cb is not None:
                     targets.append((ws, cb))
 
@@ -248,6 +295,7 @@ class QuoteEngine:
                 await cb(q)
             except Exception:
                 _log.exception("quote_engine.conflator_notify_failed")
+                QUOTE_CONFLATOR_NOTIFY_FAILURES_TOTAL.inc()
 
     # ── cache + accessor helpers ─────────────────────────────────────────
 
