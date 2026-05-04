@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sidecar_schwab.metrics import SCHWAB_ACCESS_TOKEN_AGE_SECONDS
 
@@ -36,6 +36,10 @@ class TokenCache:
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._access_issued_at: datetime | None = None
+        self._refresh_event: asyncio.Event | None = None
+
+    def set_refresh_event(self, event: asyncio.Event) -> None:
+        self._refresh_event = event
 
     def set_tokens(
         self,
@@ -50,7 +54,7 @@ class TokenCache:
     def access_token_age(self) -> float:
         if self._access_issued_at is None:
             return float("inf")
-        delta = datetime.now(timezone.utc) - self._access_issued_at
+        delta = datetime.now(UTC) - self._access_issued_at
         return delta.total_seconds()
 
     async def get_access_token(self) -> str:
@@ -63,7 +67,7 @@ class TokenCache:
             fresh = (
                 self._access_token is not None
                 and self._access_issued_at is not None
-                and (datetime.now(timezone.utc) - self._access_issued_at)
+                and (datetime.now(UTC) - self._access_issued_at)
                 < _FRESH_WINDOW
             )
             cached_access = self._access_token
@@ -88,6 +92,8 @@ class TokenCache:
             self._access_token = resp.access_token
             self._refresh_token = resp.refresh_token
             self._access_issued_at = resp.access_issued_at.ToDatetime(
-                tzinfo=timezone.utc
+                tzinfo=UTC
             )
+            if self._refresh_event is not None:
+                self._refresh_event.set()
             return resp.access_token

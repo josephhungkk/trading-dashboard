@@ -6,11 +6,14 @@ TokenCache. All other RPCs read from state populated by Configure.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -27,6 +30,8 @@ from sidecar_schwab.auth import TokenCache  # noqa: E402
 from sidecar_schwab.client import SchwabClient  # noqa: E402
 
 log = logging.getLogger(__name__)
+
+type _TickCallback = Callable[[broker_pb2.QuoteMessage], None]
 
 _FRESH_WINDOW = timedelta(minutes=25)  # H4 — 25min headroom inside 30min TTL
 
@@ -51,11 +56,11 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         request: broker_pb2.HealthRequest,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.HealthResponse:
-        """H4 invariant: gateway_connected = token_fresh AND _account_hashes non-empty."""
+        """H4 invariant: gateway_connected = token_fresh AND hashes are present."""
         token_fresh = (
             self._token_cache is not None
             and self._token_cache._access_issued_at is not None
-            and (datetime.now(timezone.utc) - self._token_cache._access_issued_at)
+            and (datetime.now(UTC) - self._token_cache._access_issued_at)
             < _FRESH_WINDOW
         )
         hashes_present = (
@@ -91,7 +96,10 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 f"schwab Configure: missing metadata keys {missing}",
             )
-            return broker_pb2.ConfigureResponse(ok=False, detail=f"missing:{','.join(missing)}")
+            return broker_pb2.ConfigureResponse(
+                ok=False,
+                detail=f"missing:{','.join(missing)}",
+            )
 
         async with self._configure_lock:
             fingerprint = self._fingerprint(meta)
@@ -103,7 +111,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
             # H4 — discard the supplied access_token if it's stale; sidecar
             # will trigger a backend RequestTokenRefresh on first outbound call.
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if access_issued_at and (now - access_issued_at) < _FRESH_WINDOW:
                 effective_access = meta.get("access_token", "")
             else:
@@ -145,7 +153,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         request: broker_pb2.Empty,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.AccountsResponse:
-        """v3 -- RPC name + signature match real proto: takes Empty, returns AccountsResponse."""
+        """v3 -- real proto signature: Empty to AccountsResponse."""
         if self._client is None:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
@@ -155,7 +163,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
         from sidecar_schwab.normalize import normalize_account
 
-        # H3 -- emit 'initial' on first call after Configure; 'rotation_detected' subsequently.
+        # H3 -- emit 'initial' first, then 'rotation_detected'.
         reason = "initial" if not self._hashes_loaded_once else "rotation_detected"
         hashes = await self._client.refresh_hashes(reason=reason)
         self._hashes_loaded_once = True
@@ -212,7 +220,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
         from sidecar_schwab.normalize import normalize_order
 
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         start = end - timedelta(days=7)
         h = self._client.hash_for(request.account_number)
         rows = await self._client.get_orders(
@@ -259,6 +267,125 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         await context.abort(grpc.StatusCode.UNIMPLEMENTED,
                             "Schwab OrderEvent stream lands in Phase 8")
 
+    async def _get_or_init_schwab_streamer(self):
+        lock = self.__dict__.setdefault("_streamer_lock", asyncio.Lock())
+        async with lock:
+            streamer = getattr(self, "_streamer", None)
+            if streamer is not None:
+                return streamer
+            if self._token_cache is None:
+                raise RuntimeError("schwab sidecar token cache not configured")
+
+            from sidecar_schwab.streamer import SchwabStreamer
+
+            tokens_refreshed = asyncio.Event()
+            self._token_cache.set_refresh_event(tokens_refreshed)
+            streamer = SchwabStreamer(
+                token_cache=self._token_cache,
+                tokens_refreshed=tokens_refreshed,
+            )
+            await streamer.start()
+            self._streamer = streamer
+            return streamer
+
+    async def StreamQuotes(  # noqa: N802
+        self,
+        request_iterator: AsyncIterator[broker_pb2.StreamQuotesRequest],
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[broker_pb2.QuoteMessage]:
+        try:
+            streamer = await self._get_or_init_schwab_streamer()
+        except RuntimeError as exc:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return
+
+        queue: asyncio.Queue[broker_pb2.QuoteMessage] = asyncio.Queue()
+        call_subs: set[str] = set()
+
+        def tick_callback(message: broker_pb2.QuoteMessage) -> None:
+            queue.put_nowait(message)
+
+        self._add_streamer_tick_callback(streamer, tick_callback)
+        consumer_task = asyncio.create_task(
+            self._consume_stream_quote_requests(
+                request_iterator,
+                streamer,
+                call_subs,
+            ),
+            name="schwab-stream-quotes-consumer",
+        )
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            consumer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(consumer_task)
+            if call_subs:
+                await streamer.on_unsubscribe(_symbol_refs(call_subs))
+            self._remove_streamer_tick_callback(streamer, tick_callback)
+
+    async def _consume_stream_quote_requests(
+        self,
+        request_iterator: AsyncIterator[broker_pb2.StreamQuotesRequest],
+        streamer: Any,
+        call_subs: set[str],
+    ) -> None:
+        async for request in request_iterator:
+            op = request.WhichOneof("op")
+            if op == "subscribe":
+                symbols = list(request.subscribe.symbols)
+                await streamer.on_subscribe(symbols)
+                call_subs.update(_canonical_id(symbol) for symbol in symbols)
+            elif op == "unsubscribe":
+                symbols = list(request.unsubscribe.symbols)
+                await streamer.on_unsubscribe(symbols)
+                call_subs.difference_update(_canonical_id(symbol) for symbol in symbols)
+            elif op == "resync":
+                symbols = list(request.resync.expected)
+                await streamer.on_resync(symbols)
+                call_subs.clear()
+                call_subs.update(_canonical_id(symbol) for symbol in symbols)
+
+    def _add_streamer_tick_callback(
+        self,
+        streamer: Any,
+        callback: _TickCallback,
+    ) -> None:
+        # SchwabStreamer exposes a singleton tick_callback slot, so the
+        # servicer installs a per-RPC fan-out dispatcher around that slot.
+        callbacks = getattr(streamer, "_broker_servicer_tick_callbacks", None)
+        if callbacks is None:
+            callbacks = set()
+            streamer._broker_servicer_tick_callbacks = callbacks
+            previous = getattr(streamer, "tick_callback", None)
+            streamer._broker_servicer_previous_tick_callback = previous
+
+            def dispatch(message: broker_pb2.QuoteMessage) -> None:
+                if previous is not None:
+                    previous(message)
+                for registered in tuple(callbacks):
+                    registered(message)
+
+            streamer.tick_callback = dispatch
+        callbacks.add(callback)
+
+    def _remove_streamer_tick_callback(
+        self,
+        streamer: Any,
+        callback: _TickCallback,
+    ) -> None:
+        callbacks = getattr(streamer, "_broker_servicer_tick_callbacks", None)
+        if callbacks is None:
+            return
+        callbacks.discard(callback)
+        if callbacks:
+            return
+        previous = getattr(streamer, "_broker_servicer_previous_tick_callback", None)
+        streamer.tick_callback = previous
+        del streamer._broker_servicer_tick_callbacks
+        del streamer._broker_servicer_previous_tick_callback
+
     async def _fetch_account_with_404_retry(self, account_number: str) -> dict:
         """H3 -- on typed SchwabAccountHashStaleError, invalidate cache + retry once."""
         from sidecar_schwab.client import SchwabAccountHashStaleError
@@ -274,14 +401,31 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
     @staticmethod
     def _fingerprint(meta: dict[str, str]) -> str:
         """Hash the 5 metadata keys we care about for idempotency."""
-        keys = ("app_key", "app_secret", "access_token", "refresh_token", "access_issued_at")
+        keys = (
+            "app_key",
+            "app_secret",
+            "access_token",
+            "refresh_token",
+            "access_issued_at",
+        )
         return "|".join(meta.get(k, "") for k in keys)
 
     @staticmethod
     def _parse_iso(s: str) -> datetime:
         if not s:
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)
         try:
-            return datetime.fromisoformat(s).astimezone(timezone.utc)
+            return datetime.fromisoformat(s).astimezone(UTC)
         except ValueError:
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)
+
+
+def _canonical_id(symbol: broker_pb2.SymbolRef) -> str:
+    return symbol.canonical_id or symbol.raw_symbol
+
+
+def _symbol_refs(canonical_ids: set[str]) -> list[broker_pb2.SymbolRef]:
+    return [
+        broker_pb2.SymbolRef(canonical_id=canonical_id)
+        for canonical_id in sorted(canonical_ids)
+    ]
