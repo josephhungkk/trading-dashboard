@@ -283,6 +283,14 @@ Boot helper `seed_instruments_from_positions(session_factory)` + admin endpoint 
 
 Spec: [`docs/superpowers/specs/2026-05-05-phase7c-alpaca-adapter-design.md`](docs/superpowers/specs/2026-05-05-phase7c-alpaca-adapter-design.md). Architect-reviewed (2 CRIT + 6 HIGH + 7 MED + 4 LOW; CRIT+HIGH+MED applied inline). Plan: [`docs/superpowers/plans/2026-05-05-phase7c-alpaca-adapter-plan.md`](docs/superpowers/plans/2026-05-05-phase7c-alpaca-adapter-plan.md).
 
+## v0.7.4 hotfix release — 2026-05-05
+
+Post-deploy bring-up fixes after v0.7.3. 7 commits, no new features.
+See `CHANGELOG.md [0.7.4]` for details. Headline:
+schwab + alpaca in-cluster sidecars now reachable; schwab OAuth
+re-authorize button works end-to-end (URL must match `schwabdev`
+shape: only `client_id` + `redirect_uri`, no state, no `response_type`).
+
 ## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket + Alpaca trade
 
 Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6). Alpaca `PlaceOrder` (US equity + crypto).

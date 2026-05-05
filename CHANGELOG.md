@@ -5,6 +5,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-05-05
+
+### Fixed — post-deploy hotfixes for v0.7.3
+
+Schwab + Alpaca sidecars failed to come up cleanly after the v0.7.3
+deploy. Cascade of 7 fixes; tagging as a patch so the running prod
+state has a named release.
+
+- **In-cluster sidecars couldn't be dialed.** `BrokerSidecarClient` always
+  built a `secure_channel`, but Schwab + Alpaca bind insecure ports
+  (peer trust = `td-net` docker bridge). Added `use_mtls` kwarg +
+  `INSECURE_IN_CLUSTER_LABELS` frozenset; `build_broker_registry`
+  passes `use_mtls=label not in INSECURE_IN_CLUSTER_LABELS`
+  (`da4cdf9`).
+- **Sidecar containers failed `python -m sidecar_<name>.main`.**
+  `COPY . .` flattened the package into `/app/`. Fixed with
+  `COPY . ./sidecar_<name>/` so the module path resolves under
+  `PYTHONPATH=/app` (`b44cabc`).
+- **Alpaca registry dialed `10.10.0.2:9091/9092`** (NUC, no listener)
+  instead of `alpaca-sidecar-{live,paper}:9091/9092` (docker DNS).
+  Added entries to `SIDECAR_HOSTS` (`67a030a`).
+- **Schwab sidecar restart loop:** `from broker.v1 import broker_pb2`
+  in auto-gen file failed at import time. Added
+  `sys.path.insert(_GENERATED_ROOT)` to `sidecar_schwab/main.py`,
+  matching the `sidecar_alpaca/handlers.py` workaround (`d8cabbb`).
+- **Schwab OAuth callback returned 500 after token exchange succeeded.**
+  Py2-style `except AttributeError, ImportError:` only caught the first
+  type and bound `ImportError` to a local name; gRPC errors from
+  `reconfigure_schwab` bubbled up. Tuple-catch + fail-soft handler
+  ensures the user sees a success page even if the sidecar reconfigure
+  blips (`eef9c51`).
+- **Schwab UX bug — "contact customer support" on re-authorize button.**
+  Three compounding issues: (1) `urllib.parse.quote(callback_url)`
+  encoded `:` and `/` to `%3A`/`%2F`, breaking Schwab's strict
+  byte-match on registered redirect_uri (`b70e601`); (2) registered
+  redirect_uri at Schwab's developer portal didn't match backend
+  callback path (operator action: portal updated to
+  `/api/oauth/schwab/callback`); (3) Schwab's authorize endpoint rejects
+  `state` and `response_type=code` parameters even though both are
+  standard OAuth2 — empirically confirmed by 3-step retest cycle
+  (`8cc3d07` → `4919084` → `545fbc0`). Final URL shape matches the
+  `schwabdev` SDK: only `client_id` + `redirect_uri`. State CSRF
+  protection waived; public callback logs the caveat and accepts a
+  missing state. CSRF defense reduces to redirect_uri byte-match (`a946e5e`).
+- **Frontend Docker build failed:** `pnpm-lock.yaml` out of date with
+  `@msgpack/msgpack@^3.0.0` from Phase 7b.1 (`643a56a`).
+
 ## [0.7.3] — 2026-05-05
 
 ### Phase 7c — Alpaca adapter
