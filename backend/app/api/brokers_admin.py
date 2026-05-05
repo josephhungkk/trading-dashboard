@@ -101,11 +101,14 @@ async def schwab_oauth_start(
         user_email=user_email,
         app_secret_key=settings.secret_key.encode(),
     )
+    # response_type=code dropped — Schwab rejects it ("contact customer
+    # support") even though it's standard OAuth2. Schwab defaults to the
+    # authorization_code grant type. State retained — testing whether
+    # state alone is accepted (next revert step is state itself).
     consent_url = (
         "https://api.schwabapi.com/v1/oauth/authorize"
         f"?client_id={urllib.parse.quote(app_key, safe='')}"
         f"&redirect_uri={urllib.parse.quote(callback_url, safe=':/')}"
-        "&response_type=code"
         f"&state={urllib.parse.quote(state, safe='')}"
     )
     return RedirectResponse(url=consent_url, status_code=302)
