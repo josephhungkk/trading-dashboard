@@ -856,6 +856,16 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         except RuntimeError as exc:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
             return
+        except Exception as exc:
+            # Surprise during streamer init (AttributeError on a partly-
+            # configured IB, network error mid-subscribe, ...) must not
+            # propagate to gRPC as UNKNOWN — abort with INTERNAL so the
+            # client gets actionable status. The partial streamer was
+            # already torn down by _get_or_init_ibkr_streamer's own
+            # try/except cleanup path.
+            logger.exception("ibkr.stream_quotes.init_unexpected_error")
+            await context.abort(grpc.StatusCode.INTERNAL, str(exc))
+            return
 
         queue: asyncio.Queue[broker_pb2.QuoteMessage] = asyncio.Queue(
             maxsize=_STREAM_QUEUE_MAX
@@ -887,9 +897,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             while True:
                 yield await queue.get()
         finally:
+            # Cancel + await the consumer to release its coroutine frame
+            # immediately (B4 lesson). asyncio.shield() AFTER cancel is
+            # backwards: the cancel has already taken effect, so shielding
+            # only delays the join. A bare suppress(CancelledError) around
+            # an await is cleaner.
             consumer_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(consumer_task)
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await consumer_task
             if call_subs:
                 await streamer.on_unsubscribe(_symbol_refs(call_subs))
             self._remove_streamer_tick_callback(streamer, tick_callback)
@@ -933,6 +948,15 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                     call_subs.update(_canonical_id(symbol) for symbol in symbols)
                 # heartbeat (and any unknown op) is keep-alive only.
             except Exception as exc:
+                # Surface the subscribe-side failure in metrics — the
+                # streamer.on_subscribe path also bumps the error metric
+                # internally, but that increment never fires when the
+                # caller short-circuits before reaching the streamer
+                # (e.g. canonical_to_contract ValueError raised inside
+                # the streamer call).
+                metrics.ibkr_streamer_subscribe_total.labels(
+                    result="error"
+                ).inc()
                 logger.warning(
                     "ibkr.stream_quotes.request_dispatch_error",
                     error=str(exc),

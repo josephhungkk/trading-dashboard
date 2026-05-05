@@ -63,24 +63,39 @@ def _sym(canonical_id: str, *, exchange: str = "") -> pb.SymbolRef:
     )
 
 
-def test_normalize_gbx_lse_gbp_below_100_divides_by_100() -> None:
-    assert _normalize_gbx(Decimal("70.45"), "LSE", "GBP") == Decimal("0.7045")
+def test_normalize_gbx_pence_divides_by_100() -> None:
+    """LSE GBP feed quotes in pence — always divide regardless of price level."""
+    assert _normalize_gbx(Decimal("70.45"), is_pence=True) == Decimal("0.7045")
 
 
-def test_normalize_gbx_lse_gbp_above_100_passes_through() -> None:
-    assert _normalize_gbx(Decimal("250.00"), "LSE", "GBP") == Decimal("250.00")
+def test_normalize_gbx_pence_above_100_still_divides() -> None:
+    """Reviewer fix — a 1400p VWRL price MUST divide to 14.00 GBP, not pass
+    through. The earlier ``< 100`` heuristic produced silent corruption near
+    the boundary."""
+    assert _normalize_gbx(Decimal("1400"), is_pence=True) == Decimal("14")
 
 
-def test_normalize_gbx_non_lse_passes_through() -> None:
-    assert _normalize_gbx(Decimal("213.45"), "NASDAQ", "USD") == Decimal("213.45")
+def test_normalize_gbx_pounds_passes_through() -> None:
+    """Real GBP equity (e.g. Lloyds at 90 GBP) — must NOT divide."""
+    assert _normalize_gbx(Decimal("90"), is_pence=False) == Decimal("90")
 
 
-def test_normalize_gbx_lse_zero_price_returns_zero() -> None:
-    assert _normalize_gbx(Decimal("0"), "LSE", "GBP") == Decimal("0")
+def test_normalize_gbx_non_uk_currency_passes_through() -> None:
+    """A USD NASDAQ tick is_pence=False — unchanged."""
+    assert _normalize_gbx(Decimal("213.45"), is_pence=False) == Decimal("213.45")
+
+
+def test_normalize_gbx_zero_price_passes_through() -> None:
+    assert _normalize_gbx(Decimal("0"), is_pence=True) == Decimal("0")
+
+
+def test_normalize_gbx_negative_sentinel_passes_through() -> None:
+    """IBKR -1 sentinel for missing data — must not corrupt to -0.01."""
+    assert _normalize_gbx(Decimal("-1"), is_pence=True) == Decimal("-1")
 
 
 def test_normalize_gbx_none_returns_none() -> None:
-    assert _normalize_gbx(None, "LSE", "GBP") is None
+    assert _normalize_gbx(None, is_pence=True) is None
 
 
 def test_canonical_to_contract_us_stock() -> None:

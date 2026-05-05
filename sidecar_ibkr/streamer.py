@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Self
 
 import structlog
@@ -91,6 +92,14 @@ class IBKRStreamer:
                     contract = canonical_to_contract(symbol)
                     ticker = self._ib.reqMktData(contract, "", False, False)
                     req_id = _ticker_req_id(self._ib, ticker)
+                    # Bookkeeping must complete atomically with reqMktData
+                    # — if any dict write raises after the IBKR side
+                    # accepted the request, roll back via cancelMktData so
+                    # we don't leak a permanently-orphaned market-data
+                    # subscription slot (per-gateway L1 cap is 100).
+                    self._upstream_refcount[canonical_id] = _SymbolEntry(req_id, 1)
+                    self.reqId_to_canonical[req_id] = canonical_id
+                    self._contracts_by_req_id[req_id] = contract
                 except Exception:
                     metrics.ibkr_streamer_subscribe_total.labels(result="error").inc()
                     log.warning(
@@ -99,10 +108,10 @@ class IBKRStreamer:
                         result="error",
                         exc_info=True,
                     )
+                    if "contract" in locals() and "ticker" in locals():
+                        with contextlib.suppress(Exception):
+                            self._ib.cancelMktData(contract)
                     raise
-                self._upstream_refcount[canonical_id] = _SymbolEntry(req_id, 1)
-                self.reqId_to_canonical[req_id] = canonical_id
-                self._contracts_by_req_id[req_id] = contract
                 metrics.ibkr_streamer_subscribe_total.labels(result="ok").inc()
                 log.info(
                     "ibkr.streamer.subscribe",
@@ -127,7 +136,19 @@ class IBKRStreamer:
                 del self._upstream_refcount[canonical_id]
                 self.reqId_to_canonical.pop(entry.req_id, None)
         for canonical_id, req_id, contract in to_cancel:
-            self._ib.cancelMktData(contract)
+            # cancelMktData can raise if the gateway already closed the
+            # reqId (e.g. mid-rotation reset). State has already been
+            # cleaned up under the lock; treat the cancel as best-effort.
+            try:
+                self._ib.cancelMktData(contract)
+            except Exception as exc:
+                log.warning(
+                    "ibkr.streamer.cancel_failed",
+                    canonical_id=canonical_id,
+                    req_id=req_id,
+                    error=str(exc),
+                )
+                continue
             log.info(
                 "ibkr.streamer.unsubscribe",
                 canonical_id=canonical_id,
@@ -173,20 +194,33 @@ class IBKRStreamer:
             log.warning("ibkr.streamer.dispatch_loop_closed")
 
     def _dispatch_pending_tickers(self, tickers: object) -> None:
-        for ticker in _iter_tickers(tickers):
-            quote = self._ticker_to_quote(ticker)
-            if quote is None:
-                continue
-            callback = self.tick_callback
-            if callback is None:
-                continue
-            try:
-                callback(quote)
-            except Exception as exc:
-                log.warning("ibkr.streamer.tick_callback_error", error=str(exc))
-                continue
-            metrics.ibkr_streamer_ticks_total.labels(symbol=quote.canonical_id).inc()
-            log.info("ibkr.streamer.tick", canonical_id=quote.canonical_id)
+        # Wrap the entire body in a broad except so a malformed Ticker
+        # row or unexpected protobuf shape doesn't propagate out — under
+        # ib_async's eventkit, an unhandled exception in a listener
+        # detaches the listener, silently halting all future ticks.
+        try:
+            for ticker in _iter_tickers(tickers):
+                self._dispatch_one_ticker(ticker)
+        except Exception:
+            log.exception("ibkr.streamer.dispatch_unhandled")
+
+    def _dispatch_one_ticker(self, ticker: Any) -> None:
+        quote = self._ticker_to_quote(ticker)
+        if quote is None:
+            return
+        callback = self.tick_callback
+        if callback is None:
+            return
+        try:
+            callback(quote)
+        except Exception as exc:
+            log.warning("ibkr.streamer.tick_callback_error", error=str(exc))
+            return
+        # Metric + tick log only on successful delivery — counting
+        # before-callback was misleading observability (the previous
+        # implementation logged a tick even when the callback raised).
+        metrics.ibkr_streamer_ticks_total.labels(symbol=quote.canonical_id).inc()
+        log.info("ibkr.streamer.tick", canonical_id=quote.canonical_id)
 
     def _ticker_to_quote(self, ticker: Any) -> pb.QuoteMessage | None:
         req_id = _ticker_req_id(self._ib, ticker)
@@ -194,15 +228,21 @@ class IBKRStreamer:
         if canonical_id is None:
             return None
         contract = getattr(ticker, "contract", None)
-        exchange = str(getattr(contract, "exchange", ""))
-        currency = str(getattr(contract, "currency", ""))
+        currency = str(getattr(contract, "currency", "")).upper()
         last = _decimal_or_none(getattr(ticker, "last", None))
         bid = _decimal_or_none(getattr(ticker, "bid", None))
         ask = _decimal_or_none(getattr(ticker, "ask", None))
+        # Pence-quoted feed signal: the canonical_id's country is UK (the
+        # region from canonical_id parts) OR IBKR explicitly stamped the
+        # currency as GBX. Using ticker.contract.exchange for this check
+        # would be defeated by SMART-routing (which reports "SMART", not
+        # "LSE"); the canonical_id country is the durable signal.
+        _, _, region, _ = _canonical_parts(canonical_id)
+        is_pence = region == "UK" or currency == "GBX"
         normalized = (
-            _normalize_gbx(last, exchange, currency),
-            _normalize_gbx(bid, exchange, currency),
-            _normalize_gbx(ask, exchange, currency),
+            _normalize_gbx(last, is_pence=is_pence),
+            _normalize_gbx(bid, is_pence=is_pence),
+            _normalize_gbx(ask, is_pence=is_pence),
         )
         if normalized != (last, bid, ask):
             metrics.quote_uk_pence_normalizations_total.inc()
@@ -270,14 +310,22 @@ def canonical_to_contract(symbol: pb.SymbolRef) -> Contract:
 
 def _normalize_gbx(
     price: Decimal | None,
-    exchange: str,
-    currency: str,
+    *,
+    is_pence: bool,
 ) -> Decimal | None:
-    if price is None:
-        return None
-    if exchange != "LSE" or currency != "GBP":
+    """Convert pence -> pounds when ``is_pence`` is True.
+
+    The caller derives ``is_pence`` from the canonical_id's country (UK)
+    and/or IBKR's contract.currency (GBX). A price-threshold heuristic
+    (e.g. ``< 100``) is NOT used — IBKR consistently quotes LSE-listed
+    GBP equities in pence regardless of price level, and a threshold
+    check would silently corrupt genuine sub-£1 stocks (e.g. Lloyds at
+    90 GBP would become 0.9 GBP). Negative prices are IBKR sentinels
+    for missing data — pass through so downstream can filter.
+    """
+    if price is None or price < 0:
         return price
-    if price >= Decimal("100"):
+    if not is_pence:
         return price
     return price / Decimal("100")
 
@@ -327,7 +375,11 @@ def _decimal_or_none(value: object) -> Decimal | None:
 def _decimal_str(value: Decimal | None) -> str:
     if value is None:
         return ""
-    return str(value.quantize(_PRICE_QUANT))
+    # Explicit ROUND_HALF_EVEN — without it quantize() inherits whatever
+    # rounding mode the active decimal context has, which ib_async or
+    # third-party libs may have changed. Banker's rounding is the
+    # standard choice for tick prices.
+    return str(value.quantize(_PRICE_QUANT, rounding=ROUND_HALF_EVEN))
 
 
 def _int_str(value: object) -> str:
