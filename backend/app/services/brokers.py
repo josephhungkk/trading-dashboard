@@ -84,7 +84,13 @@ class _Timestamp(Protocol):
 
 
 class BrokerSidecarClient:
-    """One mTLS gRPC client for a single broker sidecar."""
+    """gRPC client for a single broker sidecar.
+
+    Supports both mTLS (IBKR — over WG to NUC) and insecure (in-cluster
+    docker on td-net for Schwab Phase 7a + Alpaca Phase 7c, where peer
+    trust is the docker network boundary). Set ``use_mtls=False`` for
+    in-cluster sidecars.
+    """
 
     def __init__(
         self,
@@ -95,20 +101,26 @@ class BrokerSidecarClient:
         client_key_pem: bytes,
         client_cert_pem: bytes,
         deadline_seconds: float = 5.0,
+        use_mtls: bool = True,
     ) -> None:
         self.label = label
         self.target = target
         self.deadline_seconds = deadline_seconds
-        credentials = grpc.ssl_channel_credentials(
-            root_certificates=ca_bundle_pem,
-            private_key=client_key_pem,
-            certificate_chain=client_cert_pem,
-        )
-        self.channel = grpc.aio.secure_channel(
-            target,
-            credentials,
-            options=(("grpc.default_authority", f"sidecar-{label}"),),
-        )
+        if use_mtls:
+            credentials = grpc.ssl_channel_credentials(
+                root_certificates=ca_bundle_pem,
+                private_key=client_key_pem,
+                certificate_chain=client_cert_pem,
+            )
+            self.channel = grpc.aio.secure_channel(
+                target,
+                credentials,
+                options=(("grpc.default_authority", f"sidecar-{label}"),),
+            )
+        else:
+            # In-cluster docker on td-net (Schwab Phase 7a, Alpaca Phase 7c).
+            # No TLS; peer trust is the docker network boundary.
+            self.channel = grpc.aio.insecure_channel(target)
         self.stub = cast(Any, broker_pb2_grpc.BrokerStub)(self.channel)
 
     async def health(self) -> base.HealthResponse:

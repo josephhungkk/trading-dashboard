@@ -48,6 +48,17 @@ SIDECAR_HOSTS: dict[str, str] = {
     "schwab": "schwab-sidecar",
 }
 
+# Phase 7c — labels that bind insecure-port (no mTLS) because they live in
+# the same docker network as backend. Peer trust is the network boundary.
+# Per phase7a_schwab_topology.md + phase7c_alpaca_topology.md.
+INSECURE_IN_CLUSTER_LABELS: frozenset[str] = frozenset(
+    {
+        "schwab",
+        "alpaca-live",
+        "alpaca-paper",
+    }
+)
+
 
 def resolve_target(
     label: str,
@@ -275,6 +286,7 @@ async def build_broker_registry(
                 client_cert_pem=cert_pem,
                 client_key_pem=key_pem,
                 ca_bundle_pem=ca_bundle_pem,
+                use_mtls=label not in INSECURE_IN_CLUSTER_LABELS,
             )
             for label in SIDECAR_PORTS
         }
