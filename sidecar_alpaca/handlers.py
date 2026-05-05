@@ -19,8 +19,9 @@ from sidecar_alpaca._generated.broker.v1 import (
     broker_pb2,
     broker_pb2_grpc,
 )
-from sidecar_alpaca import config
+from sidecar_alpaca import config, normalize
 from sidecar_alpaca.auth import AuthCache
+from sidecar_alpaca.client import AlpacaClient, AlpacaClientError
 
 log = structlog.get_logger(module="sidecar_alpaca.handlers")
 
@@ -74,35 +75,63 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         request: broker_pb2.Empty,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.AccountsResponse:
-        await self._abort_unimplemented(
-            context,
-            "Alpaca ListManagedAccounts lands in C1",
-        )
-        return broker_pb2.AccountsResponse()
+        try:
+            client = await self._new_client()
+            rows = await client.list_managed_accounts()
+            accounts = [
+                normalize.to_proto_account(
+                    row,
+                    gateway_label=f"alpaca-{config.MODE}",
+                    mode=config.MODE,
+                )
+                for row in rows
+            ]
+            return broker_pb2.AccountsResponse(accounts=accounts)
+        except (AlpacaClientError, RuntimeError) as exc:
+            self._set_unavailable(context, exc)
+            return broker_pb2.AccountsResponse()
 
     async def GetAccountSummary(  # noqa: N802
         self,
         request: broker_pb2.AccountRef,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.SummaryResponse:
-        await self._abort_unimplemented(context, "Alpaca GetAccountSummary lands in C1")
-        return broker_pb2.SummaryResponse()
+        try:
+            client = await self._new_client()
+            row = await client.get_account_summary()
+            summary = normalize.to_proto_account_summary(row)
+            return broker_pb2.SummaryResponse(summary=summary)
+        except (AlpacaClientError, RuntimeError) as exc:
+            self._set_unavailable(context, exc)
+            return broker_pb2.SummaryResponse()
 
     async def GetPositions(  # noqa: N802
         self,
         request: broker_pb2.AccountRef,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.PositionsResponse:
-        await self._abort_unimplemented(context, "Alpaca GetPositions lands in C1")
-        return broker_pb2.PositionsResponse()
+        try:
+            client = await self._new_client()
+            rows = await client.get_positions()
+            positions = [normalize.to_proto_position(row) for row in rows]
+            return broker_pb2.PositionsResponse(positions=positions)
+        except (AlpacaClientError, RuntimeError) as exc:
+            self._set_unavailable(context, exc)
+            return broker_pb2.PositionsResponse()
 
     async def GetOrders(  # noqa: N802
         self,
         request: broker_pb2.AccountRef,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.OrdersResponse:
-        await self._abort_unimplemented(context, "Alpaca GetOrders lands in C1")
-        return broker_pb2.OrdersResponse()
+        try:
+            client = await self._new_client()
+            rows = await client.get_orders()
+            orders = [normalize.to_proto_order(row) for row in rows]
+            return broker_pb2.OrdersResponse(orders=orders)
+        except (AlpacaClientError, RuntimeError) as exc:
+            self._set_unavailable(context, exc)
+            return broker_pb2.OrdersResponse()
 
     async def GetContract(  # noqa: N802
         self,
@@ -166,7 +195,7 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         request_iterator: AsyncIterator[broker_pb2.StreamQuotesRequest],
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[broker_pb2.QuoteMessage]:
-        await self._abort_unimplemented(context, "Alpaca StreamQuotes lands in C1")
+        await self._abort_unimplemented(context, "Alpaca StreamQuotes lands in D1")
         if False:
             yield broker_pb2.QuoteMessage()
 
@@ -176,6 +205,23 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         if payload_mode:
             return str(payload_mode).lower()
         return request.metadata.get("mode", "")
+
+    async def _new_client(self) -> AlpacaClient:
+        api_key, api_secret = await self._auth.get_credentials()
+        return AlpacaClient(
+            api_key,
+            api_secret,
+            paper=config.MODE == "paper",
+        )
+
+    @staticmethod
+    def _set_unavailable(
+        context: grpc.aio.ServicerContext,
+        exc: AlpacaClientError | RuntimeError,
+    ) -> None:
+        context.set_code(grpc.StatusCode.UNAVAILABLE)
+        detail = exc.message if isinstance(exc, AlpacaClientError) else str(exc)
+        context.set_details(detail)
 
     @staticmethod
     async def _abort_unimplemented(
