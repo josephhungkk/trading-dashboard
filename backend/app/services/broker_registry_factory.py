@@ -9,6 +9,7 @@ import structlog
 from cryptography.fernet import InvalidToken
 
 from app.core.metrics import BROKER_CONFIGURE_TOTAL
+from app.services.broker_dial import resolve_dial
 from app.services.brokers import BrokerRegistry, BrokerSidecarClient
 from app.services.config import ConfigService
 
@@ -44,12 +45,27 @@ SIDECAR_HOSTS: dict[str, str] = {
 }
 
 
-def resolve_target(label: str, *, default_host: str) -> str:
+def resolve_target(
+    label: str,
+    *,
+    default_host: str,
+    config: dict[str, Any] | None = None,
+) -> str:
     """Compute the gRPC target for a sidecar label.
 
-    `SIDECAR_HOSTS` overrides the default_host on a per-label basis;
-    `SIDECAR_PORTS` always provides the port.
+    Resolution order (Phase 7c HIGH-4):
+
+    1. ``app_config.broker_gateway_dial`` — config-driven table for the new
+       "labeled docker sidecar" sub-pattern (alpaca-live, alpaca-paper).
+       Consulted first when ``config`` is supplied.
+    2. ``SIDECAR_HOSTS``/``SIDECAR_PORTS`` static maps — legacy resolver
+       for IBKR (NUC+mTLS) and Schwab (in-cluster fixed dial). NOT migrated
+       to the config table this phase.
     """
+    if config is not None:
+        dialed = resolve_dial(config, label, default=None)
+        if dialed is not None:
+            return dialed
     host = SIDECAR_HOSTS.get(label, default_host)
     port = SIDECAR_PORTS[label]
     return f"{host}:{port}"
