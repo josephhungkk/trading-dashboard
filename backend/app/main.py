@@ -24,6 +24,7 @@ from app.api.oauth import router as oauth_router
 from app.api.orders import fills_router
 from app.api.orders import router as orders_router
 from app.api.sse import router as sse_router
+from app.api.ws_quotes import router as ws_quotes_router
 from app.core.config import settings
 from app.core.crypto import get_fernet
 from app.core.db import SessionLocal, engine
@@ -155,6 +156,7 @@ app.include_router(contracts_router)
 app.include_router(oauth_router)
 app.include_router(sse_router)
 app.include_router(admin_metrics_router)
+app.include_router(ws_quotes_router)
 
 
 @app.get("/health")

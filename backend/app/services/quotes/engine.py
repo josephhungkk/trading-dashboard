@@ -66,7 +66,7 @@ from app.services.quotes.upstream.sidecar_stream import SidecarStream
 _CACHE_TTL_SECONDS: float = 60.0
 _OPERATOR_TRACE_ENV: str = "OPERATOR_TRACE_QUOTES"
 
-ConflatorCallback = Callable[[pb.QuoteMessage], Awaitable[None]]
+ConflatorCallback = Callable[[pb.QuoteMessage], Awaitable[None] | None]
 
 _log = structlog.get_logger(__name__)
 
@@ -292,7 +292,9 @@ class QuoteEngine:
 
         for _, cb in targets:
             try:
-                await cb(q)
+                maybe_awaitable = cb(q)
+                if maybe_awaitable is not None:
+                    await maybe_awaitable
             except Exception:
                 _log.exception("quote_engine.conflator_notify_failed")
                 QUOTE_CONFLATOR_NOTIFY_FAILURES_TOTAL.inc()

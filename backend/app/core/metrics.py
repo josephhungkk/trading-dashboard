@@ -362,3 +362,29 @@ QUOTE_REDIS_PUBLISH_FAILURES_TOTAL = Counter(
     "redis_publish_fail_total (config invalidation channel).",
     registry=registry,
 )
+
+QUOTE_WS_CONNECTIONS = Gauge(
+    "quote_ws_connections",
+    "Active WS quote connections",
+    registry=registry,
+)
+
+QUOTE_WS_SEND_TOTAL = Counter(
+    "quote_ws_send_total",
+    "Quote WebSocket frames sent by operation.",
+    labelnames=["op"],
+    registry=registry,
+)
+
+QUOTE_WS_SEND_TIMEOUT_TOTAL = Counter(
+    "quote_ws_send_timeout_total",
+    "Quote WebSocket send attempts that timed out and closed the connection.",
+    registry=registry,
+)
+
+QUOTE_WS_RECV_INVALID_TOTAL = Counter(
+    "quote_ws_recv_invalid_total",
+    "Invalid quote WebSocket frames received by reason.",
+    labelnames=["reason"],
+    registry=registry,
+)
