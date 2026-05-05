@@ -22,6 +22,7 @@ from typing import Any
 
 from app.core.metrics import QUOTE_ROUTE_CHANGES_TOTAL, QUOTE_SOURCE_HEALTH_STATE
 from app.models.instruments import Instrument
+from app.services.config_defaults import DEFAULT_QUOTE_SOURCE_PRIORITY
 from app.services.quotes.base import (
     SourceId,
     canonical_id_components,
@@ -210,8 +211,13 @@ class SourceRouter:
         if country is None:
             return []
         key = f"{instrument.asset_class.value.lower()}.{country}"
-        result = self._config.get("quote_source_priority", {}).get(key, [])
-        return list(result)
+        override = self._config.get("quote_source_priority", {})
+        # Phase 7c HIGH-3: per-key fallback (NOT whole-table) — operator's
+        # partial override of one key still allows new defaults shipped in
+        # later phases to land for keys the operator never touched.
+        if key in override:
+            return list(override[key])
+        return list(DEFAULT_QUOTE_SOURCE_PRIORITY.get(key, []))
 
     def _derive_country(self, instrument: Instrument) -> str | None:
         """Country lives in canonical_id position 3; fall back to the
