@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 import msgpack  # type: ignore[import-untyped]
+import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, WebSocketException, status
 from google.protobuf.json_format import MessageToDict  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -38,16 +39,25 @@ class ClientFrame(BaseModel):
     canonical_id: str | None = None
 
 
+_log = structlog.get_logger(__name__)
+
+
 class WSConflator:
     """Per-connection latest-only quote conflator."""
 
-    def __init__(self, ws: WebSocket, focused_default: str | None = None) -> None:
+    def __init__(
+        self,
+        ws: WebSocket,
+        focused_default: str | None = None,
+        ws_id: str | None = None,
+    ) -> None:
         self._ws = ws
         self._pending: dict[str, pb.QuoteMessage] = {}
         self._last_sent: dict[str, float] = {}
         self._focused_symbol = focused_default
         self._send_lock = asyncio.Lock()
         self._closed = False
+        self._ws_id = ws_id  # forensic log marker only — engine uses its own UUID
 
     def on_quote(self, q: pb.QuoteMessage) -> None:
         self._pending[q.canonical_id] = q
@@ -91,6 +101,16 @@ class WSConflator:
         if self._closed:
             return
         self._closed = True
+        # Sec M2: emit a structured log with ws identity + peer IP on every
+        # slow-client close so dashboards can distinguish a single laggy
+        # consumer from a slow-loris-style targeted DoS.
+        client = getattr(self._ws, "client", None)
+        peer_ip = client.host if client is not None else None
+        _log.warning(
+            "ws_quotes.slow_client_closed",
+            ws_id=self._ws_id,
+            peer_ip=peer_ip,
+        )
         await self._ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="slow-client")
 
 
@@ -116,7 +136,7 @@ async def ws_quotes(ws: WebSocket) -> None:
     QUOTE_WS_CONNECTIONS.inc()
 
     ws_id = uuid4()
-    conflator = WSConflator(ws, focused_default=None)
+    conflator = WSConflator(ws, focused_default=None, ws_id=str(ws_id))
     engine.register_conflator(ws_id, conflator.on_quote)
     task = asyncio.create_task(conflator.run())
     try:
@@ -139,14 +159,31 @@ async def _handle_raw_frame(
 ) -> None:
     try:
         raw = await ws.receive_bytes()
-        unpacked = msgpack.unpackb(raw, raw=False, strict_map_key=False)
+        # Cap deserialisation to defang attacker-controlled msgpack frames —
+        # ClientFrame has 3 fields, so generous-but-bounded caps eliminate
+        # the unbounded-allocation risk with no functional impact (Sec M1).
+        unpacked = msgpack.unpackb(
+            raw,
+            raw=False,
+            strict_map_key=False,
+            max_str_len=512,
+            max_bin_len=512,
+            max_array_len=1000,
+            max_map_len=32,
+        )
         frame = ClientFrame.model_validate(unpacked)
     except ValidationError as exc:
         reason = _validation_reason(exc)
         QUOTE_WS_RECV_INVALID_TOTAL.labels(reason=reason).inc()
         await conflator.send_frame(_err_frame(reason))
         return
-    except TypeError, ValueError, msgpack.ExtraData, msgpack.FormatError, msgpack.StackError:
+    except (
+        TypeError,
+        ValueError,
+        msgpack.ExtraData,
+        msgpack.FormatError,
+        msgpack.StackError,
+    ):
         QUOTE_WS_RECV_INVALID_TOTAL.labels(reason="bad_msgpack").inc()
         await conflator.send_frame(_err_frame("bad_msgpack"))
         return
