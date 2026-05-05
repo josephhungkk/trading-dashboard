@@ -5,7 +5,7 @@ import { safeParseDecimal } from '../lib/decimal';
 
 export interface AccountResponse {
   id: string;
-  broker_id: 'ibkr' | 'futu' | 'schwab';
+  broker_id: 'ibkr' | 'futu' | 'schwab' | 'alpaca';
   alias: string | null;
   mode: 'live' | 'paper';
   currency_base: string;

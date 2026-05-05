@@ -57,7 +57,7 @@ describe('AccountPicker trade entry point', () => {
     const user = userEvent.setup();
     render(<AccountPicker />);
     await user.click(screen.getByRole('button'));
-    expect(await screen.findAllByRole('button', { name: 'Trade' })).toHaveLength(3);
+    expect(await screen.findAllByRole('button', { name: 'Trade' })).toHaveLength(4);
   });
 
   it('disables a trade button when policy trading is disabled', async () => {

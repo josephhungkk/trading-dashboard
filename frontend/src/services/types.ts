@@ -1,6 +1,6 @@
 export type Mode = 'live' | 'paper';
 
-export type BrokerId = 'ibkr' | 'futu' | 'schwab';
+export type BrokerId = 'ibkr' | 'futu' | 'schwab' | 'alpaca';
 export interface Broker { id: BrokerId; name: string; }
 
 export type AssetClass =
@@ -77,7 +77,7 @@ export interface Watchlist {
 }
 
 export interface ConnectedStatus {
-  broker: BrokerId;             // 'ibkr' | 'futu' | 'schwab'
+  broker: BrokerId;             // 'ibkr' | 'futu' | 'schwab' | 'alpaca'
   mode?: Mode;                  // 'live' | 'paper' for IBKR; omitted for single-stack brokers
   gatewayId: string;            // unique gateway instance id, e.g. 'ibkr-live-gw-1'
   alias: string;                // human label, e.g. 'IBKR Live Gateway 1'

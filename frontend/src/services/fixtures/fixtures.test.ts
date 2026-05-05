@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { ACCOUNTS, POSITIONS, ORDERS, WATCHLISTS, SYMBOLS, STRESS_SYMBOLS, BROKERS } from './index';
 
 describe('fixtures', () => {
-  it('6 accounts — 2 per broker × 3 brokers', () => {
-    expect(ACCOUNTS).toHaveLength(6);
+  it('8 accounts — 2 per broker × 4 brokers', () => {
+    expect(ACCOUNTS).toHaveLength(8);
     for (const b of BROKERS) {
       const mine = ACCOUNTS.filter(a => a.broker === b.id);
       expect(mine).toHaveLength(2);
