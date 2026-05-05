@@ -1,155 +1,107 @@
 # Trading Dashboard — Project Constitution
 
-Self-hosted multi-broker, multi-account trading dashboard. Trades stocks, forex, commodities, indexes, bonds, ETF, futures, crypto, CFD, options, derivatives.
-
-Frontend + backend on IONOS VPS behind Cloudflare. Broker gateways (IB Gateway, FutuOpenD) + PostgreSQL 18 on NUC15PRO over WireGuard. Heavy AI box (RTX 4080 + 64 GB) runs large Ollama models on demand.
+Self-hosted multi-broker, multi-account trading dashboard. Stocks, forex, commodities, indexes, bonds, ETFs, futures, crypto, CFD, options, derivatives. FE+BE on IONOS VPS behind Cloudflare; broker gateways + PG-18 on NUC15PRO over WireGuard; heavy AI box (RTX 4080 + 64 GB) for large Ollama models on demand.
 
 ## Stack
 
-- **Backend:** Python 3.14 + FastAPI + SQLAlchemy 2.0 async + Alembic + Pydantic v2 + asyncpg
-- **Frontend:** React 19 + Vite 7 + TypeScript 6.0 strict + Tailwind v4 (CSS-first `@theme`) + shadcn/ui (owned in-repo) + Zustand + Storybook 10
-- **Charting:** klineschart (Phase 3+)
-- **Testing:** Vitest 4 + RTL 16 (FE); pytest 9 + pytest-asyncio + httpx (BE); Playwright deferred to Phase 5+
-- **Cache/pubsub:** Redis 7 (containerized, dev + prod)
-- **Database:** PostgreSQL 18 native on Windows NUC (never containerized). Dev DB `dashboard`; legacy Phase-1 DB `trading`. `DATABASE_URL` → `10.10.0.2:5432` (NUC WG IP).
-- **Broker adapters:** `ib_async` (IBKR), `futu-api` (Futu HK), `requests-oauthlib` (Schwab) — Phases 4, 6, 8.
-- **AI:** Ollama — 7-8B on NUC, 14-70B on heavy box (WoL on demand).
-- **Orchestration:** Docker Compose (docker-ce in WSL on NUC).
-- **Reverse proxy/TLS:** Cloudflare Tunnel terminates TLS at edge; nginx on VPS = defense-in-depth (rate limits, headers, strict Host). Certbot retired Phase 1.
-- **Access:** CF Access + Google IdP (`josephhungkk@gmail.com`, `ispyling@gmail.com`); CF Access service token for CI; WG bypass `http://10.10.0.1/` for NUC dev.
-- **Node:** 24 LTS via Corepack. **Pkg mgrs:** pnpm (FE), uv (BE).
-- **Lint:** ruff + mypy (BE); ESLint 9 flat + `eslint-plugin-boundaries` + `eslint-plugin-jsx-a11y` + Stylelint (FE); pre-commit + commitlint at commit-msg.
+- **BE:** Python 3.14 · FastAPI · SQLAlchemy 2.0 async · Alembic · Pydantic v2 · asyncpg
+- **FE:** React 19 · Vite 7 · TS 6.0 strict · Tailwind v4 (`@theme`) · shadcn/ui (in-repo) · Zustand · Storybook 10 · klineschart (Phase 9+)
+- **Test:** Vitest 4 + RTL 16 (FE); pytest 9 + pytest-asyncio + httpx (BE); Playwright (Phase 5+)
+- **Infra:** Redis 7 · PostgreSQL 18 native on Windows NUC (never containerized) · Docker Compose (docker-ce in WSL on NUC) · Cloudflare Tunnel (TLS at edge) + nginx defense-in-depth · CF Access + Google IdP
+- **Broker SDKs:** `ib_async` · `futu-api` · `schwabdev` (read-only) · `alpaca-py`
+- **AI:** Ollama — 7-8B on NUC, 14-70B on heavy box (WoL)
+- **Pkg:** pnpm (FE) + uv (BE); Node 24 LTS via Corepack
+- **Lint:** ruff + mypy --strict (BE); ESLint 9 flat + `eslint-plugin-boundaries` + `jsx-a11y` + Stylelint (FE); pre-commit + commitlint
 
-**Versioning:** latest stable at scaffold time. Pin via lockfiles only.
+Versioning: latest stable at scaffold time; pin via lockfiles only.
 
-### Fonts
-Noto only. Self-hosted `.woff2` in `frontend/public/fonts/` — 3 Latin weights + 5 CJK (TC, SC, HK, JP, KR). `@font-face` + `unicode-range`, variants via `lang`. Stock names: set `lang` via `langForMarket(exchange)` from `src/services/lang.ts`. Bold CJK synthesized via CSS `font-synthesis`.
+### FE invariants
+- **Fonts:** Noto only, self-hosted `.woff2` in `frontend/public/fonts/` (3 Latin + 5 CJK). `unicode-range` + `lang`-driven variants. `langForMarket(exchange)` from `src/services/lang.ts`.
+- **Mobile-first:** bottom tab bar (mobile) / sidebar (desktop). Min 2.75 rem touch targets. Tables collapse to cards below `md`.
+- **CSS units:** rem/%/vh/vw only — no `px`, no `em`. Stylelint `unit-disallowed-list` enforces.
 
-### Mobile
-Mobile-first. Bottom tab bar (mobile) / sidebar (desktop). Min 2.75 rem touch targets. Tables collapse to cards below `md`.
-
-## Component Architecture (Frontend)
-
-Five layers, one-way deps. Enforced by `eslint-plugin-boundaries`; violations break CI.
+### Component layers (one-way deps, enforced by `eslint-plugin-boundaries`)
 
 | Layer | Path | May import from |
 |---|---|---|
-| `design-tokens/` | `src/design-tokens/**` | — (leaf) |
+| `design-tokens/` | `src/design-tokens/**` | — (leaf; only place rem/hex/font literals live) |
 | `components/primitives/` | `src/components/primitives/**` | tokens, lib |
 | `components/patterns/` | `src/components/patterns/**` | tokens, primitives, patterns, lib |
 | `components/layout/` | `src/components/layout/**` | tokens, primitives, patterns, layout, features, lib |
 | `features/` | `src/features/**` | everything |
 
-1. `design-tokens/` is the only place rem/hex/font literals live. Else, reference tokens (Tailwind classes).
-2. Primitives + patterns ship `Component.stories.tsx` + `Component.test.tsx`. Features tested E2E.
-3. **No `px` or `em` anywhere.** Stylelint `unit-disallowed-list` enforces.
-4. Boundaries config in `frontend/eslint.config.mjs` is source of truth.
+Primitives + patterns ship `.stories.tsx` + `.test.tsx`. Features tested E2E. Boundaries config in `frontend/eslint.config.mjs` is source of truth.
 
-## Frontend Runtime (Phase 3+)
-
-- **Routing:** TanStack Router file-based under `frontend/src/routes/`. `routeTree.gen.ts` is gitignored, regenerated by `pnpm tsr generate` (auto via `pnpm typecheck`/`pnpm test`). Don't hand-edit.
-- **Scoped state:** features use `useActiveStores()` for live/paper bundle. Never import `@/stores/scoped/*` directly (no-restricted-imports).
-- **Service ticker:** `getServices()` lazy. Tests/Storybook call `setTickingEnabled(false)`. Prod uses default.
+### FE runtime (Phase 3+)
+- **Routing:** TanStack Router file-based under `frontend/src/routes/`. `routeTree.gen.ts` is gitignored, regenerated by `pnpm tsr generate` (auto via typecheck/test). Don't hand-edit.
+- **Scoped state:** features use `useActiveStores()`. Never import `@/stores/scoped/*` directly (no-restricted-imports).
+- **Service ticker:** `getServices()` lazy. Tests/Storybook call `setTickingEnabled(false)`.
 - **Mode toggle:** paper→live needs confirm dialog; live→paper direct. Cold load = paper. Mode on `<body data-mode>`.
-- **Vite dev proxy:** `/api` + `/health` → `http://10.10.0.2:8000` (NUC backend over WG).
+- **Vite dev proxy:** `/api` + `/health` → `http://10.10.0.2:8000` (NUC over WG).
 
-## Broker Adapters (Phase 4+)
+## Broker adapters (Phase 4+)
 
-- **Sidecar topology:** PyInstaller-frozen Python sidecar per IBKR gateway on NUC at `10.10.0.2:18001-18004` (isa-live=18001, isa-paper=18002, normal-live=18003, normal-paper=18004; gateways on 4001-4004). mTLS over WG; CRL at `C:\dashboard\secrets\crl.pem` reloaded every 60s.
-- **avg_cost unit:** `broker.<account_number>.avg_cost_unit` config (default `pounds`). Invariant `Σ(qty × avg_cost) > 1.5 × NLV` triggers `avg_cost_unit_suspected_wrong{account}`.
-- **Maintenance windows:** `app/services/ibkr_maintenance.py` is source of truth. Backend returns `503 + Retry-After` during reset; watchdog skips weekend reset; tolerates daily-reset BAD reads without kill+restart.
-- **Boundary stripping (M22):** `AccountResponse` to FE = `id, broker_id, alias, mode, currency_base, display_order` only. Never `gateway_label`/`account_number`. FE's `account_id` UUID is the only handle; backend's `AccountService._resolve_account` is the single chokepoint.
-- **C1 race-free soft-delete:** `BrokerDiscoverer` only soft-deletes `broker_accounts` whose `last_seen_via = ANY(:healthy_labels)` THIS tick. All-unhealthy → empty predicate → zero rows deleted.
-- **NUC ops:** `deploy/nuc/` has all PowerShell + VBS launchers + watchdog. `provision-and-publish.ps1` rotates mTLS; `revoke-cert.ps1 -Serial <s>` revokes; `renew-sidecar-mtls.ps1` rolls one at a time. Pester suite at `deploy/nuc/tests/SidecarLib.Tests.ps1` (21 tests) on `deploy/nuc/lib/SidecarLib.ps1`.
+Per-broker invariants live in phase-memory files (read before changing those surfaces): `phase4_sidecar_topology.md` (IBKR mTLS+CRL+watchdog), `phase5a_shipped.md` (NLV cache), `phase5b_shipped.md` (trade execution), `phase5c_shipped.md` (modify+bracket+fills), `phase6_futu_topology.md`, `phase7a_schwab_topology.md` (OAuth+two-tier+BackendCallback), `phase7b1_shipped.md` (quote engine+WS gateway), `phase7c_alpaca_topology.md` (in-cluster docker+30-symbol cap). Don't copy that detail here.
 
-### Phase-shipped invariants → auto-memory
+Cross-cutting load-bearing rules:
+- **Boundary stripping:** `AccountResponse` to FE = `id, broker_id, alias, mode, currency_base, display_order` only. Never `gateway_label`/`account_number`. `account_id` UUID is the only FE handle; `AccountService._resolve_account` is the single chokepoint.
+- **Race-free soft-delete:** `BrokerDiscoverer` only soft-deletes rows whose `last_seen_via = ANY(:healthy_labels)` THIS tick. All-unhealthy → empty predicate → zero deletions.
+- **Maintenance:** `app/services/ibkr_maintenance.py` is source of truth. Backend returns `503 + Retry-After` during reset; watchdog skips weekend reset.
+- **NUC ops:** `deploy/nuc/` (PowerShell launchers + watchdog + Pester). `provision-and-publish.ps1` rotates mTLS; `revoke-cert.ps1` revokes; `renew-sidecar-mtls.ps1` rolls one at a time.
 
-- `phase5a_shipped.md` — discoverer NLV cache (v0.5.0)
-- `phase5b_shipped.md` — IBKR trade execution + 5b.1 hardening (v0.5.1–v0.5.3)
-- `phase5c_shipped.md` — modify, bracket, fills history (v0.5.4)
-- `phase6_futu_topology.md` — Futu HK adapter + Configure RPC + SDK gotchas (v0.6.0)
-- `phase7a_schwab_topology.md` — Schwab read-only OAuth + two-tier auth + BackendCallback (v0.7.0)
-- `phase7b1_shipped.md` — quote engine + streaming bus + FE WS gateway + instruments schema (v0.7.1)
-- `phase7c_alpaca_topology.md` — Alpaca adapter + 30-symbol two-layer cap + per-mode Configure (v0.7.3)
+## Configuration & topology
 
-Consult before changing those surfaces. **Don't copy that detail into CLAUDE.md.**
+Runtime settings in DB (`app_config` + `app_secrets` Fernet-encrypted), not `.env`. **Don't add new `.env` keys beyond bootstrap.** Edit at runtime via `POST /api/admin/config`/`/secrets`. See [`docs/CONFIG.md`](docs/CONFIG.md).
 
-## Configuration Storage
-
-Runtime settings in DB (`app_config` + `app_secrets`), not `.env`. `.env` only holds bootstrap values. **Don't add new `.env` keys beyond bootstrap.** Read via `get_config()` dependency or `ConfigService`; edit at runtime via `POST /api/admin/config`/`/secrets`. See `docs/CONFIG.md`.
-
-## Topology + paths
-WG topology, Postgres connectivity, and Windows-side service paths live in [`docs/NETWORK.md`](docs/NETWORK.md). Key invariants: **NUC = dev host** (WSL2 at `/home/joseph/dashboard`); PG at `10.10.0.2:5432` over WG; VPS prod at `/home/trader/trading-dashboard`; SSH VPS via `ssh -p 2222 trader@88.208.197.219`.
-
-## Directory Layout
-See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3`.
+WG topology + Postgres connectivity + Windows-side paths: [`docs/NETWORK.md`](docs/NETWORK.md). Key invariants: NUC = dev host (WSL2 at `/home/joseph/dashboard`); PG at `10.10.0.2:5432` over WG; VPS prod at `/home/trader/trading-dashboard`; SSH via `ssh -p 2222 trader@88.208.197.219`. Directory layout: `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3`.
 
 ## Coding conventions
-Full Python/TS/SQL/Git rules in [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md). Load-bearing one-liners:
-- **Python:** 3.14, type hints everywhere, async-only, structlog (no `print`), no bare `except:`. Lint: `ruff`. Types: `mypy --strict`.
-- **TypeScript:** strict mode; no `any` without disable + reason; function components only; no `px`/`em` (rem/%/vh/vw only).
+
+Full rules in [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md). Load-bearing one-liners:
+- **Python:** 3.14; type hints everywhere; async-only; structlog (no `print`); no bare `except:`; `except (A, B) as exc:` (Py3 tuple-catch).
+- **TS:** strict; no `any` without disable + reason; function components only.
 - **SQL:** schema via Alembic only; `snake_case`; `TIMESTAMPTZ`; money in `NUMERIC(20, 8)`.
-- **Git:** conventional commits; body lines ≤100 chars; squash-merge; never commit `.env`/`*.key`/`secrets/*`.
+- **Git:** conventional commits; body ≤100 chars; squash-merge; never commit `.env`/`*.key`/`secrets/*`.
 
-## Commands
-Common dev/lint/migrate/deploy commands live in [`docs/COMMANDS.md`](docs/COMMANDS.md).
+Common dev/lint/migrate/deploy commands: [`docs/COMMANDS.md`](docs/COMMANDS.md). Prod deploy: `./scripts/deploy.sh` (rsync + remote build + nginx reload).
 
-## Security Rules
+## Security
 
 - Never log API keys/tokens/passwords — structlog redacts via processor in `app/core/logging.py`.
-- Broker creds live in `app_secrets` (Fernet-encrypted) from Phase 2 on. Never in git.
-- Postgres reachable only via WG (from VPS) and LAN/WSL (from NUC). Never public.
+- Broker creds in `app_secrets` (Fernet) from Phase 2. Never in git.
+- Postgres reachable only via WG (VPS) and LAN/WSL (NUC). Never public.
 - FE never sees broker creds.
 - Trade-execution endpoints require confirmation nonce (CSRF).
 
-## Roadmap
+## Roadmap & goals
 
-Locked Phase 7 → v1.0.0 in [`docs/ROADMAP.md`](docs/ROADMAP.md). End-state: every IBKR/Futu/Schwab asset class + relevant order types, multi-source streaming quotes, charting, AI alerts/scanner, autonomous self-refining bots (param-tuning + LLM-feedback ceiling — no raw RL), UK CGT (S104 pool + SA108), PWA mobile at v1.0.0.
+Phase 7 → v1.0.0 locked in [`docs/ROADMAP.md`](docs/ROADMAP.md). End-state: every IBKR/Futu/Schwab/Alpaca asset class + relevant order types, multi-source streaming quotes, charting, AI alerts/scanner, autonomous self-refining bots (param-tuning + LLM-in-loop ceiling — no raw RL), UK CGT (S104 + SA108), PWA mobile.
 
-## Goals
-Trade every asset class IBKR+Futu+Schwab support; cover every relevant order type; AI alerts/scanner/news/earnings; autonomous self-refining bots (rule → LLM-in-loop → autonomous); PWA mobile (install + Web Push + offline order queue).
-
-## Non-Goals
-Native RN app (PWA covers); raw RL bots (overfit/blowup); paper sim (use broker paper accounts); multi-tenant.
+**Non-goals:** native RN app (PWA covers); raw RL bots (overfit); paper sim (use broker paper); multi-tenant.
 
 ## Phase workflow
 
-Every phase: brainstorm → spec self-review → **architect review (apply CRIT+HIGH+MED inline)** → user approval → plan → implementation (subagent-driven) → close-out (update CLAUDE.md/CHANGELOG.md/TASKS.md, tag, push).
-
-Skip architect review only for truly trivial phases (Phase 0 skipped → cost ~2hr CI debugging).
-
-Implementation runs per-commit reviewer chain (spec-compliance + code-quality + lang-reviewer minimum, plus security/db/type/silent-failure/a11y/build/tdd when triggered). Reviews fire every commit, never batched.
-
-Full workflow + tooling list + reviewer table + skills + hooks: `docs/PHASE-WORKFLOW.md`. Tooling catalog: memory `project_tooling_inventory.md`.
+Every phase: brainstorm → spec self-review → **architect review (apply CRIT+HIGH+MED inline)** → user approval → plan → impl (subagent-driven) → close-out (CLAUDE.md/CHANGELOG.md/TASKS.md, tag, push). Per-commit reviewer chain (spec-compliance + code-quality + lang-reviewer minimum + others when triggered). Full workflow + tooling list + reviewer table: [`docs/PHASE-WORKFLOW.md`](docs/PHASE-WORKFLOW.md). Catalog: memory `project_tooling_inventory.md`.
 
 ### Subagent model routing (locked 2026-05-04)
 
-**Coding goes to Codex.** Per `feedback_codex_delegation.md` (in force since 2026-05-01), Codex writes both source AND tests in one delegation; the Opus main thread reviews, verifies, commits. Anthropic-tier subagents do **not** write production code in this project — they review.
+**Coding goes to Codex.** Codex writes source AND tests in one delegation; Opus main thread reviews, verifies, commits. Anthropic subagents do **not** write production code — they review.
 
 | Stage | Who | Model |
 |---|---|---|
-| Implementation (source + tests) | **Codex** | `gpt-5-codex` (OpenAI) |
-| Main-thread orchestration / Write / lint / test / commit | Opus main thread | `claude-opus-4-7` |
-| spec-compliance review (`general-purpose` w/ spec-prompt) | subagent | `haiku` |
-| `python-reviewer` / `typescript-reviewer` | subagent | `haiku` |
-| `code-reviewer` / `code-quality` (`general-purpose` w/ quality-prompt) | subagent | `sonnet` |
-| `security-reviewer` / `database-reviewer` / `silent-failure-hunter` | subagent | `sonnet` |
+| Implementation (source + tests) | **Codex** | `gpt-5-codex` |
+| Main-thread orchestrate / Write / lint / test / commit | Opus | `claude-opus-4-7` |
+| spec-compliance / `python-reviewer` / `typescript-reviewer` | subagent | `haiku` |
+| `code-reviewer` / `security-reviewer` / `database-reviewer` / `silent-failure-hunter` | subagent | `sonnet` |
 | `ARCHITECT-REVIEW` (once-per-phase, skill) | skill | `opus` |
 
-Pass `model: "haiku"` / `"sonnet"` to the `Agent` tool for per-call override on the reviewer chain (option A — durable until tier-routing knobs land in plugin config).
+Pass `model: "haiku"`/`"sonnet"` to the `Agent` tool for per-call override. Codex fallback (`feedback_codex_fallback.md`): on rate-limit, Claude main-thread takes over; user overrides "use codex" / "claude take over" honor the named model.
 
-Codex fallback (per `feedback_codex_fallback.md`): on rate-limit, Claude main-thread takes over the same task; canary attempt, then `ScheduleWakeup` ~30 min for retry. User overrides "use codex" / "claude take over" honor the named model.
+## When Claude makes changes
 
-## When Claude Makes Changes
-
-- Run tests after edits: `docker compose exec backend pytest` + `cd frontend && pnpm test`.
-- Regenerate types when API schemas change: `scripts/gen-types.sh` (Phase 2+).
+- Tests after edits: `docker compose exec backend pytest` + `cd frontend && pnpm test`.
+- Regenerate types when API schemas change: `scripts/gen-types.sh`.
 - Never modify `brokers/base.py` without updating every concrete adapter.
-- Prefer editing existing files.
 - Schema changes → Alembic migration, not raw model edits.
-
-Use `/frontend-design` skill for FE design; discuss direction with user.
-
-FE supports desktop + mobile. Rem-based CSS only.
-
-GitHub is canonical repo. Update CLAUDE.md/CHANGELOG.md/TASKS.md every phase close; commit.
+- Prefer editing existing files. Use `/frontend-design` skill for FE design.
+- GitHub is canonical repo. Update CLAUDE.md/CHANGELOG.md/TASKS.md every phase close; commit.
