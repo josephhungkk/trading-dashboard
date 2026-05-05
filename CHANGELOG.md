@@ -5,6 +5,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-05-05
+
+### Phase 7b.1 — Streaming quote engine
+
+- New bidirectional gRPC `StreamQuotes` RPC on `service Broker` — backend
+  is gRPC client, sidecar is server; `Subscribe`/`Unsubscribe`/`Heartbeat`/
+  `Resync` ops via `oneof` (CRIT-1, HIGH-1).
+- New `instruments` + `symbol_aliases` schema (Alembic 0009) with
+  race-safe `INSERT … ON CONFLICT DO NOTHING RETURNING` upsert + in-process
+  `asyncio.Lock` guard (CRIT-3).
+- `sidecar_schwab` ports `LEVELONE_EQUITIES` streamer with `$`-symbology
+  for US cash indexes; proactive reconnect on token rotation, gap < 2s
+  (CRIT-2).
+- `sidecar_futu` exposes HK Lv1 quotes (stocks/ETFs/warrants/CBBC + HSI/
+  HSCEI/HHI indexes) over `StreamQuotes`.
+- `sidecar_ibkr` (×4) exposes STK + IND quotes with LSE GBp normalization;
+  4 SidecarStream instances, gateway-quote-assignment via app_config map
+  (MED-6).
+- New backend `QuoteEngine` with `SubscriptionRegistry` (cap + rate-limit,
+  HIGH-6), `SourceRouter` (config-driven priority + health window, HIGH-7),
+  `InstrumentResolver`, `SidecarStream` (Subscribe-vs-Resync per HIGH-1),
+  Redis bus `quote.<source>.<canonical_id>` with `publisher_worker_id`
+  envelope for INV-Q-1 single-worker loopback suppression.
+- Engine invariants `INV-Q-1..4`: Redis loopback suppression, M22 boundary
+  strip (`raw_payload` + `source_meta`), staleness-not-reroute, token-
+  rotation Event ordering.
+- New `/ws/quotes` FastAPI WebSocket endpoint with MessagePack v=1 frames
+  (op: `sub`/`unsub`/`focus`/`ping`/`ack`/`snap`/`q`/`stale`/`err`/`pong`),
+  `WSConflator` per-connection focused-10Hz/background-4Hz, `asyncio
+  .wait_for(send, timeout=2.0)` slow-client isolation (HIGH-3), CF Access
+  JWT auth via `Cf-Access-Jwt-Assertion` header (HIGH-2), dev-bypass over
+  WG.
+- Frontend `RealQuotesService` replaces `MockQuotesService`; `useFocused
+  Symbol` hook elevates one symbol per session to 10Hz on Trade ticket
+  mount; reconnect with bounded `pendingFrames` (≤100, drop-oldest);
+  fallback to mock after 3 failed reconnects with banner.
+- 3 operator runbooks: `runbook-quote-coverage.md`,
+  `runbook-ibkr-data-subs.md`, `runbook-quote-streaming-ops.md`.
+- Source enum proto: 13 entries open-set, 3 wired in 7b.1
+  (IBKR/Futu/Schwab); 10 designed-for, wired by demand
+  (Coinbase/OANDA/yfinance in 7b.2; Finnhub Free in Phase 18; EODHD in
+  Phase 9; Tradier conditional in Phase 12; Twelve Data/Alpaca/Polygon/
+  Binance per asset-class phase).
+- A5 (instruments seed) deferred to Phase 7b.1.5 — schema for `positions`
+  / `watchlist_entries` doesn't carry `symbol`/`exchange` yet; resolver
+  works lazily without seed.
+- **Saves $192–960/yr in IBKR data fees** (cancel US bundles +
+  expensive intl subs, replace with Schwab+Futu+yfinance).
+
 ## [0.7.0] — 2026-05-04
 
 ### Phase 7a — Schwab broker connect (read-only OAuth + two-tier auth)

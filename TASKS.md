@@ -222,13 +222,30 @@ Inherits from prior deferrals:
 - [ ] **On-demand quote subscribe for preview** (deferred from 5c) — falls out of the registry pattern.
 - [ ] **Periodic BASE-tag refresh for accounts added mid-run** (deferred from 5b.1).
 
-### Phase 7b.1 progress (Chunk A — proto + schema + resolver)
+### Phase 7b.1 progress  *(complete — v0.7.1 · 2026-05-05)*
 - [x] A1 — proto: `StreamQuotes` RPC + `SymbolRef` + `QuoteMessage` (`df8502a`)
 - [x] A2 — Alembic 0009 `instruments` + `symbol_aliases` (`e1c8f51`)
 - [x] A3 — SQLAlchemy ORM models (`392f7b8`)
 - [x] A4 — `InstrumentResolver` race-safe upsert (`811e4e7` + reviewer fixes `4062b1b`)
 - [ ] A5 — **deferred to Phase 7b.1.5** (see below). Plan assumed `positions.symbol` + `positions.exchange` + `watchlist_entries`; actual schema (Alembic 0005) has neither + `watchlist_entries` table doesn't exist. Resolver works fine without seed — first quote tick creates the row lazily.
-- [ ] **Chunk B in progress** — `QuoteEngine` core (B1–B5)
+- [x] B1–B5 — QuoteEngine core: `canonical_id` helpers + `SubscriptionRegistry` + `SourceRouter` + `SidecarStream` + `QuoteEngine` with INV-Q-1..4
+- [x] C1–C3 — Schwab streamer + handler + token-rotation reconnect (CRIT-2)
+- [x] D1 — Futu HK Lv1 streamer + Subscribe/Unsubscribe/Resync ops
+- [x] E1 — IBKR streamer × 4 with LSE GBp guard (canonical-id-derived; SMART-routing-safe)
+- [x] F1 — `WSConflator` per-WS focused-10Hz/background-4Hz
+- [x] F2 — `/ws/quotes` MessagePack endpoint with CF JWT auth (HIGH-2), msgpack bounds, slow-client wait_for (HIGH-3)
+- [ ] F3 — cardinality load test (gated off CI; reuse harness from B5/F2 unit tests when needed)
+- [x] G1 — `RealQuotesService` + `connectWs` + `Quote.isStale`/`staleSinceMs` markers
+- [x] G2 — `useFocusedSymbol` hook + Trade ticket integration (`bd99dfd`)
+- [x] G3 — Playwright E2E for `/ws/quotes` upgrade + frame receipt (`49962b3`)
+- [x] H1 — operator runbook `deploy/runbook-quote-coverage.md` (Schwab `$`-symbology day-1 verification template)
+- [x] H2 — operator runbook `deploy/runbook-ibkr-data-subs.md` (cancel/keep/subscribe matrix template)
+- [x] H3 — operator runbook `deploy/runbook-quote-streaming-ops.md` (debugging + adding-source guide)
+- [x] H4 — close-out: CHANGELOG `[0.7.1]` + CLAUDE.md phase-shipped + memory `phase7b1_shipped.md` + tag `v0.7.1`
+
+LOW deferrals carried forward to Phase 7b.2:
+- yfinance + Coinbase + OANDA streamers (`sidecar_market_data/`)
+- Source enum entries 4-13 wired by demand
 
 ## Phase 7b.1.5 — Instruments seed + admin alias endpoint  *(mini-phase, ~½ day, after 7b.1 ships)*
 
