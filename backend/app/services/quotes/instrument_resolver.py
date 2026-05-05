@@ -262,13 +262,17 @@ class InstrumentResolver:
                 currency=currency,
                 alias_meta={"exchange": exchange, "sec_type": "STK"},
             )
-        except SQLAlchemyError, LookupError:
+        except (SQLAlchemyError, LookupError) as exc:
+            # Tuple parens + `as exc` binding are load-bearing: `ruff format`
+            # strips bare-tuple parens, turning `except (A, B):` into Py2-style
+            # `except A, B:` (catches only A, binds it to local name B). The
+            # `as exc` clause makes ruff keep the parens.
             _log.warning(
                 "instrument_resolver.from_legacy_failed",
                 broker_id=broker_id,
                 raw_symbol=raw_symbol,
                 exchange=exchange,
                 currency=currency,
-                exc_info=True,
+                exc_info=exc,
             )
             return None
