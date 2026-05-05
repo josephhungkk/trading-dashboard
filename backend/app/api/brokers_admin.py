@@ -23,6 +23,7 @@ from app.services.config import ConfigService
 from app.services.schwab_oauth import (
     StateNonceError,
     consume_state_nonce,
+    mint_state_nonce,
 )
 
 _deps = importlib.import_module("app.core.deps")
@@ -71,14 +72,13 @@ async def reconfigure(
 async def schwab_oauth_start(
     user: AdminDep,
     config_service: ConfigDep,
+    redis: RedisDep,
+    settings: SettingsDep,
 ) -> RedirectResponse:
     SCHWAB_OAUTH_START_TOTAL.inc()
-    _user_email = user.email or "admin"
+    user_email = user.email or "admin"
     app_key_raw = await config_service.reveal_secret("broker", "schwab.app_key")
     if not app_key_raw:
-        # Surfacing a 500 from urllib.parse.quote(None) was unhelpful; a 400
-        # with a precise hint matches the runbook's "seed app_key/app_secret"
-        # step (deploy/runbook-schwab-setup.md).
         raise HTTPException(
             400,
             "schwab.app_key not configured - seed broker.schwab.app_key + "
@@ -88,19 +88,25 @@ async def schwab_oauth_start(
     callback_url = cast(str | None, await config_service.get("broker", "schwab.callback_url"))
     if not callback_url:
         callback_url = "https://dashboard.kiusinghung.com/api/oauth/schwab/callback"
-    # Schwab's authorize endpoint is unusually strict — adding `state` or
-    # `response_type=code` (both standard OAuth2!) triggers a generic
-    # "contact customer support" error. Schwabdev (the official-ish python
-    # client) builds the URL with ONLY client_id + redirect_uri:
-    #   schwabdev/tokens.py:417 — auth_url = f"...?client_id={key}&redirect_uri={url}"
-    # We follow the same shape. State CSRF protection lost in exchange.
+    # v0.7.4 → restore standard OAuth2 params (state + response_type=code).
+    # Earlier strip was a misdiagnosis — the real "contact customer support"
+    # cause was a redirect_uri path mismatch at Schwab's portal. Retesting
+    # with state restored to recover CSRF protection (HMAC-signed nonce,
+    # Redis GETDEL atomic consume — see schwab_oauth.py).
     #
-    # Also: redirect_uri must byte-match the registered value, so pass
-    # `safe=':/'` to urllib.parse.quote so `:` and `/` aren't %-encoded.
+    # redirect_uri must byte-match the registered value; pass `safe=':/'` so
+    # urllib.parse.quote doesn't %-encode `:` and `/`.
+    state = await mint_state_nonce(
+        redis,
+        user_email=user_email,
+        app_secret_key=settings.secret_key.encode(),
+    )
     consent_url = (
         "https://api.schwabapi.com/v1/oauth/authorize"
         f"?client_id={urllib.parse.quote(app_key, safe='')}"
         f"&redirect_uri={urllib.parse.quote(callback_url, safe=':/')}"
+        "&response_type=code"
+        f"&state={urllib.parse.quote(state, safe='')}"
     )
     return RedirectResponse(url=consent_url, status_code=302)
 

@@ -52,11 +52,9 @@ async def schwab_oauth_callback_public(
 ) -> dict[str, str]:
     """Public Schwab OAuth callback. CF-Access-bypassed.
 
-    Schwab's authorize endpoint rejects requests that include a `state`
-    query param ("contact customer support" error), so the consent URL no
-    longer sends one. Schwab therefore won't echo state back. We accept a
-    missing/empty state and log the CSRF caveat. If state IS present
-    (e.g., manual flow with a custom URL), validate it as before.
+    v0.7.4: state restored to the authorize URL. Manual-flow URLs may
+    still omit state, in which case CSRF protection falls back to
+    redirect_uri byte-match only.
     """
     user_email = "anonymous"
     if state:
@@ -72,7 +70,7 @@ async def schwab_oauth_callback_public(
     else:
         log.warning(
             "schwab.oauth_callback.no_state_csrf_unverified",
-            note="schwab rejects state; CSRF protection waived (redirect_uri match only)",
+            note="manual-flow URL without state; CSRF defense = redirect_uri match only",
         )
 
     log.info("schwab_oauth_callback_public", user=user_email)
