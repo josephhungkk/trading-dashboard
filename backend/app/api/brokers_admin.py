@@ -96,11 +96,17 @@ async def schwab_oauth_start(
     callback_url = cast(str | None, await config_service.get("broker", "schwab.callback_url"))
     if not callback_url:
         callback_url = "https://dashboard.kiusinghung.com/api/oauth/schwab/callback"
+    # Schwab matches `redirect_uri` byte-for-byte against the registered
+    # value in their developer portal. Default `urllib.parse.quote()` encodes
+    # `:` to `%3A`, producing `https%3A//...` which does NOT match
+    # `https://...` and triggers Schwab's generic "contact customer support"
+    # error. Pass `safe=':/'` so the URL passes through unchanged. Same goes
+    # for `state` — keep its `.` separator unencoded.
     consent_url = (
         "https://api.schwabapi.com/v1/oauth/authorize"
-        f"?client_id={urllib.parse.quote(app_key)}"
-        f"&redirect_uri={urllib.parse.quote(callback_url)}"
-        f"&state={urllib.parse.quote(signed)}"
+        f"?client_id={urllib.parse.quote(app_key, safe='')}"
+        f"&redirect_uri={urllib.parse.quote(callback_url, safe=':/')}"
+        f"&state={urllib.parse.quote(signed, safe='.')}"
         "&response_type=code"
     )
     return RedirectResponse(url=consent_url, status_code=302)
