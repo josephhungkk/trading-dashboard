@@ -44,22 +44,36 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 @router.get("/schwab/callback")
 async def schwab_oauth_callback_public(
     code: Annotated[str, Query(...)],
-    state: Annotated[str, Query(...)],
     config_service: ConfigDep,
     redis: RedisDep,
     db: DbDep,
     settings: SettingsDep,
+    state: Annotated[str, Query()] = "",
 ) -> dict[str, str]:
-    """Public Schwab OAuth callback. CF-Access-bypassed."""
-    try:
-        user_email = await consume_state_nonce(
-            redis,
-            signed=state,
-            app_secret_key=settings.secret_key.encode(),
+    """Public Schwab OAuth callback. CF-Access-bypassed.
+
+    Schwab's authorize endpoint rejects requests that include a `state`
+    query param ("contact customer support" error), so the consent URL no
+    longer sends one. Schwab therefore won't echo state back. We accept a
+    missing/empty state and log the CSRF caveat. If state IS present
+    (e.g., manual flow with a custom URL), validate it as before.
+    """
+    user_email = "anonymous"
+    if state:
+        try:
+            user_email = await consume_state_nonce(
+                redis,
+                signed=state,
+                app_secret_key=settings.secret_key.encode(),
+            )
+        except StateNonceError as e:
+            SCHWAB_OAUTH_CALLBACK_TOTAL.labels(path="public", result="state_mismatch").inc()
+            raise HTTPException(403, f"state nonce: {e}") from e
+    else:
+        log.warning(
+            "schwab.oauth_callback.no_state_csrf_unverified",
+            note="schwab rejects state; CSRF protection waived (redirect_uri match only)",
         )
-    except StateNonceError as e:
-        SCHWAB_OAUTH_CALLBACK_TOTAL.labels(path="public", result="state_mismatch").inc()
-        raise HTTPException(403, f"state nonce: {e}") from e
 
     log.info("schwab_oauth_callback_public", user=user_email)
 
