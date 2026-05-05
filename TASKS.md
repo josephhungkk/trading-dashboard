@@ -247,21 +247,18 @@ LOW deferrals carried forward to Phase 7b.2:
 - yfinance + Coinbase + OANDA streamers (`sidecar_market_data/`)
 - Source enum entries 4-13 wired by demand
 
-## Phase 7b.1.5 — Instruments seed + admin alias endpoint  *(mini-phase, ~½ day, after 7b.1 ships)*
+## Phase 7b.1.5 — Instruments seed + admin alias endpoint  *(complete — 2026-05-05)*
 
-Boot helper `seed_instruments_from_positions(session)` + admin endpoint `POST /api/admin/instruments` for operators to manually create aliases when the lazy creation flow surfaces `op:"err", code:"NO_INSTRUMENT"`.
+Boot helper `seed_instruments_from_positions(session_factory)` + admin endpoint `POST /api/admin/instruments` for operators to manually create aliases when the lazy creation flow surfaces `op:"err", code:"NO_INSTRUMENT"`. Shipped with `d42142c`.
 
-Schema work (Alembic 0010):
-- Add `symbol TEXT NOT NULL` + `primary_exchange TEXT NOT NULL` + `canonical_id TEXT` (nullable) to `positions` — populated by broker discoverer fan-out from contract metadata.
-- Create `watchlist_entries(id UUID PK, broker_id TEXT, symbol TEXT, exchange TEXT, currency CHAR(3), created_at)` — no model exists today.
-- Backfill positions via re-discover round on deploy (BASE-tag pattern from Phase 5b.1).
-
-Implementation:
-- `seed_instruments_from_positions` iterates `positions ∪ orders ∪ watchlist_entries`, calls `InstrumentResolver.resolve_or_create()` per row; missing/ambiguous rows bump `quote_seed_skipped_total{reason}`.
-- Admin endpoint validates payload (canonical_id format, asset_class enum, exchange whitelist) and calls resolver.
-- Lifespan wires the boot seed after `ConfigService` start, before `BrokerRegistry`.
-
-Tests: `tests/integration/test_instruments_seed.py` (per-source skip-reason coverage); `tests/api/test_admin_instruments.py` (endpoint auth + schema).
+- [x] Alembic 0010: `positions.symbol`/`primary_exchange`/`canonical_id` (all NULLABLE — backfill is operator action, not migration concern); `watchlist_entries` table.
+- [x] `WatchlistEntry` ORM model.
+- [x] `BrokerDiscoverer._upsert_positions` populates the 3 new columns + emits `quote_position_canonical_resolved_total{broker_id}` / `quote_position_canonical_unresolved_total{broker_id, reason}` (`no_country` / `no_symbol` / `no_exchange`).
+- [x] `seed_instruments_from_positions` helper iterates `positions ⋈ broker_accounts`, calls `InstrumentResolver.from_legacy()`; bumps `quote_seed_skipped_total{reason}` for null returns.
+- [x] `POST /api/admin/instruments` (Pydantic v2 + `require_admin_jwt`) — canonical_id regex, asset_class enum, currency, ≥1 alias.
+- [x] Lifespan wires the seed AFTER ConfigService start, BEFORE BrokerRegistry build; best-effort with try/except.
+- [x] Tests: integration seed (3-row 1-pass-2-skip), API 201/400/401, unit upsert-canonical column write (skip on no DB).
+- [ ] Backfill of existing prod `positions.symbol`/`primary_exchange` — operator action via re-discovery round (BASE-tag pattern, Phase 5b.1).
 
 ## Phase 7c — Alpaca adapter (data + read-only + crypto/options-ready)  *(new)*
 

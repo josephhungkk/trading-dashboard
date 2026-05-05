@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 7b.1.5 — Instruments seed mini-phase (2026-05-05)
+
+- Alembic 0010: `positions.symbol`/`primary_exchange`/`canonical_id` columns
+  (NULLABLE) + `watchlist_entries` table.
+- `WatchlistEntry` ORM model.
+- `BrokerDiscoverer._upsert_positions` derives + writes `canonical_id` per
+  position; emits `quote_position_canonical_resolved_total` /
+  `quote_position_canonical_unresolved_total{reason}`.
+- `seed_instruments_from_positions(session_factory)` lifespan helper +
+  `quote_seed_skipped_total{reason}` counter.
+- `POST /api/admin/instruments` admin endpoint with Pydantic v2 validation
+  + `require_admin_jwt`.
+- 3 test files (integration seed, API endpoint, unit upsert).
+
 ## [0.7.1] — 2026-05-05
 
 ### Phase 7b.1 — Streaming quote engine
