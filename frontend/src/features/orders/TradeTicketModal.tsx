@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { Button } from '@/components/primitives/Button';
 import { Input } from '@/components/primitives/Input';
 import { cn } from '@/lib/utils';
+import { useFocusedSymbol } from '@/hooks/useFocusedSymbol';
 import { useToast } from '@/hooks/use-toast';
 import { previewOrder, placeOrder } from '@/services/orders';
 import type { DecimalString, PreviewRequest, PreviewResponse } from '@/services/types';
@@ -94,6 +95,8 @@ function TradeTicketModalContent({
     ...initialForm,
     contract: { conid: defaultConid ?? '', symbol: defaultSymbol ?? '' },
   }));
+  const focusedSymbol = form.contract.symbol.trim() || defaultSymbol || null;
+  useFocusedSymbol(focusedSymbol);
   const [attestedExtreme, setAttestedExtreme] = React.useState(false);
   const [banner, setBanner] = React.useState<BlockingBanner | null>(storyBanner);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
