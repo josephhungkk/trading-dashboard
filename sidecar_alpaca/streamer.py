@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
+from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -31,6 +33,17 @@ _IEX_CAP = 30
 _CRYPTO_CAP = 30
 _BACKOFF_MAX_SEC = 30.0
 _AUTH_TIMEOUT_SEC = 10.0
+_SUBSCRIBE_REJECTION_CODES = {
+    409: "cap_exceeded",
+    410: "cap_exceeded",
+    401: "entitlement",
+    405: "entitlement",
+}
+_DRIFT_SENTINELS = {
+    "cap_exceeded": b'{"drift":"cap_exceeded"}',
+    "entitlement": b'{"drift":"entitlement"}',
+    "unknown": b'{"drift":"unknown"}',
+}
 
 
 class _WebSocket(Protocol):
@@ -50,6 +63,8 @@ class AlpacaStreamer:
         self._iex_active: set[str] = set()
         self._crypto_active: set[str] = set()
         self._iex_symbol_map: dict[str, str] = {}
+        self._iex_pending_subs: deque[str] = deque()
+        self._crypto_pending_subs: deque[str] = deque()
         self._supervisor_task: asyncio.Task[None] | None = None
         self._iex_supervisor_task: asyncio.Task[None] | None = None
         self._crypto_supervisor_task: asyncio.Task[None] | None = None
@@ -393,6 +408,7 @@ class AlpacaStreamer:
                 {"action": "subscribe", "trades": [], "quotes": symbols, "bars": []}
             )
         )
+        self._iex_pending_subs.extend(symbols)
         log.info("alpaca.streamer.iex_subscribe", symbols=symbols)
 
     async def _send_ws_unsubscribe(self, symbols: list[str]) -> None:
@@ -413,6 +429,7 @@ class AlpacaStreamer:
                 {"action": "subscribe", "trades": [], "quotes": pairs, "bars": []}
             )
         )
+        self._crypto_pending_subs.extend(pairs)
         log.info("alpaca.streamer.crypto_subscribe", pairs=pairs)
 
     async def _send_ws_unsubscribe_crypto(self, pairs: list[str]) -> None:
@@ -447,10 +464,13 @@ class AlpacaStreamer:
         for item in _load_frame(raw):
             msg_type = item.get("T")
             if msg_type in {"q", "t"}:
+                self._clear_pending_subs(endpoint)
                 self._dispatch_quote(item, endpoint=endpoint)
                 continue
             if msg_type == "error":
                 self._handle_error(item, endpoint=endpoint)
+                continue
+            self._clear_pending_subs(endpoint)
 
     def _dispatch_quote(self, row: dict[str, Any], *, endpoint: str) -> None:
         quote = self._row_to_quote(row, endpoint=endpoint)
@@ -503,7 +523,11 @@ class AlpacaStreamer:
         return self._iex_symbol_map.get(raw_symbol, raw_symbol)
 
     def _handle_error(self, row: dict[str, Any], *, endpoint: str = "iex") -> None:
-        code = row.get("code")
+        code = _error_code(row.get("code"))
+        reason = _SUBSCRIBE_REJECTION_CODES.get(code)
+        if reason is not None:
+            self._handle_subscribe_rejection(row, endpoint=endpoint, reason=reason)
+            return
         if endpoint == "crypto":
             reason = "entitlement" if code in {402, 403} else "unknown"
             ALPACA_UPSTREAM_SUBSCRIBE_REJECTED_TOTAL.labels(
@@ -515,6 +539,75 @@ class AlpacaStreamer:
             log.warning("alpaca.streamer.iex_symbol_not_subscribed", msg=row.get("msg"))
             return
         log.warning("alpaca.streamer.iex_error", code=code, msg=row.get("msg"))
+
+    def _handle_subscribe_rejection(
+        self,
+        row: dict[str, Any],
+        *,
+        endpoint: str,
+        reason: str,
+    ) -> None:
+        ALPACA_UPSTREAM_SUBSCRIBE_REJECTED_TOTAL.labels(
+            endpoint=endpoint, reason=reason
+        ).inc()
+        raw_symbol = self._rejected_symbol(row, endpoint=endpoint)
+        canonical_id = self._canonical_id_for_row(raw_symbol, endpoint=endpoint)
+        if endpoint == "crypto":
+            self._crypto_active.discard(raw_symbol)
+        else:
+            self._iex_active.discard(raw_symbol)
+            self._iex_symbol_map.pop(raw_symbol, None)
+        self._record_active_locked()
+        log.warning(
+            "alpaca.streamer.subscribe_rejected",
+            endpoint=endpoint,
+            reason=reason,
+            code=row.get("code"),
+            symbol=raw_symbol,
+            canonical_id=canonical_id,
+            msg=row.get("msg"),
+        )
+        self._dispatch_drift_sentinel(canonical_id, reason)
+
+    def _rejected_symbol(self, row: dict[str, Any], *, endpoint: str) -> str:
+        active = self._crypto_active if endpoint == "crypto" else self._iex_active
+        for candidate in (row.get("symbol"), row.get("S")):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        msg = str(row.get("msg") or "")
+        for candidate in sorted(active, key=len, reverse=True):
+            if candidate and re.search(rf"(?<!\w){re.escape(candidate)}(?!\w)", msg):
+                return candidate
+        pending = (
+            self._crypto_pending_subs
+            if endpoint == "crypto"
+            else self._iex_pending_subs
+        )
+        if pending:
+            return pending.pop()
+        return ""
+
+    def _dispatch_drift_sentinel(self, canonical_id: str, reason: str) -> None:
+        if not canonical_id or self.tick_callback is None:
+            return
+        quote = pb.QuoteMessage(
+            canonical_id=canonical_id,
+            source="alpaca",
+            raw_payload=_DRIFT_SENTINELS.get(reason, _DRIFT_SENTINELS["unknown"]),
+        )
+        callback = self.tick_callback
+        task = asyncio.create_task(
+            self._invoke_tick_callback(callback, quote),
+            name="alpaca-drift-callback",
+        )
+        self._callback_tasks.add(task)
+        task.add_done_callback(self._callback_tasks.discard)
+
+    def _clear_pending_subs(self, endpoint: str) -> None:
+        if endpoint == "crypto":
+            self._crypto_pending_subs.clear()
+            return
+        self._iex_pending_subs.clear()
 
     async def _close_iex_ws(self) -> None:
         ws = self._iex_ws
@@ -581,6 +674,14 @@ def _is_auth_success(frame: list[dict[str, Any]]) -> bool:
         item.get("T") == "success" and item.get("msg") == "authenticated"
         for item in frame
     )
+
+
+def _error_code(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        log.warning("alpaca.streamer.bad_error_code", value=value, exc_info=exc)
+        return None
 
 
 def _set_tick_time(timestamp: Timestamp, value: Any) -> None:

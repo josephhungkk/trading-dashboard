@@ -254,6 +254,20 @@ class SubscriptionRegistry:
                 self._decrement_locked(sym, diff)
         return diff
 
+    async def decrement_for_source(self, source: str, count: int = 1) -> None:
+        """Drop _per_source_refs[source] by ``count`` to recover ghost subs.
+
+        Called by sidecar_stream when a sidecar reports a drift-detected
+        upstream rejection (Phase 7c HIGH-6). Pops the entry on 0.
+        """
+        async with self._lock:
+            cur = self._per_source_refs.get(source, 0)
+            new_val = max(0, cur - count)
+            if new_val == 0:
+                self._per_source_refs.pop(source, None)
+            else:
+                self._per_source_refs[source] = new_val
+
     def _decrement_locked(
         self,
         sym: CanonicalId,

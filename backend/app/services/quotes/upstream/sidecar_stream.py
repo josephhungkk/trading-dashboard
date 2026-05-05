@@ -25,6 +25,8 @@ queue (with a 30-s heartbeat as a keep-alive). Per-tick callback fires
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Any
@@ -45,6 +47,9 @@ from app.services.quotes.router import SourceHealthMap, SourceHealthState
 _HEARTBEAT_INTERVAL_SECONDS: float = 30.0
 _BACKOFF_INITIAL_SECONDS: float = 1.0
 _BACKOFF_MAX_SECONDS: float = 60.0
+_OPERATOR_TRACE_ENV: str = "OPERATOR_TRACE_QUOTES"
+_DRIFT_PREFIX: bytes = b'{"drift":'
+_DRIFT_REASONS: set[str] = {"cap_exceeded", "entitlement", "unknown"}
 
 OnQuote = Callable[[pb.QuoteMessage], Awaitable[None]]
 SymbolRefBuilder = Callable[[str], pb.SymbolRef]
@@ -219,11 +224,26 @@ class SidecarStream:
 
         async for resp in stub.StreamQuotes(request_iter()):
             self._health.update_last_tick(self._source, time.monotonic())
-            await self._on_quote(resp)
+            await self._handle_inbound_quote(resp)
             if self._token_rotation.is_set() or self._stopping.is_set():
                 break
 
     # ── helpers ──────────────────────────────────────────────────────────
+
+    async def _handle_inbound_quote(self, resp: pb.QuoteMessage) -> None:
+        drift_reason = _drift_reason(resp)
+        if drift_reason is not None:
+            await self._registry.decrement_for_source(self._source, 1)
+            _log.warning(
+                "sidecar.drift_detected",
+                source=self._source,
+                canonical_id=resp.canonical_id,
+                reason=drift_reason,
+            )
+            return
+        if os.getenv(_OPERATOR_TRACE_ENV) != "1" and hasattr(resp, "source_meta"):
+            resp.source_meta = b""
+        await self._on_quote(resp)
 
     def _decide_first_frame(self, current_started_at: int) -> str:
         """``subscribe`` if cold start or sidecar restarted; ``resync`` if
@@ -265,3 +285,30 @@ class SidecarStream:
             return 0
         seconds = getattr(ts, "seconds", 0)
         return int(seconds)
+
+
+def _drift_reason(resp: pb.QuoteMessage) -> str | None:
+    payload = _metadata_payload(resp)
+    if not payload.startswith(_DRIFT_PREFIX):
+        return None
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _log.warning(
+            "sidecar_stream.bad_drift_payload",
+            source=resp.source,
+            canonical_id=resp.canonical_id,
+            exc_info=exc,
+        )
+        return "unknown"
+    reason = decoded.get("drift") if isinstance(decoded, dict) else None
+    if reason in _DRIFT_REASONS:
+        return str(reason)
+    return "unknown"
+
+
+def _metadata_payload(resp: pb.QuoteMessage) -> bytes:
+    source_meta = getattr(resp, "source_meta", b"")
+    if source_meta:
+        return bytes(source_meta)
+    return bytes(resp.raw_payload)
