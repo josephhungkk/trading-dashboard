@@ -29,7 +29,7 @@ log = structlog.get_logger(__name__)
 
 RequestT = TypeVar("RequestT", contravariant=True)
 ResponseT = TypeVar("ResponseT", covariant=True)
-BrokerId = Literal["ibkr", "futu", "schwab"]
+BrokerId = Literal["ibkr", "futu", "schwab", "alpaca"]
 TradingMode = Literal["live", "paper"]
 
 

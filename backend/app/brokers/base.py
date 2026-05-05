@@ -144,7 +144,7 @@ class OrderEventMessage:
 
 class AccountResponse(BaseModel):
     id: UUID
-    broker_id: Literal["ibkr", "futu", "schwab"]
+    broker_id: Literal["ibkr", "futu", "schwab", "alpaca"]
     alias: str | None
     mode: Literal["live", "paper"]
     # "" is allowed (BASE tag not yet cached on the sidecar). Frontend
@@ -177,7 +177,7 @@ class AccountAliasUpdate(BaseModel):
 
 
 class BrokerSidecarStatus(BaseModel):
-    broker: Literal["ibkr", "futu", "schwab"]
+    broker: Literal["ibkr", "futu", "schwab", "alpaca"]
     label: str
     mode: Literal["live", "paper"]
     connected: bool
