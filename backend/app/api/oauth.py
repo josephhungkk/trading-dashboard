@@ -79,7 +79,12 @@ async def schwab_oauth_callback_public(
         raise HTTPException(502, f"schwab token exchange failed: {e}") from e
 
     # C3 — synchronous Configure to sidecar before HTTP response returns.
-    # Note: reconfigure_schwab is added in C7. If not yet present, skip.
+    # Best-effort: tokens are already persisted at this point. If the sidecar
+    # is unreachable (restart loop, mode-mismatch, network blip), do NOT 500
+    # the callback — the user otherwise sees a Schwab error page that hides
+    # the fact that the token exchange already succeeded. Operator can
+    # re-trigger via POST /api/admin/brokers/schwab/reconfigure once the
+    # sidecar recovers.
     try:
         module = importlib.import_module("app.services.broker_registry_factory")
         reconfigure_name = "reconfigure_schwab"
@@ -89,8 +94,17 @@ async def schwab_oauth_callback_public(
         )
         await reconfigure_schwab(config_service)
         SCHWAB_SIDECAR_TOKEN_DRIFT_SECONDS.set(0)
-    except AttributeError, ImportError:
-        log.warning("reconfigure_schwab not yet available (C7 pending)")
+    except (AttributeError, ImportError) as exc:
+        log.warning(
+            "schwab.oauth_callback.reconfigure_helper_missing",
+            error=str(exc),
+        )
+    except Exception as exc:
+        log.warning(
+            "schwab.oauth_callback.reconfigure_failed_post_tokens_saved",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
     # H6 — pub/sub for SSE-driven SchwabCard refresh.
     await redis.publish("config:invalidate:schwab", "1")
