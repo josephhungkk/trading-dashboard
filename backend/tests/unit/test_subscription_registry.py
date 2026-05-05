@@ -241,8 +241,106 @@ async def test_metric_counter_increments_on_per_ws_rejection(
 ) -> None:
     """quote_subscription_cap_rejected_total{cap_kind=per_ws} ticks per
     rejected symbol."""
-    before = QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="per_ws")._value.get()
+    before = QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+        cap_kind="per_ws",
+        source="",
+        asset_class="",
+    )._value.get()
     ws = uuid4()
     await registry.add(ws, [f"stock:M{i}:US" for i in range(15)])  # 5 rejections
-    after = QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="per_ws")._value.get()
+    after = QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+        cap_kind="per_ws",
+        source="",
+        asset_class="",
+    )._value.get()
     assert after - before == 5
+
+
+# ── Phase 7c F1 — per-source soft cap (CRIT-1 layer 1) ─────────────────────
+
+
+@pytest.fixture
+def large_registry() -> SubscriptionRegistry:
+    """Per-ws + global caps high enough that the per-source cap (25) bites first."""
+    return SubscriptionRegistry(
+        cap_per_ws=200,
+        cap_global=500,
+        sub_rate_limit_per_minute=10000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_source_soft_cap_at_25(large_registry: SubscriptionRegistry) -> None:
+    """26th alpaca-routed crypto symbol is rejected with cap_kind=per_source."""
+    ws = uuid4()
+    syms = [f"crypto:SYM{i:03d}:US" for i in range(26)]
+    for sym in syms:
+        large_registry.set_route(sym, "alpaca")
+    diff = await large_registry.add(ws, syms)
+    assert len(diff.added) == 25
+    assert len(diff.rejected) == 1
+    assert diff.rejected_reason == "per_source"
+
+
+@pytest.mark.asyncio
+async def test_per_source_metric_carries_source_and_asset_class(
+    large_registry: SubscriptionRegistry,
+) -> None:
+    """quote_subscription_cap_rejected_total emits cap_kind/source/asset_class."""
+    before = QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+        cap_kind="per_source",
+        source="alpaca",
+        asset_class="crypto",
+    )._value.get()
+    ws = uuid4()
+    syms = [f"crypto:SRCQ{i:03d}:US" for i in range(28)]
+    for sym in syms:
+        large_registry.set_route(sym, "alpaca")
+    await large_registry.add(ws, syms)
+    after = QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+        cap_kind="per_source",
+        source="alpaca",
+        asset_class="crypto",
+    )._value.get()
+    assert after - before == 3  # 28 - 25 cap
+
+
+@pytest.mark.asyncio
+async def test_per_source_cap_decrements_on_unsubscribe(
+    large_registry: SubscriptionRegistry,
+) -> None:
+    """Unsubscribing a 0→1 ref drops the per-source counter so a new sub can land."""
+    ws = uuid4()
+    syms = [f"crypto:DEC{i:03d}:US" for i in range(25)]
+    for sym in syms:
+        large_registry.set_route(sym, "alpaca")
+    await large_registry.add(ws, syms)
+    # Cap is full — a 26th should reject.
+    extra = "crypto:DEC999:US"
+    large_registry.set_route(extra, "alpaca")
+    diff_full = await large_registry.add(ws, [extra])
+    assert extra in diff_full.rejected
+
+    # Drop one alpaca-routed sub.
+    await large_registry.remove(ws, [syms[0]])
+
+    # Now the new symbol fits.
+    diff_after = await large_registry.add(ws, [extra])
+    assert extra in diff_after.added
+
+
+@pytest.mark.asyncio
+async def test_per_source_cap_does_not_apply_when_no_route_set(
+    large_registry: SubscriptionRegistry,
+) -> None:
+    """Symbols without a SourceRouter route bypass the per-source cap.
+
+    SourceRouter.set_route is the upstream writer; in-flight subscribes
+    that arrive before route resolution should not be rejected for a
+    cap they can't yet be assigned to.
+    """
+    ws = uuid4()
+    syms = [f"crypto:UNR{i:03d}:US" for i in range(40)]
+    diff = await large_registry.add(ws, syms)
+    assert len(diff.added) == 40
+    assert diff.rejected_reason is None

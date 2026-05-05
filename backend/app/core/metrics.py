@@ -317,10 +317,12 @@ QUOTE_SEED_SKIPPED_TOTAL = Counter(
 
 QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL = Counter(
     "quote_subscription_cap_rejected_total",
-    "SubscriptionRegistry rejections by cap kind (HIGH-6). "
-    "cap_kind ∈ {per_ws, global, rate_limit} — must match spec §8.1 labels "
-    "verbatim; dashboards + alerts query by this exact set.",
-    labelnames=["cap_kind"],
+    "SubscriptionRegistry rejections by cap kind (HIGH-6 + Phase 7c CRIT-1). "
+    "cap_kind ∈ {per_ws, global, rate_limit, per_source}. Phase 7c F1 widened "
+    "the label set with `source` (resolved upstream id, e.g. 'alpaca') and "
+    "`asset_class` (the canonical_id prefix, e.g. 'crypto'). Pre-7c rejections "
+    "carry empty strings for those two labels.",
+    labelnames=["cap_kind", "source", "asset_class"],
     registry=registry,
 )
 

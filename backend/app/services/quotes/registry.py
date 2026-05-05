@@ -33,6 +33,13 @@ WSConnId = UUID
 
 RATE_WINDOW_SECONDS: float = 60.0
 
+# Phase 7c CRIT-1 layer 1 — backend-side soft cap per upstream source.
+# 5-symbol buffer below Alpaca's free-tier 30 hard cap.
+CAP_PER_SOURCE: int = 25
+
+# Phase 7c CRIT-1 / Codex pattern D — bounded refcount table.
+MAX_SOURCES: int = 32
+
 
 @dataclass(slots=True)
 class SubscribeDiff:
@@ -41,13 +48,13 @@ class SubscribeDiff:
     * ``added`` — refcount transitioned 0→1; engine starts an upstream sub.
     * ``rejected`` — full set of rejected symbols (union of the per-cap sets
       below).
-    * ``rejected_per_ws`` / ``rejected_global`` / ``rejected_rate_limit`` —
-      per-cap breakdown so callers can surface a different message per cap
-      kind without re-running the cap math.
+    * ``rejected_per_ws`` / ``rejected_global`` / ``rejected_rate_limit`` /
+      ``rejected_per_source`` — per-cap breakdown so callers can surface a
+      different message per cap kind without re-running the cap math.
     * ``rejected_reason`` — the *first* cap encountered in the batch
-      (``per_ws`` / ``global`` / ``rate_limit``); back-compat shorthand for
-      callers that only need a single label. ``None`` iff every requested
-      symbol was accepted. Label values match the spec §8.1
+      (``per_ws`` / ``global`` / ``rate_limit`` / ``per_source``); back-compat
+      shorthand for callers that only need a single label. ``None`` iff every
+      requested symbol was accepted. Label values match the spec §8.1
       ``quote_subscription_cap_rejected_total{cap_kind}`` set verbatim.
     """
 
@@ -56,6 +63,7 @@ class SubscribeDiff:
     rejected_per_ws: set[CanonicalId] = field(default_factory=set)
     rejected_global: set[CanonicalId] = field(default_factory=set)
     rejected_rate_limit: set[CanonicalId] = field(default_factory=set)
+    rejected_per_source: set[CanonicalId] = field(default_factory=set)
     rejected_reason: str | None = None
 
 
@@ -91,6 +99,10 @@ class SubscriptionRegistry:
         self._global_refs: dict[CanonicalId, int] = defaultdict(int)
         self._routes: dict[CanonicalId, SourceId | str] = {}
         self._rate_buckets: dict[WSConnId, deque[float]] = {}
+        # Phase 7c CRIT-1: per-source refcount, keyed by the SourceRouter-
+        # assigned upstream id (e.g. "alpaca"). Bounded at MAX_SOURCES to
+        # prevent typo-source key explosion (Pattern D).
+        self._per_source_refs: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
     # ── add / remove ──────────────────────────────────────────────────────
@@ -135,22 +147,52 @@ class SubscriptionRegistry:
                     diff.rejected.add(sym)
                     diff.rejected_rate_limit.add(sym)
                     diff.rejected_reason = diff.rejected_reason or "rate_limit"
-                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="rate_limit").inc()
+                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+                        cap_kind="rate_limit",
+                        source="",
+                        asset_class="",
+                    ).inc()
                     continue
 
                 if len(ws_set_view) >= self._cap_per_ws:
                     diff.rejected.add(sym)
                     diff.rejected_per_ws.add(sym)
                     diff.rejected_reason = diff.rejected_reason or "per_ws"
-                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="per_ws").inc()
+                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+                        cap_kind="per_ws",
+                        source="",
+                        asset_class="",
+                    ).inc()
                     continue
 
                 if len(self._global_refs) >= self._cap_global and sym not in self._global_refs:
                     diff.rejected.add(sym)
                     diff.rejected_global.add(sym)
                     diff.rejected_reason = diff.rejected_reason or "global"
-                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(cap_kind="global").inc()
+                    QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+                        cap_kind="global",
+                        source="",
+                        asset_class="",
+                    ).inc()
                     continue
+
+                # Phase 7c CRIT-1 layer 1: per-source soft cap (only when a
+                # route has been assigned by SourceRouter; pre-route subs
+                # bypass — they'll be capped on a later add() once routed).
+                source = self._routes.get(sym)
+                if source is not None:
+                    source_str = str(source)
+                    asset_class = sym.split(":", 1)[0] if ":" in sym else ""
+                    if self._per_source_refs.get(source_str, 0) >= CAP_PER_SOURCE:
+                        diff.rejected.add(sym)
+                        diff.rejected_per_source.add(sym)
+                        diff.rejected_reason = diff.rejected_reason or "per_source"
+                        QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL.labels(
+                            cap_kind="per_source",
+                            source=source_str,
+                            asset_class=asset_class,
+                        ).inc()
+                        continue
 
                 ws_set_view.add(sym)
                 ws_set_dirty = True
@@ -158,6 +200,16 @@ class SubscriptionRegistry:
                 self._global_refs[sym] = prev + 1
                 if prev == 0:
                     diff.added.add(sym)
+                    # 0→1 transition — bump per-source refcount if routed.
+                    if source is not None:
+                        source_str = str(source)
+                        if (
+                            len(self._per_source_refs) < MAX_SOURCES
+                            or source_str in self._per_source_refs
+                        ):
+                            self._per_source_refs[source_str] = (
+                                self._per_source_refs.get(source_str, 0) + 1
+                            )
 
             # Only persist the per-WS set + rate bucket if we actually
             # touched them — avoids phantom defaultdict entries leaking
@@ -209,9 +261,18 @@ class SubscriptionRegistry:
     ) -> None:
         prev = self._global_refs.get(sym, 0)
         if prev <= 1:
+            # Phase 7c CRIT-1: pop the route BEFORE we delete it, so we know
+            # which per-source counter to decrement.
+            source = self._routes.pop(sym, None)
             self._global_refs.pop(sym, None)
-            self._routes.pop(sym, None)
             diff.removed.add(sym)
+            if source is not None:
+                source_str = str(source)
+                cur = self._per_source_refs.get(source_str, 0)
+                if cur <= 1:
+                    self._per_source_refs.pop(source_str, None)
+                else:
+                    self._per_source_refs[source_str] = cur - 1
         else:
             self._global_refs[sym] = prev - 1
 
