@@ -23,7 +23,6 @@ from app.services.config import ConfigService
 from app.services.schwab_oauth import (
     StateNonceError,
     consume_state_nonce,
-    mint_state_nonce,
 )
 
 _deps = importlib.import_module("app.core.deps")
@@ -72,11 +71,9 @@ async def reconfigure(
 async def schwab_oauth_start(
     user: AdminDep,
     config_service: ConfigDep,
-    redis: RedisDep,
-    settings: SettingsDep,
 ) -> RedirectResponse:
     SCHWAB_OAUTH_START_TOTAL.inc()
-    user_email = user.email or "admin"
+    _user_email = user.email or "admin"
     app_key_raw = await config_service.reveal_secret("broker", "schwab.app_key")
     if not app_key_raw:
         raise HTTPException(
@@ -88,28 +85,18 @@ async def schwab_oauth_start(
     callback_url = cast(str | None, await config_service.get("broker", "schwab.callback_url"))
     if not callback_url:
         callback_url = "https://dashboard.kiusinghung.com/api/oauth/schwab/callback"
-    # v0.7.4 → restore standard OAuth2 params (state + response_type=code).
-    # Earlier strip was a misdiagnosis — the real "contact customer support"
-    # cause was a redirect_uri path mismatch at Schwab's portal. Retesting
-    # with state restored to recover CSRF protection (HMAC-signed nonce,
-    # Redis GETDEL atomic consume — see schwab_oauth.py).
+    # Schwab's authorize endpoint rejects BOTH `state` AND `response_type=code`
+    # with "contact customer support" — empirically confirmed v0.7.4 hotfix
+    # cycle (redeploy 18:31 UTC + 18:??? UTC, 2026-05-05). schwabdev's URL
+    # shape (client_id + redirect_uri only) is the only accepted form.
+    # CSRF protection waived; rely on redirect_uri byte-match instead.
     #
     # redirect_uri must byte-match the registered value; pass `safe=':/'` so
     # urllib.parse.quote doesn't %-encode `:` and `/`.
-    state = await mint_state_nonce(
-        redis,
-        user_email=user_email,
-        app_secret_key=settings.secret_key.encode(),
-    )
-    # response_type=code dropped — Schwab rejects it ("contact customer
-    # support") even though it's standard OAuth2. Schwab defaults to the
-    # authorization_code grant type. State retained — testing whether
-    # state alone is accepted (next revert step is state itself).
     consent_url = (
         "https://api.schwabapi.com/v1/oauth/authorize"
         f"?client_id={urllib.parse.quote(app_key, safe='')}"
         f"&redirect_uri={urllib.parse.quote(callback_url, safe=':/')}"
-        f"&state={urllib.parse.quote(state, safe='')}"
     )
     return RedirectResponse(url=consent_url, status_code=302)
 
