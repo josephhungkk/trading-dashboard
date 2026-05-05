@@ -324,6 +324,15 @@ QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL = Counter(
     registry=registry,
 )
 
+ALPACA_MODE_MISMATCH_TOTAL = Counter(
+    "alpaca_mode_mismatch_total",
+    "Backend refused to send Configure to a sidecar whose Health-reported "
+    "label-suffix did not match the gateway_label-implied mode (Phase 7c "
+    "HIGH-5 cross-mode pollution probe). Should always be 0 in steady state.",
+    labelnames=["label"],
+    registry=registry,
+)
+
 QUOTE_SOURCE_HEALTH_STATE = Gauge(
     "quote_source_health_state",
     "SourceRouter health gauge per upstream (HIGH-7). "

@@ -22,6 +22,8 @@ SIDECAR_PORTS: dict[str, int] = {
     "normal-paper": 18004,
     "futu": 18005,
     "schwab": 9090,  # Phase 7a — VPS docker-compose-internal port
+    "alpaca-live": 9091,  # Phase 7c — in-cluster docker, no mTLS to alpaca itself
+    "alpaca-paper": 9092,  # Phase 7c
 }
 
 # H4: backend cross-checks Health.broker_id against this map at every probe.
@@ -33,6 +35,8 @@ SIDECAR_BROKERS: dict[str, str] = {
     "normal-paper": "ibkr",
     "futu": "futu",
     "schwab": "schwab",  # Phase 7a
+    "alpaca-live": "alpaca",  # Phase 7c
+    "alpaca-paper": "alpaca",  # Phase 7c
 }
 
 
@@ -89,6 +93,9 @@ class BrokerConfigurer:
 
         if label == "schwab":
             return await self._configure_schwab()
+
+        if label.startswith("alpaca-"):
+            return await self._configure_alpaca(label)
 
         unlock_pwd_md5 = await self.config_service.reveal_secret(
             "broker", f"{label}.unlock_pwd_md5"
@@ -157,6 +164,78 @@ class BrokerConfigurer:
             BROKER_CONFIGURE_TOTAL.labels(label="schwab", reason="ok").inc()
         return ok
 
+    async def _configure_alpaca(self, label: str) -> bool:
+        """Per-mode Configure routing for alpaca-live / alpaca-paper (Phase 7c HIGH-5).
+
+        The sidecar's Health-reported ``label`` (e.g. ``"alpaca-live"``)
+        encodes its boot-time MODE in the suffix. Backend MUST verify the
+        suffix matches the gateway_label-implied mode before dispatching
+        Configure, otherwise the paper sidecar might receive live creds
+        (or vice versa). On mismatch, increment
+        ``alpaca_mode_mismatch_total{label}`` and refuse.
+        """
+        from app.core.metrics import ALPACA_MODE_MISMATCH_TOTAL
+
+        expected_mode = "live" if label.endswith("-live") else "paper"
+
+        client = await self.registry.get_client(label)
+
+        try:
+            health = await client.health()
+        except Exception as exc:
+            log.warning("alpaca.configure.health_failed", label=label, error=str(exc))
+            return False
+
+        sidecar_label = getattr(health, "label", "") or ""
+        sidecar_mode = "live" if sidecar_label.endswith("-live") else "paper"
+        if sidecar_mode != expected_mode:
+            ALPACA_MODE_MISMATCH_TOTAL.labels(label=label).inc()
+            log.error(
+                "alpaca.configure_refused.mode_mismatch",
+                gateway_label=label,
+                sidecar_label=sidecar_label,
+                expected_mode=expected_mode,
+                sidecar_mode=sidecar_mode,
+            )
+            return False
+
+        # MED-2: forward-compat schema reads broker.alpaca.<account_label>.<mode>.api_key
+        # first, falls back to broker.alpaca.<mode>.api_key for legacy single-account
+        # deployments. account_label defaults to "default".
+        account_label = "default"
+        labeled_key = f"alpaca.{account_label}.{expected_mode}.api_key"
+        labeled_secret = f"alpaca.{account_label}.{expected_mode}.api_secret"
+        legacy_key = f"alpaca.{expected_mode}.api_key"
+        legacy_secret = f"alpaca.{expected_mode}.api_secret"
+
+        api_key = await self.config_service.reveal_secret(
+            "broker", labeled_key
+        ) or await self.config_service.reveal_secret("broker", legacy_key)
+        api_secret = await self.config_service.reveal_secret(
+            "broker", labeled_secret
+        ) or await self.config_service.reveal_secret("broker", legacy_secret)
+
+        if not api_key or not api_secret:
+            log.warning("broker_configure_creds_missing", label=label, mode=expected_mode)
+            return False
+
+        metadata = {
+            "api_key": str(api_key),
+            "api_secret": str(api_secret),
+            "mode": expected_mode,
+            "account_label": account_label,
+        }
+        try:
+            resp = await client.configure(metadata=metadata)
+        except Exception as exc:
+            log.warning("broker_configure_call_failed", label=label, error=str(exc))
+            return False
+
+        ok = bool(resp.ok)
+        if ok:
+            BROKER_CONFIGURE_TOTAL.labels(label=label, reason="ok").inc()
+        return ok
+
 
 async def build_broker_registry(
     config_service: ConfigService,
@@ -204,7 +283,7 @@ async def build_broker_registry(
     configurer = BrokerConfigurer(
         config_service=config_service,
         registry=registry,
-        targets={"futu", "schwab"},
+        targets={"futu", "schwab", "alpaca-live", "alpaca-paper"},
     )
     registry._configurer = configurer
 
