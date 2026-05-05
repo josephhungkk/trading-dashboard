@@ -14,9 +14,9 @@ from sidecar_alpaca.metrics import ALPACA_WS_RECONNECT_TOTAL
 from sidecar_alpaca.streamer import AlpacaStreamer
 
 
-def _reconnect_value(reason: str) -> float:
+def _reconnect_value(endpoint: str, reason: str) -> float:
     return ALPACA_WS_RECONNECT_TOTAL.labels(
-        endpoint="iex", reason=reason
+        endpoint=endpoint, reason=reason
     )._value.get()
 
 
@@ -25,7 +25,7 @@ async def test_iex_loop_crash_does_not_cancel_crypto(monkeypatch) -> None:
     auth = AuthCache()
     await auth.set_credentials("key", "secret")
     streamer = AlpacaStreamer(auth)
-    before = _reconnect_value("loop_crash")
+    before = _reconnect_value("iex", "loop_crash")
 
     async def fake_crypto_loop() -> None:
         await asyncio.sleep(60)
@@ -39,17 +39,74 @@ async def test_iex_loop_crash_does_not_cancel_crypto(monkeypatch) -> None:
     task = asyncio.create_task(streamer._supervisor_loop())
     try:
         for _ in range(100):
-            if _reconnect_value("loop_crash") > before:
+            if _reconnect_value("iex", "loop_crash") > before:
                 break
             await asyncio.sleep(0.01)
 
-        assert _reconnect_value("loop_crash") >= before + 1
+        assert _reconnect_value("iex", "loop_crash") >= before + 1
         assert streamer._crypto_task is not None
         assert not streamer._crypto_task.done()
     finally:
         streamer._shutting_down = True
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        if streamer._crypto_task is not None:
-            streamer._crypto_task.cancel()
-            await asyncio.gather(streamer._crypto_task, return_exceptions=True)
+        pending = [
+            child
+            for child in (
+                task,
+                streamer._iex_supervisor_task,
+                streamer._crypto_supervisor_task,
+                streamer._iex_task,
+                streamer._crypto_task,
+            )
+            if child is not None
+        ]
+        for child in pending:
+            if not child.done():
+                child.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_crypto_loop_crash_does_not_cancel_iex(monkeypatch) -> None:
+    auth = AuthCache()
+    await auth.set_credentials("key", "secret")
+    streamer = AlpacaStreamer(auth)
+    before = _reconnect_value("crypto", "loop_crash")
+
+    async def fake_iex_loop() -> None:
+        await asyncio.sleep(60)
+
+    def connect(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("crypto boom")
+
+    monkeypatch.setattr(streamer, "_iex_loop", fake_iex_loop)
+    monkeypatch.setattr("sidecar_alpaca.streamer.websockets.connect", connect)
+
+    task = asyncio.create_task(streamer._supervisor_loop())
+    try:
+        for _ in range(100):
+            if _reconnect_value("crypto", "loop_crash") > before:
+                break
+            await asyncio.sleep(0.01)
+
+        assert _reconnect_value("crypto", "loop_crash") >= before + 1
+        assert streamer._iex_task is not None
+        assert not streamer._iex_task.done()
+    finally:
+        streamer._shutting_down = True
+        task.cancel()
+        pending = [
+            child
+            for child in (
+                task,
+                streamer._iex_supervisor_task,
+                streamer._crypto_supervisor_task,
+                streamer._iex_task,
+                streamer._crypto_task,
+            )
+            if child is not None
+        ]
+        for child in pending:
+            if not child.done():
+                child.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)

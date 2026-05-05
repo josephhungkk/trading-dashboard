@@ -207,13 +207,25 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
             async for request in request_iterator:
                 op = request.WhichOneof("op")
                 if op == "subscribe":
-                    await streamer.on_subscribe(list(request.subscribe.symbols))
+                    iex_symbols, crypto_ids = _partition_crypto_symbols(
+                        list(request.subscribe.symbols)
+                    )
+                    await streamer.on_subscribe(iex_symbols)
+                    await streamer.on_subscribe_crypto(crypto_ids)
                     continue
                 if op == "unsubscribe":
-                    await streamer.on_unsubscribe(list(request.unsubscribe.symbols))
+                    iex_symbols, crypto_ids = _partition_crypto_symbols(
+                        list(request.unsubscribe.symbols)
+                    )
+                    await streamer.on_unsubscribe(iex_symbols)
+                    await streamer.on_unsubscribe_crypto(crypto_ids)
                     continue
                 if op == "resync":
-                    await streamer.on_resync(list(request.resync.expected))
+                    iex_symbols, crypto_ids = _partition_crypto_symbols(
+                        list(request.resync.expected)
+                    )
+                    await streamer.on_resync(iex_symbols)
+                    await streamer.on_resync_crypto(crypto_ids)
         finally:
             await streamer.stop()
         if False:
@@ -257,3 +269,17 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 exc_info=exc,
             )
             raise
+
+
+def _partition_crypto_symbols(
+    symbols: list[broker_pb2.SymbolRef],
+) -> tuple[list[broker_pb2.SymbolRef], list[str]]:
+    iex_symbols: list[broker_pb2.SymbolRef] = []
+    crypto_ids: list[str] = []
+    for symbol in symbols:
+        canonical_id = symbol.canonical_id or symbol.raw_symbol
+        if canonical_id.startswith("crypto:"):
+            crypto_ids.append(canonical_id)
+            continue
+        iex_symbols.append(symbol)
+    return iex_symbols, crypto_ids

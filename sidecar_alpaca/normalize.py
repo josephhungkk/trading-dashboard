@@ -85,6 +85,20 @@ def _status(raw: str) -> int:
     return _STATUS_MAP.get(raw.upper(), broker_pb2.OrderStatus.STATUS_UNSPECIFIED)
 
 
+def canonical_to_alpaca_crypto(canonical_id: str) -> str:
+    """crypto:BTC:US -> BTC/USD. Raises ValueError on malformed input."""
+    parts = canonical_id.split(":")
+    if len(parts) < 3 or parts[0] != "crypto":
+        raise ValueError(f"not a crypto canonical_id: {canonical_id}")
+    return f"{parts[1].upper()}/USD"
+
+
+def alpaca_crypto_to_canonical(pair: str) -> str:
+    """BTC/USD -> crypto:BTC:US."""
+    base, _, _quote = pair.partition("/")
+    return f"crypto:{base.upper()}:US"
+
+
 def to_proto_account(
     data: dict[str, Any],
     *,
