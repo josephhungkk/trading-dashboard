@@ -60,3 +60,33 @@ broker_sim_cancel_echo_total = Counter(
     "Synthetic cancellation events emitted for SIM-prefixed orders.",
     labelnames=["label"],
 )
+
+ibkr_streamer_ticks_total = Counter(
+    "ibkr_streamer_ticks_total",
+    "IBKR quote streamer ticks emitted.",
+    labelnames=["symbol"],
+)
+
+ibkr_streamer_subscribe_total = Counter(
+    "ibkr_streamer_subscribe_total",
+    "IBKR quote streamer subscription attempts.",
+    labelnames=["result"],
+)
+
+quote_uk_pence_normalizations_total = Counter(
+    "quote_uk_pence_normalizations_total",
+    "UK pence quote normalizations applied.",
+    labelnames=[],
+)
+
+quote_ibkr_subs_cap_hit_total = Counter(
+    "quote_ibkr_subs_cap_hit_total",
+    "IBKR quote streamer upstream subscription cap hits.",
+    labelnames=[],
+)
+
+ibkr_stream_quote_drops_total = Counter(
+    "ibkr_stream_quote_drops_total",
+    "IBKR StreamQuotes per-call queue drops.",
+    labelnames=[],
+)
