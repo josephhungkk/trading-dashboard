@@ -1,10 +1,21 @@
 """Schwab sidecar entrypoint — asyncio gRPC server, plain TCP (no mTLS;
 sidecar lives on same docker network as backend per spec §3.1)."""
+# ruff: noqa: E402
 from __future__ import annotations
 
 import asyncio
 import logging
 import signal
+import sys
+from pathlib import Path
+
+# The auto-generated broker_pb2_grpc.py does `from broker.v1 import broker_pb2`
+# (a sibling-relative import without the sidecar_schwab prefix). Add the
+# _generated directory to sys.path so that bare import resolves at module
+# load time. Mirrors sidecar_alpaca/handlers.py.
+_GENERATED_ROOT = Path(__file__).resolve().parent / "_generated"
+if str(_GENERATED_ROOT) not in sys.path:
+    sys.path.insert(0, str(_GENERATED_ROOT))
 
 import grpc
 import structlog
