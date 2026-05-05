@@ -1,0 +1,49 @@
+[project]
+name = "sidecar_alpaca"
+version = "0.7.3"
+description = "Alpaca sidecar gRPC adapter"
+requires-python = ">=3.14"
+dependencies = [
+    "alpaca-py>=0.30",
+    "googleapis-common-protos",
+    "grpcio>=1.62",
+    "grpcio-tools>=1.62",
+    "prometheus-client>=0.20",
+    "protobuf",
+    "structlog>=24",
+    "websockets>=13",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.15.12",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+exclude = ["_generated"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "ASYNC", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"_generated/**/*.py" = ["ALL"]
+"_generated/**/*.pyi" = ["ALL"]
+"tests/test_handlers_stub.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
