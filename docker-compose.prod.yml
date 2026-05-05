@@ -165,6 +165,32 @@ services:
     networks: [td-net]
     profiles: ["tier2"]
 
+  alpaca-sidecar-live:
+    build: ./sidecar_alpaca
+    restart: unless-stopped
+    environment:
+      MODE: "live"
+      GRPC_PORT: "9091"
+      BACKEND_ADMIN_GRPC: "backend:8001"
+      ALPACA_ACCOUNT_LABEL: "default"
+      LOG_LEVEL: "INFO"
+    networks: [td-net]
+    depends_on:
+      backend: { condition: service_started }
+
+  alpaca-sidecar-paper:
+    build: ./sidecar_alpaca
+    restart: unless-stopped
+    environment:
+      MODE: "paper"
+      GRPC_PORT: "9092"
+      BACKEND_ADMIN_GRPC: "backend:8001"
+      ALPACA_ACCOUNT_LABEL: "default"
+      LOG_LEVEL: "INFO"
+    networks: [td-net]
+    depends_on:
+      backend: { condition: service_started }
+
 networks:
   td-net:
     driver: bridge
