@@ -76,101 +76,21 @@ Consult before changing those surfaces. **Don't copy that detail into CLAUDE.md.
 
 Runtime settings in DB (`app_config` + `app_secrets`), not `.env`. `.env` only holds bootstrap values. **Don't add new `.env` keys beyond bootstrap.** Read via `get_config()` dependency or `ConfigService`; edit at runtime via `POST /api/admin/config`/`/secrets`. See `docs/CONFIG.md`.
 
-## Network Topology
-
-| Node | Role | LAN IP | WG IP |
-|---|---|---|---|
-| IONOS VPS | Prod HTTP host | 88.208.197.219 | 10.10.0.1 |
-| NUC15PRO | **Dev host + brokers + Postgres + light Ollama (24/7)** | 192.168.50.20 | 10.10.0.2 |
-| Heavy AI box | Large Ollama + ML training (WoL) | 192.168.50.30 | 10.10.0.3 |
-| Router | | 192.168.50.1 | 10.10.0.254 |
-
-**NUC = dev host.** Claude runs in WSL2 at `/home/joseph/dashboard` (native ext4; moved 2026-04-24 from `C:\dashboard`/`/mnt/c/dashboard` for HMR). No separate Windows dev box. Docker = docker-ce in WSL.
-
-SSH VPS: `ssh -p 2222 trader@88.208.197.219`.
-
-### Postgres connectivity (dev)
-WSL Docker containers reach PG at `10.10.0.2:5432` (WG IP), NOT `host.docker.internal`:
-1. docker-ce in WSL doesn't tunnel `host.docker.internal` → resolves to bridge gateway `172.17.0.1`.
-2. Container egress to `10.10.0.2:5432` is SNATed; PG sees source = `10.10.0.2`. `pg_hba.conf` must include `host all trader 10.10.0.0/24 scram-sha-256`.
-
-## Project Paths
-
-- **NUC dev:** `/home/joseph/dashboard` (native WSL2 ext4) — claude, pnpm, docker, deploy.sh.
-- **VPS prod:** `/home/trader/trading-dashboard` (rsync target).
-
-### Third-party services live OUTSIDE the repo
-
-| Service | NUC path |
-|---|---|
-| IB Gateway | `C:\Jts\ibgateway\<version>\` |
-| FutuOpenD | `C:\FutuOpenD\` |
-| PostgreSQL 18 | `C:\Program Files\PostgreSQL\18\` |
-| Ollama | `%LOCALAPPDATA%\Programs\Ollama\` |
-
-Ops glue (PowerShell + VBS) runs from Windows-side mirror at `C:\dashboard\deploy\nuc\*` so Scheduled Tasks find `.ps1`/`.vbs`. Not in Docker build, not rsync'd to VPS. **Phase 4+ TODO:** sync `/home/joseph/dashboard/deploy/nuc/` ↔ `C:\dashboard\deploy\nuc\`.
+## Topology + paths
+WG topology, Postgres connectivity, and Windows-side service paths live in [`docs/NETWORK.md`](docs/NETWORK.md). Key invariants: **NUC = dev host** (WSL2 at `/home/joseph/dashboard`); PG at `10.10.0.2:5432` over WG; VPS prod at `/home/trader/trading-dashboard`; SSH VPS via `ssh -p 2222 trader@88.208.197.219`.
 
 ## Directory Layout
 See `docs/superpowers/specs/2026-04-21-phase0-scaffold-design.md §3`.
 
-## Coding Conventions
+## Coding conventions
+Full Python/TS/SQL/Git rules in [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md). Load-bearing one-liners:
+- **Python:** 3.14, type hints everywhere, async-only, structlog (no `print`), no bare `except:`. Lint: `ruff`. Types: `mypy --strict`.
+- **TypeScript:** strict mode; no `any` without disable + reason; function components only; no `px`/`em` (rem/%/vh/vw only).
+- **SQL:** schema via Alembic only; `snake_case`; `TIMESTAMPTZ`; money in `NUMERIC(20, 8)`.
+- **Git:** conventional commits; body lines ≤100 chars; squash-merge; never commit `.env`/`*.key`/`secrets/*`.
 
-### Python
-- 3.14, type hints everywhere, Pydantic v2 for I/O.
-- Async all the way down (asyncpg, no sync DB).
-- One adapter per broker in `app/brokers/`. Subclass `BrokerAdapter` (`base.py`, lands Phase 4 with first concrete adapter).
-- Adding to `BrokerAdapter` → update every adapter same commit.
-- DI via `Depends`. Never import singletons directly.
-- structlog only, never `print`. No bare `except:`.
-- Lint: `ruff` (`E,F,W,I,N,UP,B,A,C4,ASYNC,RUF`). Format: `ruff format`. Types: `mypy --strict app/`.
-
-### TypeScript
-- Strict (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`). No `any` w/o disable + reason.
-- Function components only.
-- Zustand global, `useState` local.
-- API via `services/api.ts` only. WS via `services/ws.ts` → Zustand.
-- No `px`/`em` in CSS or inline. Only rem, %, vh/vw, fr, auto.
-- Layer imports per `eslint-plugin-boundaries`.
-
-### SQL
-- Schema changes via Alembic only.
-- `snake_case` columns, plural snake_case tables.
-- Timestamps: `created_at`/`updated_at`, `TIMESTAMPTZ`.
-- Money: `NUMERIC(20, 8)`, never FLOAT/REAL.
-
-### Git
-- Conventional commits (`feat`/`fix`/`refactor`/`docs`/`test`/`chore`/`perf`/`ci`). Body lines ≤100 chars.
-- Feature branches off `main`. Squash-merge.
-- Never commit `.env`/`*.key`/`secrets/*`.
-
-## Common Commands
-
-    docker compose up -d
-    docker compose logs -f backend
-    docker compose exec backend alembic upgrade head
-    docker compose exec backend pytest
-
-    cd frontend && pnpm dev          # FE hot reload
-    cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-    cd frontend && pnpm storybook
-
-    # Lint
-    cd frontend && pnpm lint && pnpm stylelint && pnpm typecheck
-    cd backend && uv run ruff check . && uv run mypy app/
-
-    # Migrations
-    docker compose exec backend alembic revision --autogenerate -m "msg"
-    docker compose exec backend alembic upgrade head
-
-    ./scripts/deploy.sh              # Manual deploy (GH Actions auto-deploys on push-to-main)
-
-    # Dev bypass (NUC, over WG)
-    curl -sf http://10.10.0.1/health
-
-    # CI bypass (anywhere, service token)
-    curl -sf https://dashboard.kiusinghung.com/health \
-      -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-      -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
+## Commands
+Common dev/lint/migrate/deploy commands live in [`docs/COMMANDS.md`](docs/COMMANDS.md).
 
 ## Security Rules
 
