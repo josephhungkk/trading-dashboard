@@ -23,6 +23,7 @@ from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from app.brokers import base
 from app.core import metrics
 from app.services.ibkr_maintenance import compute_broker_maintenance
+from app.services.quotes.base import canonical_id_components, country_for_exchange
 
 log = structlog.get_logger(__name__)
 
@@ -1267,36 +1268,71 @@ class BrokerDiscoverer:
         Uses NOT EXISTS (architect-review HIGH-4) — NULL-safe and slightly
         faster than NOT IN.
         """
-        rows_json = json.dumps(
-            [
+        broker_id_result = await session.execute(
+            text("SELECT broker_id FROM broker_accounts WHERE id = :account_id"),
+            {"account_id": account_id},
+        )
+        broker_id = str(broker_id_result.scalar_one())
+        rows: list[dict[str, str | None]] = []
+        for p in positions:
+            symbol = p.contract.symbol
+            primary_exchange = p.contract.exchange or ""
+            country = country_for_exchange(primary_exchange)
+            asset_class = _proto_asset_class_to_str(p.contract.asset_class)
+            canonical_id: str | None = None
+            if not symbol:
+                metrics.QUOTE_POSITION_CANONICAL_UNRESOLVED_TOTAL.labels(
+                    broker_id=broker_id, reason="no_symbol"
+                ).inc()
+            elif not primary_exchange:
+                metrics.QUOTE_POSITION_CANONICAL_UNRESOLVED_TOTAL.labels(
+                    broker_id=broker_id, reason="no_exchange"
+                ).inc()
+            elif country is None:
+                metrics.QUOTE_POSITION_CANONICAL_UNRESOLVED_TOTAL.labels(
+                    broker_id=broker_id, reason="no_country"
+                ).inc()
+            else:
+                canonical_id = f"{asset_class.lower()}:{symbol.upper()}:{country}"
+                canonical_id_components(canonical_id)
+                metrics.QUOTE_POSITION_CANONICAL_RESOLVED_TOTAL.labels(broker_id=broker_id).inc()
+            rows.append(
                 {
                     "conid": p.contract.conid,
                     "qty": p.quantity,
                     "avg_cost": p.avg_cost.value,
                     "currency": p.avg_cost.currency,
                     "multiplier": (getattr(p.contract, "multiplier", "") or "1"),
-                    "asset_class": _proto_asset_class_to_str(p.contract.asset_class),
+                    "asset_class": asset_class,
+                    "symbol": symbol,
+                    "primary_exchange": primary_exchange,
+                    "canonical_id": canonical_id,
                 }
-                for p in positions
-            ]
-        )
+            )
+        rows_json = json.dumps(rows)
         await session.execute(
             text(
                 """
                 WITH upserted AS (
                   INSERT INTO positions (account_id, conid, qty, avg_cost, currency,
-                                         multiplier, asset_class, updated_at)
+                                         multiplier, asset_class, symbol,
+                                         primary_exchange, canonical_id, updated_at)
                   SELECT :account_id, conid, qty::numeric, avg_cost::numeric, currency,
-                         multiplier::numeric, asset_class, now()
+                         multiplier::numeric, asset_class, symbol, primary_exchange,
+                         canonical_id, now()
                     FROM jsonb_to_recordset(CAST(:rows AS jsonb))
                       AS x(conid varchar, qty varchar, avg_cost varchar, currency varchar,
-                           multiplier varchar, asset_class varchar)
+                           multiplier varchar, asset_class varchar, symbol varchar,
+                           primary_exchange varchar, canonical_id varchar)
                   ON CONFLICT (account_id, conid) DO UPDATE
                     SET qty = EXCLUDED.qty,
                         avg_cost = EXCLUDED.avg_cost,
                         currency = EXCLUDED.currency,
                         multiplier = EXCLUDED.multiplier,
                         asset_class = EXCLUDED.asset_class,
+                        symbol = EXCLUDED.symbol,
+                        primary_exchange = EXCLUDED.primary_exchange,
+                        canonical_id = EXCLUDED.canonical_id,
                         updated_at = now()
                   RETURNING conid
                 )

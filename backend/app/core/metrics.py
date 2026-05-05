@@ -294,6 +294,27 @@ QUOTE_ALIASES_CREATED_TOTAL = Counter(
     registry=registry,
 )
 
+QUOTE_POSITION_CANONICAL_RESOLVED_TOTAL = Counter(
+    "quote_position_canonical_resolved_total",
+    "Positions upserted with a derived canonical_id.",
+    labelnames=["broker_id"],
+    registry=registry,
+)
+
+QUOTE_POSITION_CANONICAL_UNRESOLVED_TOTAL = Counter(
+    "quote_position_canonical_unresolved_total",
+    "Positions upserted without a derived canonical_id.",
+    labelnames=["broker_id", "reason"],
+    registry=registry,
+)
+
+QUOTE_SEED_SKIPPED_TOTAL = Counter(
+    "quote_seed_skipped_total",
+    "Position rows skipped during instruments seed.",
+    labelnames=["reason"],
+    registry=registry,
+)
+
 QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL = Counter(
     "quote_subscription_cap_rejected_total",
     "SubscriptionRegistry rejections by cap kind (HIGH-6). "

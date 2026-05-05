@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.api import admin_instruments
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.admin_metrics import router as admin_metrics_router
@@ -38,9 +39,10 @@ from app.services.config_cache import ConfigCache
 from app.services.order_event_consumer import OrderEventConsumer
 from app.services.pending_fills_sweeper import PendingFillsSweeper
 from app.services.pending_submit_watchdog import PendingSubmitWatchdog
+from app.services.quotes.instruments_seed import seed_instruments_from_positions
 
 configure_logging()
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 @asynccontextmanager
@@ -69,6 +71,12 @@ async def lifespan(_app: FastAPI) -> Any:
     pending_fills_task: asyncio.Task[None] | None = None
 
     try:
+        try:
+            seeded = await seed_instruments_from_positions(session_factory)
+            log.info("instrument_seed.complete", count=seeded)
+        except (Exception,) as exc:  # noqa: B013 - project convention keeps tuple form
+            log.warning("instrument_seed.failed", exc=str(exc))
+
         broker_registry = await build_broker_registry(svc)
         broker_discoverer = BrokerDiscoverer(broker_registry, session_factory)
         broker_health_task = asyncio.create_task(broker_registry.health_probe_loop())
@@ -88,9 +96,9 @@ async def lifespan(_app: FastAPI) -> Any:
         pending_fills_task = asyncio.create_task(pending_fills_sweeper.run())
         log.info("broker_lifespan_started")
     except MissingBrokerSecrets as exc:
-        log.warning("broker_lifespan_skipped reason=%s", exc)
+        log.warning("broker_lifespan_skipped", reason=str(exc))
 
-    log.info("startup_ok env=%s", settings.env)
+    log.info("startup_ok", env=settings.env)
     try:
         yield
     finally:
@@ -146,6 +154,7 @@ app.add_middleware(
 )
 
 app.include_router(admin_router)
+app.include_router(admin_instruments.router)
 app.include_router(brokers_admin_router)
 app.include_router(accounts_router)
 app.include_router(brokers_router)
