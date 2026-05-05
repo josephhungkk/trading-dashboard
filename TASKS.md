@@ -260,18 +260,28 @@ Boot helper `seed_instruments_from_positions(session_factory)` + admin endpoint 
 - [x] Tests: integration seed (3-row 1-pass-2-skip), API 201/400/401, unit upsert-canonical column write (skip on no DB).
 - [ ] Backfill of existing prod `positions.symbol`/`primary_exchange` — operator action via re-discovery round (BASE-tag pattern, Phase 5b.1).
 
-## Phase 7c — Alpaca adapter (data + read-only + crypto/options-ready)  *(new)*
+## Phase 7c — Alpaca adapter (data + read-only + crypto/options-ready)  *(complete — v0.7.3 · 2026-05-05)*
 
-Add `sidecar_alpaca/` (own gRPC sidecar, same proto). Alpaca's REST + WS API is well-documented and stable; SDK `alpaca-py` (Python). API-key auth (no OAuth dance). Sandbox + paper-trading endpoints from day 1.
+`sidecar_alpaca/` (own gRPC sidecar, same proto) — in-cluster Docker on `td-net`, port 9091 live + 9092 paper, no mTLS to sidecar (peer trust = docker bridge). API-key auth via app_secrets with forward-compat `<account_label>` schema (MED-2). Free-tier Alpaca data: 30-symbol cap per WS endpoint; backend soft cap at 25 (CRIT-1).
 
-Scope:
-- `Configure` RPC, `ListManagedAccounts`, `GetAccountSummary`, `GetPositions`, `GetOrders` (read-only) — same shape as `sidecar_schwab`.
-- `StreamQuotes` wired to Alpaca's `wss://stream.data.alpaca.markets/v2/iex` (free real-time IEX feed) — registers `alpaca` in the source enum (already designed-for in 7b.1).
-- US equity + crypto in scope; options scaffolded (Alpaca added options Apr 2024) but trade execution deferred to Phase 8 alongside Schwab `PlaceOrder`.
-- `account_hash` boundary-strip same as Schwab.
-- Operator runbook at `deploy/runbook-alpaca-setup.md`.
+- [x] A1 — `BrokerId` Literal `+ "alpaca"` (`0924a08`).
+- [x] A2 — `app_config.broker_gateway_dial` config table + `resolve_dial` helper (`1b688da`).
+- [x] B1 — `sidecar_alpaca/` skeleton: Dockerfile, pyproject (alpaca-py), main.py, config.py, auth.py, metrics.py, handlers.py UNIMPLEMENTED stubs (`819fd03`).
+- [x] C1 — AlpacaClient + normalize.py + read-RPC handler wiring (`ece6ff9`).
+- [x] C2 — Per-mode Configure routing + `alpaca_mode_mismatch_total{label}` HIGH-5 cross-mode probe (`69ef187`).
+- [x] C3 — `account_id` boundary-strip regression test — chokepoint already covers HIGH-2 via existing `_ACCOUNT_BOUNDARY_STRIP_FIELDS` (`52827aa`).
+- [x] D1 — IEX equity streamer with supervisor + per-task isolation (HIGH-1) + Subscribe-vs-Resync (CRIT-2) + sidecar-side hard cap 30 (CRIT-1 layer 2) (`39881a2`).
+- [x] E1 — Crypto v1beta3 streamer sibling + canonical↔pair mapping (`25ae9e9`).
+- [x] F1 — Backend `SubscriptionRegistry` per-source soft cap 25 + widened `quote_subscription_cap_rejected_total` labels {cap_kind,source,asset_class} (CRIT-1 layer 1) (`d5d94f1`).
+- [x] F2 — Subscribe-rejection drift detection — streamer emits drift sentinel via `QuoteMessage.raw_payload`; backend's `SidecarStream.decrement_for_source` recovers from ghost subs (HIGH-6) (`258ecbd`).
+- [x] G1 — `app/services/config_defaults.py` + per-key router fallback merge (HIGH-3) (`ef515e1`).
+- [x] G2 — Frontend BrokerId Literal + ACCOUNTS / BROKERS fixture extension + AccountPicker test count update (`bb49543`).
+- [x] G3 — SourceRouter 4-case integration test (MED-1) (`88e999f`).
+- [x] H1 + H2 — `docker-compose.prod.yml` services + `deploy/runbook-alpaca-setup.md` (`c58eb3d`).
+- [x] H3 — full lint + mypy --strict clean across `backend/app/` + `sidecar_alpaca/`; 14 new tests (7 backend + 7 sidecar).
+- [x] H4 — close-out: CHANGELOG `[0.7.3]` + CLAUDE.md phase-shipped pointer + memory `phase7c_alpaca_topology.md` + tag `v0.7.3`.
 
-Tests: full Tier-1 smoke (no OAuth dance, just API-key); WS reconnect under token rotation (Alpaca tokens are long-lived but rotatable).
+Spec: [`docs/superpowers/specs/2026-05-05-phase7c-alpaca-adapter-design.md`](docs/superpowers/specs/2026-05-05-phase7c-alpaca-adapter-design.md). Architect-reviewed (2 CRIT + 6 HIGH + 7 MED + 4 LOW; CRIT+HIGH+MED applied inline). Plan: [`docs/superpowers/plans/2026-05-05-phase7c-alpaca-adapter-plan.md`](docs/superpowers/plans/2026-05-05-phase7c-alpaca-adapter-plan.md).
 
 ## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket + Alpaca trade
 

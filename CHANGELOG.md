@@ -5,6 +5,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-05-05
+
+### Phase 7c — Alpaca adapter
+
+- New `sidecar_alpaca/` Python package, in-cluster Docker on `td-net`,
+  insecure-port 9091 (live) / 9092 (paper). API-key auth via app_secrets
+  with forward-compat `<account_label>` schema (MED-2). SDK isolation:
+  only `client.py` imports `alpaca-py` (M3).
+- Two upstream WS connections per sidecar — IEX equity + crypto v1beta3
+  — with per-task isolation supervisor (HIGH-1). Failure of one endpoint
+  cannot cancel the other; both directions verified by
+  `test_streamer_isolation.py`.
+- Two-layer 30-symbol cap (CRIT-1): backend `SubscriptionRegistry` soft
+  cap at 25 + sidecar `_iex_active`/`_crypto_active` hard cap at 30.
+  `quote_subscription_cap_rejected_total` widens from 1 to 3 labels:
+  `cap_kind`/`source`/`asset_class`. New `cap_kind=per_source` value.
+- Subscribe vs Resync reconnect contract (CRIT-2): full WS reconnect on
+  Subscribe (sidecar restart), diff-only on Resync (gRPC blip). No
+  upstream reconnect storm on backend reconnect churn.
+- Per-mode Configure routing (HIGH-5): paper sidecar never sees live
+  creds; cross-mode probe fires `alpaca_mode_mismatch_total{label}`.
+- New `app/services/config_defaults.py` + per-key merge in
+  `SourceRouter._priority_list_for` (HIGH-3) — operator partial overrides
+  preserve new defaults shipped in later phases.
+- Source-router default: `crypto.US` primary → alpaca; `stock.US`/
+  `etf.US` fallback after schwab.
+- New `app_config.broker_gateway_dial` table (HIGH-4) — labeled-docker
+  sidecar dial resolution. Schwab + IBKR dials NOT migrated this phase.
+- `account_id` boundary strip (HIGH-2) — Alpaca's UUID rides proto
+  field 5 (account_hash) which the existing M22 chokepoint at
+  `services/brokers.py::_ACCOUNT_BOUNDARY_STRIP_FIELDS` already strips.
+  Regression test asserts AccountResponse declares no broker-internal
+  ID fields.
+- Subscribe-rejection drift detection (HIGH-6): when Alpaca silently
+  lowers their cap, streamer removes the rejected symbol locally AND
+  emits a drift sentinel via `QuoteMessage.raw_payload` =
+  `b'{"drift":"cap_exceeded"...}'`; backend's `SidecarStream` decrements
+  `SubscriptionRegistry._per_source_refs[source]` to prevent ghost subs.
+- 11 new metrics (`alpaca_*` family + extended
+  `quote_subscription_cap_rejected_total`).
+- 1 operator runbook: `deploy/runbook-alpaca-setup.md`.
+- 14 new tests (7 backend + 7 sidecar) — all green; lint + mypy --strict
+  clean across `backend/app/` and `sidecar_alpaca/`.
+- Trade execution remains UNIMPLEMENTED — Phase 8 alongside Schwab.
+
 ### Phase 7b.1.5 — Instruments seed mini-phase (2026-05-05)
 
 - Alembic 0010: `positions.symbol`/`primary_exchange`/`canonical_id` columns
