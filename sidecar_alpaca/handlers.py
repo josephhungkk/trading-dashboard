@@ -22,6 +22,7 @@ from sidecar_alpaca._generated.broker.v1 import (
 from sidecar_alpaca import config, normalize
 from sidecar_alpaca.auth import AuthCache
 from sidecar_alpaca.client import AlpacaClient, AlpacaClientError
+from sidecar_alpaca.streamer import AlpacaStreamer
 
 log = structlog.get_logger(module="sidecar_alpaca.handlers")
 
@@ -195,7 +196,26 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         request_iterator: AsyncIterator[broker_pb2.StreamQuotesRequest],
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[broker_pb2.QuoteMessage]:
-        await self._abort_unimplemented(context, "Alpaca StreamQuotes lands in D1")
+        streamer = AlpacaStreamer(self._auth)
+
+        async def tick_callback(quote_message: broker_pb2.QuoteMessage) -> None:
+            await context.write(quote_message)
+
+        streamer.tick_callback = tick_callback
+        await streamer.start()
+        try:
+            async for request in request_iterator:
+                op = request.WhichOneof("op")
+                if op == "subscribe":
+                    await streamer.on_subscribe(list(request.subscribe.symbols))
+                    continue
+                if op == "unsubscribe":
+                    await streamer.on_unsubscribe(list(request.unsubscribe.symbols))
+                    continue
+                if op == "resync":
+                    await streamer.on_resync(list(request.resync.expected))
+        finally:
+            await streamer.stop()
         if False:
             yield broker_pb2.QuoteMessage()
 

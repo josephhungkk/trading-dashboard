@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +13,15 @@ import pytest
 os.environ.setdefault("MODE", "paper")
 
 from sidecar_alpaca.client import AlpacaClient, AlpacaClientError
+
+
+async def _to_thread_inline(
+    fn: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    return fn(*args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -22,7 +33,10 @@ async def test_alpaca_client_list_accounts_normalizes() -> None:
         status="ACTIVE",
     )
 
-    with patch("sidecar_alpaca.client.TradingClient") as trading_client:
+    with (
+        patch("sidecar_alpaca.client.TradingClient") as trading_client,
+        patch("sidecar_alpaca.client.asyncio.to_thread", _to_thread_inline),
+    ):
         trading_client.return_value.get_account.return_value = account
         client = AlpacaClient("key", "secret", paper=True)
 
@@ -63,7 +77,10 @@ async def test_alpaca_client_get_positions_normalizes() -> None:
         ),
     ]
 
-    with patch("sidecar_alpaca.client.TradingClient") as trading_client:
+    with (
+        patch("sidecar_alpaca.client.TradingClient") as trading_client,
+        patch("sidecar_alpaca.client.asyncio.to_thread", _to_thread_inline),
+    ):
         trading_client.return_value.get_all_positions.return_value = positions
         client = AlpacaClient("key", "secret", paper=True)
 
@@ -87,7 +104,10 @@ async def test_alpaca_client_get_positions_normalizes() -> None:
 
 @pytest.mark.asyncio
 async def test_alpaca_client_handles_api_error() -> None:
-    with patch("sidecar_alpaca.client.TradingClient") as trading_client:
+    with (
+        patch("sidecar_alpaca.client.TradingClient") as trading_client,
+        patch("sidecar_alpaca.client.asyncio.to_thread", _to_thread_inline),
+    ):
         trading_client.return_value.get_account.side_effect = RuntimeError("API down")
         client = AlpacaClient("key", "secret", paper=True)
 
