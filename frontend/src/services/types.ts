@@ -34,6 +34,11 @@ export interface Quote {
   ivRank: number | null; optionsOI: number | null; newsCount24h: number;
   spread: number; spreadPct: number;
   isDelayed: boolean; asOf: string;
+  // Optional staleness markers populated by RealQuotesService on
+  // 'stale' frames from /ws/quotes (Phase 7b.1 G1). Mock service
+  // never sets these; consumers should treat them as default-false.
+  isStale?: boolean;
+  staleSinceMs?: number;
 }
 
 export type OrderStatus = 'open' | 'filled' | 'partial' | 'cancelled' | 'rejected' | 'expired';
