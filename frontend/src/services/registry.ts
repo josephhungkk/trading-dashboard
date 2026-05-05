@@ -9,7 +9,7 @@ import type { CommandRegistry } from './commands';
 import { MockAccountsService, RealAccountsService } from './accounts';
 import { MockPositionsService } from './positions';
 import { MockOrdersService } from './orders';
-import { MockQuotesService } from './quotes';
+import { MockQuotesService, RealQuotesService } from './quotes';
 import { LocalStorageWatchlistService } from './watchlists';
 import { MockConnectedService } from './connected';
 import { MockQuoteFeedService } from './quote-feeds';
@@ -39,6 +39,9 @@ class MemoryStorage implements Storage {
 let _services: Services | null = null;
 
 const USE_MOCKS = (import.meta.env.VITE_USE_MOCKS as string | undefined) === 'true';
+const IS_TEST = import.meta.env.MODE === 'test';
+const USE_MOCK_QUOTES =
+  IS_TEST || USE_MOCKS || (import.meta.env.VITE_QUOTES_USE_MOCK as string | undefined) === 'true';
 
 export function getServices(): Services {
   if (_services) return _services;
@@ -50,7 +53,7 @@ export function getServices(): Services {
     accounts:   USE_MOCKS ? new MockAccountsService() : new RealAccountsService(),
     positions:  new MockPositionsService(),
     orders:     new MockOrdersService(),
-    quotes:     new MockQuotesService(),
+    quotes:     USE_MOCK_QUOTES ? new MockQuotesService() : new RealQuotesService(),
     watchlists: new LocalStorageWatchlistService(
       typeof window !== 'undefined' ? window.localStorage : new MemoryStorage()),
     connected:  new MockConnectedService(),
