@@ -46,6 +46,8 @@ SIDECAR_BROKERS: dict[str, str] = {
 # its host is the compose service name "schwab-sidecar".
 SIDECAR_HOSTS: dict[str, str] = {
     "schwab": "schwab-sidecar",
+    "alpaca-live": "alpaca-sidecar-live",
+    "alpaca-paper": "alpaca-sidecar-paper",
 }
 
 # Phase 7c — labels that bind insecure-port (no mTLS) because they live in
