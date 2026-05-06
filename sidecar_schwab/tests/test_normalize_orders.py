@@ -153,3 +153,173 @@ def test_to_schwab_order_payload_gtc_maps_to_good_till_cancel() -> None:
     )
 
     assert payload["duration"] == "GOOD_TILL_CANCEL"
+
+
+# ---------------------------------------------------------------------------
+# Phase 8b order-type tests (T-S.1, T-S.2, T-S.5)
+# ---------------------------------------------------------------------------
+
+import datetime
+from unittest.mock import MagicMock, patch
+
+
+def test_trail_amount_payload() -> None:
+    """TRAIL with trail_offset_type=AMOUNT → TRAILING_STOP + VALUE."""
+    payload = to_schwab_order_payload(
+        side="BUY",
+        order_type="TRAIL",
+        tif="DAY",
+        qty="100",
+        symbol="AAPL",
+        trail_offset="0.10",
+        trail_offset_type="AMOUNT",
+    )
+    assert payload["orderType"] == "TRAILING_STOP"
+    assert payload["trailingStopOffset"] == "0.10"
+    assert payload["stopPriceLinkType"] == "VALUE"
+
+
+def test_trail_percent_payload() -> None:
+    """TRAIL with trail_offset_type=PERCENT → stopPriceLinkType==PERCENT."""
+    payload = to_schwab_order_payload(
+        side="SELL",
+        order_type="TRAIL",
+        tif="GTC",
+        qty="50",
+        symbol="TSLA",
+        trail_offset="2.5",
+        trail_offset_type="PERCENT",
+    )
+    assert payload["orderType"] == "TRAILING_STOP"
+    assert payload["trailingStopOffset"] == "2.5"
+    assert payload["stopPriceLinkType"] == "PERCENT"
+
+
+def test_trail_limit_payload() -> None:
+    """TRAIL_LIMIT maps to TRAILING_STOP_LIMIT with stopPrice set."""
+    payload = to_schwab_order_payload(
+        side="BUY",
+        order_type="TRAIL_LIMIT",
+        tif="DAY",
+        qty="10",
+        symbol="MSFT",
+        trail_offset="0.10",
+        trail_offset_type="AMOUNT",
+        trail_limit_offset="0.05",
+    )
+    assert payload["orderType"] == "TRAILING_STOP_LIMIT"
+    assert payload["trailingStopOffset"] == "0.10"
+    assert payload["stopPrice"] == "0.05"
+    assert payload["stopPriceLinkType"] == "VALUE"
+
+
+def test_moc_payload() -> None:
+    """MOC → MARKET_ON_CLOSE, session NORMAL."""
+    payload = to_schwab_order_payload(
+        side="SELL",
+        order_type="MOC",
+        tif="DAY",
+        qty="200",
+        symbol="SPY",
+    )
+    assert payload["orderType"] == "MARKET_ON_CLOSE"
+    assert payload["session"] == "NORMAL"
+
+
+def test_moo_payload() -> None:
+    """MOO → MARKET_ON_OPEN, session AM."""
+    payload = to_schwab_order_payload(
+        side="BUY",
+        order_type="MOO",
+        tif="DAY",
+        qty="100",
+        symbol="QQQ",
+    )
+    assert payload["orderType"] == "MARKET_ON_OPEN"
+    assert payload["session"] == "AM"
+
+
+def test_loc_payload() -> None:
+    """LOC → LIMIT_ON_CLOSE, session NORMAL, price set."""
+    payload = to_schwab_order_payload(
+        side="SELL",
+        order_type="LOC",
+        tif="DAY",
+        qty="50",
+        symbol="AAPL",
+        limit_price="10.00",
+    )
+    assert payload["orderType"] == "LIMIT_ON_CLOSE"
+    assert payload["session"] == "NORMAL"
+    assert payload["price"] == "10.00"
+
+
+def test_loo_payload() -> None:
+    """LOO → LIMIT_ON_OPEN, session AM, price set."""
+    payload = to_schwab_order_payload(
+        side="BUY",
+        order_type="LOO",
+        tif="DAY",
+        qty="25",
+        symbol="NVDA",
+        limit_price="10.00",
+    )
+    assert payload["orderType"] == "LIMIT_ON_OPEN"
+    assert payload["session"] == "AM"
+    assert payload["price"] == "10.00"
+
+
+def _make_mock_calendar(close_dt: datetime.datetime) -> MagicMock:
+    """Build a minimal exchange_calendars mock (no pandas dependency)."""
+    # Build a minimal Timestamp-like object so the normalize code can call
+    # session_close.to_pydatetime() without importing pandas in tests.
+    ts_mock = MagicMock()
+    ts_mock.to_pydatetime.return_value = close_dt
+
+    session_row = MagicMock()
+    session_row.__getitem__ = lambda self, key: ts_mock
+
+    mock_cal = MagicMock()
+    mock_cal.schedule.loc.__getitem__ = lambda self, key: session_row
+    return mock_cal
+
+
+def test_gtd_payload_has_cancel_time() -> None:
+    """LIMIT + GTD → duration==GOOD_TILL_CANCEL + non-empty cancelTime with 'T'."""
+    close_dt = datetime.datetime(2026, 5, 29, 20, 0, 0, tzinfo=datetime.timezone.utc)
+    mock_cal = _make_mock_calendar(close_dt)
+
+    mock_xcals = MagicMock()
+    mock_xcals.get_calendar.return_value = mock_cal
+
+    with patch.dict("sys.modules", {"exchange_calendars": mock_xcals}):
+        payload = to_schwab_order_payload(
+            side="BUY",
+            order_type="LIMIT",
+            tif="GTD",
+            qty="100",
+            symbol="AAPL",
+            limit_price="50.00",
+            exchange="NYSE",
+            expiry_date=datetime.date(2026, 5, 29),
+        )
+
+    assert payload["duration"] == "GOOD_TILL_CANCEL"
+    assert "cancelTime" in payload
+    cancel_time = payload["cancelTime"]
+    assert "T" in cancel_time
+    assert len(cancel_time) > 0
+
+
+def test_gtd_missing_expiry_raises() -> None:
+    """LIMIT + GTD without expiry_date → ValueError('gtd_order_missing_expiry_date')."""
+    with pytest.raises(ValueError, match="gtd_order_missing_expiry_date"):
+        to_schwab_order_payload(
+            side="BUY",
+            order_type="LIMIT",
+            tif="GTD",
+            qty="100",
+            symbol="AAPL",
+            limit_price="50.00",
+            # no expiry_date
+        )

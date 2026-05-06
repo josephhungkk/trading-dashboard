@@ -149,21 +149,58 @@ def to_schwab_order_payload(
     symbol: str,
     limit_price: str = "",
     stop_price: str = "",
+    trail_offset: str = "",
+    trail_offset_type: str = "PERCENT",
+    trail_limit_offset: str = "",
+    exchange: str = "NYSE",
+    expiry_date: "str | datetime.date | None" = None,
 ) -> dict[str, Any]:
     """Translate flat PlaceOrderRequest fields to Schwab JSON payload.
 
-    Single-leg equity only (Phase 8a scope). Brackets/options land in 8b.
+    Phase 8b extends Phase 8a with trailing stops, MOC/MOO/LOC/LOO, and GTD.
     """
-    duration_map = {
+    import datetime as _datetime
+
+    _EXCHANGE_MIC: dict[str, str] = {
+        "NYSE": "XNYS",
+        "NASDAQ": "XNYS",
+        "XNYS": "XNYS",
+        "XHKG": "XHKG",
+        "XLON": "XLON",
+    }
+
+    # --- order type → (schwab_order_type, session_override) ---
+    _OT_SESSION: dict[str, tuple[str, str]] = {
+        "MOC": ("MARKET_ON_CLOSE", "NORMAL"),
+        "MOO": ("MARKET_ON_OPEN", "AM"),
+        "LOC": ("LIMIT_ON_CLOSE", "NORMAL"),
+        "LOO": ("LIMIT_ON_OPEN", "AM"),
+    }
+
+    duration_map: dict[str, str] = {
         "DAY": "DAY",
         "GTC": "GOOD_TILL_CANCEL",
         "IOC": "IMMEDIATE_OR_CANCEL",
         "FOK": "FILL_OR_KILL",
-        "GTD": "GOOD_TILL_DATE",
+        "GTD": "GOOD_TILL_CANCEL",  # Schwab uses GOOD_TILL_CANCEL + cancelTime for GTD
     }
+
+    # Determine Schwab orderType and session from internal order_type
+    if order_type in _OT_SESSION:
+        schwab_order_type, session = _OT_SESSION[order_type]
+    elif order_type in ("TRAIL", "TRAILING_STOP"):
+        schwab_order_type = "TRAILING_STOP"
+        session = "NORMAL"
+    elif order_type in ("TRAIL_LIMIT", "TRAILING_STOP_LIMIT"):
+        schwab_order_type = "TRAILING_STOP_LIMIT"
+        session = "NORMAL"
+    else:
+        schwab_order_type = order_type
+        session = "NORMAL"
+
     payload: dict[str, Any] = {
-        "orderType": order_type,
-        "session": "NORMAL",
+        "orderType": schwab_order_type,
+        "session": session,
         "duration": duration_map.get(tif, "DAY"),
         "orderStrategyType": "SINGLE",
         "orderLegCollection": [
@@ -174,10 +211,42 @@ def to_schwab_order_payload(
             }
         ],
     }
-    if limit_price:
+
+    # Price fields by order type
+    if order_type in ("LOC", "LOO") and limit_price:
         payload["price"] = limit_price
-    if stop_price:
+    elif limit_price and order_type not in _OT_SESSION and order_type not in ("TRAIL", "TRAIL_LIMIT", "TRAILING_STOP", "TRAILING_STOP_LIMIT"):
+        payload["price"] = limit_price
+
+    if stop_price and order_type not in ("TRAIL", "TRAIL_LIMIT", "TRAILING_STOP", "TRAILING_STOP_LIMIT"):
         payload["stopPrice"] = stop_price
+
+    # Trailing stop fields
+    if order_type in ("TRAIL", "TRAILING_STOP", "TRAIL_LIMIT", "TRAILING_STOP_LIMIT"):
+        if trail_offset:
+            payload["trailingStopOffset"] = trail_offset
+        payload["stopPriceLinkType"] = "VALUE" if trail_offset_type == "AMOUNT" else "PERCENT"
+        if order_type in ("TRAIL_LIMIT", "TRAILING_STOP_LIMIT") and trail_limit_offset:
+            payload["stopPrice"] = trail_limit_offset
+
+    # GTD → GOOD_TILL_CANCEL + cancelTime computed from exchange calendar
+    if tif == "GTD":
+        payload["duration"] = "GOOD_TILL_CANCEL"
+        if expiry_date is None:
+            raise ValueError("gtd_order_missing_expiry_date")
+        # Resolve expiry_date to a date object
+        if isinstance(expiry_date, str):
+            exp = _datetime.date.fromisoformat(expiry_date)
+        else:
+            exp = expiry_date
+        # Compute market session close for the given exchange + date
+        import exchange_calendars as xcals  # noqa: PLC0415
+        mic = _EXCHANGE_MIC.get(exchange, "XNYS")
+        cal = xcals.get_calendar(mic)
+        session_close = cal.schedule.loc[str(exp)]["market_close"]
+        close_dt = session_close.to_pydatetime()
+        payload["cancelTime"] = close_dt.isoformat()
+
     return payload
 
 
