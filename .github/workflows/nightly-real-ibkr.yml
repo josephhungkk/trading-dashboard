@@ -1,79 +1,52 @@
-name: Nightly real-IBKR contract tests
+name: nightly-real-ibkr
 
 on:
   schedule:
-    # 12:00 UTC clears all four IBKR daily maintenance windows by >=6h.
-    # 5b.1 D3 expanded scope: the e2e-trade test placed in this same job
-    # makes live HTTP calls and asserts maintenance.active == false.
-    - cron: '0 12 * * *'
+    # 22:00 UTC Mon-Fri = 17:00 ET (post-NYSE-close including auction).
+    - cron: "0 22 * * 1-5"
   workflow_dispatch:
-    inputs:
-      run_e2e:
-        description: 'Run e2e-trade chain (real paper gateway 4002) in addition to smoke'
-        required: false
-        default: 'false'
 
 jobs:
-  real-ibkr:
+  nightly-ibkr-trade-e2e:
     runs-on: [self-hosted, nuc]
-    timeout-minutes: 15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [market_spy, trail_percent_spy, moc_spy, gtd_limit_spy]
     env:
-      CI_USE_REAL_IBKR: '1'
-      IBKR_PAPER_PORT: '4002'
-      # 5b.1 D3 - CF Access service-token creds are read by the e2e-trade
-      # test (sidecar/tests/test_real_ibkr_e2e_trade.py) which calls
-      # https://dashboard.kiusinghung.com/api/* with the service-token headers.
+      IBKR_PAPER_ACCOUNT: ${{ secrets.IBKR_PAPER_ACCOUNT }}
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-      # NOTE: NOT opting into FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 yet —
-      # astral-sh/setup-uv@v5 crashes on Node 24 with a libuv assertion
-      # (src\win\async.c:76). Re-enable once setup-uv ships a Node-24
-      # compatible release. The Node-20 deprecation warning is harmless
-      # until 2026-06-02.
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - name: Install sidecar deps
-        working-directory: sidecar
-        run: uv sync --extra dev --frozen
-      - name: Generate proto stubs (grpc_tools)
-        working-directory: sidecar
-        # Native PowerShell — bash isn't on the self-hosted runner's PATH.
-        # Mirrors sidecar/scripts/build-windows.ps1's codegen block so dev
-        # + CI emit the same files in the same place.
+        with:
+          python-version: "3.14"
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run real IBKR trade E2E (${{ matrix.case }})
+        working-directory: backend
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force -Path '_generated/broker/v1' | Out-Null
-          foreach ($init in '_generated/__init__.py', '_generated/broker/__init__.py', '_generated/broker/v1/__init__.py') {
-            if (-not (Test-Path $init)) { New-Item -ItemType File -Path $init | Out-Null }
+          uv run pytest tests/real_broker/test_real_ibkr_e2e.py `
+            -m real_ibkr `
+            --case ${{ matrix.case }} `
+            -v --tb=short --no-header
+          # Exit 5 = no tests collected (marker filter); treat as success.
+          if ($LASTEXITCODE -eq 5) {
+            Write-Host "::notice::No real_ibkr tests collected for case ${{ matrix.case }}."
+            exit 0
           }
-          uv run python -m grpc_tools.protoc `
-            --proto_path=../proto `
-            --python_out=_generated `
-            --grpc_python_out=_generated `
-            --pyi_out=_generated `
-            broker/v1/broker.proto
-          if ($LASTEXITCODE -ne 0) { throw "grpc_tools.protoc failed with exit code $LASTEXITCODE" }
-          $grpcPath = '_generated/broker/v1/broker_pb2_grpc.py'
-          $content = Get-Content -Raw $grpcPath
-          $content = $content -replace '(?m)^from broker\.v1 import broker_pb2', 'from sidecar._generated.broker.v1 import broker_pb2'
-          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-          [System.IO.File]::WriteAllText((Resolve-Path $grpcPath).Path, $content, $utf8NoBom)
-      - name: Pytest (real_ibkr only)
-        working-directory: sidecar
-        shell: powershell
-        # Pass the test directory + marker filter; PowerShell doesn't expand
-        # globs the way bash does so `tests/test_handlers_*.py` ends up as a
-        # literal path that pytest can't resolve.
-        # Pytest exit codes:
-        #   0 = all tests passed
-        #   5 = no tests collected (no @pytest.mark.real_ibkr-marked tests yet)
-        # Treat 5 as success — the cron has nothing to verify until someone
-        # adds real-broker contract tests; that's a Phase 4.x backlog item,
-        # not a runner failure.
-        run: |
-          uv run pytest tests/ -v -m real_ibkr
-          if ($LASTEXITCODE -eq 5) { Write-Host "::notice::No real_ibkr-marked tests yet - treating as success."; exit 0 }
           exit $LASTEXITCODE
+      - name: Upload test results (${{ matrix.case }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-ibkr-results-${{ github.run_id }}-${{ matrix.case }}
+          path: backend/test-results/
+          retention-days: 30
       - if: failure()
-        run: echo "::error::Nightly real-IBKR contract tests failed. Check ib_async release notes and the paper Gateway 4002 status on the NUC."
+        run: Write-Host "::error::Nightly real-IBKR ${{ matrix.case }} failed. Check paper Gateway 4002 on the NUC."
+        shell: powershell
