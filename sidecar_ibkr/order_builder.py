@@ -89,3 +89,30 @@ def build_ib_order(request: Any, side: str, qty: float) -> Any:  # noqa: C901
             order.tif = tif
 
     return order
+
+
+def attach_oca_group(order: Any, group_id: str, oca_type: int = 1) -> None:
+    """Attach OCA group identity to an ib_async Order for cancel-on-fill semantics.
+
+    Parameters
+    ----------
+    order:
+        An ib_async.Order instance (or any object with ocaGroup/ocaType attributes).
+    group_id:
+        OCA group identifier — max 32 chars per TWS API constraint.
+    oca_type:
+        1 = cancel all remaining on fill (OCO default)
+        2 = reduce all sizes proportionally
+        3 = reduce all sizes with overfill protection
+
+    Raises
+    ------
+    ValueError
+        If group_id exceeds 32 chars or oca_type is not 1, 2, or 3.
+    """
+    if len(group_id) > 32:
+        raise ValueError(f"oca_group_id too long: {len(group_id)} > 32")
+    if oca_type not in (1, 2, 3):
+        raise ValueError(f"oca_type must be 1, 2, or 3 (got {oca_type})")
+    order.ocaGroup = group_id
+    order.ocaType = oca_type

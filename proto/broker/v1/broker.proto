@@ -252,6 +252,7 @@ message PlaceOrderRequest {
   string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
   string trail_limit_offset = 23;  // Decimal — TRAIL_LIMIT only
   string expiry_date = 24;         // ISO "YYYY-MM-DD" — GTD only
+  string oco_group_id = 25;   // optional OCA group identifier (≤32 chars) for OCO placement (Phase 8b T-O.8)
   reserved 10 to 20; // forward-extension reservations (R35)
 }
 

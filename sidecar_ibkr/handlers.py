@@ -495,6 +495,9 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             ib_order: object = self._build_ib_order(request)
             ib_order.orderRef = request.client_order_id
             ib_order.account = request.account_number
+            if request.oco_group_id:
+                from sidecar_ibkr.order_builder import attach_oca_group
+                attach_oca_group(ib_order, request.oco_group_id)
             trade: _IbTrade = cast(
                 "_IbTrade",
                 self.ib.placeOrder(contract, ib_order),  # type: ignore[attr-defined, unused-ignore]
