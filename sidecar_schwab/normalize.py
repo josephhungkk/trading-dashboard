@@ -1,6 +1,9 @@
 """Normalize Schwab REST JSON payloads into broker protos."""
+
 from __future__ import annotations
 
+import warnings
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -28,12 +31,16 @@ def _install_proto_compat_aliases() -> None:
             )
 
     enum_aliases = (
-        (broker_pb2.AssetClass, "UNKNOWN_ASSET_CLASS", broker_pb2.AssetClass.ASSET_UNSPECIFIED),
+        (
+            broker_pb2.AssetClass,
+            "UNKNOWN_ASSET_CLASS",
+            broker_pb2.AssetClass.ASSET_UNSPECIFIED,
+        ),
         (broker_pb2.AssetClass, "FX", broker_pb2.AssetClass.FOREX),
         (broker_pb2.OrderStatus, "CANCELED", broker_pb2.OrderStatus.CANCELLED),
-        (broker_pb2.OrderStatus, "PENDING_CANCEL", 8),
-        (broker_pb2.OrderStatus, "EXPIRED", 9),
-        (broker_pb2.OrderType, "TRAILING_STOP", broker_pb2.OrderType.STOP),
+        (broker_pb2.OrderStatus, "PENDING_CANCEL", broker_pb2.OrderStatus.SUBMITTED),
+        (broker_pb2.OrderStatus, "EXPIRED", broker_pb2.OrderStatus.CANCELLED),
+        (broker_pb2.OrderType, "TRAILING_STOP", broker_pb2.OrderType.ORDER_TYPE_TRAIL),
     )
     for enum_type, alias, value in enum_aliases:
         if not hasattr(enum_type, alias):
@@ -43,7 +50,9 @@ def _install_proto_compat_aliases() -> None:
 _install_proto_compat_aliases()
 
 
-def _money(value: str | float | int | Decimal, currency: str = "USD") -> broker_pb2.Money:
+def _money(
+    value: str | float | int | Decimal, currency: str = "USD"
+) -> broker_pb2.Money:
     return broker_pb2.Money(value=str(value), currency=currency)
 
 
@@ -58,12 +67,12 @@ _STATUS_MAP = {
     "QUEUED": broker_pb2.OrderStatus.SUBMITTED,
     "WORKING": broker_pb2.OrderStatus.SUBMITTED,
     "REJECTED": broker_pb2.OrderStatus.REJECTED,
-    "PENDING_CANCEL": broker_pb2.OrderStatus.PENDING_CANCEL,
-    "CANCELED": broker_pb2.OrderStatus.CANCELED,
+    "PENDING_CANCEL": broker_pb2.OrderStatus.SUBMITTED,
+    "CANCELED": broker_pb2.OrderStatus.CANCELLED,
     "PENDING_REPLACE": broker_pb2.OrderStatus.SUBMITTED,
     "REPLACED": broker_pb2.OrderStatus.SUBMITTED,
     "FILLED": broker_pb2.OrderStatus.FILLED,
-    "EXPIRED": broker_pb2.OrderStatus.EXPIRED,
+    "EXPIRED": broker_pb2.OrderStatus.CANCELLED,
     "NEW": broker_pb2.OrderStatus.SUBMITTED,
     "AWAITING_RELEASE_TIME": broker_pb2.OrderStatus.PENDING,
     "PENDING_ACKNOWLEDGEMENT": broker_pb2.OrderStatus.PENDING,
@@ -76,36 +85,36 @@ _ASSET_TYPE_MAP = {
     "OPTION": broker_pb2.AssetClass.OPTION,
     "FUTURES": broker_pb2.AssetClass.FUTURE,
     "FUTURE_OPTION": broker_pb2.AssetClass.FUTURE,
-    "FOREX": broker_pb2.AssetClass.FX,
+    "FOREX": broker_pb2.AssetClass.FOREX,
     "FIXED_INCOME": broker_pb2.AssetClass.BOND,
     "MUTUAL_FUND": broker_pb2.AssetClass.STOCK,
     "CASH_EQUIVALENT": broker_pb2.AssetClass.STOCK,
 }
 
 _ORDER_TYPE_MAP = {
-    "MARKET": broker_pb2.OrderType.MARKET,
-    "LIMIT": broker_pb2.OrderType.LIMIT,
-    "STOP": broker_pb2.OrderType.STOP,
-    "STOP_LIMIT": broker_pb2.OrderType.STOP_LIMIT,
-    "TRAILING_STOP": broker_pb2.OrderType.TRAILING_STOP,
-    "TRAILING_STOP_LIMIT": broker_pb2.OrderType.TRAILING_STOP,
-    "MARKET_ON_CLOSE": broker_pb2.OrderType.MARKET,
-    "EXERCISE": broker_pb2.OrderType.MARKET,
-    "CABINET": broker_pb2.OrderType.LIMIT,
-    "NET_DEBIT": broker_pb2.OrderType.LIMIT,
-    "NET_CREDIT": broker_pb2.OrderType.LIMIT,
-    "NET_ZERO": broker_pb2.OrderType.LIMIT,
+    "MARKET": broker_pb2.OrderType.ORDER_TYPE_MARKET,
+    "LIMIT": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
+    "STOP": broker_pb2.OrderType.ORDER_TYPE_STOP,
+    "STOP_LIMIT": broker_pb2.OrderType.ORDER_TYPE_STOP_LIMIT,
+    "TRAILING_STOP": broker_pb2.OrderType.ORDER_TYPE_TRAIL,
+    "TRAILING_STOP_LIMIT": broker_pb2.OrderType.ORDER_TYPE_TRAIL,
+    "MARKET_ON_CLOSE": broker_pb2.OrderType.ORDER_TYPE_MARKET,
+    "EXERCISE": broker_pb2.OrderType.ORDER_TYPE_MARKET,
+    "CABINET": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
+    "NET_DEBIT": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
+    "NET_CREDIT": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
+    "NET_ZERO": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
 }
 
 _TIF_MAP = {
-    "DAY": broker_pb2.TimeInForce.DAY,
-    "GTC": broker_pb2.TimeInForce.GTC,
-    "FOK": broker_pb2.TimeInForce.FOK,
-    "IOC": broker_pb2.TimeInForce.IOC,
-    "END_OF_WEEK": broker_pb2.TimeInForce.GTC,
-    "END_OF_MONTH": broker_pb2.TimeInForce.GTC,
-    "NEXT_END_OF_MONTH": broker_pb2.TimeInForce.GTC,
-    "UNKNOWN": broker_pb2.TimeInForce.DAY,
+    "DAY": broker_pb2.TimeInForce.TIF_DAY,
+    "GTC": broker_pb2.TimeInForce.TIF_GTC,
+    "FOK": broker_pb2.TimeInForce.TIF_FOK,
+    "IOC": broker_pb2.TimeInForce.TIF_IOC,
+    "END_OF_WEEK": broker_pb2.TimeInForce.TIF_GTC,
+    "END_OF_MONTH": broker_pb2.TimeInForce.TIF_GTC,
+    "NEXT_END_OF_MONTH": broker_pb2.TimeInForce.TIF_GTC,
+    "UNKNOWN": broker_pb2.TimeInForce.TIF_DAY,
 }
 
 
@@ -120,15 +129,15 @@ def map_asset_type(raw: str) -> int:
     if raw in _ASSET_TYPE_MAP:
         return _ASSET_TYPE_MAP[raw]
     SCHWAB_NORMALIZE_UNKNOWN_TOTAL.labels(field="assetType", value=raw).inc()
-    return broker_pb2.AssetClass.UNKNOWN_ASSET_CLASS
+    return broker_pb2.AssetClass.ASSET_UNSPECIFIED
 
 
 def map_order_type(raw: str) -> int:
-    return _ORDER_TYPE_MAP.get(raw, broker_pb2.OrderType.MARKET)
+    return _ORDER_TYPE_MAP.get(raw, broker_pb2.OrderType.ORDER_TYPE_MARKET)
 
 
 def map_tif(raw: str) -> int:
-    return _TIF_MAP.get(raw, broker_pb2.TimeInForce.DAY)
+    return _TIF_MAP.get(raw, broker_pb2.TimeInForce.TIF_DAY)
 
 
 def normalize_account(raw: dict[str, Any]) -> broker_pb2.Account:
@@ -221,4 +230,92 @@ def normalize_order(raw: dict[str, Any]) -> broker_pb2.Order:
         quantity_filled=qty_filled_str,
         avg_fill_price=avg_fill_price,
         avg_fill_price_inferred=avg_fill_price_inferred,
+    )
+
+
+@dataclass(frozen=True)
+class StatusMapping:
+    wire_status: str
+    rank: int
+    terminal: bool
+    kind: str = "status"
+
+
+_NEW_STATUS_MAP: dict[str, StatusMapping] = {
+    "AWAITING_PARENT_ORDER": StatusMapping("pending_submit", 0, False),
+    "PENDING_ACTIVATION": StatusMapping("pending_submit", 0, False),
+    "QUEUED": StatusMapping("submitted", 1, False),
+    "WORKING": StatusMapping("submitted", 1, False),
+    "PENDING_CANCEL": StatusMapping("cancel_requested", 2, False),
+    "PENDING_REPLACE": StatusMapping("modify_requested", 2, False),
+    "FILLED": StatusMapping("filled", 4, True),
+    "CANCELED": StatusMapping("cancelled", 4, True),
+    "REPLACED": StatusMapping("cancelled", 4, True, kind="replaced"),
+    "REJECTED": StatusMapping("rejected", 4, True),
+    "EXPIRED": StatusMapping("expired", 4, True),
+}
+
+
+def schwab_status_to_wire(schwab_status: str) -> StatusMapping:
+    m = _NEW_STATUS_MAP.get(schwab_status)
+    if m is None:
+        warnings.warn(
+            f"unknown schwab status: {schwab_status}", UserWarning, stacklevel=2
+        )
+        return StatusMapping("submitted", 1, False)
+    return m
+
+
+@dataclass
+class FillEvent:
+    exec_id: str
+    price: Decimal
+    quantity: Decimal
+    time_iso: str
+    avg_fill_price_inferred: bool = False
+
+
+@dataclass
+class NormalizedOrder:
+    broker_order_id: str
+    client_order_id: str
+    status_mapping: StatusMapping
+    entered_time_iso: str = ""
+    fills: list[FillEvent] = field(default_factory=list)
+
+
+def schwab_to_wire_order(
+    schwab_order: dict[str, Any],
+    *,
+    client_order_id: str,
+) -> NormalizedOrder:
+    fills: list[FillEvent] = []
+    total_qty = schwab_order.get("quantity")
+    market_value = schwab_order.get("marketValue")
+    for activity in schwab_order.get("orderActivityCollection") or []:
+        if activity.get("executionType") != "FILL":
+            continue
+        for leg in activity.get("executionLegs") or []:
+            inferred = False
+            price = leg.get("price")
+            if price is None and total_qty and market_value:
+                price = Decimal(str(market_value)) / Decimal(str(total_qty))
+                inferred = True
+            elif price is None:
+                continue
+            fills.append(
+                FillEvent(
+                    exec_id=str(leg["legId"]),
+                    price=Decimal(str(price)),
+                    quantity=Decimal(str(leg["quantity"])),
+                    time_iso=leg["time"],
+                    avg_fill_price_inferred=inferred,
+                )
+            )
+    return NormalizedOrder(
+        broker_order_id=str(schwab_order["orderId"]),
+        client_order_id=client_order_id,
+        status_mapping=schwab_status_to_wire(schwab_order["status"]),
+        entered_time_iso=schwab_order.get("enteredTime", ""),
+        fills=fills,
     )

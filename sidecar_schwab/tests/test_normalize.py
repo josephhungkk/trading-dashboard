@@ -26,12 +26,12 @@ from sidecar_schwab.normalize import (
         ("QUEUED", broker_pb2.OrderStatus.SUBMITTED),
         ("WORKING", broker_pb2.OrderStatus.SUBMITTED),
         ("REJECTED", broker_pb2.OrderStatus.REJECTED),
-        ("PENDING_CANCEL", broker_pb2.OrderStatus.PENDING_CANCEL),
-        ("CANCELED", broker_pb2.OrderStatus.CANCELED),
+        ("PENDING_CANCEL", broker_pb2.OrderStatus.SUBMITTED),
+        ("CANCELED", broker_pb2.OrderStatus.CANCELLED),
         ("PENDING_REPLACE", broker_pb2.OrderStatus.SUBMITTED),
         ("REPLACED", broker_pb2.OrderStatus.SUBMITTED),
         ("FILLED", broker_pb2.OrderStatus.FILLED),
-        ("EXPIRED", broker_pb2.OrderStatus.EXPIRED),
+        ("EXPIRED", broker_pb2.OrderStatus.CANCELLED),
         ("NEW", broker_pb2.OrderStatus.SUBMITTED),
         ("AWAITING_RELEASE_TIME", broker_pb2.OrderStatus.PENDING),
         ("WHO_KNOWS", broker_pb2.OrderStatus.SUBMITTED),
@@ -50,7 +50,7 @@ def test_status_mapping(raw, expected):
         ("OPTION", broker_pb2.AssetClass.OPTION),
         ("FUTURES", broker_pb2.AssetClass.FUTURE),
         ("FUTURE_OPTION", broker_pb2.AssetClass.FUTURE),
-        ("FOREX", broker_pb2.AssetClass.FX),
+        ("FOREX", broker_pb2.AssetClass.FOREX),
         ("FIXED_INCOME", broker_pb2.AssetClass.BOND),
         ("MUTUAL_FUND", broker_pb2.AssetClass.STOCK),
         ("CASH_EQUIVALENT", broker_pb2.AssetClass.STOCK),
@@ -111,7 +111,9 @@ def test_normalize_order_extracts_avg_fill_from_order_activity_collection():
         "quantity": 10.0,
         "filledQuantity": 10.0,
         "price": 100.0,
-        "orderLegCollection": [{"instrument": {"symbol": "TSLA", "assetType": "EQUITY"}}],
+        "orderLegCollection": [
+            {"instrument": {"symbol": "TSLA", "assetType": "EQUITY"}}
+        ],
         "orderActivityCollection": [
             {
                 "activityType": "EXECUTION",
@@ -138,7 +140,9 @@ def test_normalize_order_filled_without_order_activity_collection_marks_inferred
         "quantity": 5.0,
         "filledQuantity": 5.0,
         "price": 200.0,
-        "orderLegCollection": [{"instrument": {"symbol": "MSFT", "assetType": "EQUITY"}}],
+        "orderLegCollection": [
+            {"instrument": {"symbol": "MSFT", "assetType": "EQUITY"}}
+        ],
     }
     order = normalize_order(raw)
     assert order.avg_fill_price_inferred is True
@@ -153,19 +157,19 @@ def test_normalize_modified_status_maps_to_submitted_not_modified():
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("MARKET", broker_pb2.OrderType.MARKET),
-        ("LIMIT", broker_pb2.OrderType.LIMIT),
-        ("STOP", broker_pb2.OrderType.STOP),
-        ("STOP_LIMIT", broker_pb2.OrderType.STOP_LIMIT),
-        ("TRAILING_STOP", broker_pb2.OrderType.TRAILING_STOP),
-        ("TRAILING_STOP_LIMIT", broker_pb2.OrderType.TRAILING_STOP),
-        ("MARKET_ON_CLOSE", broker_pb2.OrderType.MARKET),
-        ("EXERCISE", broker_pb2.OrderType.MARKET),
-        ("CABINET", broker_pb2.OrderType.LIMIT),
-        ("NET_DEBIT", broker_pb2.OrderType.LIMIT),
-        ("NET_CREDIT", broker_pb2.OrderType.LIMIT),
-        ("NET_ZERO", broker_pb2.OrderType.LIMIT),
-        ("WHO_KNOWS", broker_pb2.OrderType.MARKET),
+        ("MARKET", broker_pb2.OrderType.ORDER_TYPE_MARKET),
+        ("LIMIT", broker_pb2.OrderType.ORDER_TYPE_LIMIT),
+        ("STOP", broker_pb2.OrderType.ORDER_TYPE_STOP),
+        ("STOP_LIMIT", broker_pb2.OrderType.ORDER_TYPE_STOP_LIMIT),
+        ("TRAILING_STOP", broker_pb2.OrderType.ORDER_TYPE_TRAIL),
+        ("TRAILING_STOP_LIMIT", broker_pb2.OrderType.ORDER_TYPE_TRAIL),
+        ("MARKET_ON_CLOSE", broker_pb2.OrderType.ORDER_TYPE_MARKET),
+        ("EXERCISE", broker_pb2.OrderType.ORDER_TYPE_MARKET),
+        ("CABINET", broker_pb2.OrderType.ORDER_TYPE_LIMIT),
+        ("NET_DEBIT", broker_pb2.OrderType.ORDER_TYPE_LIMIT),
+        ("NET_CREDIT", broker_pb2.OrderType.ORDER_TYPE_LIMIT),
+        ("NET_ZERO", broker_pb2.OrderType.ORDER_TYPE_LIMIT),
+        ("WHO_KNOWS", broker_pb2.OrderType.ORDER_TYPE_MARKET),
     ],
 )
 def test_order_type_mapping(raw, expected):
@@ -175,15 +179,15 @@ def test_order_type_mapping(raw, expected):
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("DAY", broker_pb2.TimeInForce.DAY),
-        ("GTC", broker_pb2.TimeInForce.GTC),
-        ("FOK", broker_pb2.TimeInForce.FOK),
-        ("IOC", broker_pb2.TimeInForce.IOC),
-        ("END_OF_WEEK", broker_pb2.TimeInForce.GTC),
-        ("END_OF_MONTH", broker_pb2.TimeInForce.GTC),
-        ("NEXT_END_OF_MONTH", broker_pb2.TimeInForce.GTC),
-        ("UNKNOWN", broker_pb2.TimeInForce.DAY),
-        ("WHO_KNOWS", broker_pb2.TimeInForce.DAY),
+        ("DAY", broker_pb2.TimeInForce.TIF_DAY),
+        ("GTC", broker_pb2.TimeInForce.TIF_GTC),
+        ("FOK", broker_pb2.TimeInForce.TIF_FOK),
+        ("IOC", broker_pb2.TimeInForce.TIF_IOC),
+        ("END_OF_WEEK", broker_pb2.TimeInForce.TIF_GTC),
+        ("END_OF_MONTH", broker_pb2.TimeInForce.TIF_GTC),
+        ("NEXT_END_OF_MONTH", broker_pb2.TimeInForce.TIF_GTC),
+        ("UNKNOWN", broker_pb2.TimeInForce.TIF_DAY),
+        ("WHO_KNOWS", broker_pb2.TimeInForce.TIF_DAY),
     ],
 )
 def test_tif_mapping(raw, expected):
