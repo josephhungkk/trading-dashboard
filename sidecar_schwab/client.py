@@ -211,6 +211,19 @@ class SchwabClient:
             ),
         )
 
+    async def search_instruments(
+        self,
+        query: str,
+        projection: str = "symbol-search",
+    ) -> list[dict[str, Any]]:
+        raw = await self._call(
+            "/instruments",
+            lambda: self._client.instruments(symbols=query, projection=projection),
+        )
+        if isinstance(raw, dict):
+            return list(raw.get("instruments") or [])
+        return list(raw or [])
+
     # account_hash cache (H3)
 
     def cache_hashes(self, mapping: dict[str, str]) -> None:

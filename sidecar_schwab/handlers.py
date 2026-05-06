@@ -29,6 +29,7 @@ from sidecar_schwab._generated.broker.v1 import (  # noqa: E402
 )
 from sidecar_schwab.auth import TokenCache  # noqa: E402
 from sidecar_schwab.client import SchwabClient  # noqa: E402
+from sidecar_schwab.normalize import map_asset_type as _asset_type_to_enum  # noqa: E402
 
 if TYPE_CHECKING:
     from sidecar_schwab.client import SchwabHTTPError
@@ -46,6 +47,8 @@ _REQUIRED_META_KEYS = ("app_key", "app_secret", "refresh_token")
 # from exhausting sidecar memory.
 _STREAM_QUEUE_MAX = 2048  # in-flight ticks before drop-oldest kicks in
 _CALL_SUBS_MAX = 500  # canonical_ids tracked per gRPC call
+_SEARCH_CACHE_TTL_S = 300  # 5 min
+_SEARCH_CACHE_MAX_ENTRIES = 1000
 
 
 class BrokerServicer(broker_pb2_grpc.BrokerServicer):
@@ -61,6 +64,9 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         self._hashes_loaded_once = False
         # 8a C3 -- trade write-path state
         self._replay_cache: dict[tuple[str, str], broker_pb2.PlaceOrderResponse] = {}
+        self._search_cache: dict[
+            tuple[str, int], tuple[list[broker_pb2.Contract], float]
+        ] = {}
         self._simulator: Any = None  # set by D4 lifespan; tests inject directly
         self._poller: Any = None  # set by D4 lifespan; tests inject directly
 
@@ -465,17 +471,75 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         )
         return broker_pb2.PlaceBracketResponse()
 
-    async def SearchContracts(self, request, context):  # noqa: N802
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Schwab contract search lands in Phase 7b"
-        )
-        return broker_pb2.SearchContractsResponse()
+    async def SearchContracts(  # noqa: N802
+        self,
+        request: broker_pb2.SearchContractsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.SearchContractsResponse:
+        import time as _time
 
-    async def OrderEvent(self, request, context):  # noqa: N802
-        # Server-streaming RPC.
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Schwab OrderEvent stream lands in Phase 8"
-        )
+        from sidecar_schwab.client import SchwabHTTPError
+
+        if not request.query:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "query must not be empty"
+            )
+        if self._client is None:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "schwab sidecar not configured",
+            )
+
+        cache_key = (request.query.upper(), request.asset_class)
+        now = _time.monotonic()
+        cached = self._search_cache.get(cache_key)
+        if cached is not None and now - cached[1] < _SEARCH_CACHE_TTL_S:
+            return broker_pb2.SearchContractsResponse(contracts=cached[0])
+
+        await self._client.ensure_fresh_token()
+        try:
+            results = await self._client.search_instruments(query=request.query)
+        except SchwabHTTPError as exc:
+            await self._abort_for_http(context, exc)
+        except (OSError, TimeoutError) as exc:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, f"schwab transport: {exc}")
+
+        contracts = [
+            broker_pb2.Contract(
+                symbol=r.get("symbol", ""),
+                exchange=r.get("exchange", ""),
+                asset_class=_asset_type_to_enum(r.get("assetType", "")),
+            )
+            for r in results
+        ]
+        if len(self._search_cache) >= _SEARCH_CACHE_MAX_ENTRIES:
+            oldest = min(self._search_cache, key=lambda k: self._search_cache[k][1])
+            del self._search_cache[oldest]
+        self._search_cache[cache_key] = (contracts, now)
+        return broker_pb2.SearchContractsResponse(contracts=contracts)
+
+    async def OrderEvent(  # noqa: N802
+        self,
+        request: broker_pb2.AccountRef,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[broker_pb2.OrderEventMessage]:
+        if self._poller is None:
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "schwab order-event stream not yet wired (Phase 8a D4)",
+            )
+            return
+
+        fan_out = self._poller.fan_out_for(account_number=request.account_number)
+        queue: asyncio.Queue[broker_pb2.OrderEventMessage | None] = fan_out.subscribe()
+        try:
+            while context.is_active():
+                ev = await queue.get()
+                if ev is None:
+                    break
+                yield ev
+        finally:
+            fan_out.unsubscribe(queue)
 
     async def _get_or_init_schwab_streamer(self):
         lock = self.__dict__.setdefault("_streamer_lock", asyncio.Lock())

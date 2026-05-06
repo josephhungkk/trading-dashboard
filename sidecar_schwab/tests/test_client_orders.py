@@ -16,6 +16,7 @@ def _make_client():
     sd.replace_order = AsyncMock()
     sd.account_orders = AsyncMock()
     sd.order_details = AsyncMock()
+    sd.instruments = AsyncMock()
     sd.tokens = MagicMock(access_token="a", refresh_token="r")
     sd._session = MagicMock(headers={})
     tokens = MagicMock()
@@ -64,6 +65,32 @@ async def test_get_orders_since_returns_list():
     result = await client.get_orders_since("HASH", "2026-05-06T00:00:00Z")
 
     assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_instruments_returns_list():
+    client, sd = _make_client()
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"instruments": [{"symbol": "AAPL"}]}
+    sd.instruments.return_value = resp
+
+    result = await client.search_instruments("AAPL")
+
+    assert result == [{"symbol": "AAPL"}]
+
+
+@pytest.mark.asyncio
+async def test_search_instruments_empty_response_returns_empty_list():
+    client, sd = _make_client()
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"instruments": None}
+    sd.instruments.return_value = resp
+
+    result = await client.search_instruments("AAPL")
+
+    assert result == []
 
 
 @pytest.mark.asyncio

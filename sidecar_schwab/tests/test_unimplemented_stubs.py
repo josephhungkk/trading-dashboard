@@ -18,8 +18,8 @@ from sidecar_schwab.handlers import BrokerServicer
         # CancelOrder flipped live in Phase 8a C4 — see test_handlers_cancel_modify.py
         # ModifyOrder flipped live in Phase 8a C4 — see test_handlers_cancel_modify.py
         ("PlaceBracket", pb.PlaceBracketRequest()),
-        ("SearchContracts", pb.SearchContractsRequest()),
-        ("OrderEvent", pb.AccountRef()),
+        # SearchContracts flipped live in Phase 8a C5 — see test_handlers_stream_search.py
+        # OrderEvent flipped live in Phase 8a C5 — see test_handlers_stream_search.py
     ],
 )
 async def test_unimplemented_returns_unimplemented(method, request_proto):
