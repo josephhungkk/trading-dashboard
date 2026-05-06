@@ -147,9 +147,9 @@ async def _validate_pre_dispatch(
         {
             "error": {
                 "code": "unsupported_order_type_for_broker",
-                "broker": broker_id,
+                "broker_id": broker_id,
                 "order_type": order_type,
-                "time_in_force": tif,
+                "tif": tif,
                 "notes": notes,
             }
         },

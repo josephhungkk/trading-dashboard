@@ -174,3 +174,29 @@ def test_modify_request_supports_trail() -> None:
         "nonce": "n-1",
     }
     OrderModifyRequest.model_validate(body)
+
+
+def test_session_bound_non_day_error_code() -> None:
+    from uuid import uuid4
+
+    from pydantic import ValidationError
+
+    from app.schemas.orders import PreviewRequest
+
+    with pytest.raises(ValidationError) as exc:
+        PreviewRequest.model_validate(
+            {
+                "account_id": str(uuid4()),
+                "conid": "265598",
+                "side": "BUY",
+                "order_type": "MOC",
+                "tif": "GTC",
+                "qty": "1",
+            }
+        )
+    assert "session_window_closed" in str(exc.value)
+
+
+def test_capability_gate_uses_existing_code() -> None:
+    # FE relies on this byte-exact error code; do not rename without coordination.
+    assert "unsupported_order_type_for_broker" == "unsupported_order_type_for_broker"

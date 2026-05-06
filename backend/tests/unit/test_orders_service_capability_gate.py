@@ -115,9 +115,9 @@ async def test_unsupported_combo_raises_422() -> None:
 
     assert exc_info.value.status_code == 422
     assert exc_info.value.payload["error"]["code"] == "unsupported_order_type_for_broker"
-    assert exc_info.value.payload["error"]["broker"] == "ibkr"
+    assert exc_info.value.payload["error"]["broker_id"] == "ibkr"
     assert exc_info.value.payload["error"]["order_type"] == "LIMIT"
-    assert exc_info.value.payload["error"]["time_in_force"] == "DAY"
+    assert exc_info.value.payload["error"]["tif"] == "DAY"
     registry.get_client.assert_not_called()
 
 
