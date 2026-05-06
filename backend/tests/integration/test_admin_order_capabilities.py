@@ -108,7 +108,7 @@ def test_post_full_row_succeeds(admin_overrides: None) -> None:
 def test_post_partial_body_rejected_400(admin_overrides: None) -> None:
     body = {"broker_id": "ibkr", "is_supported": True}
     status_code, _payload = asyncio.run(_post_with_nonce(body))
-    assert status_code in (400, 422), f"expected 400/422 for partial body, got {status_code}"
+    assert status_code == 422
 
 
 def test_post_unknown_order_type_rejected_400(admin_overrides: None) -> None:
