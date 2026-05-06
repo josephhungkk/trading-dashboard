@@ -49,3 +49,15 @@ SCHWAB_PLACE_ORDER_DURATION_MS = Histogram(
     "Schwab PlaceOrder REST call duration in milliseconds.",
     buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
 )
+
+SCHWAB_CANCEL_ORDER_DURATION_MS = Histogram(
+    "schwab_cancel_order_duration_ms",
+    "Schwab CancelOrder REST call duration in milliseconds.",
+    buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
+)
+
+SCHWAB_MODIFY_ORDER_DURATION_MS = Histogram(
+    "schwab_modify_order_duration_ms",
+    "Schwab ModifyOrder REST call duration in milliseconds.",
+    buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
+)

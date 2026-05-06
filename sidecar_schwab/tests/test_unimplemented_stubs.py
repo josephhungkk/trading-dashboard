@@ -1,4 +1,5 @@
 """Phase 7a B10 - write + streaming RPCs return UNIMPLEMENTED (Phase 8/7b deferrals)."""
+
 from unittest.mock import AsyncMock, MagicMock
 
 import grpc
@@ -9,19 +10,22 @@ from sidecar_schwab.handlers import BrokerServicer
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('method,request_proto', [
-    ('GetContract',     pb.ContractRef()),
-    # PlaceOrder flipped live in Phase 8a C3 — see test_handlers_place_order.py
-    ('CancelOrder',     pb.CancelOrderRequest()),
-    ('ModifyOrder',     pb.ModifyOrderRequest()),
-    ('PlaceBracket',    pb.PlaceBracketRequest()),
-    ('SearchContracts', pb.SearchContractsRequest()),
-    ('OrderEvent',      pb.AccountRef()),
-])
+@pytest.mark.parametrize(
+    "method,request_proto",
+    [
+        ("GetContract", pb.ContractRef()),
+        # PlaceOrder flipped live in Phase 8a C3 — see test_handlers_place_order.py
+        # CancelOrder flipped live in Phase 8a C4 — see test_handlers_cancel_modify.py
+        # ModifyOrder flipped live in Phase 8a C4 — see test_handlers_cancel_modify.py
+        ("PlaceBracket", pb.PlaceBracketRequest()),
+        ("SearchContracts", pb.SearchContractsRequest()),
+        ("OrderEvent", pb.AccountRef()),
+    ],
+)
 async def test_unimplemented_returns_unimplemented(method, request_proto):
     servicer = BrokerServicer()
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
-    ctx.abort = AsyncMock(side_effect=grpc.RpcError('aborted'))
+    ctx.abort = AsyncMock(side_effect=grpc.RpcError("aborted"))
     fn = getattr(servicer, method)
     try:
         await fn(request_proto, ctx)

@@ -348,16 +348,116 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             await context.abort(grpc.StatusCode.UNAVAILABLE, body)
 
     async def CancelOrder(self, request, context):  # noqa: N802
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Schwab CancelOrder lands in Phase 8"
-        )
-        return broker_pb2.CancelOrderResponse()
+        import time as _time
+
+        from sidecar_schwab.client import SchwabHTTPError
+        from sidecar_schwab.metrics import SCHWAB_CANCEL_ORDER_DURATION_MS
+
+        if request.broker_order_id.startswith("SIM-") and self._simulator is not None:
+            self._simulator.cancel(request.broker_order_id)
+            return broker_pb2.CancelOrderResponse(accepted=True)
+
+        if self._client is None:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "schwab sidecar not configured",
+            )
+
+        account_hash = self._client.hash_for(request.account_number)
+        if not account_hash:
+            await context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"unknown account_number: {request.account_number}",
+            )
+
+        await self._client.ensure_fresh_token()
+
+        t0 = _time.monotonic()
+        try:
+            await self._client.cancel_order(
+                account_hash=account_hash,
+                order_id=request.broker_order_id,
+            )
+        except SchwabHTTPError as exc:
+            SCHWAB_CANCEL_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await self._abort_for_http(context, exc)
+        except (OSError, TimeoutError) as exc:
+            SCHWAB_CANCEL_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, f"schwab transport: {exc}")
+
+        SCHWAB_CANCEL_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+        if self._poller is not None:
+            self._poller.activate_fast(account_number=request.account_number)
+        return broker_pb2.CancelOrderResponse(accepted=True)
 
     async def ModifyOrder(self, request, context):  # noqa: N802
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Schwab ModifyOrder lands in Phase 8"
+        import time as _time
+
+        from sidecar_schwab.client import SchwabHTTPError
+        from sidecar_schwab.metrics import SCHWAB_MODIFY_ORDER_DURATION_MS
+        from sidecar_schwab.normalize import to_schwab_order_payload
+
+        if request.broker_order_id.startswith("SIM-") and self._simulator is not None:
+            new_id = self._simulator.modify(request.broker_order_id, request)
+            return broker_pb2.ModifyOrderResponse(
+                broker_order_id=new_id,
+                status="submitted",
+                parent_broker_order_id=request.broker_order_id,
+            )
+
+        if self._client is None:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "schwab sidecar not configured",
+            )
+
+        account_hash = self._client.hash_for(request.account_number)
+        if not account_hash:
+            await context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"unknown account_number: {request.account_number}",
+            )
+
+        await self._client.ensure_fresh_token()
+
+        side = broker_pb2.OrderSide.Name(request.side)
+        order_type = broker_pb2.OrderType.Name(request.order_type).removeprefix(
+            "ORDER_TYPE_"
         )
-        return broker_pb2.ModifyOrderResponse()
+        tif = broker_pb2.TimeInForce.Name(request.tif).removeprefix("TIF_")
+        payload = to_schwab_order_payload(
+            side=side,
+            order_type=order_type,
+            tif=tif,
+            qty=request.qty,
+            symbol=request.contract.symbol or request.contract.conid,
+            limit_price=request.limit_price.value,
+            stop_price=request.stop_price.value,
+        )
+
+        t0 = _time.monotonic()
+        try:
+            result = await self._client.replace_order(
+                account_hash=account_hash,
+                order_id=request.broker_order_id,
+                payload=payload,
+            )
+        except SchwabHTTPError as exc:
+            SCHWAB_MODIFY_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await self._abort_for_http(context, exc)
+        except (OSError, TimeoutError) as exc:
+            SCHWAB_MODIFY_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, f"schwab transport: {exc}")
+
+        SCHWAB_MODIFY_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+
+        if self._poller is not None:
+            self._poller.activate_fast(account_number=request.account_number)
+        return broker_pb2.ModifyOrderResponse(
+            broker_order_id=result["broker_order_id"],
+            status="submitted",
+            parent_broker_order_id=request.broker_order_id,
+        )
 
     async def PlaceBracket(self, request, context):  # noqa: N802
         await context.abort(
