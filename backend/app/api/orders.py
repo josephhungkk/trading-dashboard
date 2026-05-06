@@ -30,6 +30,7 @@ from app.schemas.orders import (
 from app.services import orders_service
 from app.services.brokers import BrokerRegistry, BrokerSidecarUnavailable
 from app.services.config import ConfigService
+from app.services.order_capability_service import OrderCapabilityService
 from app.services.orders_service import CancelUnavailable, PreviewUnavailable, RedisLike
 from app.services.orders_sse import order_events_generator
 
@@ -61,6 +62,17 @@ def get_orders_redis(request: Request) -> RedisLike:
 
 
 RedisDep = Annotated[RedisLike, Depends(get_orders_redis)]
+
+
+def get_order_capability_service(db: DbDep, redis: RedisDep) -> OrderCapabilityService:
+    # Both modules declare structurally-identical RedisLike Protocols (only `publish`
+    # is needed). mypy treats them as distinct nominal types, so cast at the boundary.
+    from app.services.order_capability_service import RedisLike as CapabilityRedisLike
+
+    return OrderCapabilityService(db=db, redis=cast(CapabilityRedisLike, redis))
+
+
+CapabilityDep = Annotated[OrderCapabilityService, Depends(get_order_capability_service)]
 
 
 @router.get("", response_model=OrderListResponse)
@@ -103,6 +115,7 @@ async def place_order(
     db: DbDep,
     redis: RedisDep,
     registry: RegistryDep,
+    capability: CapabilityDep,
 ) -> OrderResponse | JSONResponse:
     try:
         body = await request.json()
@@ -113,6 +126,7 @@ async def place_order(
             db=db,
             redis=redis,
             registry=registry,
+            capability=capability,
             request_data=body,
         )
     except ValidationError as exc:
@@ -190,6 +204,7 @@ async def preview_order(
     redis: RedisDep,
     registry: RegistryDep,
     identity: IdentityDep,
+    capability: CapabilityDep,
 ) -> PreviewResponse | JSONResponse:
     try:
         body = await request.json()
@@ -200,6 +215,7 @@ async def preview_order(
             db=db,
             redis=redis,
             registry=registry,
+            capability=capability,
             request_data=body,
             user_key=identity.email,
         )
@@ -222,6 +238,7 @@ async def modify_order(
     db: DbDep,
     redis: RedisDep,
     registry: RegistryDep,
+    capability: CapabilityDep,
 ) -> dict[str, Any] | JSONResponse:
     started = time.perf_counter()
     try:
@@ -233,6 +250,7 @@ async def modify_order(
             redis=redis,
             config=cfg,
             registry=registry,
+            capability=capability,
             order_id=order_id,
             request=OrderModifyRequest.model_validate(body),
         )

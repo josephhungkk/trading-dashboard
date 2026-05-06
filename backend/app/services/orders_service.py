@@ -36,6 +36,7 @@ from app.schemas.orders import (
 from app.services.brokers import BrokerRegistry, BrokerSidecarTimeout, BrokerSidecarUnavailable
 from app.services.config import ConfigService
 from app.services.ibkr_maintenance import BrokerMaintenance, compute_broker_maintenance
+from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 from app.services.orders_policy import get_account_policy, is_kill_switch_active
 
 _MODIFY_REPLAY_CACHE: dict[tuple[UUID, str], tuple[float, dict[str, Any]]] = {}
@@ -110,12 +111,68 @@ def cap_status(filled: Decimal, cap: Decimal) -> Literal["ok", "near", "exceeded
     return "ok"
 
 
+async def _validate_pre_dispatch(
+    *,
+    cfg: ConfigService,
+    capability: OrderCapabilityService,
+    broker_label: str,
+    order_type: str,
+    tif: str,
+    skip_operational_checks: bool = False,
+) -> None:
+    """Validate order controls that must run before sidecar dispatch."""
+    broker_id = _capability_broker_id(broker_label)
+    if not skip_operational_checks:
+        if await is_kill_switch_active(cfg):
+            raise PreviewUnavailable(
+                503,
+                {"error": {"code": "broker_kill_switch_enabled", "broker": broker_id}},
+            )
+
+        now = _utcnow()
+        maintenance = compute_broker_maintenance(now)
+        if maintenance.active:
+            raise PreviewUnavailable(
+                503,
+                {"error": {"code": "broker_maintenance", "broker": broker_id}},
+                {"Retry-After": str(_retry_after(now, maintenance))},
+            )
+
+    if await capability.is_supported(broker_id, order_type, tif):
+        return
+
+    notes = await capability.get_notes(broker_id, order_type, tif)
+    raise PreviewUnavailable(
+        422,
+        {
+            "error": {
+                "code": "unsupported_order_type_for_broker",
+                "broker": broker_id,
+                "order_type": order_type,
+                "time_in_force": tif,
+                "notes": notes,
+            }
+        },
+    )
+
+
+def _capability_broker_id(broker_label: str) -> str:
+    if broker_label in KNOWN_BROKERS:
+        return broker_label
+    prefix = broker_label.split("-", 1)[0]
+    if prefix in KNOWN_BROKERS:
+        return prefix
+    # Legacy IBKR labels are account-scope labels (e.g. isa-paper), not broker ids.
+    return "ibkr"
+
+
 async def preview_order(
     *,
     cfg: ConfigService,
     db: AsyncSession,
     redis: RedisLike,
     registry: BrokerRegistry,
+    capability: OrderCapabilityService,
     request_data: dict[str, Any],
     user_key: str,
 ) -> PreviewResponse:
@@ -139,6 +196,14 @@ async def preview_order(
     await _check_rate_limit(redis, user_key)
 
     account = await _resolve_account(db, request.account_id)
+    await _validate_pre_dispatch(
+        cfg=cfg,
+        capability=capability,
+        broker_label=account.gateway_label,
+        order_type=request.order_type,
+        tif=request.tif,
+        skip_operational_checks=True,
+    )
     client = await registry.get_client(account.gateway_label)
     contract = await _resolve_contract(client, request.conid)
     qty = Decimal(request.qty)
@@ -181,6 +246,7 @@ async def place_order(
     db: AsyncSession,
     redis: RedisLike,
     registry: BrokerRegistry,
+    capability: OrderCapabilityService,
     request_data: dict[str, Any],
 ) -> OrderResponse:
     if await is_kill_switch_active(cfg):
@@ -201,6 +267,14 @@ async def place_order(
     request = PlaceOrderRequest.model_validate(request_data)
     request = request.model_copy(update={"qty": _canonicalize_qty(request.qty)})
     account = await _resolve_account(db, request.account_id)
+    await _validate_pre_dispatch(
+        cfg=cfg,
+        capability=capability,
+        broker_label=account.gateway_label,
+        order_type=request.order_type,
+        tif=request.tif,
+        skip_operational_checks=True,
+    )
     client = await registry.get_client(account.gateway_label)
     contract = await _resolve_contract(client, request.conid)
     qty = Decimal(request.qty)
@@ -279,6 +353,7 @@ async def modify_order(
     redis: RedisLike,
     config: ConfigService,
     registry: BrokerRegistry,
+    capability: OrderCapabilityService,
     *,
     order_id: UUID,
     request: OrderModifyRequest,
@@ -338,7 +413,27 @@ async def modify_order(
     if await config.get_bool("broker", "kill_switch_enabled", default=False):
         raise PreviewUnavailable(503, {"error": "kill_switch"})
 
+    now = _utcnow()
+    maintenance = compute_broker_maintenance(now)
+    if maintenance.active:
+        raise PreviewUnavailable(
+            503,
+            {
+                "detail": f"IBKR {maintenance.window} maintenance window in progress",
+                "broker_maintenance": maintenance.model_dump(mode="json"),
+            },
+            {"Retry-After": str(_retry_after(now, maintenance))},
+        )
+
     account = await _resolve_account(db, row["account_id"])
+    await _validate_pre_dispatch(
+        cfg=config,
+        capability=capability,
+        broker_label=account.gateway_label,
+        order_type=str(row["order_type"]),
+        tif=request.tif,
+        skip_operational_checks=True,
+    )
     qty_text = canonicalize_qty(request.qty)
     existing_limit_price = str(row["limit_price"]) if row["limit_price"] is not None else None
     new_limit_price = request.limit_price or existing_limit_price
