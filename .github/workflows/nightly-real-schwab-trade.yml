@@ -1,0 +1,36 @@
+name: nightly-real-schwab-trade
+
+on:
+  schedule:
+    - cron: "0 6 * * 1-5"  # 06:00 UTC Mon-Fri (US market pre-open)
+  workflow_dispatch:
+
+jobs:
+  nightly-schwab-trade-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SCHWAB_APP_KEY: ${{ secrets.SCHWAB_APP_KEY }}
+      SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+      SCHWAB_PAPER_ACCOUNT_HASH: ${{ secrets.SCHWAB_PAPER_ACCOUNT_HASH }}
+      SCHWAB_PAPER_SYMBOL: ${{ secrets.SCHWAB_PAPER_SYMBOL || 'F' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run real Schwab trade E2E (Phase 8a place + cancel + modify)
+        working-directory: backend
+        run: |
+          uv run pytest tests/real_broker/ -m real_schwab -v \
+            --tb=short --no-header -q
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-schwab-trade-results-${{ github.run_id }}
+          path: backend/test-results/
+          retention-days: 30

@@ -73,3 +73,6 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "real_schwab: requires SCHWAB_APP_KEY/SCHWAB_APP_SECRET/SCHWAB_PAPER_ACCOUNT_HASH env vars; live API calls",
+]

@@ -1,0 +1,36 @@
+name: weekly-real-schwab-drift
+
+on:
+  schedule:
+    - cron: "0 7 * * 0"  # 07:00 UTC Sunday
+  workflow_dispatch:
+
+jobs:
+  capability-drift-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SCHWAB_APP_KEY: ${{ secrets.SCHWAB_APP_KEY }}
+      SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+      SCHWAB_PAPER_ACCOUNT_HASH: ${{ secrets.SCHWAB_PAPER_ACCOUNT_HASH }}
+      SCHWAB_PAPER_SYMBOL: ${{ secrets.SCHWAB_PAPER_SYMBOL || 'F' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run capability drift checks
+        working-directory: backend
+        run: |
+          uv run pytest tests/real_broker/test_real_schwab_capability_drift.py \
+            -m real_schwab -v --tb=long --no-header
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report-${{ github.run_id }}
+          path: backend/test-results/
+          retention-days: 90
