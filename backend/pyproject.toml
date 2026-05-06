@@ -76,4 +76,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "real_schwab: requires SCHWAB_APP_KEY/SCHWAB_APP_SECRET/SCHWAB_PAPER_ACCOUNT_HASH env vars; live API calls",
+    "real_futu: requires FUTU_HOST/FUTU_PORT env vars; live futu OpenD calls",
 ]

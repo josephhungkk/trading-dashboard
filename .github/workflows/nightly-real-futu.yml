@@ -1,0 +1,35 @@
+name: nightly-real-futu
+
+on:
+  schedule:
+    # Mon-Fri 01:00 UTC = 09:00 HKT (HKEX is closed but futu paper accepts orders 24/5)
+    - cron: "0 1 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  real-futu:
+    runs-on: self-hosted  # NUC15PRO — only host with WG access to futu OpenD at 10.10.0.x
+    timeout-minutes: 15
+    env:
+      FUTU_HOST: ${{ secrets.FUTU_HOST }}
+      FUTU_PORT: ${{ secrets.FUTU_PORT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run Futu real-broker E2E
+        working-directory: backend
+        run: |
+          uv run pytest tests/real_broker/test_real_futu_e2e_modify.py \
+            -m real_futu -v --tb=short --no-header -q
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-real-futu-results-${{ github.run_id }}
+          path: backend/.pytest_cache/
+          retention-days: 7
