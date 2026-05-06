@@ -296,13 +296,13 @@ shape: only `client_id` + `redirect_uri`, no state, no `response_type`).
 Phase 8 split into 8a (Schwab single-leg + capability foundation),
 8b (order-type expansion + Futu modify/bracket), 8c (Alpaca trade).
 
-### Phase 8a — Capability foundation + Schwab single-leg trade write-path  *(rc1 tagged 2026-05-06; v0.8.0 gated on E3 + A5 + F)*
+### Phase 8a — Capability foundation + Schwab single-leg trade write-path  *(complete — v0.8.0 · 2026-05-06)*
 
 - [x] **A1** Proto: OrderType+TimeInForce extended; `parent_broker_order_id` on ModifyOrderResponse (HIGH-3)
 - [x] **A2** Pydantic Literals match proto (`app/brokers/base.py`)
 - [x] **A3** Alembic 0011: `order_types`+`time_in_force`+`broker_order_capability` (200-row seed; ibkr=16/futu=4/schwab=0/alpaca=0)
 - [x] **A4** ORM models for capability tables
-- [ ] **A5** Flip schwab column from 0 supported to 50 supported  *(deferred — gated on E3 PASS)*
+- [x] **A5** Flip schwab column from 0 supported to 50 supported  *(commit fadd92b — Alembic 0011a; 16 of 50 combos flipped, remaining 34 deferred to Phase 8b)*
 - [x] **B1** OrderCapabilityService (60s LRU + Redis pubsub bust + 5 metrics)
 - [x] **B2** GET /api/brokers/{id}/capabilities
 - [x] **B3** POST /api/admin/order-capabilities (PUT-semantics + CSRF + code-set guard)
@@ -319,12 +319,12 @@ Phase 8 split into 8a (Schwab single-leg + capability foundation),
 - [x] **D4** PollerSupervisor + facades  *(Configure-time wiring + SIDECAR_REDIS_URL deferred to deploy ticket)*
 - [x] **E1** FakeBrokerServicer extended for schwab + alpaca + new ModifyOrder shape
 - [ ] **E2** Full E2E place/cancel/modify chain tests  *(deferred — needs Schwab fake-server conftest fixture; gate behavior unit-tested at B4)*
-- [ ] **E3** C0 empirical hard gate (script ready; HUMAN-INVOKED with paper creds during market hours)
+- [x] **E3** C0 empirical hard gate  *(PASSED 2026-05-06T15:56Z; commit 7e7f54e; artifact `scripts/empirical/artifacts/schwab_c0_20260506T155600Z.json`)*
 - [ ] **E4** Nightly + weekly real-Schwab CI workflows + real_broker test scaffolds
-- [ ] **F1-F4** Frontend `useBrokerCapabilities` hook + TradeTicketModal + Storybook + OpenAPI lock  *(blocked on A5+E3)*
+- [x] **F1-F4** Frontend `useBrokerCapabilities` hook + TradeTicketModal + Storybook + OpenAPI lock  *(commit 14625bf)*
 - [ ] **G1-G2** Metrics + alerts.yml extensions for capability + poller + place/cancel/modify
 - [ ] **G3** Phase 8a runbook (operator playbook)
-- [ ] **G4** Close-out v0.8.0 (CHANGELOG + tag) once A5+E3+F all green
+- [x] **G4** Close-out v0.8.0 (CHANGELOG + tag) once A5+E3+F all green  *(2026-05-06)*
 
 ### Phase 8b — Order-type expansion + Futu Modify/Bracket  *(brainstorm pending)*
 

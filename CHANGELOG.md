@@ -5,9 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
-## [0.8.0-rc1] — 2026-05-06
+## [0.8.0] — 2026-05-06
 
-### Added — Phase 8a capability foundation + Schwab trade write-path
+### Added — Phase 8a complete (post-rc1: C0 PASS + A5 flip + Chunk F frontend)
+
+Phase 8a v0.8.0-rc1 (commit `db43993`) shipped Chunks A-E1 + G. The rc1 close-out called out 5 deferred items gating v0.8.0:
+
+- **C0 empirical hard-gate**: PASSED 2026-05-06T15:56Z against real Schwab paper account; all 8 assertions green. Artifact at `scripts/empirical/artifacts/schwab_c0_20260506T155600Z.json` (commit `7e7f54e`). Empirical finding driven into the implementation: **Schwab REJECTS `clientOrderId` as a top-level place_order field** with HTTP 400. The sidecar's `to_schwab_order_payload` already correctly omits it; backend tracks `(client_order_id ↔ broker_order_id)` mapping locally. Script changed `clientOrderId round-trips` assertion → `broker_order_id round-trips` assertion.
+- **A5 — Alembic 0011a Schwab capability flip**: 16 (type, TIF) combos flipped from `is_supported=FALSE` to `TRUE` (MARKET/LIMIT/STOP/STOP_LIMIT × DAY/GTC/IOC/FOK). Migration applied to prod (commit `fadd92b`).
+- **Chunk F — Frontend capability-aware trade ticket** (commit `14625bf`):
+  - F1: `useBrokerCapabilities()` hook with TanStack Query 5min staleTime + SSE invalidation on `app_config:invalidate:order_capabilities`. `isSupported(type, tif)` + `notesFor(type, tif)` helpers.
+  - F2: `TradeTicketModal` lazy-disables unsupported combos with notes-driven tooltips. Loading + capability-error states handled gracefully.
+  - F3: 3 new Storybook stories (`SchwabAccountReady`, `CapabilityLoading`, `CapabilityError`). Storybook stories glob widened to `src/features/**/*.stories.@(ts|tsx)`.
+  - F4: OpenAPI snapshot lock (`frontend/openapi-snapshot.json` + `openapi-snapshot.test.ts`) asserts the Phase 8a paths + components.
+  - Side fix: `pnpm add @tanstack/react-query` (was missing) + `test-utils/render-with-query.tsx` helper.
+
+### Side-fixes shipped en route to v0.8.0
+
+- **Admin endpoint `GET /api/admin/brokers/{label}/account-hashes`** (commits `2774bb6` + `c098688`): operator-only endpoint that returns sidecar-side `(account_number, account_hash, mode, gateway_label, currency_base)` tuples by calling the sidecar's `ListManagedAccounts` gRPC directly. Bypasses `AccountResponse` boundary stripping. Used to discover `SCHWAB_PAPER_ACCOUNT_HASH` for the C0 script. Surfaces sidecar errors as 502/504 with structured detail (grpc_code + hint) instead of opaque 500.
+- **Schwab sidecar tokens.db pre-seed** (commit `d4e0a5e`): `SchwabClient.from_credentials` now writes the schwabdev SQLite tokens table from the TokenCache before constructing `ClientAsync`. Without this, schwabdev's `Tokens.__init__` ran `update_tokens(force_refresh_token=True)` which calls `input()` and EOFErrored in our non-interactive container, leaving the sidecar in `FAILED_PRECONDITION` forever after every redeploy. Symptom resolved: OAuth re-authorize via the UI now correctly seeds the sidecar through the Configure path.
+- **Async aiohttp ClientResponse.json await fix** (commit `5f651e9`): `_call` now detects awaitable `.json()` from `ClientAsync` (vs the parsed-JSON return from sync `Client`) and awaits it. Previously every read RPC after Configure returned a coroutine and downstream callers blew up with `TypeError: 'coroutine' object is not iterable`.
+- **C0 empirical script methods + payload corrections**: `order_place` → `place_order` (schwabdev exposes the inverted name), removed `clientOrderId` from payload (Schwab rejects), seeded tokens.db with `access_token_issued` 2h in the past so schwabdev auto-refreshes from refresh_token without hitting interactive OAuth.
+
+30+ commits since v0.7.4. Production cut-over complete.
+
+### Original rc1 content (Phase 8a chunks A-E1 + G — preserved verbatim)
 
 23 commits since v0.7.4. First release candidate for Phase 8 trade
 expansion. Production cut-over (`v0.8.0`) is gated on the C0 empirical
