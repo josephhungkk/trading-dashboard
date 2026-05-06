@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Self
 from uuid import UUID
@@ -10,8 +10,20 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.schemas.accounts import BrokerMaintenance
 
 OrderSide = Literal["BUY", "SELL"]
-OrderType = Literal["MARKET", "LIMIT", "STOP"]
-OrderTif = Literal["DAY", "GTC"]
+OrderType = Literal[
+    "MARKET",
+    "LIMIT",
+    "STOP",
+    "STOP_LIMIT",
+    "TRAIL",
+    "TRAIL_LIMIT",
+    "MOC",
+    "MOO",
+    "LOC",
+    "LOO",
+]
+OrderTif = Literal["DAY", "GTC", "IOC", "FOK", "GTD"]
+TrailOffsetType = Literal["AMOUNT", "PERCENT"]
 OrderStatusEnum = Literal[
     "pending_submit",
     "submitted",
@@ -25,6 +37,8 @@ OrderStatusEnum = Literal[
 ]
 CapStatus = Literal["ok", "near", "exceeded"]
 PositionSanityStatus = Literal["ok", "high", "extreme"]
+SESSION_BOUND_ORDER_TYPES = {"MOC", "MOO", "LOC", "LOO"}
+DECIMAL_8_PATTERN = r"^\d+(\.\d{1,8})?$"
 
 
 class ContractSummary(BaseModel):
@@ -37,29 +51,41 @@ class ContractSummary(BaseModel):
 class PreviewRequest(BaseModel):
     account_id: UUID
     conid: str
-    side: Literal["BUY", "SELL"]
-    order_type: Literal["MARKET", "LIMIT", "STOP"]
-    tif: Literal["DAY", "GTC"]
-    qty: str = Field(pattern=r"^\d+(\.\d{1,8})?$")
-    limit_price: str | None = Field(default=None, pattern=r"^\d+(\.\d{1,8})?$")
-    stop_price: str | None = Field(default=None, pattern=r"^\d+(\.\d{1,8})?$")
+    side: OrderSide
+    order_type: OrderType
+    tif: OrderTif
+    qty: str = Field(pattern=DECIMAL_8_PATTERN)
+    limit_price: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
+    stop_price: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
+    trail_offset: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
+    trail_offset_type: TrailOffsetType | None = None
+    trail_limit_offset: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
+    expiry_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
-    @field_validator("qty", "limit_price", "stop_price", mode="before")
+    @field_validator(
+        "qty",
+        "limit_price",
+        "stop_price",
+        "trail_offset",
+        "trail_limit_offset",
+        mode="before",
+    )
     @classmethod
     def _decimal_inputs_to_wire_string(cls, value: object) -> object:
         return _coerce_decimal_8(value)
 
     @model_validator(mode="after")
     def _check_order_type_prices(self) -> Self:
-        if self.order_type == "MARKET":
-            if self.limit_price is not None or self.stop_price is not None:
-                raise ValueError("MARKET orders cannot include limit_price or stop_price")
-        elif self.order_type == "LIMIT":
-            if self.limit_price is None or self.stop_price is not None:
-                raise ValueError("LIMIT orders require limit_price and cannot include stop_price")
-        elif self.order_type == "STOP":
-            if self.stop_price is None or self.limit_price is not None:
-                raise ValueError("STOP orders require stop_price and cannot include limit_price")
+        _validate_order_shape(
+            order_type=self.order_type,
+            tif=self.tif,
+            limit_price=self.limit_price,
+            stop_price=self.stop_price,
+            trail_offset=self.trail_offset,
+            trail_offset_type=self.trail_offset_type,
+            trail_limit_offset=self.trail_limit_offset,
+            expiry_date=self.expiry_date,
+        )
         return self
 
 
@@ -136,9 +162,9 @@ class OrderResponse(BaseModel):
     broker_order_id: str | None
     conid: str
     symbol: str
-    side: Literal["BUY", "SELL"]
-    order_type: Literal["MARKET", "LIMIT", "STOP"]
-    tif: Literal["DAY", "GTC"]
+    side: OrderSide
+    order_type: OrderType
+    tif: OrderTif
     qty: str
     limit_price: str | None
     stop_price: str | None
@@ -225,14 +251,116 @@ def _format_decimal_8(value: Decimal) -> str:
     return format(value.quantize(Decimal("1e-8")), "f")
 
 
+def _validate_order_shape(
+    *,
+    order_type: OrderType,
+    tif: OrderTif,
+    limit_price: str | None,
+    stop_price: str | None,
+    trail_offset: str | None,
+    trail_offset_type: TrailOffsetType | None,
+    trail_limit_offset: str | None,
+    expiry_date: str | None,
+) -> None:
+    trail_fields_present = (
+        trail_offset is not None or trail_offset_type is not None or trail_limit_offset is not None
+    )
+
+    if expiry_date is not None:
+        try:
+            date.fromisoformat(expiry_date)
+        except ValueError as exc:
+            raise ValueError("expiry_date must be a valid ISO date string") from exc
+
+    if order_type in SESSION_BOUND_ORDER_TYPES and tif != "DAY":
+        raise ValueError("session_window_closed: session-bound order types require DAY tif")
+
+    if tif == "GTD" and expiry_date is None:
+        raise ValueError("GTD orders require expiry_date")
+    if tif != "GTD" and expiry_date is not None:
+        raise ValueError("expiry_date can only be supplied when tif is GTD")
+
+    if order_type == "MARKET":
+        if limit_price is not None or stop_price is not None or trail_fields_present:
+            raise ValueError("MARKET orders cannot include price or trail fields")
+    elif order_type == "LIMIT":
+        if limit_price is None or stop_price is not None or trail_fields_present:
+            raise ValueError(
+                "LIMIT orders require limit_price and cannot include stop or trail fields"
+            )
+    elif order_type == "STOP":
+        if stop_price is None or limit_price is not None or trail_fields_present:
+            raise ValueError(
+                "STOP orders require stop_price and cannot include limit or trail fields"
+            )
+    elif order_type == "STOP_LIMIT":
+        if stop_price is None or limit_price is None:
+            raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
+        if trail_fields_present or expiry_date is not None:
+            raise ValueError("STOP_LIMIT orders cannot include trail fields or expiry_date")
+    elif order_type == "TRAIL":
+        if trail_offset is None or trail_offset_type is None:
+            raise ValueError("TRAIL orders require trail_offset and trail_offset_type")
+        if limit_price is not None or stop_price is not None or trail_limit_offset is not None:
+            raise ValueError(
+                "TRAIL orders cannot include limit_price, stop_price, or trail_limit_offset"
+            )
+    elif order_type == "TRAIL_LIMIT":
+        if trail_offset is None or trail_offset_type is None or trail_limit_offset is None:
+            raise ValueError(
+                "TRAIL_LIMIT orders require trail_offset, trail_offset_type, and trail_limit_offset"
+            )
+        if limit_price is not None or stop_price is not None:
+            raise ValueError("TRAIL_LIMIT orders cannot include limit_price or stop_price")
+    elif order_type in {"MOC", "MOO"}:
+        if limit_price is not None or stop_price is not None or trail_fields_present:
+            raise ValueError("MOC and MOO orders cannot include price or trail fields")
+    elif order_type in {"LOC", "LOO"}:
+        if limit_price is None:
+            raise ValueError("LOC and LOO orders require limit_price")
+        if stop_price is not None or trail_fields_present:
+            raise ValueError("LOC and LOO orders cannot include stop or trail fields")
+
+
 class OrderModifyRequest(BaseModel):
-    """PUT /api/orders/{id} body. account_id/conid/side/order_type immutable."""
+    """PUT /api/orders/{id} body. account_id/conid/side immutable."""
 
     nonce: str = Field(min_length=1, max_length=128)
     qty: str = Field(pattern=r"^\d+(\.\d+)?$")
     limit_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
-    tif: Literal["DAY", "GTC"]
+    order_type: OrderType
+    tif: OrderTif
     stop_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
+    trail_offset: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
+    trail_offset_type: TrailOffsetType | None = None
+    trail_limit_offset: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
+    expiry_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator(
+        "qty",
+        "limit_price",
+        "stop_price",
+        "trail_offset",
+        "trail_limit_offset",
+        mode="before",
+    )
+    @classmethod
+    def _decimal_inputs_to_wire_string(cls, value: object) -> object:
+        return _coerce_decimal_8(value)
+
+    @model_validator(mode="after")
+    def _check_order_type_prices(self) -> Self:
+        _validate_order_shape(
+            order_type=self.order_type,
+            tif=self.tif,
+            limit_price=self.limit_price,
+            stop_price=self.stop_price,
+            trail_offset=self.trail_offset,
+            trail_offset_type=self.trail_offset_type,
+            trail_limit_offset=self.trail_limit_offset,
+            expiry_date=self.expiry_date,
+        )
+        return self
 
 
 class OrderBracketLeg(BaseModel):
