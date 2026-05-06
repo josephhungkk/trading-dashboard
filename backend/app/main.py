@@ -40,6 +40,7 @@ from app.services.config_cache import ConfigCache
 from app.services.order_event_consumer import OrderEventConsumer
 from app.services.pending_fills_sweeper import PendingFillsSweeper
 from app.services.pending_submit_watchdog import PendingSubmitWatchdog
+from app.services.postgres_listen_bridge import PostgresListenBridge
 from app.services.quotes.instruments_seed import seed_instruments_from_positions
 
 configure_logging()
@@ -50,6 +51,12 @@ log = structlog.get_logger(__name__)
 async def lifespan(_app: FastAPI) -> Any:
     redis = Redis.from_url(settings.redis_url, decode_responses=False)
     _app.state.redis = redis
+    # Build plain postgresql:// DSN for asyncpg (strip +asyncpg driver prefix)
+    _listen_dsn = getattr(settings, "DATABASE_URL_LISTEN", None) or settings.database_url.replace(
+        "+asyncpg", "", 1
+    )
+    bridge = PostgresListenBridge(dsn=_listen_dsn, redis=redis)
+    bridge_task: asyncio.Task[None] = asyncio.create_task(bridge.run())
     config_cache = ConfigCache(redis, "config:invalidate", "config", ttl_seconds=300)
     secrets_cache = ConfigCache(redis, "config:invalidate:secrets", "secret", ttl_seconds=300)
     fernet = get_fernet(settings.secret_key, settings.secret_key_prev)
@@ -128,6 +135,9 @@ async def lifespan(_app: FastAPI) -> Any:
         if broker_registry is not None:
             await broker_registry.close()
 
+        bridge.stop()
+        bridge_task.cancel()
+        await asyncio.gather(bridge_task, return_exceptions=True)
         listener_config.cancel()
         listener_secrets.cancel()
         for t in (listener_config, listener_secrets):
