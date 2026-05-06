@@ -7,6 +7,7 @@ that in-process caches (ConfigCache etc.) can be invalidated cluster-wide.
 from __future__ import annotations
 
 import asyncio
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,6 +18,15 @@ log = structlog.get_logger(__name__)
 
 _CHANNEL = "app_config:invalidate"
 _BACKOFF_MAX = 30.0
+
+
+def _sanitize_dsn(dsn: str) -> str:
+    """Return ``host:port/database`` stripped of any credentials."""
+    try:
+        parts = urllib.parse.urlsplit(dsn)
+        return f"{parts.hostname}:{parts.port}/{parts.path.lstrip('/')}"
+    except Exception:
+        return "<dsn-parse-error>"
 
 
 @dataclass
@@ -51,16 +61,16 @@ class PostgresListenBridge:
         a transient Redis error (Pattern C — per-callback isolation).
         """
         try:
-            await self.redis.publish(channel, payload)
+            await self.redis.publish(_CHANNEL, payload)
             log.debug(
                 "pg_listen_bridge.republished",
-                channel=channel,
+                channel=_CHANNEL,
                 pid=pid,
             )
         except Exception as exc:
             log.warning(
                 "pg_listen_bridge.publish_failed",
-                channel=channel,
+                channel=_CHANNEL,
                 exc=str(exc),
             )
 
@@ -86,6 +96,7 @@ class PostgresListenBridge:
                 log.warning(
                     "pg_listen_bridge.connection_error",
                     exc=str(exc),
+                    dsn=_sanitize_dsn(self.dsn),
                     backoff=backoff,
                 )
             except asyncio.CancelledError:
@@ -96,7 +107,7 @@ class PostgresListenBridge:
                 if conn is not None and not conn.is_closed():
                     try:
                         await conn.close()
-                    except Exception as exc:
+                    except (asyncpg.PostgresError, OSError) as exc:
                         log.warning("pg_listen_bridge.close_error", exc=str(exc))
                 self._connected = False
 

@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from typing import Any, cast
 
-import exchange_calendars as ecals  # type: ignore[import-not-found, unused-ignore]
+import exchange_calendars as ecals  # type: ignore[import-not-found]
 
 # Exchange code mappings: project's Contract.exchange uses "NYSE", "HKEX", "LSE",
 # "NASDAQ", etc. exchange_calendars expects ISO codes "XNYS", "XHKG", "XLON", "XNAS".
@@ -68,7 +68,10 @@ def eod_for_exchange(exchange: str, expiry_date: date) -> datetime:
     close_local = cal.session_close(iso)
     # exchange_calendars returns a tz-aware Timestamp at the exchange tz.
     # Convert to UTC.
-    return cast(datetime, close_local.tz_convert("UTC").to_pydatetime())
+    result = close_local.tz_convert("UTC").to_pydatetime()
+    if not isinstance(result, datetime):
+        raise ValueError(f"eod_for_exchange: expected datetime, got {type(result)!r}")
+    return cast(datetime, result)
 
 
 def next_session_open(exchange: str, after: datetime | None = None) -> datetime:
@@ -83,7 +86,10 @@ def next_session_open(exchange: str, after: datetime | None = None) -> datetime:
     when_naive = when.astimezone(UTC).replace(tzinfo=None)
     next_session = cal.next_session(when_naive.date())
     open_local = cal.session_open(next_session)
-    return cast(datetime, open_local.tz_convert("UTC").to_pydatetime())
+    result = open_local.tz_convert("UTC").to_pydatetime()
+    if not isinstance(result, datetime):
+        raise ValueError(f"next_session_open: expected datetime, got {type(result)!r}")
+    return cast(datetime, result)
 
 
 def is_session_window_open(exchange: str, order_type: str, now: datetime | None = None) -> bool:
@@ -101,8 +107,15 @@ def is_session_window_open(exchange: str, order_type: str, now: datetime | None 
     iso = today_local.isoformat()
     if not cal.is_session(iso):
         return False
-    open_utc = cal.session_open(iso).tz_convert("UTC").to_pydatetime()
-    close_utc = cal.session_close(iso).tz_convert("UTC").to_pydatetime()
+    _open_raw = cal.session_open(iso).tz_convert("UTC").to_pydatetime()
+    _close_raw = cal.session_close(iso).tz_convert("UTC").to_pydatetime()
+    if not isinstance(_open_raw, datetime) or not isinstance(_close_raw, datetime):
+        raise ValueError(
+            "is_session_window_open: unexpected types "
+            f"open={type(_open_raw)!r} close={type(_close_raw)!r}"
+        )
+    open_utc: datetime = _open_raw
+    close_utc: datetime = _close_raw
 
     if order_type in {"MOO", "LOO"}:
         # Submittable in [open - 60min, open + 5min] window.

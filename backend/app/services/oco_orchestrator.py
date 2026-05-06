@@ -11,20 +11,34 @@ import contextlib
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
+from redis.exceptions import RedisError
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
 LOCK_KEY = "oco:advisory_lock"
+LOCK_TOKEN = "oco:leader"  # value stored in the lock key for ownership checks
 LOCK_TTL_SECONDS = 60
 RENEW_SECONDS = 30
 MAX_STREAMS = 100
 IDLE_STREAM_SECONDS = 60
 
-TERMINAL_STATUSES = frozenset({"COMPLETED", "CANCELED", "ERROR"})
+TERMINAL_STATUSES = frozenset({"COMPLETED", "CANCELED", "ERROR", "CANCEL_FAILED"})
+
+
+class _RedisLike(Protocol):
+    """Minimal Redis interface used by OcoOrchestrator; compatible with AsyncMock."""
+
+    async def set(
+        self, name: str, value: str, *, ex: int | None = None, nx: bool = False
+    ) -> Any: ...
+    async def get(self, name: str) -> Any: ...
+    async def expire(self, name: str, time: int) -> Any: ...
+    async def delete(self, name: str) -> Any: ...
 
 
 class CapacityError(RuntimeError):
@@ -48,14 +62,14 @@ def oco_group_id_for_ibkr(oco_link_id: uuid.UUID) -> str:
 class OcoOrchestrator:
     """Single-leader OCO orchestrator backed by Redis advisory lock.
 
-    ``db`` is an ``async_sessionmaker`` (or any callable) returning an async
-    context manager that yields a session supporting ``.execute()`` and
-    ``.commit()``.  In tests pass a factory function/mock that follows the
-    same protocol.
+    ``db`` is an ``async_sessionmaker[AsyncSession]`` in production; in tests
+    pass a factory function/AsyncMock that follows the same async-context-manager
+    protocol (yields a session with ``.execute()`` and ``.commit()``).
+    ``redis`` must satisfy the ``_RedisLike`` protocol; pass AsyncMock in tests.
     """
 
-    db: Any  # async_sessionmaker[AsyncSession] in production; factory mock in tests
-    redis: Any
+    db: async_sessionmaker[AsyncSession]  # type: ignore[type-arg]  # tests inject compatible mock
+    redis: _RedisLike
     _active: dict[str, dict] = field(default_factory=dict, init=False)
     _streams: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict, init=False)
     _stream_last_pending: dict[tuple[str, str], float] = field(default_factory=dict, init=False)
@@ -74,7 +88,7 @@ class OcoOrchestrator:
 
     async def start(self) -> None:
         """Acquire advisory lock; become leader or enter follower mode."""
-        acquired = await self.redis.set(LOCK_KEY, "1", ex=LOCK_TTL_SECONDS, nx=True)
+        acquired = await self.redis.set(LOCK_KEY, LOCK_TOKEN, ex=LOCK_TTL_SECONDS, nx=True)
         self._leader = bool(acquired)
         if self._leader:
             log.info("oco_orchestrator.leader_acquired")
@@ -98,17 +112,30 @@ class OcoOrchestrator:
         if self._leader:
             try:
                 await self.redis.delete(LOCK_KEY)
-            except Exception as exc:
+            except (TimeoutError, ConnectionError, OSError, RedisError) as exc:
                 log.warning("oco_orchestrator.lock_release_failed", exc=str(exc))
 
     async def _renew_lock(self) -> None:
-        """Periodically extend the advisory lock TTL while leader."""
+        """Periodically extend the advisory lock TTL while leader.
+
+        Verifies ownership before each renewal: if the lock value is no longer
+        ``LOCK_TOKEN`` the lock expired and was acquired by another instance, so
+        this instance demotes itself to follower and cancels further renewal.
+        """
         try:
             while not self._stopped:
                 await asyncio.sleep(RENEW_SECONDS)
                 try:
+                    current = await self.redis.get(LOCK_KEY)
+                    if current != LOCK_TOKEN:
+                        log.warning(
+                            "oco_orchestrator.lock_ownership_lost",
+                            current=current,
+                        )
+                        self._leader = False
+                        return
                     await self.redis.expire(LOCK_KEY, LOCK_TTL_SECONDS)
-                except (TimeoutError, ConnectionError, OSError) as exc:
+                except (TimeoutError, ConnectionError, OSError, RedisError) as exc:
                     log.warning("oco_orchestrator.lock_renewal_failed", exc=str(exc))
         except asyncio.CancelledError:
             pass
@@ -125,7 +152,7 @@ class OcoOrchestrator:
                     """SELECT id, broker_id, account_id, order_id_a, order_id_b,
                               status, filled_leg_id, failure_reason
                        FROM oco_links
-                       WHERE status NOT IN ('COMPLETED', 'CANCELED', 'ERROR')"""
+                       WHERE status NOT IN ('COMPLETED', 'CANCELED', 'ERROR', 'CANCEL_FAILED')"""
                 )
             )
             rows = result.mappings().all()
