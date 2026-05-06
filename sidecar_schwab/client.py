@@ -369,7 +369,12 @@ class SchwabClient:
                         endpoint=endpoint,
                     )
                 if hasattr(resp, "json"):
-                    return resp.json()
+                    payload = resp.json()
+                    # ClientAsync returns aiohttp.ClientResponse whose .json()
+                    # is itself awaitable; sync Client returns parsed-JSON directly.
+                    if asyncio.iscoroutine(payload):
+                        return await payload
+                    return payload
                 return resp
             raise SchwabRateLimitedError(
                 "unreachable retry exhaustion",
