@@ -412,3 +412,24 @@ class FillResponse(BaseModel):
 class FillListResponse(BaseModel):
     fills: list[FillResponse]
     next_cursor: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# T-O.6: OCO (one-cancels-other) order schemas
+# ---------------------------------------------------------------------------
+
+
+class OcoOrderRequest(BaseModel):
+    """Two-leg one-cancels-other order request."""
+
+    order_a: PreviewRequest  # reuse existing PreviewRequest shape
+    order_b: PreviewRequest
+    nonce: str = Field(min_length=1, max_length=128)
+
+
+class OcoOrderResponse(BaseModel):
+    """Response after successfully placing both OCO legs."""
+
+    oco_link_id: str  # UUID of the oco_links row (server-generated — Pattern E)
+    order_id_a: str  # broker_order_id of leg A
+    order_id_b: str  # broker_order_id of leg B

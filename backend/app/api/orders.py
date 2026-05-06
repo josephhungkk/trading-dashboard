@@ -5,11 +5,13 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from typing import Annotated, Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 from redis.asyncio import Redis
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -19,6 +21,8 @@ from app.core.config import settings
 from app.core.deps import get_broker_registry, get_config, get_db, require_admin_jwt
 from app.schemas.orders import (
     FillListResponse,
+    OcoOrderRequest,
+    OcoOrderResponse,
     OrderBracketRequest,
     OrderBracketResponse,
     OrderListResponse,
@@ -31,7 +35,15 @@ from app.services import orders_service
 from app.services.brokers import BrokerRegistry, BrokerSidecarUnavailable
 from app.services.config import ConfigService
 from app.services.order_capability_service import OrderCapabilityService
-from app.services.orders_service import CancelUnavailable, PreviewUnavailable, RedisLike
+from app.services.orders_service import (
+    CancelUnavailable,
+    PreviewUnavailable,
+    RedisLike,
+    _as_order_sidecar_client,
+    _capability_broker_id,
+    _resolve_account,
+    _validate_pre_dispatch,
+)
 from app.services.orders_sse import order_events_generator
 
 router = APIRouter(
@@ -335,3 +347,177 @@ async def list_fills(
         cursor=cursor,
     )
     return FillListResponse.model_validate(result)
+
+
+# ---------------------------------------------------------------------------
+# T-O.6: POST /api/orders/oco — atomic two-leg one-cancels-other placement
+# ---------------------------------------------------------------------------
+
+_log = structlog.get_logger(__name__)
+
+
+@router.post("/oco", response_model=OcoOrderResponse)
+async def place_oco_order(
+    body: OcoOrderRequest,
+    cfg: ConfigDep,
+    db: DbDep,
+    redis: RedisDep,
+    registry: RegistryDep,
+    capability: CapabilityDep,
+) -> OcoOrderResponse | JSONResponse:
+    """Place two OCO legs atomically.
+
+    Invariants enforced here (T-O.6):
+    - Kill-switch gate: broker.oco.enabled must be "true" in app_config.
+    - Both legs must reference the same broker (by gateway prefix).
+    - Both legs must reference the same account_id.
+    - Capability gate is checked individually for each leg.
+    - Atomicity: leg B failure triggers best-effort cancel of leg A.
+    - oco_links row is INSERTed (status='PENDING_BOTH') after both legs succeed.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Kill-switch gate
+    # ------------------------------------------------------------------
+    oco_enabled = str(await cfg.get("broker", "oco.enabled", "false") or "false")
+    if oco_enabled.lower() != "true":
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "oco_disabled", "msg": "OCO not enabled in app_config"},
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Consume nonce (reject replay via GETDEL)
+    # ------------------------------------------------------------------
+    nonce_key = f"nonce:order:{body.order_a.account_id}:{body.nonce}"
+    consumed = await redis.execute_command("GETDEL", nonce_key)
+    if consumed is None:
+        raise HTTPException(status_code=422, detail={"error": "unknown_nonce"})
+
+    # ------------------------------------------------------------------
+    # Step 3: Same-broker + same-account validation
+    # ------------------------------------------------------------------
+    if body.order_a.account_id != body.order_b.account_id:
+        raise HTTPException(status_code=422, detail={"error": "oco_legs_different_accounts"})
+
+    # Resolve both accounts to compare broker prefixes
+    try:
+        account_a = await _resolve_account(db, body.order_a.account_id)
+        account_b = await _resolve_account(db, body.order_b.account_id)
+    except PreviewUnavailable as exc:
+        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=exc.headers)
+
+    broker_a = _capability_broker_id(account_a.gateway_label)
+    broker_b = _capability_broker_id(account_b.gateway_label)
+    if broker_a != broker_b:
+        raise HTTPException(status_code=422, detail={"error": "oco_legs_different_brokers"})
+
+    # ------------------------------------------------------------------
+    # Step 4: Capability gate — both legs individually
+    # ------------------------------------------------------------------
+    try:
+        await _validate_pre_dispatch(
+            cfg=cfg,
+            capability=capability,
+            broker_label=account_a.gateway_label,
+            order_type=body.order_a.order_type,
+            tif=body.order_a.tif,
+            skip_operational_checks=True,
+        )
+        await _validate_pre_dispatch(
+            cfg=cfg,
+            capability=capability,
+            broker_label=account_b.gateway_label,
+            order_type=body.order_b.order_type,
+            tif=body.order_b.tif,
+            skip_operational_checks=True,
+        )
+    except PreviewUnavailable as exc:
+        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=exc.headers)
+
+    # ------------------------------------------------------------------
+    # Step 5: Place leg A
+    # ------------------------------------------------------------------
+    client_a = await registry.get_client(account_a.gateway_label)
+    order_client_a = _as_order_sidecar_client(client_a)
+
+    try:
+        client_order_id_a = str(uuid4())
+        sidecar_a = await order_client_a.place_order(
+            account_a.account_number,
+            client_order_id_a,
+            body.order_a.conid,
+            body.order_a.side,
+            body.order_a.order_type,
+            body.order_a.tif,
+            body.order_a.qty,
+            body.order_a.limit_price or "",
+            body.order_a.stop_price or "",
+        )
+    except Exception as exc_a:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "oco_leg_a_failed", "detail": str(exc_a)},
+        ) from exc_a
+
+    order_id_a = sidecar_a.broker_order_id
+
+    # ------------------------------------------------------------------
+    # Step 6: Place leg B; on failure cancel leg A (best-effort)
+    # ------------------------------------------------------------------
+    try:
+        client_order_id_b = str(uuid4())
+        sidecar_b = await order_client_a.place_order(
+            account_a.account_number,
+            client_order_id_b,
+            body.order_b.conid,
+            body.order_b.side,
+            body.order_b.order_type,
+            body.order_b.tif,
+            body.order_b.qty,
+            body.order_b.limit_price or "",
+            body.order_b.stop_price or "",
+        )
+    except Exception as exc_b:
+        # Best-effort cancel of leg A — do not raise on cancel failure
+        try:
+            await order_client_a.cancel_order(account_a.account_number, order_id_a)
+        except Exception as cancel_exc:
+            _log.warning(
+                "oco_leg_a_cancel_failed_after_leg_b_failure",
+                oco_leg_a_order_id=order_id_a,
+                error=str(cancel_exc),
+            )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "oco_leg_b_failed", "detail": str(exc_b)},
+        ) from exc_b
+
+    order_id_b = sidecar_b.broker_order_id
+
+    # ------------------------------------------------------------------
+    # Step 7: INSERT oco_links row (server-generated id — Pattern E)
+    # ------------------------------------------------------------------
+    oco_link_id = str(uuid4())
+    await db.execute(
+        text(
+            """
+            INSERT INTO oco_links
+                (id, broker_id, account_id, order_id_a, order_id_b, status)
+            VALUES (:id, :broker_id, :account_id, :order_id_a, :order_id_b, 'PENDING_BOTH')
+            """
+        ),
+        {
+            "id": oco_link_id,
+            "broker_id": broker_a,
+            "account_id": str(body.order_a.account_id),
+            "order_id_a": order_id_a,
+            "order_id_b": order_id_b,
+        },
+    )
+    await db.commit()
+
+    return OcoOrderResponse(
+        oco_link_id=oco_link_id,
+        order_id_a=order_id_a,
+        order_id_b=order_id_b,
+    )
