@@ -227,6 +227,10 @@ class BrokerSidecarClient:
         qty: str,
         limit_price: str = "",
         stop_price: str = "",
+        trail_offset: str = "",
+        trail_offset_type: str = "",
+        trail_limit_offset: str = "",
+        expiry_date: str = "",
     ) -> base.PlaceOrderResult:
         request = broker_pb2.PlaceOrderRequest(
             account_number=account_number,
@@ -238,6 +242,10 @@ class BrokerSidecarClient:
             qty=qty,
             limit_price=limit_price,
             stop_price=stop_price,
+            trail_offset=trail_offset,
+            trail_offset_type=trail_offset_type,
+            trail_limit_offset=trail_limit_offset,
+            expiry_date=expiry_date,
         )
         response = await self._call(
             method="PlaceOrder",
@@ -265,6 +273,10 @@ class BrokerSidecarClient:
         limit_price: str,
         stop_price: str,
         client_order_id: str,
+        trail_offset: str = "",
+        trail_offset_type: str = "",
+        trail_limit_offset: str = "",
+        expiry_date: str = "",
     ) -> base.ModifyOrderResult:
         # ModifyOrderRequest expects Money protos for prices (vs PlaceOrderRequest
         # which takes plain strings). Wrap with the contract's currency so the
@@ -279,6 +291,10 @@ class BrokerSidecarClient:
             limit_price=broker_pb2.Money(value=limit_price or "0", currency=contract.currency),
             stop_price=broker_pb2.Money(value=stop_price or "0", currency=contract.currency),
             client_order_id=client_order_id,
+            trail_offset=trail_offset,
+            trail_offset_type=trail_offset_type,
+            trail_limit_offset=trail_limit_offset,
+            expiry_date=expiry_date,
         )
         response = await self._call(
             method="ModifyOrder",

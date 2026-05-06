@@ -72,13 +72,17 @@ enum OrderSide {
 }
 
 enum OrderType {
+  option allow_alias = true;
+
   ORDER_TYPE_UNSPECIFIED = 0;
   ORDER_TYPE_MARKET = 1;
   ORDER_TYPE_LIMIT = 2;
   ORDER_TYPE_STOP = 3;
   ORDER_TYPE_STOP_LIMIT = 4;
   ORDER_TYPE_TRAIL = 5;
+  TRAIL = 5;
   ORDER_TYPE_TRAIL_LIMIT = 6;
+  TRAIL_LIMIT = 6;
   ORDER_TYPE_MOC = 7;
   ORDER_TYPE_MOO = 8;
   ORDER_TYPE_LOC = 9;
@@ -86,12 +90,15 @@ enum OrderType {
 }
 
 enum TimeInForce {
+  option allow_alias = true;
+
   TIF_UNSPECIFIED = 0;
   TIF_DAY = 1;
   TIF_GTC = 2;
   TIF_IOC = 3;
   TIF_FOK = 4;
   TIF_GTD = 5;
+  GTD = 5;
 }
 
 enum OrderStatus {
@@ -220,6 +227,11 @@ message Order {
   // Schwab's `orderActivityCollection` missing on a FILLED order). UI
   // dims the value when this flag is true.
   bool avg_fill_price_inferred = 14;
+  // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
+  string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
+  string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
+  string trail_limit_offset = 23;  // Decimal — TRAIL_LIMIT only
+  string expiry_date = 24;         // ISO "YYYY-MM-DD" — GTD only
 }
 message OrdersResponse {
   repeated Order orders = 1;
@@ -235,6 +247,11 @@ message PlaceOrderRequest {
   string qty = 7; // decimal-as-string, fixed-point 8 digits
   string limit_price = 8; // decimal-as-string, "" for MARKET
   string stop_price = 9; // decimal-as-string, "" unless STOP
+  // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
+  string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
+  string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
+  string trail_limit_offset = 23;  // Decimal — TRAIL_LIMIT only
+  string expiry_date = 24;         // ISO "YYYY-MM-DD" — GTD only
   reserved 10 to 20; // forward-extension reservations (R35)
 }
 
@@ -254,6 +271,11 @@ message ModifyOrderRequest {
   Money limit_price = 8;
   Money stop_price = 9;
   string client_order_id = 10;
+  // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
+  string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
+  string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
+  string trail_limit_offset = 23;  // Decimal — TRAIL_LIMIT only
+  string expiry_date = 24;         // ISO "YYYY-MM-DD" — GTD only
 }
 
 message ModifyOrderResponse {
