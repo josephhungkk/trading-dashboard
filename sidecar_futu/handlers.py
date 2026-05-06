@@ -224,6 +224,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             )
         if not self._client.gateway_connected:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
+            return broker_pb2.ModifyOrderResponse()  # defensive: abort raises in real gRPC
 
         ok, msg = await self._client.modify_order_live(
             account_number=request.account_number,
@@ -233,6 +234,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         )
         if not ok:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, msg)
+            return broker_pb2.ModifyOrderResponse()  # defensive: abort raises in real gRPC
         return broker_pb2.ModifyOrderResponse(
             broker_order_id=request.broker_order_id, status="SUBMITTED"
         )
@@ -254,11 +256,13 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             )
         if not self._client.gateway_connected:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
+            return broker_pb2.PlaceBracketResponse()  # defensive: abort raises in real gRPC
 
         try:
             parent_id, sl_id, tp_id = await self._client.place_bracket(request)
         except Exception as exc:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+            return broker_pb2.PlaceBracketResponse()  # defensive: abort raises in real gRPC
         return broker_pb2.PlaceBracketResponse(
             parent_broker_order_id=parent_id,
             stop_loss_broker_order_id=sl_id,
