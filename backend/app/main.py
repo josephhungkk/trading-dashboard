@@ -19,6 +19,7 @@ from app.api.admin import router as admin_router
 from app.api.admin_metrics import router as admin_metrics_router
 from app.api.brokers import router as brokers_router
 from app.api.brokers_admin import router as brokers_admin_router
+from app.api.capabilities import router as capabilities_router
 from app.api.contracts import router as contracts_router
 from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
@@ -158,6 +159,7 @@ app.include_router(admin_instruments.router)
 app.include_router(brokers_admin_router)
 app.include_router(accounts_router)
 app.include_router(brokers_router)
+app.include_router(capabilities_router)
 app.include_router(metrics_router)
 app.include_router(orders_router)
 app.include_router(fills_router)
