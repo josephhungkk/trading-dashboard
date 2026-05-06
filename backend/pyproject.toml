@@ -7,6 +7,7 @@ dependencies = [
     "alembic>=1.18.4",
     "asyncpg>=0.31.0",
     "cryptography>=46.0.7",
+    "exchange-calendars>=4.5",
     "fastapi>=0.136.0",
     "grpcio>=1.66.0",
     "grpcio-tools>=1.66.0",
