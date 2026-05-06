@@ -64,8 +64,14 @@ async def parse_order_capability_write(
     try:
         return OrderCapabilityWrite.model_validate(body)
     except ValidationError as exc:
-        notes_errors = [err for err in exc.errors() if tuple(err["loc"]) == ("notes",)]
-        if notes_errors:
+        # 400 only for notes content-validation failures (printable ASCII, length).
+        # Missing required fields (type="missing") return 422 per FastAPI convention.
+        notes_value_errors = [
+            err
+            for err in exc.errors()
+            if tuple(err["loc"]) == ("notes",) and err["type"] != "missing"
+        ]
+        if notes_value_errors:
             raise HTTPException(
                 status_code=400,
                 detail={"error": {"code": "invalid_notes"}},
