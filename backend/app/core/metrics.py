@@ -203,6 +203,39 @@ broker_normalize_unknown_total = Counter(
     registry=registry,
 )
 
+order_capability_check_total = Counter(
+    "order_capability_check_total",
+    "Capability check outcomes",
+    labelnames=["broker", "result"],
+    registry=registry,
+)
+
+order_capability_cache_hits_total = Counter(
+    "order_capability_cache_hits_total",
+    "Capability LRU cache hits",
+    labelnames=["broker"],
+    registry=registry,
+)
+
+order_capability_cache_misses_total = Counter(
+    "order_capability_cache_misses_total",
+    "Capability LRU cache misses",
+    labelnames=["broker"],
+    registry=registry,
+)
+
+order_capability_pubsub_invalidations_total = Counter(
+    "order_capability_pubsub_invalidations_total",
+    "Capability cache invalidations triggered by Redis pubsub",
+    registry=registry,
+)
+
+order_capability_pubsub_failures_total = Counter(
+    "order_capability_pubsub_failures_total",
+    "Redis pubsub publish failures (MED-5: silent cache-inconsistency canary)",
+    registry=registry,
+)
+
 
 # ──────────────────────── Phase 7a Schwab metrics ───────────────────────────
 # Per spec §8.1 — see docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md
