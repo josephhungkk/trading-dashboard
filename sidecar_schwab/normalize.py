@@ -250,6 +250,52 @@ def to_schwab_order_payload(
     return payload
 
 
+
+def to_schwab_oco_payload(order_a: dict, order_b: dict) -> dict:
+    """Build a Schwab OCO REST payload from two single-leg order dicts.
+
+    Each dict must contain the same keys accepted by to_schwab_order_payload
+    (side, order_type, tif, qty, symbol, and optionally limit_price, etc.).
+
+    The OCO parent carries no top-level orderType/duration/session — those
+    live on each child SINGLE order produced by to_schwab_order_payload.
+
+    Validation raises:
+        ValueError("oco_legs_symbol_mismatch") — legs target different symbols.
+        ValueError("oco_legs_asset_type_mismatch") — legs target different
+            asset types (only EQUITY is supported for now).
+
+    Note: Schwab OCO orders are submitted via REST (schwabdev), not via gRPC.
+    The orchestrator calls this helper and posts the payload directly.  No
+    PlaceOco RPC exists in the proto.
+    """
+    sym_a = (order_a.get("symbol") or "").upper()
+    sym_b = (order_b.get("symbol") or "").upper()
+    if sym_a != sym_b:
+        raise ValueError("oco_legs_symbol_mismatch")
+
+    # Asset type is currently always EQUITY for Schwab equities; validate
+    # to future-proof when options/futures legs are added.
+    asset_a = (order_a.get("assetType") or "EQUITY").upper()
+    asset_b = (order_b.get("assetType") or "EQUITY").upper()
+    if asset_a != asset_b:
+        raise ValueError("oco_legs_asset_type_mismatch")
+
+    # Build each child as a complete SINGLE order payload.
+    # Pop assetType from the forwarded dict — to_schwab_order_payload does
+    # not accept it as a kwarg (it hard-codes EQUITY internally).
+    def _build_leg(order: dict) -> dict:
+        kwargs = {k: v for k, v in order.items() if k != "assetType"}
+        return to_schwab_order_payload(**kwargs)
+
+    return {
+        "orderStrategyType": "OCO",
+        "childOrderStrategies": [
+            _build_leg(order_a),
+            _build_leg(order_b),
+        ],
+    }
+
 def normalize_account(raw: dict[str, Any]) -> broker_pb2.Account:
     return broker_pb2.Account(
         account_number=raw["accountNumber"],

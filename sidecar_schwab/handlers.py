@@ -266,7 +266,13 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
         from sidecar_schwab.client import SchwabHTTPError
         from sidecar_schwab.metrics import SCHWAB_PLACE_ORDER_DURATION_MS
-        from sidecar_schwab.normalize import to_schwab_order_payload
+        from sidecar_schwab.normalize import (
+            to_schwab_order_payload,
+            to_schwab_oco_payload,  # noqa: F401 — used by orchestrator for OCO REST
+        )
+        # OCO orders: no PlaceOco RPC exists in broker.proto.  The backend
+        # orchestrator calls to_schwab_oco_payload(leg_a, leg_b) directly and
+        # POSTs the result via schwabdev REST.  This handler handles SINGLE only.
 
         coid = request.client_order_id
 
