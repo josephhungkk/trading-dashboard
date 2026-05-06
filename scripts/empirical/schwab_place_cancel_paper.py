@@ -32,8 +32,60 @@ KNOWN_STATUSES = {
     "PENDING_RECALL",
     "UNKNOWN",
 }
-REQUIRED_ENV = ("SCHWAB_APP_KEY", "SCHWAB_APP_SECRET", "SCHWAB_PAPER_ACCOUNT_HASH")
+REQUIRED_ENV = (
+    "SCHWAB_APP_KEY",
+    "SCHWAB_APP_SECRET",
+    "SCHWAB_PAPER_ACCOUNT_HASH",
+    # SCHWAB_REFRESH_TOKEN unblocks the schwabdev tokens-db seed so the script
+    # never hits its interactive OAuth flow (which would EOFError in CI).
+    "SCHWAB_REFRESH_TOKEN",
+)
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
+TOKENS_DB_PATH = "/tmp/schwab_empirical_tokens.db"  # noqa: S108
+
+
+def _seed_schwabdev_tokens_db(
+    db_path: str,
+    *,
+    access_token: str,
+    refresh_token: str,
+) -> None:
+    """Pre-populate schwabdev's SQLite tokens table to bypass OAuth.
+
+    Mirrors sidecar_schwab.client.SchwabClient._seed_schwabdev_tokens_db.
+    Without this, schwabdev's Tokens.__init__ runs
+    `update_tokens(force_refresh_token=True)` when the DB is empty, which
+    calls `input()` and EOFErrors here.
+    """
+    import sqlite3
+
+    if not refresh_token:
+        return  # caller already errored on missing env
+    now = datetime.now(UTC).isoformat()
+    seed_access = access_token or "PLACEHOLDER_AWAITING_REFRESH"
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schwabdev (
+            access_token_issued TEXT NOT NULL,
+            refresh_token_issued TEXT NOT NULL,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            id_token TEXT NOT NULL,
+            expires_in INTEGER,
+            token_type TEXT,
+            scope TEXT
+        );
+        """
+    )
+    cur.execute("DELETE FROM schwabdev")
+    cur.execute(
+        "INSERT INTO schwabdev VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (now, now, seed_access, refresh_token, "", 1800, "Bearer", "api"),
+    )
+    conn.commit()
+    conn.close()
 
 
 class EmpiricalFailure(RuntimeError):
@@ -132,10 +184,15 @@ def _run() -> tuple[bool, dict[str, Any]]:
         "known_statuses": sorted(KNOWN_STATUSES),
     }
 
+    _seed_schwabdev_tokens_db(
+        TOKENS_DB_PATH,
+        access_token=os.environ.get("SCHWAB_ACCESS_TOKEN", ""),
+        refresh_token=env["SCHWAB_REFRESH_TOKEN"],
+    )
     client = schwabdev.Client(
         env["SCHWAB_APP_KEY"],
         env["SCHWAB_APP_SECRET"],
-        tokens_db="/tmp/schwab_empirical_tokens.db",
+        tokens_db=TOKENS_DB_PATH,
     )
     payload = _order_payload(client_order_id, symbol)
     place = client.order_place(env["SCHWAB_PAPER_ACCOUNT_HASH"], payload)
