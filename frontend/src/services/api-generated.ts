@@ -535,6 +535,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/orders/oco": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Place Oco Order
+         * @description Place two OCO legs atomically.
+         *
+         *     Invariants enforced here (T-O.6):
+         *     - Kill-switch gate: broker.oco.enabled must be "true" in app_config.
+         *     - Both legs must reference the same broker (by gateway prefix).
+         *     - Both legs must reference the same account_id.
+         *     - Capability gate is checked individually for each leg.
+         *     - Atomicity: leg B failure triggers best-effort cancel of leg A.
+         *     - oco_links row is INSERTed (status='PENDING_BOTH') after both legs succeed.
+         */
+        post: operations["place_oco_order_api_orders_oco_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orders/policy/{account_id}": {
         parameters: {
             query?: never;
@@ -867,6 +895,28 @@ export interface components {
             /** Value */
             value: string;
         };
+        /**
+         * OcoOrderRequest
+         * @description Two-leg one-cancels-other order request.
+         */
+        OcoOrderRequest: {
+            /** Nonce */
+            nonce: string;
+            order_a: components["schemas"]["PreviewRequest"];
+            order_b: components["schemas"]["PreviewRequest"];
+        };
+        /**
+         * OcoOrderResponse
+         * @description Response after successfully placing both OCO legs.
+         */
+        OcoOrderResponse: {
+            /** Oco Link Id */
+            oco_link_id: string;
+            /** Order Id A */
+            order_id_a: string;
+            /** Order Id B */
+            order_id_b: string;
+        };
         /** Order */
         Order: {
             avg_fill_price: components["schemas"]["Money"];
@@ -1017,7 +1067,7 @@ export interface components {
              * Order Type
              * @enum {string}
              */
-            order_type: "MARKET" | "LIMIT" | "STOP";
+            order_type: "MARKET" | "LIMIT" | "STOP" | "STOP_LIMIT" | "TRAIL" | "TRAIL_LIMIT" | "MOC" | "MOO" | "LOC" | "LOO";
             /** Qty */
             qty: string;
             /**
@@ -1044,7 +1094,7 @@ export interface components {
              * Tif
              * @enum {string}
              */
-            tif: "DAY" | "GTC";
+            tif: "DAY" | "GTC" | "IOC" | "FOK" | "GTD";
             /**
              * Updated At
              * Format: date-time
@@ -1109,6 +1159,45 @@ export interface components {
              * @enum {string}
              */
             status: "ok" | "high" | "extreme";
+        };
+        /** PreviewRequest */
+        PreviewRequest: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Conid */
+            conid: string;
+            /** Expiry Date */
+            expiry_date?: string | null;
+            /** Limit Price */
+            limit_price?: string | null;
+            /**
+             * Order Type
+             * @enum {string}
+             */
+            order_type: "MARKET" | "LIMIT" | "STOP" | "STOP_LIMIT" | "TRAIL" | "TRAIL_LIMIT" | "MOC" | "MOO" | "LOC" | "LOO";
+            /** Qty */
+            qty: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "BUY" | "SELL";
+            /** Stop Price */
+            stop_price?: string | null;
+            /**
+             * Tif
+             * @enum {string}
+             */
+            tif: "DAY" | "GTC" | "IOC" | "FOK" | "GTD";
+            /** Trail Limit Offset */
+            trail_limit_offset?: string | null;
+            /** Trail Offset */
+            trail_offset?: string | null;
+            /** Trail Offset Type */
+            trail_offset_type?: ("AMOUNT" | "PERCENT") | null;
         };
         /** PreviewResponse */
         PreviewResponse: {
@@ -2417,6 +2506,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    place_oco_order_api_orders_oco_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OcoOrderRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OcoOrderResponse"];
                 };
             };
             /** @description Validation Error */
