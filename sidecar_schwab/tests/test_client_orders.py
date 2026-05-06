@@ -88,3 +88,13 @@ async def test_replace_order_returns_new_broker_order_id():
 def test_extract_broker_order_id_raises_on_missing_location():
     with pytest.raises(ValueError):
         _extract_broker_order_id({})
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_token_syncs_schwabdev_authorization_header():
+    client, sd = _make_client()
+    client._tokens.get_access_token = AsyncMock(return_value="abc")
+
+    await client.ensure_fresh_token()
+
+    assert sd._session.headers["Authorization"] == "Bearer abc"

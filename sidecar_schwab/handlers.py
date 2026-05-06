@@ -3,6 +3,7 @@
 Configure mutates server state — it owns the SchwabClient instance and the
 TokenCache. All other RPCs read from state populated by Configure.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +14,7 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -29,6 +30,9 @@ from sidecar_schwab._generated.broker.v1 import (  # noqa: E402
 from sidecar_schwab.auth import TokenCache  # noqa: E402
 from sidecar_schwab.client import SchwabClient  # noqa: E402
 
+if TYPE_CHECKING:
+    from sidecar_schwab.client import SchwabHTTPError
+
 log = logging.getLogger(__name__)
 
 type _TickCallback = Callable[[broker_pb2.QuoteMessage], None]
@@ -40,8 +44,8 @@ _REQUIRED_META_KEYS = ("app_key", "app_secret", "refresh_token")
 
 # Per-call StreamQuotes guards — prevent a misbehaving / slow consumer
 # from exhausting sidecar memory.
-_STREAM_QUEUE_MAX = 2048   # in-flight ticks before drop-oldest kicks in
-_CALL_SUBS_MAX = 500       # canonical_ids tracked per gRPC call
+_STREAM_QUEUE_MAX = 2048  # in-flight ticks before drop-oldest kicks in
+_CALL_SUBS_MAX = 500  # canonical_ids tracked per gRPC call
 
 
 class BrokerServicer(broker_pb2_grpc.BrokerServicer):
@@ -55,6 +59,10 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         self._last_meta_fingerprint: str | None = None
         self._configured_at: datetime | None = None
         self._hashes_loaded_once = False
+        # 8a C3 -- trade write-path state
+        self._replay_cache: dict[tuple[str, str], broker_pb2.PlaceOrderResponse] = {}
+        self._simulator: Any = None  # set by D4 lifespan; tests inject directly
+        self._poller: Any = None  # set by D4 lifespan; tests inject directly
 
     async def Health(  # noqa: N802
         self,
@@ -68,10 +76,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             and (datetime.now(UTC) - self._token_cache._access_issued_at)
             < _FRESH_WINDOW
         )
-        hashes_present = (
-            self._client is not None
-            and bool(self._client._account_hashes)
-        )
+        hashes_present = self._client is not None and bool(self._client._account_hashes)
         connected = token_fresh and hashes_present
 
         started_ts = Timestamp()
@@ -149,8 +154,11 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             self._last_meta_fingerprint = fingerprint
             self._configured_at = now
             self._configure_count += 1
-            log.info("schwab_configured count=%d access_was_fresh=%s",
-                     self._configure_count, bool(effective_access))
+            log.info(
+                "schwab_configured count=%d access_was_fresh=%s",
+                self._configure_count,
+                bool(effective_access),
+            )
             return broker_pb2.ConfigureResponse(ok=True)
 
     async def ListManagedAccounts(  # noqa: N802
@@ -238,39 +246,136 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         return broker_pb2.OrdersResponse(orders=orders)
 
     async def GetContract(self, request, context):  # noqa: N802
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab GetContract lands in Phase 7b")
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Schwab GetContract lands in Phase 7b"
+        )
         return broker_pb2.ContractResponse()
 
-    async def PlaceOrder(self, request, context):  # noqa: N802
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab PlaceOrder lands in Phase 8")
-        return broker_pb2.PlaceOrderResponse()
+    async def PlaceOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceOrderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PlaceOrderResponse:
+        import time as _time
+
+        from sidecar_schwab.client import SchwabHTTPError
+        from sidecar_schwab.metrics import SCHWAB_PLACE_ORDER_DURATION_MS
+        from sidecar_schwab.normalize import to_schwab_order_payload
+
+        coid = request.client_order_id
+
+        # 1. SIM route: client_order_id starting with "SIM-" never hits live REST.
+        if coid.startswith("SIM-") and self._simulator is not None:
+            broker_order_id = self._simulator.register(
+                account_number=request.account_number,
+                client_order_id=coid,
+                request=request,
+            )
+            return broker_pb2.PlaceOrderResponse(
+                broker_order_id=broker_order_id,
+                status="submitted",
+            )
+
+        if self._client is None:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "schwab sidecar not configured",
+            )
+
+        account_hash = self._client.hash_for(request.account_number)
+        if not account_hash:
+            await context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"unknown account_number: {request.account_number}",
+            )
+
+        # 2. Replay cache (idempotency for client retries).
+        cache_key = (account_hash, coid)
+        if cache_key in self._replay_cache:
+            return self._replay_cache[cache_key]
+
+        # 3. Token pre-warm (HIGH-4).
+        await self._client.ensure_fresh_token()
+
+        # 4. Live REST.
+        payload = to_schwab_order_payload(
+            side=request.side,
+            order_type=request.order_type,
+            tif=request.tif,
+            qty=request.qty,
+            symbol=request.conid,
+            limit_price=request.limit_price,
+            stop_price=request.stop_price,
+        )
+        t0 = _time.monotonic()
+        try:
+            result = await self._client.place_order(
+                account_hash=account_hash, payload=payload
+            )
+        except SchwabHTTPError as exc:
+            SCHWAB_PLACE_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await self._abort_for_http(context, exc)
+        except (OSError, TimeoutError) as exc:
+            SCHWAB_PLACE_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, f"schwab transport: {exc}")
+
+        SCHWAB_PLACE_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+
+        rsp = broker_pb2.PlaceOrderResponse(
+            broker_order_id=result["broker_order_id"],
+            status="submitted",
+        )
+        self._replay_cache[cache_key] = rsp
+        if self._poller is not None:
+            self._poller.activate_fast(account_number=request.account_number)
+        return rsp
+
+    async def _abort_for_http(  # noqa: N802
+        self,
+        context: grpc.aio.ServicerContext,
+        exc: "SchwabHTTPError",
+    ) -> None:
+        body = (getattr(exc, "args", [str(exc)])[0] or "")[:200]
+        if exc.status_code == 401:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, body)
+        elif exc.status_code == 403:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, body)
+        elif exc.status_code == 429:
+            await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, body)
+        elif 400 <= exc.status_code < 500:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, body)
+        else:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, body)
 
     async def CancelOrder(self, request, context):  # noqa: N802
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab CancelOrder lands in Phase 8")
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Schwab CancelOrder lands in Phase 8"
+        )
         return broker_pb2.CancelOrderResponse()
 
     async def ModifyOrder(self, request, context):  # noqa: N802
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab ModifyOrder lands in Phase 8")
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Schwab ModifyOrder lands in Phase 8"
+        )
         return broker_pb2.ModifyOrderResponse()
 
     async def PlaceBracket(self, request, context):  # noqa: N802
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab PlaceBracket lands in Phase 8")
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Schwab PlaceBracket lands in Phase 8"
+        )
         return broker_pb2.PlaceBracketResponse()
 
     async def SearchContracts(self, request, context):  # noqa: N802
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab contract search lands in Phase 7b")
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Schwab contract search lands in Phase 7b"
+        )
         return broker_pb2.SearchContractsResponse()
 
     async def OrderEvent(self, request, context):  # noqa: N802
         # Server-streaming RPC.
-        await context.abort(grpc.StatusCode.UNIMPLEMENTED,
-                            "Schwab OrderEvent stream lands in Phase 8")
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED, "Schwab OrderEvent stream lands in Phase 8"
+        )
 
     async def _get_or_init_schwab_streamer(self):
         lock = self.__dict__.setdefault("_streamer_lock", asyncio.Lock())

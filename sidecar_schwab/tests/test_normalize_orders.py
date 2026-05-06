@@ -8,6 +8,7 @@ from sidecar_schwab.normalize import (
     StatusMapping,
     schwab_status_to_wire,
     schwab_to_wire_order,
+    to_schwab_order_payload,
 )
 
 
@@ -103,3 +104,52 @@ def test_avg_fill_price_inferred_when_leg_price_null() -> None:
     assert len(result.fills) == 1
     assert result.fills[0].avg_fill_price_inferred is True
     assert result.fills[0].price == Decimal("42.5")
+
+
+def test_to_schwab_order_payload_market_buy() -> None:
+    payload = to_schwab_order_payload(
+        side="BUY",
+        order_type="MARKET",
+        tif="DAY",
+        qty="100",
+        symbol="AAPL",
+    )
+
+    assert payload == {
+        "orderType": "MARKET",
+        "session": "NORMAL",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "orderLegCollection": [
+            {
+                "instruction": "BUY",
+                "quantity": "100",
+                "instrument": {"symbol": "AAPL", "assetType": "EQUITY"},
+            }
+        ],
+    }
+
+
+def test_to_schwab_order_payload_limit_includes_price() -> None:
+    payload = to_schwab_order_payload(
+        side="BUY",
+        order_type="LIMIT",
+        tif="DAY",
+        qty="100",
+        symbol="AAPL",
+        limit_price="50.25",
+    )
+
+    assert payload["price"] == "50.25"
+
+
+def test_to_schwab_order_payload_gtc_maps_to_good_till_cancel() -> None:
+    payload = to_schwab_order_payload(
+        side="BUY",
+        order_type="MARKET",
+        tif="GTC",
+        qty="100",
+        symbol="AAPL",
+    )
+
+    assert payload["duration"] == "GOOD_TILL_CANCEL"

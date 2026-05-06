@@ -11,7 +11,7 @@ from sidecar_schwab.handlers import BrokerServicer
 @pytest.mark.asyncio
 @pytest.mark.parametrize('method,request_proto', [
     ('GetContract',     pb.ContractRef()),
-    ('PlaceOrder',      pb.PlaceOrderRequest()),
+    # PlaceOrder flipped live in Phase 8a C3 — see test_handlers_place_order.py
     ('CancelOrder',     pb.CancelOrderRequest()),
     ('ModifyOrder',     pb.ModifyOrderRequest()),
     ('PlaceBracket',    pb.PlaceBracketRequest()),

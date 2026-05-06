@@ -43,3 +43,9 @@ SCHWAB_STREAMER_TOKEN_ROTATION_GAP_SECONDS = Histogram(
     "schwab_streamer_token_rotation_gap_seconds",
     "Seconds between token rotation signal and websocket close.",
 )
+
+SCHWAB_PLACE_ORDER_DURATION_MS = Histogram(
+    "schwab_place_order_duration_ms",
+    "Schwab PlaceOrder REST call duration in milliseconds.",
+    buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
+)

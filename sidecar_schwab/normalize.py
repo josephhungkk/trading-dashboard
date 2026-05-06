@@ -140,6 +140,47 @@ def map_tif(raw: str) -> int:
     return _TIF_MAP.get(raw, broker_pb2.TimeInForce.TIF_DAY)
 
 
+def to_schwab_order_payload(
+    *,
+    side: str,
+    order_type: str,
+    tif: str,
+    qty: str,
+    symbol: str,
+    limit_price: str = "",
+    stop_price: str = "",
+) -> dict[str, Any]:
+    """Translate flat PlaceOrderRequest fields to Schwab JSON payload.
+
+    Single-leg equity only (Phase 8a scope). Brackets/options land in 8b.
+    """
+    duration_map = {
+        "DAY": "DAY",
+        "GTC": "GOOD_TILL_CANCEL",
+        "IOC": "IMMEDIATE_OR_CANCEL",
+        "FOK": "FILL_OR_KILL",
+        "GTD": "GOOD_TILL_DATE",
+    }
+    payload: dict[str, Any] = {
+        "orderType": order_type,
+        "session": "NORMAL",
+        "duration": duration_map.get(tif, "DAY"),
+        "orderStrategyType": "SINGLE",
+        "orderLegCollection": [
+            {
+                "instruction": side,
+                "quantity": qty,
+                "instrument": {"symbol": symbol, "assetType": "EQUITY"},
+            }
+        ],
+    }
+    if limit_price:
+        payload["price"] = limit_price
+    if stop_price:
+        payload["stopPrice"] = stop_price
+    return payload
+
+
 def normalize_account(raw: dict[str, Any]) -> broker_pb2.Account:
     return broker_pb2.Account(
         account_number=raw["accountNumber"],

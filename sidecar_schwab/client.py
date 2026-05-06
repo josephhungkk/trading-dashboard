@@ -107,6 +107,12 @@ class SchwabClient:
 
     # Public API used by handlers
 
+    async def ensure_fresh_token(self) -> None:
+        """Pre-warm token sync. Mirrors the first half of _call."""
+        access = await self._tokens.get_access_token()
+        current_refresh = self._tokens._refresh_token or ""
+        self._sync_tokens(access_token=access, refresh_token=current_refresh)
+
     async def get_account_numbers(self) -> list[dict[str, str]]:
         """GET /trader/v1/accountNumbers -- returns account_number <-> hash map."""
         return await self._call("/accountNumbers", self._client.linked_accounts)
