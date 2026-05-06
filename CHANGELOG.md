@@ -5,6 +5,145 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.8.0-rc1] — 2026-05-06
+
+### Added — Phase 8a capability foundation + Schwab trade write-path
+
+23 commits since v0.7.4. First release candidate for Phase 8 trade
+expansion. Production cut-over (`v0.8.0`) is gated on the C0 empirical
+hard-gate (`scripts/empirical/schwab_place_cancel_paper.py`) PASSing
+against a real Schwab paper account, then the Alembic 0011a capability
+flip + frontend trade ticket modal land.
+
+#### Capability foundation (Chunks A + B)
+
+- **Proto**: `OrderType` extended to 11 values (added TRAIL,
+  TRAIL_LIMIT, MOC, MOO, LOC, LOO); `TimeInForce` extended to 6
+  (added GTD); `ModifyOrderResponse.parent_broker_order_id` field at
+  tag 3 (HIGH-3 modify chain link).
+- **Pydantic Literals**: `app/brokers/base.py` matches the proto
+  universe (UNSPECIFIED entries lose the `TYPE_`/`TIF_` prefix per
+  the proto runtime strip rule).
+- **Alembic 0011**: 3 new tables — `order_types`, `time_in_force`,
+  `broker_order_capability` (4 brokers × 10 types × 5 TIFs =
+  200-row seed). Initial supported counts: ibkr=16, futu=4, schwab=0,
+  alpaca=0. CHECK constraint on `notes` column (printable ASCII,
+  256-char max — MED-1).
+- **OrderCapabilityService**: 60s LRU + Redis pubsub bust pattern
+  with local-invalidate fallback on Redis failure (MED-5). 5 new
+  Prometheus metrics. KNOWN_BROKERS frozenset is the single source
+  of truth for broker enumeration.
+- **GET /api/brokers/{id}/capabilities**: full universe + supported
+  set per broker. 404 on unknown broker.
+- **POST /api/admin/order-capabilities**: PUT-semantics upsert with
+  CSRF nonce + code-set guard (rejects unknown OrderType/TIF before
+  hitting the DB).
+- **Capability gate** in `orders_service`: inserted between
+  maintenance and dispatch per CRIT-3 (kill_switch → maintenance →
+  capability → dispatch). HTTPException 422 with
+  `error.code="unsupported_order_type_for_broker"`.
+- **OrderEventConsumer dedup**: same-rank-same-status event with no
+  `exec_id` is treated as a sidecar-restart re-emit and dropped
+  (CRIT-2 backend half).
+
+#### Schwab sidecar trade path (Chunk C)
+
+All six write/stream RPCs flipped from UNIMPLEMENTED to live:
+
+- **`SchwabClient`**: 5 async REST wrappers (`place_order`,
+  `cancel_order`, `replace_order`, `get_orders_since`, `get_order`)
+  + `_call_raw` sibling that preserves response headers (Schwab
+  POST/PUT return the new orderId only in the `Location` header).
+  `ensure_fresh_token()` standalone helper for handler pre-warm.
+  Schwabdev v3.0.3 method names verified empirically (`place_order`,
+  `cancel_order`, `replace_order` — not `order_*` per spec).
+- **`normalize`**: `schwab_status_to_wire()` covers all 11 Schwab
+  statuses with a `StatusMapping(wire_status, rank, terminal, kind)`
+  dataclass; HIGH-3 `kind="replaced"` for REPLACED. `schwab_to_wire_order()`
+  extracts FillEvents from `executionLegs`, infers avg fill price
+  from `marketValue / quantity` when `leg.price` is null (Phase 7a
+  M2 carry-over). `to_schwab_order_payload()` translates flat
+  PlaceOrderRequest fields to the Schwab JSON SINGLE-strategy shape.
+- **PlaceOrder**: SIM-prefix client-order-id routes to the simulator
+  (never hits live REST); replay cache keyed on
+  `(account_hash, client_order_id)` for idempotent client retries;
+  token pre-warm; HTTP-status → grpc.StatusCode map
+  (401→UNAUTHENTICATED, 403→PERMISSION_DENIED, 429→RESOURCE_EXHAUSTED,
+  4xx→INVALID_ARGUMENT, 5xx→UNAVAILABLE).
+- **CancelOrder + ModifyOrder**: same SIM/replay/token/abort pattern.
+  ModifyOrder requires `contract.symbol` (single-leg equity scope
+  for Phase 8a; brackets land in Phase 8b); response carries
+  `parent_broker_order_id = request.broker_order_id` so the backend
+  can chain old→new orders.
+- **OrderEvent**: server-streaming async generator that subscribes to
+  the per-account fan-out queue from the OrderPoller. UNAVAILABLE
+  abort when poller not yet wired (lights up at D4 deploy).
+- **SearchContracts**: 5min LRU (1000 entries cap) over Schwab's
+  `instruments` endpoint with `projection="symbol-search"`. Reuses
+  `normalize.map_asset_type` for assetType→AssetClass enum. Empty
+  query → INVALID_ARGUMENT.
+
+Side fix: A1 prefix-strip cascade in `sidecar_schwab/normalize.py`
+(broken `_install_proto_compat_aliases` → `OrderType.STOP` no
+longer exists, etc.) — closest-neighbor mapping for the 7 OrderStatus
+values now in proto vs the 17 the legacy code referenced.
+
+#### Order tracking infrastructure (Chunk D)
+
+- **`OrderStateCache`** (CRIT-2 sidecar half): Redis HASH per
+  `(gateway_label, account_id)`, 7-day sliding TTL. First poll after
+  sidecar restart calls `hydrate()` to repopulate the in-memory dict
+  from Redis instead of treating every in-flight order as new.
+- **`OrderPoller`**: adaptive cadence per `(gateway_label, account_id)`:
+  2s while orders are in-flight, 30s when terminal-only. 429
+  exponential backoff (2/4/8/16/30s cap). Hash rotation invalidates
+  the state cache + resets the poll window. Per-callback fan-out
+  isolation (Codex pattern C); 1000-entry bounded queue (pattern D)
+  drops slow consumers; supervised cancel+gather on stop (pattern B).
+  4 new Prometheus metrics.
+- **`SimRegistry`**: SIM-prefixed client-order-ids skip live REST and
+  route through synthetic event emission. 50ms synthetic delay; 1h
+  TTL with manual `gc()` (injected monotonic clock for deterministic
+  GC tests; no freezegun dependency).
+- **`PollerSupervisor`**: per-account `OrderPoller` + `SimRegistry` +
+  `asyncio.Semaphore(4)`. `_SimulatorFacade` routes `register` by
+  `account_number`, `cancel`/`modify` by `broker_order_id`
+  (search+no-op-on-miss). `_PollerFacade` routes `activate_fast` +
+  `fan_out_for` by `account_number`. Configure-time wiring +
+  `SIDECAR_REDIS_URL` resolution deferred to Phase 8a deploy ticket.
+
+#### Test infrastructure (Chunk E1)
+
+- **`FakeBrokerServicer.broker_id`** widened to include `schwab` +
+  `alpaca` Literals. `ModifyOrder` rewritten to mirror the real C4
+  shape: fresh `SIM-{uuid7}` for the replacement, populated
+  `parent_broker_order_id`, kind="replaced" for old + kind="status"
+  for new. Re-keys sim bookkeeping so a follow-up cancel finds the
+  new id.
+
+#### Counts + coverage
+
+- 175 sidecar_schwab tests green (was 132 before Phase 8a).
+- 23 commits on `main` since v0.7.4 (`ca59a3b..db43993`).
+- ~3500 lines of net-new code across A-E1.
+
+### Deferred (gating v0.8.0 release)
+
+- **Task A5** — flip schwab column in `broker_order_capability` from
+  0 supported to 50 supported. Gated on E3 PASS.
+- **Task E2** — full E2E place/cancel/modify chain tests. Need
+  Schwab gRPC fake-server fixture wired into conftest (existing
+  IBKR mTLS fixture pattern translated to plain TCP). Capability
+  gate behavior is unit-tested at B4 (`test_orders_service_capability_gate.py`).
+- **Task E3** — C0 empirical hard gate. Script ready at
+  `scripts/empirical/schwab_place_cancel_paper.py`; needs to be
+  invoked against real Schwab paper sandbox during US market hours
+  with creds set, and the JSON artifact committed as evidence.
+- **Chunk F** — frontend trade ticket modal + capabilities hook +
+  Storybook + OpenAPI lock. Blocked on A5 + E3.
+- **Chunk G runbook + alerts.yml** — operational docs. Will land
+  with v0.8.0.
+
 ## [0.7.4] — 2026-05-05
 
 ### Fixed — post-deploy hotfixes for v0.7.3

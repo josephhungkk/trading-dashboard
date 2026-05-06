@@ -293,7 +293,46 @@ shape: only `client_id` + `redirect_uri`, no state, no `response_type`).
 
 ## Phase 8 — Schwab trade + order-type expansion + Futu Modify/Bracket + Alpaca trade
 
-Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6). Alpaca `PlaceOrder` (US equity + crypto).
+Phase 8 split into 8a (Schwab single-leg + capability foundation),
+8b (order-type expansion + Futu modify/bracket), 8c (Alpaca trade).
+
+### Phase 8a — Capability foundation + Schwab single-leg trade write-path  *(rc1 tagged 2026-05-06; v0.8.0 gated on E3 + A5 + F)*
+
+- [x] **A1** Proto: OrderType+TimeInForce extended; `parent_broker_order_id` on ModifyOrderResponse (HIGH-3)
+- [x] **A2** Pydantic Literals match proto (`app/brokers/base.py`)
+- [x] **A3** Alembic 0011: `order_types`+`time_in_force`+`broker_order_capability` (200-row seed; ibkr=16/futu=4/schwab=0/alpaca=0)
+- [x] **A4** ORM models for capability tables
+- [ ] **A5** Flip schwab column from 0 supported to 50 supported  *(deferred — gated on E3 PASS)*
+- [x] **B1** OrderCapabilityService (60s LRU + Redis pubsub bust + 5 metrics)
+- [x] **B2** GET /api/brokers/{id}/capabilities
+- [x] **B3** POST /api/admin/order-capabilities (PUT-semantics + CSRF + code-set guard)
+- [x] **B4** Capability gate in orders_service (CRIT-3 sequence)
+- [x] **B5** OrderEventConsumer dedup (CRIT-2 backend half)
+- [x] **C1** SchwabClient REST wrappers (place/cancel/replace/get_orders_since/get_order + ensure_fresh_token)
+- [x] **C2** Order normalizers (11 statuses + replaced kind + inferred fill) — also fixes A1 prefix-strip cascade
+- [x] **C3** PlaceOrder live (SIM + replay cache + REST + error map)
+- [x] **C4** CancelOrder + ModifyOrder live (parent_order_id link)
+- [x] **C5** OrderEvent stream + SearchContracts (5m cache)
+- [x] **D1** Redis-backed OrderStateCache (CRIT-2 sidecar half)
+- [x] **D2** Adaptive OrderPoller (2s/30s, 429 backoff, hash rotation)
+- [x] **D3** SimRegistry (synthetic place/cancel/modify events)
+- [x] **D4** PollerSupervisor + facades  *(Configure-time wiring + SIDECAR_REDIS_URL deferred to deploy ticket)*
+- [x] **E1** FakeBrokerServicer extended for schwab + alpaca + new ModifyOrder shape
+- [ ] **E2** Full E2E place/cancel/modify chain tests  *(deferred — needs Schwab fake-server conftest fixture; gate behavior unit-tested at B4)*
+- [ ] **E3** C0 empirical hard gate (script ready; HUMAN-INVOKED with paper creds during market hours)
+- [ ] **E4** Nightly + weekly real-Schwab CI workflows + real_broker test scaffolds
+- [ ] **F1-F4** Frontend `useBrokerCapabilities` hook + TradeTicketModal + Storybook + OpenAPI lock  *(blocked on A5+E3)*
+- [ ] **G1-G2** Metrics + alerts.yml extensions for capability + poller + place/cancel/modify
+- [ ] **G3** Phase 8a runbook (operator playbook)
+- [ ] **G4** Close-out v0.8.0 (CHANGELOG + tag) once A5+E3+F all green
+
+### Phase 8b — Order-type expansion + Futu Modify/Bracket  *(brainstorm pending)*
+
+STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6).
+
+### Phase 8c — Alpaca trade  *(brainstorm pending)*
+
+Alpaca `PlaceOrder` (US equity + crypto). Two-layer 30-symbol cap from Phase 7c carries forward.
 
 ## Phase 9 — Charting v1 + bar aggregator + historical store
 
