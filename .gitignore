@@ -39,3 +39,8 @@ frontend/src/proto-gen/
 # directory tracked so example templates can ship; everything else ignored.
 secrets/*
 !secrets/*.example
+
+# Phase 8a/8b empirical hard-gate artifacts -- contain raw broker responses
+# (account hashes, broker order IDs, internal status payloads). Never commit.
+scripts/empirical/artifacts/*
+!scripts/empirical/artifacts/.gitkeep
