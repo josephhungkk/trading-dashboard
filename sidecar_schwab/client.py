@@ -15,11 +15,13 @@ C2 single-writer rule (v3 -- corrected for schwabdev==3.0.3):
   - ClientAsync exists, but uses tokens_db rather than tokens_file.
   - Linked accounts method is linked_accounts(), not account_linked().
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import random
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -36,6 +38,25 @@ log = logging.getLogger(__name__)
 # M6 -- async semaphore caps concurrent outbound HTTP at 10.
 _HTTP_CONCURRENCY = 10
 _MAX_RETRY = 3
+_LOCATION_RE = re.compile(r"/orders/(?P<id>\d+)")
+
+
+def _extract_broker_order_id(headers: Any) -> str:
+    location = None
+    if hasattr(headers, "get"):
+        location = headers.get("Location") or headers.get("location")
+    if location is None and hasattr(headers, "items"):
+        for key, value in headers.items():
+            if str(key).lower() == "location":
+                location = value
+                break
+    if not location:
+        raise ValueError("missing Location header with broker order id")
+
+    match = _LOCATION_RE.search(str(location))
+    if match is None:
+        raise ValueError("Location header missing broker order id")
+    return match.group("id")
 
 
 class SchwabHTTPError(RuntimeError):
@@ -117,6 +138,73 @@ class SchwabClient:
             ),
         )
 
+    async def place_order(
+        self,
+        *,
+        account_hash: str,
+        payload: dict[str, Any],
+    ) -> dict[str, str]:
+        """POST /trader/v1/accounts/{hash}/orders."""
+        resp = await self._call_raw(
+            "/accounts.orders.place",
+            lambda: self._client.place_order(accountHash=account_hash, order=payload),
+        )
+        return {"broker_order_id": _extract_broker_order_id(resp.headers)}
+
+    async def cancel_order(self, *, account_hash: str, order_id: str) -> None:
+        """DELETE /trader/v1/accounts/{hash}/orders/{orderId}."""
+        await self._call(
+            "/accounts.orders.cancel",
+            lambda: self._client.cancel_order(
+                accountHash=account_hash,
+                orderId=order_id,
+            ),
+        )
+
+    async def replace_order(
+        self,
+        *,
+        account_hash: str,
+        order_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, str]:
+        """PUT /trader/v1/accounts/{hash}/orders/{orderId}."""
+        resp = await self._call_raw(
+            "/accounts.orders.replace",
+            lambda: self._client.replace_order(
+                accountHash=account_hash,
+                orderId=order_id,
+                order=payload,
+            ),
+        )
+        return {"broker_order_id": _extract_broker_order_id(resp.headers)}
+
+    async def get_orders_since(
+        self,
+        account_hash: str,
+        since_iso: str,
+        max_results: int = 500,
+    ) -> list[dict[str, Any]]:
+        """GET orders without toEnteredTime for poller-style reads."""
+        return await self._call(
+            "/accounts.orders.since",
+            lambda: self._client.account_orders(
+                accountHash=account_hash,
+                fromEnteredTime=since_iso,
+                maxResults=max_results,
+            ),
+        )
+
+    async def get_order(self, account_hash: str, order_id: str) -> dict[str, Any]:
+        """GET /trader/v1/accounts/{hash}/orders/{orderId}."""
+        return await self._call(
+            "/accounts.orders.details",
+            lambda: self._client.order_details(
+                accountHash=account_hash,
+                orderId=order_id,
+            ),
+        )
+
     # account_hash cache (H3)
 
     def cache_hashes(self, mapping: dict[str, str]) -> None:
@@ -177,6 +265,49 @@ class SchwabClient:
                     )
                 if hasattr(resp, "json"):
                     return resp.json()
+                return resp
+            raise SchwabRateLimitedError(
+                "unreachable retry exhaustion",
+                status_code=429,
+                endpoint=endpoint,
+            )
+
+    async def _call_raw(self, endpoint: str, fn: Callable[[], Any]) -> Any:
+        async with self._sem:
+            access = await self._tokens.get_access_token()
+            current_refresh = self._tokens._refresh_token or ""
+            self._sync_tokens(access_token=access, refresh_token=current_refresh)
+
+            for attempt in range(_MAX_RETRY + 1):
+                resp = await fn()
+                status = getattr(resp, "status_code", 200)
+                SCHWAB_HTTP_REQUESTS_TOTAL.labels(
+                    endpoint=endpoint,
+                    status=str(status),
+                ).inc()
+                if status == 429:
+                    if attempt == _MAX_RETRY:
+                        raise SchwabRateLimitedError(
+                            f"rate limit exceeded after {_MAX_RETRY} retries",
+                            status_code=429,
+                            endpoint=endpoint,
+                        )
+                    retry_after = float(resp.headers.get("Retry-After") or "1")
+                    jitter = random.uniform(-0.1, 0.1)
+                    await asyncio.sleep(retry_after + jitter)
+                    continue
+                if status == 404:
+                    raise SchwabAccountHashStaleError(
+                        f"{endpoint} 404 -- account_hash may have rotated",
+                        status_code=404,
+                        endpoint=endpoint,
+                    )
+                if status >= 400:
+                    raise SchwabHTTPError(
+                        f"{endpoint} returned status={status}",
+                        status_code=status,
+                        endpoint=endpoint,
+                    )
                 return resp
             raise SchwabRateLimitedError(
                 "unreachable retry exhaustion",
