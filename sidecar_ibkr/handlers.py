@@ -1074,28 +1074,11 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         return qualified[0] if qualified else contract
 
     def _build_ib_order(self, request: broker_pb2.PlaceOrderRequest) -> object:
+        from sidecar_ibkr.order_builder import build_ib_order
+
         side: str = "BUY" if request.side == "BUY" else "SELL"
         qty: float = float(request.qty)
-        order_type: str = request.order_type
-
-        if order_type == "MARKET":
-            from ib_async import MarketOrder  # type: ignore[import-untyped]
-
-            order: object = MarketOrder(side, qty)
-        elif order_type == "LIMIT":
-            from ib_async import LimitOrder  # type: ignore[import-untyped]
-
-            order = LimitOrder(side, qty, float(request.limit_price))
-        elif order_type == "STOP":
-            from ib_async import StopOrder  # type: ignore[import-untyped]
-
-            order = StopOrder(side, qty, float(request.stop_price))
-        else:
-            raise ValueError(f"Unsupported order_type: {order_type}")
-
-        if request.tif:
-            order.tif = request.tif
-        return order
+        return build_ib_order(request, side, qty)
 
     @staticmethod
     def _serialize_trade(trade: _IbTrade) -> dict[str, object]:
