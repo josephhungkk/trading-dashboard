@@ -236,6 +236,12 @@ order_capability_pubsub_failures_total = Counter(
     registry=registry,
 )
 
+order_capability_admin_writes_total = Counter(
+    "order_capability_admin_writes_total",
+    "Admin writes to broker_order_capability",
+    registry=registry,
+)
+
 
 # ──────────────────────── Phase 7a Schwab metrics ───────────────────────────
 # Per spec §8.1 — see docs/superpowers/specs/2026-04-30-phase7a-schwab-connect-design.md

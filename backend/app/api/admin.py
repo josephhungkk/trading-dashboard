@@ -1,9 +1,14 @@
 """Admin router: /api/admin/config + /api/admin/secrets + reveal endpoint."""
 
 import logging
+import re
+import secrets
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response, status
+from pydantic import BaseModel, ValidationError, field_validator
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     ConfigIn,
@@ -16,11 +21,14 @@ from app.api.schemas import (
 )
 from app.core import metrics
 from app.core.cf_access import AdminIdentity
-from app.core.deps import get_config, require_admin_jwt
+from app.core.deps import get_config, get_db, get_redis, require_admin_jwt
 from app.services.config import ConfigService
+from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 
 ConfigDep = Annotated[ConfigService, Depends(get_config)]
 IdentityDep = Annotated[AdminIdentity, Depends(require_admin_jwt)]
+DbDep = Annotated[AsyncSession, Depends(get_db)]
+RedisDep = Annotated[Any, Depends(get_redis)]
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +37,48 @@ router = APIRouter(
     tags=["admin"],
     dependencies=[Depends(require_admin_jwt)],
 )
+
+_CONFIRMATION_NONCES: set[str] = set()
+
+
+class OrderCapabilityWrite(BaseModel):
+    broker_id: str
+    order_type: str
+    time_in_force: str
+    is_supported: bool
+    notes: str
+
+    @field_validator("notes")
+    @classmethod
+    def notes_printable_ascii(cls, v: str) -> str:
+        if len(v) > 256:
+            raise ValueError("notes exceeds 256 characters")
+        if not re.fullmatch(r"[\x20-\x7E]*", v):
+            raise ValueError("notes must be printable ASCII only")
+        return v
+
+
+async def parse_order_capability_write(
+    body: Annotated[dict[str, Any], Body()],
+) -> OrderCapabilityWrite:
+    try:
+        return OrderCapabilityWrite.model_validate(body)
+    except ValidationError as exc:
+        notes_errors = [err for err in exc.errors() if tuple(err["loc"]) == ("notes",)]
+        if notes_errors:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "invalid_notes"}},
+            ) from exc
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+
+async def require_confirmation_nonce(
+    x_confirm_nonce: Annotated[str | None, Header(alias="X-Confirm-Nonce")] = None,
+) -> None:
+    if x_confirm_nonce is None or x_confirm_nonce not in _CONFIRMATION_NONCES:
+        raise HTTPException(status_code=403, detail={"error": {"code": "missing_csrf"}})
+    _CONFIRMATION_NONCES.discard(x_confirm_nonce)
 
 
 def _parse_typed_value(raw: str | None, value_type: str) -> Any:
@@ -269,6 +319,68 @@ async def reveal_secret(
         value=value,
         value_type=meta.value_type,
     )
+
+
+@router.post("/csrf/issue", status_code=200)
+async def issue_confirmation_nonce() -> dict[str, str]:
+    nonce = secrets.token_urlsafe(32)
+    _CONFIRMATION_NONCES.add(nonce)
+    return {"nonce": nonce}
+
+
+@router.post("/order-capabilities", status_code=200)
+async def set_order_capability(
+    body: Annotated[OrderCapabilityWrite, Depends(parse_order_capability_write)],
+    db: DbDep,
+    redis: RedisDep,
+    _csrf: Annotated[None, Depends(require_confirmation_nonce)],
+) -> dict[str, bool]:
+    if body.broker_id not in KNOWN_BROKERS:
+        raise HTTPException(400, detail={"error": {"code": "unknown_broker_id"}})
+
+    result = await db.execute(
+        text("SELECT 1 FROM order_types WHERE code = :c"),
+        {"c": body.order_type},
+    )
+    if result.fetchone() is None:
+        raise HTTPException(400, detail={"error": {"code": "unknown_order_type_code"}})
+
+    result = await db.execute(
+        text("SELECT 1 FROM time_in_force WHERE code = :c"),
+        {"c": body.time_in_force},
+    )
+    if result.fetchone() is None:
+        raise HTTPException(400, detail={"error": {"code": "unknown_time_in_force_code"}})
+
+    await db.execute(
+        text(
+            """
+            INSERT INTO broker_order_capability (
+                broker_id, order_type, time_in_force, is_supported, notes, updated_at
+            )
+            VALUES (
+                :broker_id, :order_type, :time_in_force, :is_supported, :notes, NOW()
+            )
+            ON CONFLICT (broker_id, order_type, time_in_force)
+            DO UPDATE SET is_supported = EXCLUDED.is_supported,
+                          notes = EXCLUDED.notes,
+                          updated_at = NOW()
+            """
+        ),
+        {
+            "broker_id": body.broker_id,
+            "order_type": body.order_type,
+            "time_in_force": body.time_in_force,
+            "is_supported": body.is_supported,
+            "notes": body.notes,
+        },
+    )
+    await db.commit()
+
+    metrics.order_capability_admin_writes_total.inc()
+    await OrderCapabilityService(db, redis).publish_invalidation(body.broker_id)
+
+    return {"ok": True}
 
 
 @router.delete("/secrets/{namespace}/{key}", status_code=status.HTTP_204_NO_CONTENT)
