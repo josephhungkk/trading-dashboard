@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from broker.v1 import broker_pb2 as broker_dot_v1_dot_broker__pb2
+from sidecar_alpaca._generated.broker.v1 import broker_pb2 as broker_dot_v1_dot_broker__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__

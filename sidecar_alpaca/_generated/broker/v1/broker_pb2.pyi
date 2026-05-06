@@ -45,19 +45,26 @@ class OrderSide(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
 
 class OrderType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
-    TYPE_UNSPECIFIED: _ClassVar[OrderType]
-    MARKET: _ClassVar[OrderType]
-    LIMIT: _ClassVar[OrderType]
-    STOP: _ClassVar[OrderType]
-    STOP_LIMIT: _ClassVar[OrderType]
+    ORDER_TYPE_UNSPECIFIED: _ClassVar[OrderType]
+    ORDER_TYPE_MARKET: _ClassVar[OrderType]
+    ORDER_TYPE_LIMIT: _ClassVar[OrderType]
+    ORDER_TYPE_STOP: _ClassVar[OrderType]
+    ORDER_TYPE_STOP_LIMIT: _ClassVar[OrderType]
+    ORDER_TYPE_TRAIL: _ClassVar[OrderType]
+    ORDER_TYPE_TRAIL_LIMIT: _ClassVar[OrderType]
+    ORDER_TYPE_MOC: _ClassVar[OrderType]
+    ORDER_TYPE_MOO: _ClassVar[OrderType]
+    ORDER_TYPE_LOC: _ClassVar[OrderType]
+    ORDER_TYPE_LOO: _ClassVar[OrderType]
 
 class TimeInForce(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     TIF_UNSPECIFIED: _ClassVar[TimeInForce]
-    DAY: _ClassVar[TimeInForce]
-    GTC: _ClassVar[TimeInForce]
-    IOC: _ClassVar[TimeInForce]
-    FOK: _ClassVar[TimeInForce]
+    TIF_DAY: _ClassVar[TimeInForce]
+    TIF_GTC: _ClassVar[TimeInForce]
+    TIF_IOC: _ClassVar[TimeInForce]
+    TIF_FOK: _ClassVar[TimeInForce]
+    TIF_GTD: _ClassVar[TimeInForce]
 
 class OrderStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -89,16 +96,23 @@ CBBC: AssetClass
 SIDE_UNSPECIFIED: OrderSide
 BUY: OrderSide
 SELL: OrderSide
-TYPE_UNSPECIFIED: OrderType
-MARKET: OrderType
-LIMIT: OrderType
-STOP: OrderType
-STOP_LIMIT: OrderType
+ORDER_TYPE_UNSPECIFIED: OrderType
+ORDER_TYPE_MARKET: OrderType
+ORDER_TYPE_LIMIT: OrderType
+ORDER_TYPE_STOP: OrderType
+ORDER_TYPE_STOP_LIMIT: OrderType
+ORDER_TYPE_TRAIL: OrderType
+ORDER_TYPE_TRAIL_LIMIT: OrderType
+ORDER_TYPE_MOC: OrderType
+ORDER_TYPE_MOO: OrderType
+ORDER_TYPE_LOC: OrderType
+ORDER_TYPE_LOO: OrderType
 TIF_UNSPECIFIED: TimeInForce
-DAY: TimeInForce
-GTC: TimeInForce
-IOC: TimeInForce
-FOK: TimeInForce
+TIF_DAY: TimeInForce
+TIF_GTC: TimeInForce
+TIF_IOC: TimeInForce
+TIF_FOK: TimeInForce
+TIF_GTD: TimeInForce
 STATUS_UNSPECIFIED: OrderStatus
 PENDING: OrderStatus
 SUBMITTED: OrderStatus
@@ -338,12 +352,14 @@ class ModifyOrderRequest(_message.Message):
     def __init__(self, broker_order_id: _Optional[str] = ..., account_number: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., tif: _Optional[_Union[TimeInForce, str]] = ..., qty: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., client_order_id: _Optional[str] = ...) -> None: ...
 
 class ModifyOrderResponse(_message.Message):
-    __slots__ = ("broker_order_id", "status")
+    __slots__ = ("broker_order_id", "status", "parent_broker_order_id")
     BROKER_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
+    PARENT_BROKER_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     broker_order_id: str
     status: str
-    def __init__(self, broker_order_id: _Optional[str] = ..., status: _Optional[str] = ...) -> None: ...
+    parent_broker_order_id: str
+    def __init__(self, broker_order_id: _Optional[str] = ..., status: _Optional[str] = ..., parent_broker_order_id: _Optional[str] = ...) -> None: ...
 
 class PlaceBracketRequest(_message.Message):
     __slots__ = ("parent", "stop_loss", "take_profit", "oca_group", "has_stop_loss", "has_take_profit")
@@ -453,6 +469,94 @@ class ConfigureResponse(_message.Message):
     ok: bool
     detail: str
     def __init__(self, ok: bool = ..., detail: _Optional[str] = ...) -> None: ...
+
+class StreamQuotesRequest(_message.Message):
+    __slots__ = ("subscribe", "unsubscribe", "heartbeat", "resync")
+    class Subscribe(_message.Message):
+        __slots__ = ("symbols",)
+        SYMBOLS_FIELD_NUMBER: _ClassVar[int]
+        symbols: _containers.RepeatedCompositeFieldContainer[SymbolRef]
+        def __init__(self, symbols: _Optional[_Iterable[_Union[SymbolRef, _Mapping]]] = ...) -> None: ...
+    class Unsubscribe(_message.Message):
+        __slots__ = ("symbols",)
+        SYMBOLS_FIELD_NUMBER: _ClassVar[int]
+        symbols: _containers.RepeatedCompositeFieldContainer[SymbolRef]
+        def __init__(self, symbols: _Optional[_Iterable[_Union[SymbolRef, _Mapping]]] = ...) -> None: ...
+    class Heartbeat(_message.Message):
+        __slots__ = ("client_time", "tick_count_received")
+        CLIENT_TIME_FIELD_NUMBER: _ClassVar[int]
+        TICK_COUNT_RECEIVED_FIELD_NUMBER: _ClassVar[int]
+        client_time: _timestamp_pb2.Timestamp
+        tick_count_received: int
+        def __init__(self, client_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., tick_count_received: _Optional[int] = ...) -> None: ...
+    class Resync(_message.Message):
+        __slots__ = ("expected",)
+        EXPECTED_FIELD_NUMBER: _ClassVar[int]
+        expected: _containers.RepeatedCompositeFieldContainer[SymbolRef]
+        def __init__(self, expected: _Optional[_Iterable[_Union[SymbolRef, _Mapping]]] = ...) -> None: ...
+    SUBSCRIBE_FIELD_NUMBER: _ClassVar[int]
+    UNSUBSCRIBE_FIELD_NUMBER: _ClassVar[int]
+    HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
+    RESYNC_FIELD_NUMBER: _ClassVar[int]
+    subscribe: StreamQuotesRequest.Subscribe
+    unsubscribe: StreamQuotesRequest.Unsubscribe
+    heartbeat: StreamQuotesRequest.Heartbeat
+    resync: StreamQuotesRequest.Resync
+    def __init__(self, subscribe: _Optional[_Union[StreamQuotesRequest.Subscribe, _Mapping]] = ..., unsubscribe: _Optional[_Union[StreamQuotesRequest.Unsubscribe, _Mapping]] = ..., heartbeat: _Optional[_Union[StreamQuotesRequest.Heartbeat, _Mapping]] = ..., resync: _Optional[_Union[StreamQuotesRequest.Resync, _Mapping]] = ...) -> None: ...
+
+class SymbolRef(_message.Message):
+    __slots__ = ("canonical_id", "raw_symbol", "asset_class", "exchange", "currency", "source_meta")
+    CANONICAL_ID_FIELD_NUMBER: _ClassVar[int]
+    RAW_SYMBOL_FIELD_NUMBER: _ClassVar[int]
+    ASSET_CLASS_FIELD_NUMBER: _ClassVar[int]
+    EXCHANGE_FIELD_NUMBER: _ClassVar[int]
+    CURRENCY_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_META_FIELD_NUMBER: _ClassVar[int]
+    canonical_id: str
+    raw_symbol: str
+    asset_class: AssetClass
+    exchange: str
+    currency: str
+    source_meta: bytes
+    def __init__(self, canonical_id: _Optional[str] = ..., raw_symbol: _Optional[str] = ..., asset_class: _Optional[_Union[AssetClass, str]] = ..., exchange: _Optional[str] = ..., currency: _Optional[str] = ..., source_meta: _Optional[bytes] = ...) -> None: ...
+
+class QuoteMessage(_message.Message):
+    __slots__ = ("canonical_id", "tick_time", "received_at", "source", "last", "bid", "ask", "volume", "day_high", "day_low", "open", "prev_close", "change_pct", "change", "is_delayed", "delay_seconds", "raw_payload")
+    CANONICAL_ID_FIELD_NUMBER: _ClassVar[int]
+    TICK_TIME_FIELD_NUMBER: _ClassVar[int]
+    RECEIVED_AT_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_FIELD_NUMBER: _ClassVar[int]
+    LAST_FIELD_NUMBER: _ClassVar[int]
+    BID_FIELD_NUMBER: _ClassVar[int]
+    ASK_FIELD_NUMBER: _ClassVar[int]
+    VOLUME_FIELD_NUMBER: _ClassVar[int]
+    DAY_HIGH_FIELD_NUMBER: _ClassVar[int]
+    DAY_LOW_FIELD_NUMBER: _ClassVar[int]
+    OPEN_FIELD_NUMBER: _ClassVar[int]
+    PREV_CLOSE_FIELD_NUMBER: _ClassVar[int]
+    CHANGE_PCT_FIELD_NUMBER: _ClassVar[int]
+    CHANGE_FIELD_NUMBER: _ClassVar[int]
+    IS_DELAYED_FIELD_NUMBER: _ClassVar[int]
+    DELAY_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    RAW_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    canonical_id: str
+    tick_time: _timestamp_pb2.Timestamp
+    received_at: _timestamp_pb2.Timestamp
+    source: str
+    last: str
+    bid: str
+    ask: str
+    volume: str
+    day_high: str
+    day_low: str
+    open: str
+    prev_close: str
+    change_pct: str
+    change: str
+    is_delayed: bool
+    delay_seconds: int
+    raw_payload: bytes
+    def __init__(self, canonical_id: _Optional[str] = ..., tick_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., received_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., source: _Optional[str] = ..., last: _Optional[str] = ..., bid: _Optional[str] = ..., ask: _Optional[str] = ..., volume: _Optional[str] = ..., day_high: _Optional[str] = ..., day_low: _Optional[str] = ..., open: _Optional[str] = ..., prev_close: _Optional[str] = ..., change_pct: _Optional[str] = ..., change: _Optional[str] = ..., is_delayed: bool = ..., delay_seconds: _Optional[int] = ..., raw_payload: _Optional[bytes] = ...) -> None: ...
 
 class TokenRefreshRequest(_message.Message):
     __slots__ = ("broker_id",)

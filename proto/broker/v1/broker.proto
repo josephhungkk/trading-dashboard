@@ -72,19 +72,26 @@ enum OrderSide {
 }
 
 enum OrderType {
-  TYPE_UNSPECIFIED = 0;
-  MARKET = 1;
-  LIMIT = 2;
-  STOP = 3;
-  STOP_LIMIT = 4;
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_MARKET = 1;
+  ORDER_TYPE_LIMIT = 2;
+  ORDER_TYPE_STOP = 3;
+  ORDER_TYPE_STOP_LIMIT = 4;
+  ORDER_TYPE_TRAIL = 5;
+  ORDER_TYPE_TRAIL_LIMIT = 6;
+  ORDER_TYPE_MOC = 7;
+  ORDER_TYPE_MOO = 8;
+  ORDER_TYPE_LOC = 9;
+  ORDER_TYPE_LOO = 10;
 }
 
 enum TimeInForce {
   TIF_UNSPECIFIED = 0;
-  DAY = 1;
-  GTC = 2;
-  IOC = 3;
-  FOK = 4;
+  TIF_DAY = 1;
+  TIF_GTC = 2;
+  TIF_IOC = 3;
+  TIF_FOK = 4;
+  TIF_GTD = 5;
 }
 
 enum OrderStatus {
@@ -252,6 +259,7 @@ message ModifyOrderRequest {
 message ModifyOrderResponse {
   string broker_order_id = 1;
   string status = 2;
+  string parent_broker_order_id = 3;
 }
 
 message PlaceBracketRequest {
