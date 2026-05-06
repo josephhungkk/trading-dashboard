@@ -15,6 +15,20 @@ import pytest
 _REQUIRED_SCHWAB_ENV = ("SCHWAB_APP_KEY", "SCHWAB_APP_SECRET", "SCHWAB_PAPER_ACCOUNT_HASH")
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--case",
+        action="store",
+        default="market_spy",
+        help="real-broker scenario name (market_spy | trail_amount_spy | gtd_limit_spy)",
+    )
+
+
+@pytest.fixture
+def case(request: pytest.FixtureRequest) -> str:
+    return request.config.getoption("--case")  # type: ignore[no-any-return]
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     if any(os.environ.get(k, "") == "" for k in _REQUIRED_SCHWAB_ENV):
         skip = pytest.mark.skip(

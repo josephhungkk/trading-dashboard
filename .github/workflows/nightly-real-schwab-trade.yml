@@ -9,6 +9,10 @@ jobs:
   nightly-schwab-trade-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [market_spy, trail_amount_spy, gtd_limit_spy]
     env:
       SCHWAB_APP_KEY: ${{ secrets.SCHWAB_APP_KEY }}
       SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
@@ -26,11 +30,12 @@ jobs:
         working-directory: backend
         run: |
           uv run pytest tests/real_broker/ -m real_schwab -v \
-            --tb=short --no-header -q
+            --tb=short --no-header -q \
+            --case ${{ matrix.case }}
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-schwab-trade-results-${{ github.run_id }}
+          name: nightly-schwab-trade-results-${{ github.run_id }}-${{ matrix.case }}
           path: backend/test-results/
           retention-days: 30
