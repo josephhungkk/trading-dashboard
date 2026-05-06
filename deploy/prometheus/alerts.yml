@@ -211,3 +211,68 @@ groups:
         annotations:
           summary: "Schwab account_hash cache refreshing > 10×/h"
           description: "account_hash cache refresh churn (reason={{ $labels.reason }}). Expected ~1/h (lifespan + post-write). Higher rate means cache is being invalidated unexpectedly — check broker_callback_server logs."
+
+  - name: phase8a_schwab_trade
+    interval: 30s
+    rules:
+      - alert: SchwabOrderPollerStalled
+        expr: |
+          sum by (gateway_label, account_id) (
+            rate(schwab_order_poller_iterations_total{cadence="2s"}[2m])
+          ) == 0
+          and on(gateway_label, account_id)
+          sum by (gateway_label, account_id) (
+            last_over_time(schwab_order_poller_iterations_total{cadence="2s"}[10m])
+          ) > 0
+        for: 90s
+        labels:
+          severity: page
+        annotations:
+          summary: "Schwab order poller stalled in fast cadence ({{ $labels.account_id }})"
+          runbook: "deploy/runbook-schwab-trade.md#schwaborderpollerstalled"
+
+      - alert: SchwabPlaceOrderErrorRateHigh
+        # SCHWAB_HTTP_REQUESTS_TOTAL has labels (endpoint, status).
+        # place_order calls _call_raw with endpoint="/accounts.orders.place" (confirmed from client.py).
+        expr: |
+          (sum(rate(schwab_http_requests_total{endpoint="/accounts.orders.place",status!~"2.."}[5m]))
+           / sum(rate(schwab_http_requests_total{endpoint="/accounts.orders.place"}[5m]))) > 0.1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Schwab /accounts.orders.place >10% non-2xx over 5min"
+          runbook: "deploy/runbook-schwab-trade.md#schwabplaceordererror"
+
+      - alert: SchwabOrderEventGapNoActivity
+        expr: |
+          sum(rate(schwab_order_poller_iterations_total{cadence="2s"}[5m])) > 0
+          and sum(rate(schwab_order_event_emitted_total[5m])) == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Schwab poller in fast cadence but no events emitted in 5min"
+          runbook: "deploy/runbook-schwab-trade.md#schwabordereventgap"
+
+      - alert: OrderCapabilityCacheChurn
+        expr: rate(order_capability_pubsub_invalidations_total[1h]) > 100
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Capability cache invalidated >100x in last hour"
+          runbook: "deploy/runbook-schwab-trade.md#capabilitycachechurn"
+
+      - alert: OrderCapabilityCheckUnknownBroker
+        expr: increase(order_capability_check_total{result="unknown_broker"}[5m]) > 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Capability check hit unknown_broker — registry/table drift"
+          runbook: "deploy/runbook-schwab-trade.md#unknownbroker"
+
+      - alert: OrderCapabilityPubsubFailures
+        expr: increase(order_capability_pubsub_failures_total[5m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Redis pubsub failed to publish capability invalidation"
+          runbook: "deploy/runbook-schwab-trade.md#capabilitypubsubfailures"
