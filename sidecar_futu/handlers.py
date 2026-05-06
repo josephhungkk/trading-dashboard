@@ -217,20 +217,54 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         request: broker_pb2.ModifyOrderRequest,
         context: Any,
     ) -> broker_pb2.ModifyOrderResponse:
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Modify deferred to Phase 7"
+        if self._sim_mode:
+            # Sim: echo back immediately; no real state change needed for tests.
+            return broker_pb2.ModifyOrderResponse(
+                broker_order_id=request.broker_order_id, status="SUBMITTED"
+            )
+        if not self._client.gateway_connected:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
+
+        ok, msg = await self._client.modify_order_live(
+            account_number=request.account_number,
+            broker_order_id=request.broker_order_id,
+            qty=float(request.qty),
+            price=float(request.limit_price.value) if request.limit_price.value else 0.0,
         )
-        raise AssertionError("unreachable: abort raises")  # mypy guard
+        if not ok:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, msg)
+        return broker_pb2.ModifyOrderResponse(
+            broker_order_id=request.broker_order_id, status="SUBMITTED"
+        )
 
     async def PlaceBracket(  # noqa: N802
         self,
         request: broker_pb2.PlaceBracketRequest,
         context: Any,
     ) -> broker_pb2.PlaceBracketResponse:
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED, "Bracket deferred to Phase 7"
+        if self._sim_mode:
+            parent_id = sim.make_sim_id()
+            sl_id = sim.make_sim_id()
+            tp_id = sim.make_sim_id()
+            return broker_pb2.PlaceBracketResponse(
+                parent_broker_order_id=parent_id,
+                stop_loss_broker_order_id=sl_id,
+                take_profit_broker_order_id=tp_id,
+                status="SUBMITTED",
+            )
+        if not self._client.gateway_connected:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
+
+        try:
+            parent_id, sl_id, tp_id = await self._client.place_bracket(request)
+        except Exception as exc:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+        return broker_pb2.PlaceBracketResponse(
+            parent_broker_order_id=parent_id,
+            stop_loss_broker_order_id=sl_id,
+            take_profit_broker_order_id=tp_id,
+            status="SUBMITTED",
         )
-        raise AssertionError("unreachable: abort raises")
 
     async def _get_or_init_futu_streamer(self) -> Any:
         lock = self.__dict__.setdefault("_streamer_lock", asyncio.Lock())

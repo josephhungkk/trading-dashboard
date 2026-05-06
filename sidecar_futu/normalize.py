@@ -277,3 +277,86 @@ def order_from_futu_row(row: dict[str, Any]) -> broker_pb2.Order:
         submitted_at=hk_local_to_utc_timestamp(row.get("create_time")),
         updated_at=hk_local_to_utc_timestamp(row.get("updated_time")),
     )
+
+
+# ---------------------------------------------------------------------------
+# Order-parameter normalization for place_order / modify_order (T-F.3)
+# ---------------------------------------------------------------------------
+
+# HKEX does not support auction-session order types.
+_HKEX_UNSUPPORTED_TYPES: frozenset[str] = frozenset({"MOO", "LOO", "LOC", "MOC"})
+
+# ft.TimeInForce only has DAY and GTC in the installed SDK version.
+# IOC / FOK / GTD are not available — callers must handle NotImplementedError.
+_FUTU_SUPPORTED_TIF: frozenset[str] = frozenset({"DAY", "GTC"})
+
+
+def to_futu_order_params(
+    order_type: str,
+    tif: str,
+    exchange: str,
+    *,
+    trail_offset: float = 0.0,
+    trail_offset_type: str = "PERCENT",
+) -> dict[str, object]:
+    """Convert canonical order-type / TIF strings to futu SDK kwargs.
+
+    Raises
+    ------
+    ValueError
+        If the order type is unsupported for the given exchange
+        (e.g. MOO/LOO/LOC/MOC on HKEX).
+    NotImplementedError
+        If a requested TIF is not supported by the installed futu-api SDK
+        (e.g. GTD, IOC, FOK — only DAY and GTC are available).
+    """
+    import futu as ft  # local import so module loads without futu at import time
+
+    params: dict[str, object] = {}
+
+    # --- Exchange-specific restrictions ---
+    if exchange == "HKEX" and order_type in _HKEX_UNSUPPORTED_TYPES:
+        raise ValueError("unsupported_for_hkex")
+
+    # --- Order type mapping ---
+    if order_type in {"LIMIT", "NORMAL"}:
+        params["order_type"] = ft.OrderType.NORMAL
+    elif order_type == "MARKET":
+        params["order_type"] = ft.OrderType.MARKET
+    elif order_type == "STOP":
+        params["order_type"] = ft.OrderType.STOP
+    elif order_type == "STOP_LIMIT":
+        params["order_type"] = ft.OrderType.STOP_LIMIT
+    elif order_type == "TRAIL":
+        params["order_type"] = ft.OrderType.TRAILING_STOP
+        if trail_offset_type == "PERCENT":
+            params["trail_type"] = ft.TrailType.RATIO
+        else:
+            params["trail_type"] = ft.TrailType.AMOUNT
+        params["aux_price"] = float(trail_offset)
+    elif order_type == "TRAIL_LIMIT":
+        params["order_type"] = ft.OrderType.TRAILING_STOP_LIMIT
+        if trail_offset_type == "PERCENT":
+            params["trail_type"] = ft.TrailType.RATIO
+        else:
+            params["trail_type"] = ft.TrailType.AMOUNT
+        params["aux_price"] = float(trail_offset)
+    elif order_type in {"AUCTION", "AUCTION_LIMIT"}:
+        params["order_type"] = ft.OrderType.AUCTION if order_type == "AUCTION" else ft.OrderType.AUCTION_LIMIT
+    elif order_type in {"MOO", "LOO"}:
+        params["order_type"] = ft.OrderType.AUCTION
+    elif order_type in {"LOC", "MOC"}:
+        params["order_type"] = ft.OrderType.AUCTION_LIMIT
+
+    # --- Time-in-force mapping ---
+    tif_upper = tif.upper()
+    if tif_upper == "DAY":
+        params["time_in_force"] = ft.TimeInForce.DAY
+    elif tif_upper == "GTC":
+        params["time_in_force"] = ft.TimeInForce.GTC
+    elif tif_upper == "GTD":
+        raise NotImplementedError("futu_gtd_unsupported")
+    elif tif_upper in {"IOC", "FOK"}:
+        raise NotImplementedError("futu_gtd_unsupported")
+
+    return params

@@ -349,6 +349,60 @@ class FutuClient:
 
         return cast("bool", await _run_in_worker_thread(_cancel))
 
+
+    async def modify_order_live(
+        self,
+        account_number: str,
+        broker_order_id: str,
+        qty: float,
+        price: float,
+    ) -> tuple[bool, str]:
+        """Modify price/qty of an existing order. Returns (ok, message)."""
+        if not self.gateway_connected or self._trade_ctx is None:
+            return False, "trade context not connected"
+        trade_ctx = self._trade_ctx
+        trd_env = self._accounts_trd_env.get(account_number, "REAL")
+
+        def _modify() -> tuple[bool, str]:
+            ret, data = trade_ctx.modify_order(
+                ModifyOrderOp.NORMAL,
+                order_id=int(broker_order_id),
+                qty=qty,
+                price=price,
+                adjust_limit=0,
+                trd_env=trd_env,
+                acc_id=int(account_number),
+            )
+            if ret != RET_OK:
+                return False, str(data)
+            return True, ""
+
+        return cast("tuple[bool, str]", await _run_in_worker_thread(_modify))
+
+    async def place_bracket(
+        self,
+        request: broker_pb2.PlaceBracketRequest,
+    ) -> tuple[str, str, str]:
+        """Place parent + stop-loss + take-profit orders sequentially.
+
+        Returns (parent_order_id, stop_loss_order_id, take_profit_order_id).
+        Raises RuntimeError on any leg failure.
+        """
+        if not self.gateway_connected or self._trade_ctx is None:
+            raise RuntimeError("trade context not connected")
+
+        parent_id, _ = await self.place_order(request.parent)
+        try:
+            sl_id, _ = await self.place_order(request.stop_loss)
+        except Exception as exc:
+            raise RuntimeError(f"stop_loss leg failed: {exc}") from exc
+        try:
+            tp_id, _ = await self.place_order(request.take_profit)
+        except Exception as exc:
+            raise RuntimeError(f"take_profit leg failed: {exc}") from exc
+
+        return parent_id, sl_id, tp_id
+
     async def search_contracts(self, query: str) -> list[dict[str, Any]]:
         if not self.gateway_connected or self._creds is None:
             return []
