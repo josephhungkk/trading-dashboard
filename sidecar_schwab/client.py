@@ -23,6 +23,7 @@ import logging
 import random
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import schwabdev  # M3 -- only file in the package that imports this
@@ -86,6 +87,82 @@ class SchwabClient:
         self._account_hashes: dict[str, str] = {}
 
     @classmethod
+    def _seed_schwabdev_tokens_db(
+        cls,
+        tokens_db_path: str,
+        *,
+        token_cache: TokenCache,
+    ) -> None:
+        """Pre-write schwabdev's SQLite tokens table so its __init__ skips OAuth.
+
+        Schema (from schwabdev/tokens.py:73-85):
+            schwabdev (
+              access_token_issued TEXT NOT NULL,
+              refresh_token_issued TEXT NOT NULL,
+              access_token TEXT NOT NULL,
+              refresh_token TEXT NOT NULL,
+              id_token TEXT NOT NULL,
+              expires_in INTEGER, token_type TEXT, scope TEXT
+            )
+
+        We read tokens out of the TokenCache (which the backend populated via the
+        Configure metadata). If access_token is empty (stale at boot), we write a
+        placeholder so the NOT NULL constraint is satisfied; subsequent
+        `_sync_tokens()` calls overwrite the in-memory schwabdev state with real
+        tokens from the backend.
+        """
+        import sqlite3
+
+        access_token = token_cache._access_token or "PLACEHOLDER_AWAITING_REFRESH"
+        refresh_token = token_cache._refresh_token or ""
+        if not refresh_token:
+            log.warning("schwab_seed_tokens_db_skipped reason=no_refresh_token")
+            return
+
+        now = datetime.now(UTC).isoformat()
+        access_issued_at = token_cache._access_issued_at
+        access_issued_iso = (
+            access_issued_at.isoformat() if access_issued_at is not None else now
+        )
+
+        try:
+            conn = sqlite3.connect(tokens_db_path, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schwabdev (
+                    access_token_issued TEXT NOT NULL,
+                    refresh_token_issued TEXT NOT NULL,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
+                    id_token TEXT NOT NULL,
+                    expires_in INTEGER,
+                    token_type TEXT,
+                    scope TEXT
+                );
+                """
+            )
+            cur.execute("DELETE FROM schwabdev")
+            cur.execute(
+                "INSERT INTO schwabdev VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    access_issued_iso,
+                    now,  # refresh_token_issued: we don't track this; conservative.
+                    access_token,
+                    refresh_token,
+                    "",  # id_token unused
+                    1800,  # expires_in (30 min)
+                    "Bearer",
+                    "api",
+                ),
+            )
+            conn.commit()
+            conn.close()
+            log.info("schwab_seed_tokens_db_ok path=%s", tokens_db_path)
+        except sqlite3.Error as exc:
+            log.warning("schwab_seed_tokens_db_failed path=%s err=%s", tokens_db_path, exc)
+
+    @classmethod
     def from_credentials(
         cls,
         app_key: str,
@@ -97,7 +174,16 @@ class SchwabClient:
         schwabdev==3.0.3 has ClientAsync, but its constructor takes tokens_db,
         not tokens_file. Its Tokens.update_tokens() is not a local setter; it
         may mint tokens. C2 single-writer is preserved by never invoking it.
+
+        BUT: schwabdev's Tokens.__init__ runs `update_tokens(force_refresh_token=True)`
+        when the tokens_db is empty -- which calls `input()` and EOFErrors in our
+        non-interactive container. We pre-seed the SQLite DB from token_cache so
+        schwabdev's `_load_tokens_from_db()` succeeds and the OAuth path is skipped.
         """
+        cls._seed_schwabdev_tokens_db(
+            "/tmp/schwabdev_tokens.db",  # noqa: S108 (ephemeral, container-local)
+            token_cache=token_cache,
+        )
         client = schwabdev.ClientAsync(
             app_key=app_key,
             app_secret=app_secret,
