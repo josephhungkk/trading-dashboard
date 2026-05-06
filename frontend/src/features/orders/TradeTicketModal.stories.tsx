@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import * as React from 'react';
 import { TradeTicketModal } from './TradeTicketModal';
 import { tradeTicketStore } from './use-trade-ticket';
+import type { BrokerCapabilitiesResponse } from '@/services/capabilities/types';
 import type { DecimalString, PreviewResponse } from '@/services/types';
 
 function decimal(value: string): DecimalString {
@@ -35,11 +36,23 @@ function StoryHarness({
   orderType = 'MARKET',
   previewResponse = null,
   banner = null,
+  brokerId = null,
+  capabilityMode = 'ready',
 }: {
-  orderType?: 'MARKET' | 'LIMIT' | 'STOP';
+  orderType?: 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT';
   previewResponse?: PreviewResponse | null;
   banner?: { kind: 'maintenance'; seconds: number } | { kind: 'kill-switch' } | null;
+  brokerId?: string | null;
+  capabilityMode?: 'ready' | 'loading' | 'error';
 }): React.JSX.Element {
+  React.useEffect(() => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = storyFetch(capabilityMode);
+    return () => {
+      globalThis.fetch = originalFetch;
+    };
+  }, [capabilityMode]);
+
   React.useEffect(() => {
     tradeTicketStore.getState().open({ accountId: 'acct-1', conid: '265598', symbol: 'AAPL' });
     if (previewResponse !== null) tradeTicketStore.getState().setPreview(previewResponse);
@@ -56,7 +69,68 @@ function StoryHarness({
     }, 0);
   }, [orderType]);
 
-  return <TradeTicketModal storyBanner={banner} />;
+  return <TradeTicketModal storyBanner={banner} {...(brokerId !== null ? { brokerId } : {})} />;
+}
+
+function storyFetch(capabilityMode: 'ready' | 'loading' | 'error'): typeof fetch {
+  return async (input: RequestInfo | URL): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+    if (url === '/api/brokers/schwab/capabilities') {
+      if (capabilityMode === 'loading') return new Promise<Response>(() => { /* pending */ });
+      if (capabilityMode === 'error') return jsonResponse({ error: 'capabilities unavailable' }, 500);
+      return jsonResponse(schwabCapabilities(), 200);
+    }
+    if (url === '/api/orders/preview') return jsonResponse(preview(), 200);
+    return jsonResponse({}, 404);
+  };
+}
+
+function jsonResponse(body: unknown, status: number): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(),
+    json: () => Promise.resolve(body),
+  } as Response;
+}
+
+function schwabCapabilities(): BrokerCapabilitiesResponse {
+  const supportedOrderTypes = ['MARKET', 'LIMIT', 'STOP', 'STOP_LIMIT'];
+  const unsupportedOrderTypes = ['TRAIL', 'TRAIL_LIMIT', 'MOC', 'MOO', 'LOC', 'LOO'];
+  const supportedTifs = ['DAY', 'GTC', 'IOC', 'FOK'];
+  return {
+    broker_id: 'schwab',
+    order_types: [
+      ...supportedOrderTypes.map((code, index) => ({ code, label: code, description: code, sort_order: index })),
+      ...unsupportedOrderTypes.map((code, index) => ({
+        code,
+        label: code,
+        description: code,
+        sort_order: supportedOrderTypes.length + index,
+      })),
+    ],
+    time_in_force: supportedTifs.map((code, index) => ({
+      code,
+      label: code,
+      description: code,
+      requires_expiry: false,
+      sort_order: index,
+    })),
+    combos: [
+      ...supportedOrderTypes.flatMap((order_type) => (
+        supportedTifs.map((time_in_force) => ({ broker_id: 'schwab', order_type, time_in_force, supported: true, notes: '' }))
+      )),
+      ...unsupportedOrderTypes.flatMap((order_type) => (
+        supportedTifs.map((time_in_force) => ({
+          broker_id: 'schwab',
+          order_type,
+          time_in_force,
+          supported: false,
+          notes: 'Not supported for this broker',
+        }))
+      )),
+    ],
+  };
 }
 
 const meta = {
@@ -98,4 +172,16 @@ export const MaintenanceBlocked: Story = {
 
 export const KillSwitchBlocked: Story = {
   render: () => <StoryHarness previewResponse={preview()} banner={{ kind: 'kill-switch' }} />,
+};
+
+export const SchwabAccountReady: Story = {
+  render: () => <StoryHarness brokerId="schwab" capabilityMode="ready" />,
+};
+
+export const CapabilityLoading: Story = {
+  render: () => <StoryHarness brokerId="schwab" capabilityMode="loading" />,
+};
+
+export const CapabilityError: Story = {
+  render: () => <StoryHarness brokerId="schwab" capabilityMode="error" />,
 };

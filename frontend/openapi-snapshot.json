@@ -1,0 +1,3708 @@
+{
+  "components": {
+    "schemas": {
+      "AccountAliasUpdate": {
+        "properties": {
+          "alias": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[\\w\\s\\-.&]+$",
+            "title": "Alias",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alias"
+        ],
+        "title": "AccountAliasUpdate",
+        "type": "object"
+      },
+      "AccountListResponse": {
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/AccountResponse"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "broker_maintenance": {
+            "$ref": "#/components/schemas/BrokerMaintenance"
+          },
+          "degraded_sidecars": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Degraded Sidecars",
+            "type": "array"
+          }
+        },
+        "required": [
+          "accounts",
+          "degraded_sidecars",
+          "broker_maintenance"
+        ],
+        "title": "AccountListResponse",
+        "type": "object"
+      },
+      "AccountResponse": {
+        "properties": {
+          "alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alias"
+          },
+          "broker_id": {
+            "enum": [
+              "ibkr",
+              "futu",
+              "schwab",
+              "alpaca"
+            ],
+            "title": "Broker Id",
+            "type": "string"
+          },
+          "currency_base": {
+            "default": "",
+            "maxLength": 3,
+            "title": "Currency Base",
+            "type": "string"
+          },
+          "display_order": {
+            "title": "Display Order",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "paper"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "nlv": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nlv"
+          },
+          "nlv_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nlv At"
+          },
+          "nlv_currency": {
+            "anyOf": [
+              {
+                "maxLength": 3,
+                "minLength": 3,
+                "pattern": "^[A-Z]{3}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nlv Currency"
+          },
+          "position_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Position Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "broker_id",
+          "alias",
+          "mode",
+          "display_order"
+        ],
+        "title": "AccountResponse",
+        "type": "object"
+      },
+      "BrokerCapabilitiesResponse": {
+        "properties": {
+          "broker_id": {
+            "title": "Broker Id",
+            "type": "string"
+          },
+          "combos": {
+            "items": {
+              "$ref": "#/components/schemas/CapabilityComboRow"
+            },
+            "title": "Combos",
+            "type": "array"
+          },
+          "order_types": {
+            "items": {
+              "$ref": "#/components/schemas/OrderTypeRow"
+            },
+            "title": "Order Types",
+            "type": "array"
+          },
+          "time_in_force": {
+            "items": {
+              "$ref": "#/components/schemas/TimeInForceRow"
+            },
+            "title": "Time In Force",
+            "type": "array"
+          }
+        },
+        "required": [
+          "broker_id",
+          "order_types",
+          "time_in_force",
+          "combos"
+        ],
+        "title": "BrokerCapabilitiesResponse",
+        "type": "object"
+      },
+      "BrokerMaintenance": {
+        "description": "Maintenance-window envelope. Single source of truth for both the\nlist endpoint (broker_maintenance field on AccountListResponse) and\nthe legacy 503 envelope used by _classify_sidecar_failure.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "enum": [
+                  "weekend",
+                  "daily"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window"
+          }
+        },
+        "required": [
+          "active"
+        ],
+        "title": "BrokerMaintenance",
+        "type": "object"
+      },
+      "BrokerSidecarStatus": {
+        "properties": {
+          "broker": {
+            "enum": [
+              "ibkr",
+              "futu",
+              "schwab",
+              "alpaca"
+            ],
+            "title": "Broker",
+            "type": "string"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "paper"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "broker",
+          "label",
+          "mode",
+          "connected"
+        ],
+        "title": "BrokerSidecarStatus",
+        "type": "object"
+      },
+      "BrokerSidecarStatusList": {
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/BrokerSidecarStatus"
+            },
+            "title": "Accounts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "accounts"
+        ],
+        "title": "BrokerSidecarStatusList",
+        "type": "object"
+      },
+      "CapabilityComboRow": {
+        "properties": {
+          "broker_id": {
+            "title": "Broker Id",
+            "type": "string"
+          },
+          "notes": {
+            "title": "Notes",
+            "type": "string"
+          },
+          "order_type": {
+            "title": "Order Type",
+            "type": "string"
+          },
+          "supported": {
+            "title": "Supported",
+            "type": "boolean"
+          },
+          "time_in_force": {
+            "title": "Time In Force",
+            "type": "string"
+          }
+        },
+        "required": [
+          "broker_id",
+          "order_type",
+          "time_in_force",
+          "supported",
+          "notes"
+        ],
+        "title": "CapabilityComboRow",
+        "type": "object"
+      },
+      "ConfigIn": {
+        "properties": {
+          "key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.-]*$",
+            "title": "Key",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "value_type": {
+            "default": "str",
+            "enum": [
+              "str",
+              "int",
+              "bool",
+              "json"
+            ],
+            "title": "Value Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "value"
+        ],
+        "title": "ConfigIn",
+        "type": "object"
+      },
+      "ConfigInUpsert": {
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z][a-z0-9_.-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "namespace": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Namespace"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "value_type": {
+            "default": "str",
+            "enum": [
+              "str",
+              "int",
+              "bool",
+              "json"
+            ],
+            "title": "Value Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ConfigInUpsert",
+        "type": "object"
+      },
+      "ConfigOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "value_type": {
+            "title": "Value Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "value",
+          "value_type",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ConfigOut",
+        "type": "object"
+      },
+      "Contract": {
+        "properties": {
+          "asset_class": {
+            "enum": [
+              "ASSET_UNSPECIFIED",
+              "STOCK",
+              "ETF",
+              "OPTION",
+              "FUTURE",
+              "FOREX",
+              "CRYPTO",
+              "BOND",
+              "MUTUAL_FUND",
+              "WARRANT",
+              "CBBC"
+            ],
+            "title": "Asset Class",
+            "type": "string"
+          },
+          "conid": {
+            "title": "Conid",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "exchange": {
+            "title": "Exchange",
+            "type": "string"
+          },
+          "local_symbol": {
+            "title": "Local Symbol",
+            "type": "string"
+          },
+          "multiplier": {
+            "default": "",
+            "title": "Multiplier",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "exchange",
+          "currency",
+          "asset_class",
+          "conid",
+          "local_symbol"
+        ],
+        "title": "Contract",
+        "type": "object"
+      },
+      "ContractSummary": {
+        "properties": {
+          "conid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Conid"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conid",
+          "description"
+        ],
+        "title": "ContractSummary",
+        "type": "object"
+      },
+      "FillListResponse": {
+        "properties": {
+          "fills": {
+            "items": {
+              "$ref": "#/components/schemas/FillResponse"
+            },
+            "title": "Fills",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "fills"
+        ],
+        "title": "FillListResponse",
+        "type": "object"
+      },
+      "FillResponse": {
+        "properties": {
+          "commission": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commission"
+          },
+          "commission_currency": {
+            "anyOf": [
+              {
+                "maxLength": 3,
+                "minLength": 3,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commission Currency"
+          },
+          "currency": {
+            "maxLength": 3,
+            "minLength": 3,
+            "title": "Currency",
+            "type": "string"
+          },
+          "exec_id": {
+            "title": "Exec Id",
+            "type": "string"
+          },
+          "executed_at": {
+            "format": "date-time",
+            "title": "Executed At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "order_id": {
+            "format": "uuid",
+            "title": "Order Id",
+            "type": "string"
+          },
+          "price": {
+            "title": "Price",
+            "type": "string"
+          },
+          "qty": {
+            "title": "Qty",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "order_id",
+          "exec_id",
+          "qty",
+          "price",
+          "currency",
+          "executed_at"
+        ],
+        "title": "FillResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "Money": {
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "currency"
+        ],
+        "title": "Money",
+        "type": "object"
+      },
+      "Order": {
+        "properties": {
+          "avg_fill_price": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "contract": {
+            "$ref": "#/components/schemas/Contract"
+          },
+          "limit_price": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "order_id": {
+            "title": "Order Id",
+            "type": "string"
+          },
+          "order_type": {
+            "enum": [
+              "UNSPECIFIED",
+              "MARKET",
+              "LIMIT",
+              "STOP",
+              "STOP_LIMIT",
+              "TRAIL",
+              "TRAIL_LIMIT",
+              "MOC",
+              "MOO",
+              "LOC",
+              "LOO"
+            ],
+            "title": "Order Type",
+            "type": "string"
+          },
+          "quantity": {
+            "title": "Quantity",
+            "type": "string"
+          },
+          "quantity_filled": {
+            "title": "Quantity Filled",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "SIDE_UNSPECIFIED",
+              "BUY",
+              "SELL"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "STATUS_UNSPECIFIED",
+              "PENDING",
+              "SUBMITTED",
+              "PARTIAL",
+              "FILLED",
+              "CANCELLED",
+              "REJECTED"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_price": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "submitted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted At"
+          },
+          "time_in_force": {
+            "enum": [
+              "UNSPECIFIED",
+              "DAY",
+              "GTC",
+              "IOC",
+              "FOK",
+              "GTD"
+            ],
+            "title": "Time In Force",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "order_id",
+          "contract",
+          "side",
+          "order_type",
+          "quantity",
+          "limit_price",
+          "stop_price",
+          "time_in_force",
+          "status",
+          "quantity_filled",
+          "avg_fill_price",
+          "submitted_at",
+          "updated_at"
+        ],
+        "title": "Order",
+        "type": "object"
+      },
+      "OrderBracketLeg": {
+        "properties": {
+          "broker_order_id": {
+            "title": "Broker Order Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "leg": {
+            "enum": [
+              "stop_loss",
+              "take_profit"
+            ],
+            "title": "Leg",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "leg",
+          "broker_order_id",
+          "status"
+        ],
+        "title": "OrderBracketLeg",
+        "type": "object"
+      },
+      "OrderBracketParent": {
+        "properties": {
+          "broker_order_id": {
+            "title": "Broker Order Id",
+            "type": "string"
+          },
+          "client_order_id": {
+            "format": "uuid",
+            "title": "Client Order Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "client_order_id",
+          "broker_order_id",
+          "status"
+        ],
+        "title": "OrderBracketParent",
+        "type": "object"
+      },
+      "OrderBracketResponse": {
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/OrderBracketLeg"
+            },
+            "title": "Children",
+            "type": "array"
+          },
+          "oca_group": {
+            "title": "Oca Group",
+            "type": "string"
+          },
+          "parent": {
+            "$ref": "#/components/schemas/OrderBracketParent"
+          }
+        },
+        "required": [
+          "parent",
+          "children",
+          "oca_group"
+        ],
+        "title": "OrderBracketResponse",
+        "type": "object"
+      },
+      "OrderEvent": {
+        "properties": {
+          "avg_fill_price": {
+            "title": "Avg Fill Price",
+            "type": "string"
+          },
+          "broker_event_at": {
+            "format": "date-time",
+            "title": "Broker Event At",
+            "type": "string"
+          },
+          "broker_order_id": {
+            "title": "Broker Order Id",
+            "type": "string"
+          },
+          "client_order_id": {
+            "title": "Client Order Id",
+            "type": "string"
+          },
+          "filled_qty": {
+            "title": "Filled Qty",
+            "type": "string"
+          },
+          "raw_payload": {
+            "title": "Raw Payload",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending_submit",
+              "submitted",
+              "partial",
+              "filled",
+              "cancelled",
+              "rejected",
+              "expired",
+              "inactive",
+              "modified"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "broker_order_id",
+          "client_order_id",
+          "status",
+          "filled_qty",
+          "avg_fill_price",
+          "broker_event_at",
+          "raw_payload"
+        ],
+        "title": "OrderEvent",
+        "type": "object"
+      },
+      "OrderListResponse": {
+        "properties": {
+          "broker_maintenance": {
+            "$ref": "#/components/schemas/BrokerMaintenance"
+          },
+          "kill_switch_active": {
+            "title": "Kill Switch Active",
+            "type": "boolean"
+          },
+          "orders": {
+            "items": {
+              "$ref": "#/components/schemas/OrderResponse"
+            },
+            "title": "Orders",
+            "type": "array"
+          }
+        },
+        "required": [
+          "orders",
+          "broker_maintenance",
+          "kill_switch_active"
+        ],
+        "title": "OrderListResponse",
+        "type": "object"
+      },
+      "OrderResponse": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "avg_fill_price": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Fill Price"
+          },
+          "broker_order_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker Order Id"
+          },
+          "conid": {
+            "title": "Conid",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "events": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OrderEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "filled_qty": {
+            "title": "Filled Qty",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_event_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Event At"
+          },
+          "limit_price": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit Price"
+          },
+          "notional": {
+            "title": "Notional",
+            "type": "string"
+          },
+          "order_type": {
+            "enum": [
+              "MARKET",
+              "LIMIT",
+              "STOP"
+            ],
+            "title": "Order Type",
+            "type": "string"
+          },
+          "qty": {
+            "title": "Qty",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending_submit",
+              "submitted",
+              "partial",
+              "filled",
+              "cancelled",
+              "rejected",
+              "expired",
+              "inactive",
+              "modified"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_price": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Price"
+          },
+          "submission_state": {
+            "default": "submitted",
+            "enum": [
+              "submitted",
+              "pending_unknown",
+              "idempotent_retry"
+            ],
+            "title": "Submission State",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "tif": {
+            "enum": [
+              "DAY",
+              "GTC"
+            ],
+            "title": "Tif",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "account_id",
+          "broker_order_id",
+          "conid",
+          "symbol",
+          "side",
+          "order_type",
+          "tif",
+          "qty",
+          "limit_price",
+          "stop_price",
+          "status",
+          "filled_qty",
+          "avg_fill_price",
+          "notional",
+          "created_at",
+          "updated_at",
+          "last_event_at"
+        ],
+        "title": "OrderResponse",
+        "type": "object"
+      },
+      "OrderTypeRow": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "sort_order": {
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "label",
+          "description",
+          "sort_order"
+        ],
+        "title": "OrderTypeRow",
+        "type": "object"
+      },
+      "PolicyResponse": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "daily_notional_cap": {
+            "title": "Daily Notional Cap",
+            "type": "string"
+          },
+          "max_notional_per_order": {
+            "title": "Max Notional Per Order",
+            "type": "string"
+          },
+          "notional_filled_today": {
+            "title": "Notional Filled Today",
+            "type": "string"
+          },
+          "position_count": {
+            "title": "Position Count",
+            "type": "integer"
+          },
+          "simulator_only": {
+            "title": "Simulator Only",
+            "type": "boolean"
+          },
+          "trade_enabled": {
+            "title": "Trade Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "account_id",
+          "max_notional_per_order",
+          "daily_notional_cap",
+          "notional_filled_today",
+          "trade_enabled",
+          "simulator_only",
+          "position_count"
+        ],
+        "title": "PolicyResponse",
+        "type": "object"
+      },
+      "Position": {
+        "properties": {
+          "avg_cost": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "contract": {
+            "$ref": "#/components/schemas/Contract"
+          },
+          "daily_pnl": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "market_price": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "market_value": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "title": "Quantity",
+            "type": "string"
+          },
+          "realized_pnl_today": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "unrealized_pnl": {
+            "$ref": "#/components/schemas/Money"
+          }
+        },
+        "required": [
+          "contract",
+          "quantity",
+          "avg_cost",
+          "market_price",
+          "market_value",
+          "unrealized_pnl",
+          "realized_pnl_today",
+          "daily_pnl"
+        ],
+        "title": "Position",
+        "type": "object"
+      },
+      "PositionSanityResult": {
+        "properties": {
+          "current_qty": {
+            "title": "Current Qty",
+            "type": "string"
+          },
+          "new_qty_after_fill": {
+            "title": "New Qty After Fill",
+            "type": "string"
+          },
+          "requires_extra_attestation": {
+            "title": "Requires Extra Attestation",
+            "type": "boolean"
+          },
+          "sanity_multiplier": {
+            "title": "Sanity Multiplier",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "high",
+              "extreme"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_qty",
+          "new_qty_after_fill",
+          "sanity_multiplier",
+          "status",
+          "requires_extra_attestation"
+        ],
+        "title": "PositionSanityResult",
+        "type": "object"
+      },
+      "PreviewResponse": {
+        "properties": {
+          "cap_status": {
+            "enum": [
+              "ok",
+              "near",
+              "exceeded"
+            ],
+            "title": "Cap Status",
+            "type": "string"
+          },
+          "contract_summary": {
+            "$ref": "#/components/schemas/ContractSummary"
+          },
+          "daily_cap_status": {
+            "enum": [
+              "ok",
+              "near",
+              "exceeded"
+            ],
+            "title": "Daily Cap Status",
+            "type": "string"
+          },
+          "daily_notional_cap": {
+            "title": "Daily Notional Cap",
+            "type": "string"
+          },
+          "max_notional_per_order": {
+            "title": "Max Notional Per Order",
+            "type": "string"
+          },
+          "nonce": {
+            "title": "Nonce",
+            "type": "string"
+          },
+          "notional": {
+            "title": "Notional",
+            "type": "string"
+          },
+          "notional_currency": {
+            "title": "Notional Currency",
+            "type": "string"
+          },
+          "notional_filled_today": {
+            "title": "Notional Filled Today",
+            "type": "string"
+          },
+          "position_sanity": {
+            "$ref": "#/components/schemas/PositionSanityResult"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "nonce",
+          "notional",
+          "notional_currency",
+          "notional_filled_today",
+          "daily_notional_cap",
+          "max_notional_per_order",
+          "cap_status",
+          "daily_cap_status",
+          "position_sanity",
+          "contract_summary",
+          "warnings"
+        ],
+        "title": "PreviewResponse",
+        "type": "object"
+      },
+      "SecretIn": {
+        "properties": {
+          "key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.-]*$",
+            "title": "Key",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "value_type": {
+            "default": "str",
+            "enum": [
+              "str",
+              "int",
+              "bool",
+              "json"
+            ],
+            "title": "Value Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "value"
+        ],
+        "title": "SecretIn",
+        "type": "object"
+      },
+      "SecretInUpsert": {
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z][a-z0-9_.-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "namespace": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Namespace"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "value_type": {
+            "default": "str",
+            "enum": [
+              "str",
+              "int",
+              "bool",
+              "json"
+            ],
+            "title": "Value Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SecretInUpsert",
+        "type": "object"
+      },
+      "SecretMetadataOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "value_type": {
+            "title": "Value Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "value_type",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SecretMetadataOut",
+        "type": "object"
+      },
+      "SecretRevealOut": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "value_type": {
+            "title": "Value Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "value",
+          "value_type"
+        ],
+        "title": "SecretRevealOut",
+        "type": "object"
+      },
+      "Summary": {
+        "properties": {
+          "buying_power": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "net_liquidation": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "realized_pnl": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "total_cash": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "unrealized_pnl": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "net_liquidation",
+          "total_cash",
+          "realized_pnl",
+          "unrealized_pnl",
+          "buying_power",
+          "updated_at"
+        ],
+        "title": "Summary",
+        "type": "object"
+      },
+      "Tier2HeartbeatIn": {
+        "properties": {
+          "last_run_seconds": {
+            "minimum": 0,
+            "title": "Last Run Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "last_run_seconds"
+        ],
+        "title": "Tier2HeartbeatIn",
+        "type": "object"
+      },
+      "TimeInForceRow": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "requires_expiry": {
+            "title": "Requires Expiry",
+            "type": "boolean"
+          },
+          "sort_order": {
+            "title": "Sort Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "label",
+          "description",
+          "requires_expiry",
+          "sort_order"
+        ],
+        "title": "TimeInForceRow",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "OrderCapabilityWrite": {
+        "title": "OrderCapabilityWrite",
+        "type": "object",
+        "properties": {
+          "broker_id": {
+            "type": "string",
+            "title": "Broker Id"
+          },
+          "order_type": {
+            "type": "string",
+            "title": "Order Type"
+          },
+          "time_in_force": {
+            "type": "string",
+            "title": "Time In Force"
+          },
+          "supported": {
+            "type": "boolean",
+            "title": "Supported"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes"
+          }
+        },
+        "required": [
+          "broker_id",
+          "order_type",
+          "time_in_force",
+          "supported"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Trading Dashboard",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/accounts": {
+      "get": {
+        "operationId": "list_accounts_api_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Accounts",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/api/accounts/{account_id}": {
+      "patch": {
+        "operationId": "update_account_alias_api_accounts__account_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountAliasUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "account <uuid>",
+                  "error": "not_found"
+                }
+              }
+            },
+            "description": "Account uuid unknown or soft-deleted"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Account Alias",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/api/accounts/{account_id}/orders": {
+      "get": {
+        "operationId": "get_account_orders_api_accounts__account_id__orders_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  },
+                  "title": "Response Get Account Orders Api Accounts  Account Id  Orders Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "account <uuid>",
+                  "error": "not_found"
+                }
+              }
+            },
+            "description": "Account uuid unknown or soft-deleted"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "broker_maintenance": {
+                    "value": {
+                      "broker_maintenance": {
+                        "active": true,
+                        "until": "2026-05-02T03:00:00+00:00",
+                        "window": "weekend"
+                      },
+                      "detail": "IBKR weekend maintenance window in progress"
+                    }
+                  },
+                  "sidecar_unreachable": {
+                    "value": {
+                      "error": "sidecar_unreachable",
+                      "label": "isa-live"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "Sidecar unreachable (Retry-After: 30) OR inside an IBKR maintenance window"
+          }
+        },
+        "summary": "Get Account Orders",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/api/accounts/{account_id}/positions": {
+      "get": {
+        "operationId": "get_account_positions_api_accounts__account_id__positions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Position"
+                  },
+                  "title": "Response Get Account Positions Api Accounts  Account Id  Positions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "account <uuid>",
+                  "error": "not_found"
+                }
+              }
+            },
+            "description": "Account uuid unknown or soft-deleted"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "broker_maintenance": {
+                    "value": {
+                      "broker_maintenance": {
+                        "active": true,
+                        "until": "2026-05-02T03:00:00+00:00",
+                        "window": "weekend"
+                      },
+                      "detail": "IBKR weekend maintenance window in progress"
+                    }
+                  },
+                  "sidecar_unreachable": {
+                    "value": {
+                      "error": "sidecar_unreachable",
+                      "label": "isa-live"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "Sidecar unreachable (Retry-After: 30) OR inside an IBKR maintenance window"
+          }
+        },
+        "summary": "Get Account Positions",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/api/accounts/{account_id}/summary": {
+      "get": {
+        "operationId": "get_account_summary_api_accounts__account_id__summary_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Summary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "account <uuid>",
+                  "error": "not_found"
+                }
+              }
+            },
+            "description": "Account uuid unknown or soft-deleted"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "broker_maintenance": {
+                    "value": {
+                      "broker_maintenance": {
+                        "active": true,
+                        "until": "2026-05-02T03:00:00+00:00",
+                        "window": "weekend"
+                      },
+                      "detail": "IBKR weekend maintenance window in progress"
+                    }
+                  },
+                  "sidecar_unreachable": {
+                    "value": {
+                      "error": "sidecar_unreachable",
+                      "label": "isa-live"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "Sidecar unreachable (Retry-After: 30) OR inside an IBKR maintenance window"
+          }
+        },
+        "summary": "Get Account Summary",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/api/admin/brokers/schwab/disconnect": {
+      "post": {
+        "description": "Phase 7a D4 — wipe Schwab tokens (always); optionally wipe Tier-2 creds.",
+        "operationId": "disconnect_schwab_api_admin_brokers_schwab_disconnect_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "delete_credentials",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Delete Credentials",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Disconnect Schwab Api Admin Brokers Schwab Disconnect Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disconnect Schwab",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/brokers/schwab/oauth-callback": {
+      "post": {
+        "operationId": "schwab_oauth_callback_admin_api_admin_brokers_schwab_oauth_callback_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "title": "State",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Schwab Oauth Callback Admin Api Admin Brokers Schwab Oauth Callback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Schwab Oauth Callback Admin",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/brokers/schwab/oauth-start": {
+      "get": {
+        "operationId": "schwab_oauth_start_api_admin_brokers_schwab_oauth_start_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Schwab Oauth Start",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/brokers/schwab/status": {
+      "get": {
+        "operationId": "schwab_status_api_admin_brokers_schwab_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "title": "Response Schwab Status Api Admin Brokers Schwab Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Schwab Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/brokers/{label}/account-hashes": {
+      "get": {
+        "description": "Operator-only: returns sidecar-side (account_number, account_hash, mode)\nfor a broker gateway label.\n\nUsed to discover SCHWAB_PAPER_ACCOUNT_HASH for the C0 empirical hard-gate\nscript (and equivalent operator workflows for other brokers). Bypasses the\nboundary-stripping in AccountResponse / _account_from_proto by reading\nresponse.accounts directly from the sidecar's ListManagedAccounts gRPC.\n\n`label` is the gateway label (e.g. \"schwab\", \"isa-paper\", \"futu\",\n\"alpaca-paper\") — not the broker_id.",
+        "operationId": "list_broker_account_hashes_api_admin_brokers__label__account_hashes_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "label",
+            "required": true,
+            "schema": {
+              "title": "Label",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "title": "Response List Broker Account Hashes Api Admin Brokers  Label  Account Hashes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Broker Account Hashes",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/brokers/{label}/reconfigure": {
+      "post": {
+        "operationId": "reconfigure_api_admin_brokers__label__reconfigure_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "label",
+            "required": true,
+            "schema": {
+              "title": "Label",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reconfigure Api Admin Brokers  Label  Reconfigure Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reconfigure",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/config": {
+      "get": {
+        "operationId": "list_config_api_admin_config_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConfigOut"
+                  },
+                  "title": "Response List Config Api Admin Config Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Config",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "create_config_api_admin_config_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Config",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/config/stream": {
+      "get": {
+        "operationId": "config_stream_api_admin_config_stream_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9_]{1,32}$",
+              "title": "Ns",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Config Stream",
+        "tags": [
+          "admin",
+          "sse"
+        ]
+      }
+    },
+    "/api/admin/config/{namespace}/{key}": {
+      "delete": {
+        "operationId": "delete_config_api_admin_config__namespace___key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Config",
+        "tags": [
+          "admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_config_entry_api_admin_config__namespace___key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Config Entry",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "operationId": "put_config_api_admin_config__namespace___key__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigInUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Config",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/csrf/issue": {
+      "post": {
+        "operationId": "issue_confirmation_nonce_api_admin_csrf_issue_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Issue Confirmation Nonce Api Admin Csrf Issue Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Issue Confirmation Nonce",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/instruments": {
+      "post": {
+        "operationId": "create_instrument_api_admin_instruments_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Instrument",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/metrics/tier2": {
+      "post": {
+        "operationId": "push_tier2_heartbeat_api_admin_metrics_tier2_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Tier2HeartbeatIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Push Tier2 Heartbeat",
+        "tags": [
+          "admin",
+          "metrics"
+        ]
+      }
+    },
+    "/api/admin/order-capabilities": {
+      "post": {
+        "operationId": "set_order_capability_api_admin_order_capabilities_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Confirm-Nonce",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Confirm-Nonce"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Set Order Capability Api Admin Order Capabilities Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Order Capability",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/secrets": {
+      "get": {
+        "operationId": "list_secrets_api_admin_secrets_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SecretMetadataOut"
+                  },
+                  "title": "Response List Secrets Api Admin Secrets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Secrets",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "create_secret_api_admin_secrets_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretMetadataOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Secret",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/secrets/{namespace}/{key}": {
+      "delete": {
+        "operationId": "delete_secret_api_admin_secrets__namespace___key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Secret",
+        "tags": [
+          "admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_secret_metadata_api_admin_secrets__namespace___key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretMetadataOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Secret Metadata",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "operationId": "put_secret_api_admin_secrets__namespace___key__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretInUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretMetadataOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Secret",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/secrets/{namespace}/{key}/reveal": {
+      "post": {
+        "operationId": "reveal_secret_api_admin_secrets__namespace___key__reveal_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "title": "Namespace",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretRevealOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reveal Secret",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/brokers/accounts": {
+      "get": {
+        "operationId": "list_broker_status_api_brokers_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrokerSidecarStatusList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Broker Status",
+        "tags": [
+          "brokers"
+        ]
+      }
+    },
+    "/api/brokers/{broker_id}/capabilities": {
+      "get": {
+        "operationId": "get_broker_capabilities_api_brokers__broker_id__capabilities_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "broker_id",
+            "required": true,
+            "schema": {
+              "title": "Broker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrokerCapabilitiesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Broker Capabilities",
+        "tags": [
+          "brokers"
+        ]
+      }
+    },
+    "/api/contracts/search": {
+      "get": {
+        "description": "Autocomplete proxy: forward to one healthy sidecar, cache 5 min.",
+        "operationId": "search_contracts_api_contracts_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "asset_class",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Asset Class",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "broker",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "ibkr",
+                    "futu",
+                    "schwab"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Broker"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Contracts",
+        "tags": [
+          "contracts"
+        ]
+      }
+    },
+    "/api/fills": {
+      "get": {
+        "operationId": "list_fills_api_fills_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "To",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FillListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Fills",
+        "tags": [
+          "fills"
+        ]
+      }
+    },
+    "/api/oauth/schwab/callback": {
+      "get": {
+        "description": "Public Schwab OAuth callback. CF-Access-bypassed.\n\nv0.7.4: state restored to the authorize URL. Manual-flow URLs may\nstill omit state, in which case CSRF protection falls back to\nredirect_uri byte-match only.",
+        "operationId": "schwab_oauth_callback_public_api_oauth_schwab_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "State",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Schwab Oauth Callback Public Api Oauth Schwab Callback Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Schwab Oauth Callback Public",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/orders": {
+      "get": {
+        "operationId": "list_orders_api_orders_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Orders",
+        "tags": [
+          "orders"
+        ]
+      },
+      "post": {
+        "operationId": "place_order_api_orders_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Place Order",
+        "tags": [
+          "orders"
+        ]
+      }
+    },
+    "/api/orders/bracket": {
+      "post": {
+        "operationId": "place_bracket_api_orders_bracket_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderBracketResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Place Bracket",
+        "tags": [
+          "orders"
+        ]
+      }
+    },
+    "/api/orders/events": {
+      "get": {
+        "description": "Server-Sent Events stream for order updates.\n\nClients may send a ``Last-Event-ID`` HTTP header to replay missed events\nsince that event id before tailing the live pubsub channel (P14).",
+        "operationId": "stream_order_events_api_orders_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Order Events",
+        "tags": [
+          "orders"
+        ]
+      }
+    },
+    "/api/orders/policy/{account_id}": {
+      "get": {
+        "operationId": "get_account_policy_api_orders_policy__account_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Account Policy",
+        "tags": [
+          "orders"
+        ]
+      }
+    },
+    "/api/orders/preview": {
+      "post": {
+        "operationId": "preview_order_api_orders_preview_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Preview Order",
+        "tags": [
+          "orders"
+        ]
+      }
+    },
+    "/api/orders/{order_id}": {
+      "delete": {
+        "operationId": "cancel_order_api_orders__order_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Order Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Order",
+        "tags": [
+          "orders"
+        ]
+      },
+      "get": {
+        "operationId": "get_order_api_orders__order_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Order Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Order",
+        "tags": [
+          "orders"
+        ]
+      },
+      "put": {
+        "operationId": "modify_order_api_orders__order_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Order Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Modify Order",
+        "tags": [
+          "orders"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "get_metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Metrics"
+      }
+    },
+    "/api/brokers/{id}/capabilities": {
+      "get": {
+        "operationId": "get_broker_capabilities_api_brokers__broker_id__capabilities_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "broker_id",
+            "required": true,
+            "schema": {
+              "title": "Broker Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrokerCapabilitiesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Broker Capabilities",
+        "tags": [
+          "brokers"
+        ]
+      }
+    }
+  }
+}

@@ -1,12 +1,14 @@
 import * as React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { renderWithQuery } from '@/test-utils/render-with-query';
 import { TradeTicketModal } from './TradeTicketModal';
 import { tradeTicketStore } from './use-trade-ticket';
 import { useOrdersStore } from '@/stores/global/orders';
 import type { DecimalString, OrderResponse, PreviewRequest, PreviewResponse } from '@/services/types';
 import { previewOrder, placeOrder } from '@/services/orders';
+import type { BrokerCapabilitiesResponse } from '@/services/capabilities/types';
 
 vi.mock('@/services/orders', async () => {
   const actual = await vi.importActual<typeof import('@/services/orders')>('@/services/orders');
@@ -77,9 +79,9 @@ function openTicket(conid = '265598', symbol = 'AAPL'): void {
   });
 }
 
-function renderOpen(): void {
+function renderOpen(brokerId?: string): void {
   openTicket();
-  render(<TradeTicketModal />);
+  renderWithQuery(<TradeTicketModal {...(brokerId !== undefined ? { brokerId } : {})} />);
 }
 
 async function fillMarket(user: ReturnType<typeof userEvent.setup>): Promise<void> {
@@ -101,6 +103,50 @@ function maintenanceError(seconds: string): Error & { headers: Headers } {
   return error;
 }
 
+function schwabCapabilities(): BrokerCapabilitiesResponse {
+  const supportedOrderTypes = ['MARKET', 'LIMIT', 'STOP', 'STOP_LIMIT'];
+  const supportedTifs = ['DAY', 'GTC', 'IOC', 'FOK'];
+  return {
+    broker_id: 'schwab',
+    order_types: [
+      ...supportedOrderTypes.map((code, index) => ({ code, label: code, description: code, sort_order: index })),
+      { code: 'TRAIL', label: 'TRAIL', description: 'TRAIL', sort_order: supportedOrderTypes.length },
+    ],
+    time_in_force: supportedTifs.map((code, index) => ({
+      code,
+      label: code,
+      description: code,
+      requires_expiry: false,
+      sort_order: index,
+    })),
+    combos: [
+      ...supportedOrderTypes.flatMap((order_type) => (
+        supportedTifs.map((time_in_force) => ({ broker_id: 'schwab', order_type, time_in_force, supported: true, notes: '' }))
+      )),
+      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'DAY', supported: false, notes: 'Not supported for this broker' },
+      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'GTC', supported: false, notes: 'Not supported for this broker' },
+      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'IOC', supported: false, notes: 'Not supported for this broker' },
+      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'FOK', supported: false, notes: 'Not supported for this broker' },
+    ],
+  };
+}
+
+function mockCapabilitiesFetch(response: Promise<Response>): void {
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+    if (url === '/api/brokers/schwab/capabilities') return response;
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  });
+}
+
+function capabilitiesResponse(body: BrokerCapabilitiesResponse, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as Response;
+}
+
 describe('TradeTicketModal', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -114,6 +160,7 @@ describe('TradeTicketModal', () => {
 
   afterEach(() => {
     tradeTicketStore.getState().close();
+    vi.restoreAllMocks();
   });
 
   it('form_validation_market_blocks_limit_price_input', () => {
@@ -229,7 +276,7 @@ describe('TradeTicketModal', () => {
         </>
       );
     }
-    render(<Harness />);
+    renderWithQuery(<Harness />);
     const trigger = screen.getByRole('button', { name: 'Trade' });
     await user.click(trigger);
     await screen.findByRole('dialog');
@@ -240,7 +287,7 @@ describe('TradeTicketModal', () => {
 
   it('focus_trap_prevents_tab_out', async () => {
     const user = userEvent.setup();
-    render(
+    renderWithQuery(
       <>
         <button type="button">Outside</button>
         <TradeTicketModal />
@@ -264,5 +311,45 @@ describe('TradeTicketModal', () => {
   it('first_focusable_element_focused_on_open', async () => {
     renderOpen();
     await waitFor(() => expect(screen.getByRole('button', { name: 'BUY' })).toHaveFocus());
+  });
+
+  it('schwab_market_limit_supported_and_trail_disabled_with_tooltip', async () => {
+    mockCapabilitiesFetch(Promise.resolve(capabilitiesResponse(schwabCapabilities())));
+    renderOpen('schwab');
+
+    const market = await screen.findByRole('option', { name: 'MARKET' });
+    const limit = screen.getByRole('option', { name: 'LIMIT' });
+    const trail = Array.from(screen.getAllByRole('option')).find((option) => (
+      option instanceof HTMLOptionElement && option.value === 'TRAIL'
+    ));
+    if (trail === undefined) throw new Error('TRAIL option missing');
+
+    expect(market).toBeEnabled();
+    expect(limit).toBeEnabled();
+    expect(trail).toBeDisabled();
+    expect(trail).toHaveAttribute('title', 'Not supported for this broker');
+  });
+
+  it('capability_loading_disables_order_and_tif_dropdowns', async () => {
+    mockCapabilitiesFetch(new Promise<Response>(() => { /* pending */ }));
+    renderOpen('schwab');
+
+    await screen.findAllByText('Loading capabilities...');
+
+    expect(screen.getByLabelText('Order type')).toBeDisabled();
+    expect(screen.getByLabelText('TIF')).toBeDisabled();
+  });
+
+  it('capability_error_shows_warning_and_still_allows_preview', async () => {
+    const user = userEvent.setup();
+    mockCapabilitiesFetch(Promise.resolve(capabilitiesResponse(schwabCapabilities(), 500)));
+    renderOpen('schwab');
+
+    expect(await screen.findByText('Broker capabilities unavailable. Orders can still be previewed.')).toBeInTheDocument();
+    previewMock.mockResolvedValueOnce(makePreview());
+    await fillMarket(user);
+    await user.click(screen.getByRole('button', { name: 'Preview' }));
+
+    expect(await screen.findByRole('button', { name: 'Confirm' })).toBeInTheDocument();
   });
 });

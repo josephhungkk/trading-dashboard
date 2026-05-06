@@ -5,6 +5,8 @@ import { Input } from '@/components/primitives/Input';
 import { cn } from '@/lib/utils';
 import { useFocusedSymbol } from '@/hooks/useFocusedSymbol';
 import { useToast } from '@/hooks/use-toast';
+import type { BrokerCapabilitiesResponse } from '@/services/capabilities/types';
+import { useBrokerCapabilities } from '@/services/capabilities/useBrokerCapabilities';
 import { previewOrder, placeOrder } from '@/services/orders';
 import type { DecimalString, PreviewRequest, PreviewResponse } from '@/services/types';
 import { useOrdersStore, type OrderResponse as StoredOrderResponse } from '@/stores/global/orders';
@@ -13,7 +15,8 @@ import { ContractSearchInput, type ContractSearchInputValue } from './ContractSe
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 
 type Side = PreviewRequest['side'];
-type OrderType = PreviewRequest['order_type'];
+type SubmittableOrderType = PreviewRequest['order_type'];
+type OrderType = SubmittableOrderType | 'TRAIL' | 'TRAIL_LIMIT' | 'MOC' | 'MOO' | 'LOC' | 'LOO';
 type Tif = PreviewRequest['tif'];
 type TradeTicketContract = ContractSearchInputValue & {
   asset_class?: string;
@@ -50,6 +53,11 @@ const initialForm: FormState = {
   tif: 'DAY',
 };
 
+const ORDER_TYPES = ['MARKET', 'LIMIT', 'STOP', 'STOP_LIMIT', 'TRAIL', 'TRAIL_LIMIT', 'MOC', 'MOO', 'LOC', 'LOO'] as const;
+const TIFS = ['DAY', 'GTC', 'IOC', 'FOK'] as const;
+const NOT_SUPPORTED = 'Not supported for this broker';
+const LOADING_CAPABILITIES = 'Loading capabilities...';
+
 const focusableSelector = [
   'button:not([disabled])',
   'input:not([disabled])',
@@ -61,26 +69,38 @@ const focusableSelector = [
 
 export function TradeTicketModal({
   storyBanner = null,
+  brokerId,
 }: {
   storyBanner?: BlockingBanner | null;
+  brokerId?: string | null;
 }): React.JSX.Element | null {
   const isOpen = useTradeTicketStore((s) => s.isOpen);
   const clientOrderId = useTradeTicketStore((s) => s.clientOrderId);
 
   if (!isOpen) return null;
-  return <TradeTicketModalContent key={clientOrderId} storyBanner={storyBanner} />;
+  return (
+    <TradeTicketModalContent
+      key={clientOrderId}
+      storyBanner={storyBanner}
+      {...(brokerId !== undefined ? { brokerId } : {})}
+    />
+  );
 }
 
 function TradeTicketModalContent({
   storyBanner,
+  brokerId,
 }: {
   storyBanner: BlockingBanner | null;
+  brokerId?: string | null;
 }): React.JSX.Element {
   const accountId = useTradeTicketStore((s) => s.accountId);
   const accountsStore = useActiveStores().useAccounts;
   const activeBroker = accountsStore(
     (s) => s.accounts.find((a) => a.id === accountId)?.broker,
   );
+  const effectiveBrokerId = brokerId ?? activeBroker ?? null;
+  const capabilities = useBrokerCapabilities(effectiveBrokerId);
   const defaultConid = useTradeTicketStore((s) => s.defaultConid);
   const defaultSymbol = useTradeTicketStore((s) => s.defaultSymbol);
   const clientOrderId = useTradeTicketStore((s) => s.clientOrderId);
@@ -100,6 +120,21 @@ function TradeTicketModalContent({
   const [attestedExtreme, setAttestedExtreme] = React.useState(false);
   const [banner, setBanner] = React.useState<BlockingBanner | null>(storyBanner);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (effectiveBrokerId === null || capabilities.data === undefined || capabilities.isError) return undefined;
+    if (capabilities.isSupported(form.orderType, form.tif)) return undefined;
+    const fallback = firstSupportedCombo(capabilities.data, form.orderType, form.tif);
+    if (fallback === null) return undefined;
+    const id = window.setTimeout(() => {
+      setForm((current) => ({
+        ...current,
+        orderType: fallback.orderType,
+        tif: fallback.tif,
+      }));
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [capabilities, effectiveBrokerId, form.orderType, form.tif]);
 
   React.useEffect(() => {
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -251,6 +286,8 @@ function TradeTicketModalContent({
                 void handlePreview().catch(() => setPreviewError('Preview failed'));
               }}
               previewDisabled={previewDisabled}
+              brokerId={effectiveBrokerId}
+              capabilities={capabilities}
               {...(activeBroker === 'ibkr' || activeBroker === 'futu'
                 ? { broker: activeBroker }
                 : {})}
@@ -278,16 +315,22 @@ function TradeTicketForm({
   onPreview,
   previewDisabled,
   broker,
+  brokerId,
+  capabilities,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
   onPreview: () => void;
   previewDisabled: boolean;
   broker?: 'ibkr' | 'futu';
+  brokerId: string | null;
+  capabilities: ReturnType<typeof useBrokerCapabilities>;
 }): React.JSX.Element {
-  const limitRequired = form.orderType === 'LIMIT' && form.limitPrice.trim() === '';
-  const stopRequired = form.orderType === 'STOP' && form.stopPrice.trim() === '';
-  const canPreview = !previewDisabled && !limitRequired && !stopRequired;
+  const capabilityLoading = brokerId !== null && capabilities.isLoading;
+  const capabilityError = brokerId !== null && capabilities.isError;
+  const limitRequired = (form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT') && form.limitPrice.trim() === '';
+  const stopRequired = (form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT') && form.stopPrice.trim() === '';
+  const canPreview = !previewDisabled && !capabilityLoading && isSubmittableOrderType(form.orderType) && !limitRequired && !stopRequired;
   const contractInputId = React.useId();
   const orderTypeId = React.useId();
   const qtyId = React.useId();
@@ -339,16 +382,21 @@ function TradeTicketForm({
           id={orderTypeId}
           className="h-10 rounded-md border border-border bg-panel px-3 text-sm text-fg"
           value={form.orderType}
+          disabled={capabilityLoading}
           onChange={(event) => {
             const orderType = event.currentTarget.value as OrderType;
             setForm((s) => ({ ...s, orderType }));
           }}
         >
-          <option value="MARKET">MARKET</option>
-          <option value="LIMIT">LIMIT</option>
-          <option value="STOP" disabled={stopDisabled}>
-            STOP{stopDisabled ? ' (unavailable for HK warrants/CBBC)' : ''}
-          </option>
+          {capabilityLoading ? <option value={form.orderType}>{LOADING_CAPABILITIES}</option> : null}
+          {!capabilityLoading ? ORDER_TYPES.map((orderType) => {
+            const disabledReason = orderTypeDisabledReason(orderType, form.tif, stopDisabled, capabilities, capabilityError, brokerId);
+            return (
+              <option key={orderType} value={orderType} disabled={disabledReason !== null} title={disabledReason ?? undefined}>
+                {optionLabel(orderType, disabledReason)}
+              </option>
+            );
+          }) : null}
         </select>
       </label>
 
@@ -366,7 +414,7 @@ function TradeTicketForm({
         />
       </label>
 
-      {form.orderType === 'LIMIT' ? (
+      {form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT' ? (
         <label htmlFor={limitPriceId} className="flex flex-col gap-1 text-sm font-medium">
           Limit price
           <Input
@@ -382,7 +430,7 @@ function TradeTicketForm({
         </label>
       ) : null}
 
-      {form.orderType === 'STOP' ? (
+      {form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT' ? (
         <label htmlFor={stopPriceId} className="flex flex-col gap-1 text-sm font-medium">
           Stop price
           <Input
@@ -404,15 +452,29 @@ function TradeTicketForm({
           id={tifId}
           className="h-10 rounded-md border border-border bg-panel px-3 text-sm text-fg"
           value={form.tif}
+          disabled={capabilityLoading}
           onChange={(event) => {
             const tif = event.currentTarget.value as Tif;
             setForm((s) => ({ ...s, tif }));
           }}
         >
-          <option value="DAY">DAY</option>
-          <option value="GTC">GTC</option>
+          {capabilityLoading ? <option value={form.tif}>{LOADING_CAPABILITIES}</option> : null}
+          {!capabilityLoading ? TIFS.map((tif) => {
+            const disabledReason = tifDisabledReason(form.orderType, tif, capabilities, capabilityError, brokerId);
+            return (
+              <option key={tif} value={tif} disabled={disabledReason !== null} title={disabledReason ?? undefined}>
+                {optionLabel(tif, disabledReason)}
+              </option>
+            );
+          }) : null}
         </select>
       </label>
+
+      {capabilityError ? (
+        <div className="rounded-md border border-warning/60 bg-warning/10 p-3 text-sm text-warning">
+          Broker capabilities unavailable. Orders can still be previewed.
+        </div>
+      ) : null}
 
       <Button type="submit" disabled={!canPreview}>Preview</Button>
     </form>
@@ -485,12 +547,73 @@ function BlockingBannerView({ banner }: { banner: BlockingBanner }): React.JSX.E
   );
 }
 
+function firstSupportedCombo(
+  capabilities: BrokerCapabilitiesResponse,
+  currentOrderType: OrderType,
+  currentTif: Tif,
+): { orderType: SubmittableOrderType; tif: Tif } | null {
+  const preferred = capabilities.combos.find((combo) => (
+    combo.supported && combo.order_type === 'LIMIT' && combo.time_in_force === 'DAY'
+  ));
+  if (preferred !== undefined) {
+    if (preferred.order_type === currentOrderType && preferred.time_in_force === currentTif) return null;
+    return { orderType: 'LIMIT', tif: 'DAY' };
+  }
+  for (const orderType of ORDER_TYPES) {
+    if (!isSubmittableOrderType(orderType)) continue;
+    for (const tif of TIFS) {
+      const supported = capabilities.combos.some((combo) => (
+        combo.supported && combo.order_type === orderType && combo.time_in_force === tif
+      ));
+      if (!supported) continue;
+      if (orderType === currentOrderType && tif === currentTif) return null;
+      return { orderType, tif };
+    }
+  }
+  return null;
+}
+
+function orderTypeDisabledReason(
+  orderType: OrderType,
+  tif: Tif,
+  stopDisabled: boolean,
+  capabilities: ReturnType<typeof useBrokerCapabilities>,
+  capabilityError: boolean,
+  brokerId: string | null,
+): string | null {
+  if (orderType === 'STOP' && stopDisabled) return 'Unavailable for HK warrants/CBBC';
+  if (brokerId === null || capabilityError) return null;
+  if (capabilities.isSupported(orderType, tif)) return null;
+  return capabilities.notesFor(orderType, tif) ?? NOT_SUPPORTED;
+}
+
+function tifDisabledReason(
+  orderType: OrderType,
+  tif: Tif,
+  capabilities: ReturnType<typeof useBrokerCapabilities>,
+  capabilityError: boolean,
+  brokerId: string | null,
+): string | null {
+  if (brokerId === null || capabilityError) return null;
+  if (capabilities.isSupported(orderType, tif)) return null;
+  return capabilities.notesFor(orderType, tif) ?? NOT_SUPPORTED;
+}
+
+function optionLabel(value: string, disabledReason: string | null): string {
+  return disabledReason === null ? value : `${value} (${disabledReason})`;
+}
+
+function isSubmittableOrderType(value: string): value is SubmittableOrderType {
+  return value === 'MARKET' || value === 'LIMIT' || value === 'STOP' || value === 'STOP_LIMIT';
+}
+
 function buildRequest(accountId: string, form: FormState): PreviewRequest | null {
   const conid = form.contract.conid.trim() || form.contract.symbol.trim();
   const qty = form.qty.trim();
   if (conid === '' || !positiveInteger(qty)) return null;
-  if (form.orderType === 'LIMIT' && form.limitPrice.trim() === '') return null;
-  if (form.orderType === 'STOP' && form.stopPrice.trim() === '') return null;
+  if (!isSubmittableOrderType(form.orderType)) return null;
+  if ((form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT') && form.limitPrice.trim() === '') return null;
+  if ((form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT') && form.stopPrice.trim() === '') return null;
   return {
     account_id: accountId,
     conid,
@@ -498,8 +621,8 @@ function buildRequest(accountId: string, form: FormState): PreviewRequest | null
     order_type: form.orderType,
     tif: form.tif,
     qty: qty as DecimalString,
-    limit_price: form.orderType === 'LIMIT' ? form.limitPrice.trim() as DecimalString : null,
-    stop_price: form.orderType === 'STOP' ? form.stopPrice.trim() as DecimalString : null,
+    limit_price: form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT' ? form.limitPrice.trim() as DecimalString : null,
+    stop_price: form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT' ? form.stopPrice.trim() as DecimalString : null,
   };
 }
 

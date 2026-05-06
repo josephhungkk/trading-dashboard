@@ -117,8 +117,8 @@ export interface PreviewRequest {
   account_id: string;
   conid: string;
   side: 'BUY' | 'SELL';
-  order_type: 'MARKET' | 'LIMIT' | 'STOP';
-  tif: 'DAY' | 'GTC';
+  order_type: 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT';
+  tif: 'DAY' | 'GTC' | 'IOC' | 'FOK';
   qty: DecimalString;
   limit_price?: DecimalString | null;
   stop_price?: DecimalString | null;
@@ -164,8 +164,8 @@ export interface OrderResponse {
   broker_order_id: string | null;
   symbol: string;
   side: 'BUY' | 'SELL';
-  order_type: 'MARKET' | 'LIMIT' | 'STOP';
-  tif: 'DAY' | 'GTC';
+  order_type: 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT';
+  tif: 'DAY' | 'GTC' | 'IOC' | 'FOK';
   qty: DecimalString;
   limit_price: DecimalString | null;
   stop_price: DecimalString | null;

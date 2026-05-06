@@ -8,6 +8,7 @@ import { useFleetMaintenance } from '@/stores/global/fleet-maintenance';
 import { getBothScopes } from '@/stores/registry';
 import { getServices, resetServices } from '@/services/registry';
 import { ACCOUNTS } from '@/services/fixtures';
+import { renderWithQuery } from '@/test-utils/render-with-query';
 import { tradeTicketStore } from './use-trade-ticket';
 import type { Position } from '@/services/types';
 
@@ -115,7 +116,7 @@ describe('TradeButton', () => {
 
   it('account_picker_trade_button_opens_modal_with_account_id', async () => {
     const user = userEvent.setup();
-    render(<AccountPicker />);
+    renderWithQuery(<AccountPicker />);
     await user.click(screen.getByRole('button'));
     const tradeButtons = await screen.findAllByRole('button', { name: 'Trade' });
     await waitFor(() => expect(tradeButtons[0]).toBeEnabled());
@@ -152,7 +153,7 @@ describe('TradeButton', () => {
       asOf: '2026-04-24T10:00:00Z',
     };
     paper.usePositions.setState({ positions: [position] });
-    render(<PositionsTable />);
+    renderWithQuery(<PositionsTable />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Trade' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'Trade' }));
     expect(screen.getByRole('dialog', { name: 'Trade ticket' })).toBeInTheDocument();

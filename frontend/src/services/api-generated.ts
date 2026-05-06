@@ -89,6 +89,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/brokers/schwab/disconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disconnect Schwab
+         * @description Phase 7a D4 — wipe Schwab tokens (always); optionally wipe Tier-2 creds.
+         */
+        post: operations["disconnect_schwab_api_admin_brokers_schwab_disconnect_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/brokers/schwab/oauth-callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Schwab Oauth Callback Admin */
+        post: operations["schwab_oauth_callback_admin_api_admin_brokers_schwab_oauth_callback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/brokers/schwab/oauth-start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Schwab Oauth Start */
+        get: operations["schwab_oauth_start_api_admin_brokers_schwab_oauth_start_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/brokers/schwab/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Schwab Status */
+        get: operations["schwab_status_api_admin_brokers_schwab_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/brokers/{label}/account-hashes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Broker Account Hashes
+         * @description Operator-only: returns sidecar-side (account_number, account_hash, mode)
+         *     for a broker gateway label.
+         *
+         *     Used to discover SCHWAB_PAPER_ACCOUNT_HASH for the C0 empirical hard-gate
+         *     script (and equivalent operator workflows for other brokers). Bypasses the
+         *     boundary-stripping in AccountResponse / _account_from_proto by reading
+         *     response.accounts directly from the sidecar's ListManagedAccounts gRPC.
+         *
+         *     `label` is the gateway label (e.g. "schwab", "isa-paper", "futu",
+         *     "alpaca-paper") — not the broker_id.
+         */
+        get: operations["list_broker_account_hashes_api_admin_brokers__label__account_hashes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/brokers/{label}/reconfigure": {
         parameters: {
             query?: never;
@@ -124,6 +224,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/config/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Config Stream */
+        get: operations["config_stream_api_admin_config_stream_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/config/{namespace}/{key}": {
         parameters: {
             query?: never;
@@ -138,6 +255,74 @@ export interface paths {
         post?: never;
         /** Delete Config */
         delete: operations["delete_config_api_admin_config__namespace___key__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/csrf/issue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Issue Confirmation Nonce */
+        post: operations["issue_confirmation_nonce_api_admin_csrf_issue_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/instruments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Instrument */
+        post: operations["create_instrument_api_admin_instruments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/metrics/tier2": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Push Tier2 Heartbeat */
+        post: operations["push_tier2_heartbeat_api_admin_metrics_tier2_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/order-capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set Order Capability */
+        post: operations["set_order_capability_api_admin_order_capabilities_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -214,6 +399,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/brokers/{broker_id}/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Broker Capabilities */
+        get: operations["get_broker_capabilities_api_brokers__broker_id__capabilities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/contracts/search": {
         parameters: {
             query?: never;
@@ -243,6 +445,30 @@ export interface paths {
         };
         /** List Fills */
         get: operations["list_fills_api_fills_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/oauth/schwab/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Schwab Oauth Callback Public
+         * @description Public Schwab OAuth callback. CF-Access-bypassed.
+         *
+         *     v0.7.4: state restored to the authorize URL. Manual-flow URLs may
+         *     still omit state, in which case CSRF protection falls back to
+         *     redirect_uri byte-match only.
+         */
+        get: operations["schwab_oauth_callback_public_api_oauth_schwab_callback_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -421,7 +647,7 @@ export interface components {
              * Broker Id
              * @enum {string}
              */
-            broker_id: "ibkr" | "futu" | "schwab";
+            broker_id: "ibkr" | "futu" | "schwab" | "alpaca";
             /**
              * Currency Base
              * @default
@@ -451,6 +677,17 @@ export interface components {
              */
             position_count: number;
         };
+        /** BrokerCapabilitiesResponse */
+        BrokerCapabilitiesResponse: {
+            /** Broker Id */
+            broker_id: string;
+            /** Combos */
+            combos: components["schemas"]["CapabilityComboRow"][];
+            /** Order Types */
+            order_types: components["schemas"]["OrderTypeRow"][];
+            /** Time In Force */
+            time_in_force: components["schemas"]["TimeInForceRow"][];
+        };
         /**
          * BrokerMaintenance
          * @description Maintenance-window envelope. Single source of truth for both the
@@ -471,7 +708,7 @@ export interface components {
              * Broker
              * @enum {string}
              */
-            broker: "ibkr" | "futu" | "schwab";
+            broker: "ibkr" | "futu" | "schwab" | "alpaca";
             /** Connected */
             connected: boolean;
             /** Label */
@@ -486,6 +723,19 @@ export interface components {
         BrokerSidecarStatusList: {
             /** Accounts */
             accounts: components["schemas"]["BrokerSidecarStatus"][];
+        };
+        /** CapabilityComboRow */
+        CapabilityComboRow: {
+            /** Broker Id */
+            broker_id: string;
+            /** Notes */
+            notes: string;
+            /** Order Type */
+            order_type: string;
+            /** Supported */
+            supported: boolean;
+            /** Time In Force */
+            time_in_force: string;
         };
         /** ConfigIn */
         ConfigIn: {
@@ -628,7 +878,7 @@ export interface components {
              * Order Type
              * @enum {string}
              */
-            order_type: "TYPE_UNSPECIFIED" | "MARKET" | "LIMIT" | "STOP" | "STOP_LIMIT";
+            order_type: "UNSPECIFIED" | "MARKET" | "LIMIT" | "STOP" | "STOP_LIMIT" | "TRAIL" | "TRAIL_LIMIT" | "MOC" | "MOO" | "LOC" | "LOO";
             /** Quantity */
             quantity: string;
             /** Quantity Filled */
@@ -650,7 +900,7 @@ export interface components {
              * Time In Force
              * @enum {string}
              */
-            time_in_force: "TIF_UNSPECIFIED" | "DAY" | "GTC" | "IOC" | "FOK";
+            time_in_force: "UNSPECIFIED" | "DAY" | "GTC" | "IOC" | "FOK" | "GTD";
             /** Updated At */
             updated_at: string | null;
         };
@@ -801,6 +1051,17 @@ export interface components {
              */
             updated_at: string;
         };
+        /** OrderTypeRow */
+        OrderTypeRow: {
+            /** Code */
+            code: string;
+            /** Description */
+            description: string;
+            /** Label */
+            label: string;
+            /** Sort Order */
+            sort_order: number;
+        };
         /** PolicyResponse */
         PolicyResponse: {
             /**
@@ -947,6 +1208,24 @@ export interface components {
             unrealized_pnl: components["schemas"]["Money"];
             /** Updated At */
             updated_at: string | null;
+        };
+        /** Tier2HeartbeatIn */
+        Tier2HeartbeatIn: {
+            /** Last Run Seconds */
+            last_run_seconds: number;
+        };
+        /** TimeInForceRow */
+        TimeInForceRow: {
+            /** Code */
+            code: string;
+            /** Description */
+            description: string;
+            /** Label */
+            label: string;
+            /** Requires Expiry */
+            requires_expiry: boolean;
+            /** Sort Order */
+            sort_order: number;
         };
         /** ValidationError */
         ValidationError: {
@@ -1205,6 +1484,148 @@ export interface operations {
             };
         };
     };
+    disconnect_schwab_api_admin_brokers_schwab_disconnect_post: {
+        parameters: {
+            query?: {
+                delete_credentials?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: boolean;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    schwab_oauth_callback_admin_api_admin_brokers_schwab_oauth_callback_post: {
+        parameters: {
+            query: {
+                code: string;
+                state: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    schwab_oauth_start_api_admin_brokers_schwab_oauth_start_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    schwab_status_api_admin_brokers_schwab_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string | null;
+                    };
+                };
+            };
+        };
+    };
+    list_broker_account_hashes_api_admin_brokers__label__account_hashes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    }[];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     reconfigure_api_admin_brokers__label__reconfigure_post: {
         parameters: {
             query?: never;
@@ -1289,6 +1710,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConfigOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    config_stream_api_admin_config_stream_get: {
+        parameters: {
+            query: {
+                ns: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -1388,6 +1840,133 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    issue_confirmation_nonce_api_admin_csrf_issue_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+        };
+    };
+    create_instrument_api_admin_instruments_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    push_tier2_heartbeat_api_admin_metrics_tier2_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Tier2HeartbeatIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_order_capability_api_admin_order_capabilities_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: boolean;
+                    };
+                };
             };
             /** @description Validation Error */
             422: {
@@ -1614,6 +2193,37 @@ export interface operations {
             };
         };
     };
+    get_broker_capabilities_api_brokers__broker_id__capabilities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                broker_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerCapabilitiesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     search_contracts_api_contracts_search_get: {
         parameters: {
             query: {
@@ -1669,6 +2279,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FillListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    schwab_oauth_callback_public_api_oauth_schwab_callback_get: {
+        parameters: {
+            query: {
+                code: string;
+                state?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
                 };
             };
             /** @description Validation Error */
