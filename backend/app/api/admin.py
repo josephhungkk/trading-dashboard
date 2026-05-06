@@ -426,6 +426,7 @@ async def list_broker_account_hashes(
     from app._generated.broker.v1 import broker_pb2
     from app.core.deps import get_broker_registry
     from app.services.broker_registry_factory import SIDECAR_BROKERS
+    from app.services.brokers import BrokerSidecarTimeout, BrokerSidecarUnavailable
 
     if label not in SIDECAR_BROKERS:
         raise HTTPException(
@@ -434,12 +435,55 @@ async def list_broker_account_hashes(
         )
 
     registry = get_broker_registry()
-    client = await registry.get_client(label)
-    response = await client._call(
-        method="ListManagedAccounts",
-        rpc=client.stub.ListManagedAccounts,
-        request=broker_pb2.Empty(),
-    )
+    try:
+        client = await registry.get_client(label)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "sidecar_not_registered",
+                "label": label,
+                "hint": (
+                    "BrokerRegistry has no client for this label; "
+                    "check broker_registry_factory wiring"
+                ),
+            },
+        ) from exc
+
+    try:
+        response = await client._call(
+            method="ListManagedAccounts",
+            rpc=client.stub.ListManagedAccounts,
+            request=broker_pb2.Empty(),
+        )
+    except BrokerSidecarTimeout as exc:
+        log.warning("admin_list_broker_account_hashes_timeout label=%s err=%s", label, exc)
+        raise HTTPException(
+            status_code=504,
+            detail={"error": "sidecar_timeout", "label": label, "detail": str(exc)},
+        ) from exc
+    except BrokerSidecarUnavailable as exc:
+        log.warning(
+            "admin_list_broker_account_hashes_unavailable label=%s grpc_code=%s details=%s",
+            label,
+            exc.grpc_code,
+            exc.grpc_details,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "sidecar_unavailable",
+                "label": label,
+                "grpc_code": exc.grpc_code,
+                "grpc_details": exc.grpc_details,
+                "hint": (
+                    "If grpc_code=FAILED_PRECONDITION, the sidecar needs Configure (token refresh "
+                    "or app_key/app_secret seed). If UNAUTHENTICATED, the Schwab refresh_token "
+                    "is expired — re-authorize via the Schwab integration UI."
+                ),
+            },
+        ) from exc
+
     rows = [
         {
             "account_number": acct.account_number,
