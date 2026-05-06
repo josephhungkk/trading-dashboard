@@ -111,7 +111,7 @@ def cap_status(filled: Decimal, cap: Decimal) -> Literal["ok", "near", "exceeded
     return "ok"
 
 
-async def _validate_pre_dispatch(
+async def validate_pre_dispatch(
     *,
     cfg: ConfigService,
     capability: OrderCapabilityService,
@@ -121,7 +121,7 @@ async def _validate_pre_dispatch(
     skip_operational_checks: bool = False,
 ) -> None:
     """Validate order controls that must run before sidecar dispatch."""
-    broker_id = _capability_broker_id(broker_label)
+    broker_id = capability_broker_id(broker_label)
     if not skip_operational_checks:
         if await is_kill_switch_active(cfg):
             raise PreviewUnavailable(
@@ -156,7 +156,7 @@ async def _validate_pre_dispatch(
     )
 
 
-def _capability_broker_id(broker_label: str) -> str:
+def capability_broker_id(broker_label: str) -> str:
     if broker_label in KNOWN_BROKERS:
         return broker_label
     prefix = broker_label.split("-", 1)[0]
@@ -195,8 +195,8 @@ async def preview_order(
     request = request.model_copy(update={"qty": canonicalize_qty(request.qty)})
     await _check_rate_limit(redis, user_key)
 
-    account = await _resolve_account(db, request.account_id)
-    await _validate_pre_dispatch(
+    account = await resolve_account(db, request.account_id)
+    await validate_pre_dispatch(
         cfg=cfg,
         capability=capability,
         broker_label=account.gateway_label,
@@ -266,8 +266,8 @@ async def place_order(
 
     request = PlaceOrderRequest.model_validate(request_data)
     request = request.model_copy(update={"qty": _canonicalize_qty(request.qty)})
-    account = await _resolve_account(db, request.account_id)
-    await _validate_pre_dispatch(
+    account = await resolve_account(db, request.account_id)
+    await validate_pre_dispatch(
         cfg=cfg,
         capability=capability,
         broker_label=account.gateway_label,
@@ -315,7 +315,7 @@ async def place_order(
             )
         return _order_response_from_mapping(existing, submission_state="idempotent_retry")
 
-    order_client = _as_order_sidecar_client(client)
+    order_client = as_order_sidecar_client(client)
     try:
         sidecar_result = await order_client.place_order(
             account.account_number,
@@ -425,8 +425,8 @@ async def modify_order(
             {"Retry-After": str(_retry_after(now, maintenance))},
         )
 
-    account = await _resolve_account(db, row["account_id"])
-    await _validate_pre_dispatch(
+    account = await resolve_account(db, row["account_id"])
+    await validate_pre_dispatch(
         cfg=config,
         capability=capability,
         broker_label=account.gateway_label,
@@ -539,7 +539,7 @@ async def modify_order(
 
     client = await registry.get_client(account.gateway_label)
     contract = await client.get_contract(str(row["conid"]))
-    modify_result = await _as_order_sidecar_client(client).modify_order(
+    modify_result = await as_order_sidecar_client(client).modify_order(
         broker_order_id=str(row["broker_order_id"] or ""),
         account_number=account.account_number,
         contract=contract,
@@ -765,7 +765,7 @@ async def _check_rate_limit(redis: RedisLike, user_key: str) -> None:
         raise PreviewUnavailable(429, {"error": "rate_limited"}, {"Retry-After": "60"})
 
 
-async def _resolve_account(db: AsyncSession, account_id: object) -> _Account:
+async def resolve_account(db: AsyncSession, account_id: object) -> _Account:
     result = await db.execute(
         text(
             """
@@ -907,7 +907,7 @@ class _OrderSidecarClient(_ContractSearchClient, Protocol):
     ) -> base.ModifyOrderResult: ...
 
 
-def _as_order_sidecar_client(client: object) -> _OrderSidecarClient:
+def as_order_sidecar_client(client: object) -> _OrderSidecarClient:
     return client  # type: ignore[return-value]
 
 
@@ -1321,7 +1321,7 @@ async def place_bracket(
 
     if await is_kill_switch_active(config):
         raise PreviewUnavailable(503, {"error": "kill_switch"})
-    account = await _resolve_account(db, request.account_id)
+    account = await resolve_account(db, request.account_id)
     parent_qty = canonicalize_qty(request.qty)
     parent_notional = Decimal(parent_qty) * entry
     policy = await get_account_policy(

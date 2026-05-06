@@ -122,7 +122,7 @@ async def test_oco_enabled_passes_killswitch(client: AsyncClient) -> None:
     with (
         patch("app.services.config.ConfigService.get", new=AsyncMock(side_effect=_fake_cfg_get)),
         patch(
-            "app.services.orders_service._resolve_account",
+            "app.services.orders_service.resolve_account",
             new=AsyncMock(side_effect=_fake_resolve),
         ),
     ):

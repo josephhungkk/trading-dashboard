@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0012_broker_features"
@@ -11,39 +12,33 @@ depends_on = None
 
 
 BROKER_FEATURE_ROWS = [
-    ("ibkr", "modify", True, None, ""),
-    ("futu", "modify", False, None, "Phase 6 deferred -- empirical pending"),
-    ("schwab", "modify", True, None, ""),
-    ("ibkr", "bracket", True, None, ""),
-    ("futu", "bracket", False, None, "Phase 6 deferred -- empirical pending"),
-    ("schwab", "bracket", False, None, "Phase 8b -- pending implementation"),
-    ("ibkr", "oco", False, None, "Phase 8b"),
-    ("futu", "oco", False, None, "Phase 8b"),
-    ("schwab", "oco", False, None, "Phase 8b"),
-    ("ibkr", "gtd_max_days", True, 90, "TWS API limit"),
-    ("futu", "gtd_max_days", True, 30, "Futu HK trading-day cap"),
-    ("schwab", "gtd_max_days", True, 60, "retail account limit per Schwab docs"),
-    (
-        "nyse",
-        "session_cutoff_minutes",
-        True,
-        10,
-        "MOC cutoff: 15:50 ET = 10 min before 16:00 close",
-    ),
-    ("hkex", "session_cutoff_minutes", True, 0, "no MOC support -- Phase 8b out of scope"),
+    {"b": "ibkr", "f": "modify", "s": True, "i": None, "n": ""},
+    {"b": "futu", "f": "modify", "s": False, "i": None, "n": "Phase 6 deferred -- empirical pending"},
+    {"b": "schwab", "f": "modify", "s": True, "i": None, "n": ""},
+    {"b": "ibkr", "f": "bracket", "s": True, "i": None, "n": ""},
+    {"b": "futu", "f": "bracket", "s": False, "i": None, "n": "Phase 6 deferred -- empirical pending"},
+    {"b": "schwab", "f": "bracket", "s": False, "i": None, "n": "Phase 8b -- pending implementation"},
+    {"b": "ibkr", "f": "oco", "s": False, "i": None, "n": "Phase 8b"},
+    {"b": "futu", "f": "oco", "s": False, "i": None, "n": "Phase 8b"},
+    {"b": "schwab", "f": "oco", "s": False, "i": None, "n": "Phase 8b"},
+    {"b": "ibkr", "f": "gtd_max_days", "s": True, "i": 90, "n": "TWS API limit"},
+    {"b": "futu", "f": "gtd_max_days", "s": True, "i": 30, "n": "Futu HK trading-day cap"},
+    {"b": "schwab", "f": "gtd_max_days", "s": True, "i": 60, "n": "retail account limit per Schwab docs"},
+    {
+        "b": "nyse",
+        "f": "session_cutoff_minutes",
+        "s": True,
+        "i": 10,
+        "n": "MOC cutoff: 15:50 ET = 10 min before 16:00 close",
+    },
+    {
+        "b": "hkex",
+        "f": "session_cutoff_minutes",
+        "s": True,
+        "i": 0,
+        "n": "no MOC support -- Phase 8b out of scope",
+    },
 ]
-
-
-def _sql_literal(value: object) -> str:
-    if value is None:
-        return "NULL"
-    if value is True:
-        return "TRUE"
-    if value is False:
-        return "FALSE"
-    if isinstance(value, int):
-        return str(value)
-    return "'" + str(value).replace("'", "''") + "'"
 
 
 def upgrade() -> None:
@@ -65,18 +60,19 @@ def upgrade() -> None:
         """
     )
 
-    values_sql = ",\n".join(
-        f"        ({', '.join(_sql_literal(value) for value in row)})"
-        for row in BROKER_FEATURE_ROWS
-    )
-    op.execute(
-        f"""
-        INSERT INTO broker_features
-            (broker_id, feature, is_supported, int_value, notes)
-        VALUES
-{values_sql}
-        """
-    )
+    bind = op.get_bind()
+    for row in BROKER_FEATURE_ROWS:
+        bind.execute(
+            sa.text(
+                """
+                INSERT INTO broker_features
+                    (broker_id, feature, is_supported, int_value, notes, updated_at)
+                VALUES (:b, :f, :s, :i, :n, NOW())
+                ON CONFLICT (broker_id, feature) DO NOTHING
+                """
+            ),
+            row,
+        )
 
 
 def downgrade() -> None:

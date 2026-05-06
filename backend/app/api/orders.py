@@ -39,10 +39,10 @@ from app.services.orders_service import (
     CancelUnavailable,
     PreviewUnavailable,
     RedisLike,
-    _as_order_sidecar_client,
-    _capability_broker_id,
-    _resolve_account,
-    _validate_pre_dispatch,
+    as_order_sidecar_client,
+    capability_broker_id,
+    resolve_account,
+    validate_pre_dispatch,
 )
 from app.services.orders_sse import order_events_generator
 
@@ -386,7 +386,28 @@ async def place_oco_order(
         )
 
     # ------------------------------------------------------------------
-    # Step 2: Consume nonce (reject replay via GETDEL)
+    # Step 2: Same-account validation
+    # ------------------------------------------------------------------
+    if body.order_a.account_id != body.order_b.account_id:
+        raise HTTPException(status_code=422, detail={"error": "oco_legs_different_accounts"})
+
+    # ------------------------------------------------------------------
+    # Step 3: Same-broker validation
+    # ------------------------------------------------------------------
+    # Resolve both accounts to compare broker prefixes
+    try:
+        account_a = await resolve_account(db, body.order_a.account_id)
+        account_b = await resolve_account(db, body.order_b.account_id)
+    except PreviewUnavailable as exc:
+        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=exc.headers)
+
+    broker_a = capability_broker_id(account_a.gateway_label)
+    broker_b = capability_broker_id(account_b.gateway_label)
+    if broker_a != broker_b:
+        raise HTTPException(status_code=422, detail={"error": "oco_legs_different_brokers"})
+
+    # ------------------------------------------------------------------
+    # Step 4: Consume nonce (reject replay via GETDEL)
     # ------------------------------------------------------------------
     nonce_key = f"nonce:order:{body.order_a.account_id}:{body.nonce}"
     consumed = await redis.execute_command("GETDEL", nonce_key)
@@ -394,28 +415,10 @@ async def place_oco_order(
         raise HTTPException(status_code=422, detail={"error": "unknown_nonce"})
 
     # ------------------------------------------------------------------
-    # Step 3: Same-broker + same-account validation
-    # ------------------------------------------------------------------
-    if body.order_a.account_id != body.order_b.account_id:
-        raise HTTPException(status_code=422, detail={"error": "oco_legs_different_accounts"})
-
-    # Resolve both accounts to compare broker prefixes
-    try:
-        account_a = await _resolve_account(db, body.order_a.account_id)
-        account_b = await _resolve_account(db, body.order_b.account_id)
-    except PreviewUnavailable as exc:
-        return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=exc.headers)
-
-    broker_a = _capability_broker_id(account_a.gateway_label)
-    broker_b = _capability_broker_id(account_b.gateway_label)
-    if broker_a != broker_b:
-        raise HTTPException(status_code=422, detail={"error": "oco_legs_different_brokers"})
-
-    # ------------------------------------------------------------------
-    # Step 4: Capability gate — both legs individually
+    # Step 5: Capability gate — both legs individually
     # ------------------------------------------------------------------
     try:
-        await _validate_pre_dispatch(
+        await validate_pre_dispatch(
             cfg=cfg,
             capability=capability,
             broker_label=account_a.gateway_label,
@@ -423,7 +426,7 @@ async def place_oco_order(
             tif=body.order_a.tif,
             skip_operational_checks=True,
         )
-        await _validate_pre_dispatch(
+        await validate_pre_dispatch(
             cfg=cfg,
             capability=capability,
             broker_label=account_b.gateway_label,
@@ -435,10 +438,10 @@ async def place_oco_order(
         return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=exc.headers)
 
     # ------------------------------------------------------------------
-    # Step 5: Place leg A
+    # Step 6: Place leg A
     # ------------------------------------------------------------------
     client_a = await registry.get_client(account_a.gateway_label)
-    order_client_a = _as_order_sidecar_client(client_a)
+    order_client_a = as_order_sidecar_client(client_a)
 
     try:
         client_order_id_a = str(uuid4())
@@ -456,13 +459,16 @@ async def place_oco_order(
     except Exception as exc_a:
         raise HTTPException(
             status_code=503,
-            detail={"error": "oco_leg_a_failed", "detail": str(exc_a)},
+            detail={
+                "error": "oco_leg_a_failed",
+                "detail": getattr(exc_a, "grpc_details", None) or str(exc_a),
+            },
         ) from exc_a
 
     order_id_a = sidecar_a.broker_order_id
 
     # ------------------------------------------------------------------
-    # Step 6: Place leg B; on failure cancel leg A (best-effort)
+    # Step 7: Place leg B; on failure cancel leg A (best-effort)
     # ------------------------------------------------------------------
     try:
         client_order_id_b = str(uuid4())
@@ -489,13 +495,16 @@ async def place_oco_order(
             )
         raise HTTPException(
             status_code=503,
-            detail={"error": "oco_leg_b_failed", "detail": str(exc_b)},
+            detail={
+                "error": "oco_leg_b_failed",
+                "detail": getattr(exc_b, "grpc_details", None) or str(exc_b),
+            },
         ) from exc_b
 
     order_id_b = sidecar_b.broker_order_id
 
     # ------------------------------------------------------------------
-    # Step 7: INSERT oco_links row (server-generated id — Pattern E)
+    # Step 8: INSERT oco_links row (server-generated id — Pattern E)
     # ------------------------------------------------------------------
     oco_link_id = str(uuid4())
     await db.execute(

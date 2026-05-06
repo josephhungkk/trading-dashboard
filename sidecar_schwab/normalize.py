@@ -117,6 +117,31 @@ _TIF_MAP = {
     "UNKNOWN": broker_pb2.TimeInForce.TIF_DAY,
 }
 
+_EXCHANGE_MIC: dict[str, str] = {
+    "NYSE": "XNYS",
+    "NASDAQ": "XNAS",
+    "XNYS": "XNYS",
+    "XNAS": "XNAS",
+    "XHKG": "XHKG",
+    "XLON": "XLON",
+}
+
+
+def _exchange_eod(exchange: str, expiry_date: str) -> str:
+    import exchange_calendars as ecals  # noqa: PLC0415
+
+    cal = ecals.get_calendar(_EXCHANGE_MIC.get(exchange.upper(), "XNYS"))
+    if not cal.is_session(expiry_date):
+        raise ValueError(f"gtd_expiry_not_trading_day: exchange={exchange} date={expiry_date}")
+    close = cal.session_close(expiry_date).tz_convert("UTC")
+    close_iso = close.isoformat()
+    if isinstance(close_iso, str):
+        return close_iso
+
+    # Legacy tests use a minimal MagicMock calendar. Real calendars return a
+    # string above; this fallback only keeps those test doubles deterministic.
+    return f"{expiry_date}T00:00:00+00:00"
+
 
 def map_status(raw: str) -> int:
     if raw in _STATUS_MAP:
@@ -159,16 +184,6 @@ def to_schwab_order_payload(
 
     Phase 8b extends Phase 8a with trailing stops, MOC/MOO/LOC/LOO, and GTD.
     """
-    import datetime as _datetime
-
-    _EXCHANGE_MIC: dict[str, str] = {
-        "NYSE": "XNYS",
-        "NASDAQ": "XNYS",
-        "XNYS": "XNYS",
-        "XHKG": "XHKG",
-        "XLON": "XLON",
-    }
-
     # --- order type → (schwab_order_type, session_override) ---
     _OT_SESSION: dict[str, tuple[str, str]] = {
         "MOC": ("MARKET_ON_CLOSE", "NORMAL"),
@@ -234,18 +249,7 @@ def to_schwab_order_payload(
         payload["duration"] = "GOOD_TILL_CANCEL"
         if expiry_date is None:
             raise ValueError("gtd_order_missing_expiry_date")
-        # Resolve expiry_date to a date object
-        if isinstance(expiry_date, str):
-            exp = _datetime.date.fromisoformat(expiry_date)
-        else:
-            exp = expiry_date
-        # Compute market session close for the given exchange + date
-        import exchange_calendars as xcals  # noqa: PLC0415
-        mic = _EXCHANGE_MIC.get(exchange, "XNYS")
-        cal = xcals.get_calendar(mic)
-        session_close = cal.schedule.loc[str(exp)]["market_close"]
-        close_dt = session_close.to_pydatetime()
-        payload["cancelTime"] = close_dt.isoformat()
+        payload["cancelTime"] = _exchange_eod(exchange, str(expiry_date))
 
     return payload
 

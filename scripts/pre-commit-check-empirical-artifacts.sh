@@ -6,10 +6,10 @@ set -euo pipefail
 
 # Match patterns of the form: <key><sep><quote><value 16+ chars><quote>
 # where <key> is a sensitive name and <value> is a non-empty string literal.
-key_pattern='accountNumber|account_number|clientOrderId|access_token|refresh_token'
+key_pattern='accountNumber|account_number|clientOrderId|access_token|refresh_token|app_key|app_secret|account_hash|SCHWAB_APP_KEY|SCHWAB_APP_SECRET|SCHWAB_PAPER_ACCOUNT_HASH'
 value_re="(${key_pattern})[[:space:]]*[=:][[:space:]]*[\"'][A-Za-z0-9_.-]{16,}[\"']"
 
-raw_files=$(git diff --cached --name-only -- 'scripts/empirical/*.py' 2>/dev/null || true)
+raw_files=$(git diff --cached --name-only -- 'scripts/empirical/*.py' 'scripts/empirical/artifacts/*.json' 2>/dev/null || true)
 [ -z "$raw_files" ] && exit 0
 
 files=()

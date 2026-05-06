@@ -34,11 +34,11 @@ def upgrade() -> None:
             ),
             {"b": broker_id},
         )
-    bind.execute(
-        sa.text(
-            "SELECT pg_notify('app_config:invalidate:order_capabilities', 'oco')"
+    for broker_id in OCO_BROKERS:
+        bind.execute(
+            sa.text("SELECT pg_notify('app_config:invalidate:order_capabilities', :b)"),
+            {"b": broker_id},
         )
-    )
 
 
 def downgrade() -> None:
@@ -54,8 +54,8 @@ def downgrade() -> None:
             ),
             {"b": broker_id},
         )
-    bind.execute(
-        sa.text(
-            "SELECT pg_notify('app_config:invalidate:order_capabilities', 'oco')"
+    for broker_id in OCO_BROKERS:
+        bind.execute(
+            sa.text("SELECT pg_notify('app_config:invalidate:order_capabilities', :b)"),
+            {"b": broker_id},
         )
-    )

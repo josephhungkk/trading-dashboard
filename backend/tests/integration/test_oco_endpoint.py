@@ -100,31 +100,24 @@ async def test_oco_killswitch_disabled(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_oco_legs_different_brokers(client: AsyncClient) -> None:
-    """Legs referencing different broker prefixes → 422 oco_legs_different_brokers."""
-    account_b_id = str(uuid.uuid4())
-    leg_b_diff_broker = {**LEG_B, "account_id": account_b_id}
+    """Resolved broker prefix mismatch → 422 oco_legs_different_brokers."""
+    from app.services.orders_service import _Account
 
     async def _fake_cfg_get(ns: str, key: str, default: Any = None) -> Any:
         if ns == "broker" and key == "oco.enabled":
             return "true"
         return default
 
-    async def _fake_resolve(db: Any, account_id: Any) -> Any:
-        from app.services.orders_service import _Account
-
-        if str(account_id) == ACCOUNT_ID:
-            return _Account(gateway_label="ibkr-paper", mode="paper", currency_base="USD")
-        # Second account belongs to a different broker (futu)
-        return _Account(gateway_label="futu-paper", mode="paper", currency_base="HKD")
-
-    async def _fake_redis_getdel(*args: Any, **kwargs: Any) -> str:
-        return "nonce-payload"
-
     with (
         patch("app.services.config.ConfigService.get", new=AsyncMock(side_effect=_fake_cfg_get)),
         patch(
-            "app.services.orders_service._resolve_account",
-            new=AsyncMock(side_effect=_fake_resolve),
+            "app.services.orders_service.resolve_account",
+            new=AsyncMock(
+                side_effect=[
+                    _Account(gateway_label="ibkr-paper", mode="paper", currency_base="USD"),
+                    _Account(gateway_label="futu-paper", mode="paper", currency_base="HKD"),
+                ]
+            ),
         ),
         patch(
             "app.api.orders.RedisLike.execute_command",
@@ -142,7 +135,7 @@ async def test_oco_legs_different_brokers(client: AsyncClient) -> None:
                 "/api/orders/oco",
                 json={
                     "order_a": LEG_A,
-                    "order_b": {**leg_b_diff_broker},
+                    "order_b": LEG_B,
                     "nonce": OCO_NONCE,
                 },
             )
@@ -249,7 +242,7 @@ async def test_oco_happy_path_with_killswitch_on(client: AsyncClient) -> None:
                 new=AsyncMock(side_effect=_fake_cfg_get),
             ),
             patch(
-                "app.services.orders_service._resolve_account",
+                "app.services.orders_service.resolve_account",
                 new=AsyncMock(return_value=fake_account),
             ),
             patch(
@@ -261,7 +254,7 @@ async def test_oco_happy_path_with_killswitch_on(client: AsyncClient) -> None:
                 new=AsyncMock(return_value=mock_sidecar),
             ),
             patch(
-                "app.api.orders._as_order_sidecar_client",
+                "app.api.orders.as_order_sidecar_client",
                 return_value=mock_sidecar,
             ),
             patch("sqlalchemy.ext.asyncio.AsyncSession.execute", new=mock_db_execute),
@@ -342,7 +335,7 @@ async def test_oco_atomicity_rollback(client: AsyncClient) -> None:
                 new=AsyncMock(side_effect=_fake_cfg_get),
             ),
             patch(
-                "app.services.orders_service._resolve_account",
+                "app.services.orders_service.resolve_account",
                 new=AsyncMock(return_value=fake_account),
             ),
             patch(
@@ -354,7 +347,7 @@ async def test_oco_atomicity_rollback(client: AsyncClient) -> None:
                 new=AsyncMock(return_value=mock_sidecar),
             ),
             patch(
-                "app.api.orders._as_order_sidecar_client",
+                "app.api.orders.as_order_sidecar_client",
                 return_value=mock_sidecar,
             ),
         ):

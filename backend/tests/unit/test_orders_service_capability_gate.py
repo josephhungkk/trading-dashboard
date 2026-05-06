@@ -97,7 +97,7 @@ async def test_unsupported_combo_raises_422() -> None:
         patch.object(orders_service, "_check_rate_limit", new=AsyncMock()),
         patch.object(
             orders_service,
-            "_resolve_account",
+            "resolve_account",
             new=AsyncMock(return_value=orders_service._Account("isa-paper", "paper", "USD")),
         ),
     ):
@@ -132,7 +132,7 @@ async def test_supported_combo_proceeds_to_dispatch() -> None:
         patch.object(orders_service, "_check_rate_limit", new=AsyncMock()),
         patch.object(
             orders_service,
-            "_resolve_account",
+            "resolve_account",
             new=AsyncMock(return_value=orders_service._Account("isa-paper", "paper", "USD")),
         ),
         patch.object(

@@ -6,16 +6,137 @@ without triggering the gRPC generated-code sys.modules requirements.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Protocol
 
 
-def build_ib_order(request: Any, side: str, qty: float) -> Any:  # noqa: C901
+_IBKR_GTD_EOD_TIME = "23:59:59 US/Eastern"
+
+
+class PlaceOrderRequestLike(Protocol):
+    order_type: str
+    tif: str
+    limit_price: object
+    stop_price: object
+    trail_offset: object
+    trail_offset_type: str
+    trail_limit_offset: object
+    expiry_date: object
+
+
+class OrderLike(Protocol):
+    action: str
+    totalQuantity: float
+    orderType: str
+    tif: str
+    lmtPrice: float
+    auxPrice: float
+    trailingPercent: float
+    goodTillDate: str
+    ocaGroup: str
+    ocaType: int
+
+
+def _set_market(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "MKT"
+
+
+def _set_limit(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "LMT"
+    order.lmtPrice = float(request.limit_price)
+
+
+def _set_stop(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "STP"
+    order.auxPrice = float(request.stop_price)
+
+
+def _set_stop_limit(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "STP LMT"
+    order.lmtPrice = float(request.limit_price)
+    order.auxPrice = float(request.stop_price)
+
+
+def _set_trail(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "TRAIL"
+    if request.trail_offset_type == "PERCENT":
+        order.trailingPercent = float(request.trail_offset)
+    else:
+        order.auxPrice = float(request.trail_offset)
+
+
+def _set_trail_limit(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "TRAIL LIMIT"
+    order.lmtPrice = float(request.trail_limit_offset)
+    if request.trail_offset_type == "PERCENT":
+        order.trailingPercent = float(request.trail_offset)
+    else:
+        order.auxPrice = float(request.trail_offset)
+
+
+def _set_moc(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "MOC"
+
+
+def _set_moo(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "MKT"
+    order.tif = "OPG"
+
+
+def _set_loc(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "LOC"
+    order.lmtPrice = float(request.limit_price)
+
+
+def _set_loo(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    order.orderType = "LMT"
+    order.lmtPrice = float(request.limit_price)
+    order.tif = "OPG"
+
+
+_ORDER_TYPE_SETTERS: dict[str, Callable[[OrderLike, PlaceOrderRequestLike], None]] = {
+    "MARKET": _set_market,
+    "LIMIT": _set_limit,
+    "STOP": _set_stop,
+    "STOP_LIMIT": _set_stop_limit,
+    "TRAIL": _set_trail,
+    "TRAIL_LIMIT": _set_trail_limit,
+    "MOC": _set_moc,
+    "MOO": _set_moo,
+    "LOC": _set_loc,
+    "LOO": _set_loo,
+}
+
+
+def _format_ibkr_gtd(expiry: object) -> str:
+    if hasattr(expiry, "strftime"):
+        yyyymmdd = expiry.strftime("%Y%m%d")
+    else:
+        yyyymmdd = str(expiry).replace("-", "")
+    return f"{yyyymmdd} {_IBKR_GTD_EOD_TIME}"
+
+
+def _set_tif_modifiers(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    if request.order_type in ("MOO", "LOO") or not request.tif:
+        return
+
+    if request.tif == "GTD":
+        order.tif = "GTD"
+        order.goodTillDate = _format_ibkr_gtd(request.expiry_date)
+        return
+
+    order.tif = request.tif
+
+
+def build_ib_order(request: PlaceOrderRequestLike, side: str, qty: float) -> OrderLike:
     """Construct an ib_async.Order from a PlaceOrderRequest-shaped object.
 
     Parameters
     ----------
     request:
-        Any object with attributes matching PlaceOrderRequest fields.
+        Any object with attributes matching PlaceOrderRequest fields. GTD currently
+        assumes US/Eastern; HKEX/LSE GTD will be addressed in Phase 8c via
+        market_calendar.eod_for_exchange().
     side:
         "BUY" or "SELL".
     qty:
@@ -27,71 +148,21 @@ def build_ib_order(request: Any, side: str, qty: float) -> Any:  # noqa: C901
     """
     from ib_async import Order  # type: ignore[import-untyped]
 
-    order_type: str = request.order_type
-
-    order: Any = Order()
+    order: OrderLike = Order()
     order.action = side
     order.totalQuantity = qty
 
-    # --- order type -------------------------------------------------
-    if order_type == "MARKET":
-        order.orderType = "MKT"
-    elif order_type == "LIMIT":
-        order.orderType = "LMT"
-        order.lmtPrice = float(request.limit_price)
-    elif order_type == "STOP":
-        order.orderType = "STP"
-        order.auxPrice = float(request.stop_price)
-    elif order_type == "STOP_LIMIT":
-        order.orderType = "STP LMT"
-        order.lmtPrice = float(request.limit_price)
-        order.auxPrice = float(request.stop_price)
-    elif order_type == "TRAIL":
-        order.orderType = "TRAIL"
-        if request.trail_offset_type == "PERCENT":
-            order.trailingPercent = float(request.trail_offset)
-        else:
-            order.auxPrice = float(request.trail_offset)
-    elif order_type == "TRAIL_LIMIT":
-        order.orderType = "TRAIL LIMIT"
-        order.lmtPrice = float(request.trail_limit_offset)
-        if request.trail_offset_type == "PERCENT":
-            order.trailingPercent = float(request.trail_offset)
-        else:
-            order.auxPrice = float(request.trail_offset)
-    elif order_type == "MOC":
-        order.orderType = "MOC"
-    elif order_type == "MOO":
-        order.orderType = "MKT"
-        order.tif = "OPG"
-    elif order_type == "LOC":
-        order.orderType = "LOC"
-        order.lmtPrice = float(request.limit_price)
-    elif order_type == "LOO":
-        order.orderType = "LMT"
-        order.lmtPrice = float(request.limit_price)
-        order.tif = "OPG"
-    else:
-        raise ValueError(f"Unsupported order_type: {order_type}")
+    try:
+        _ORDER_TYPE_SETTERS[request.order_type](order, request)
+    except KeyError as exc:
+        raise ValueError(f"Unsupported order_type: {request.order_type}") from exc
 
-    # --- time-in-force (skip if already set by MOO/LOO above) ------
-    if order_type not in ("MOO", "LOO") and request.tif:
-        tif: str = request.tif
-        if tif == "GTD":
-            order.tif = "GTD"
-            expiry = request.expiry_date
-            if hasattr(expiry, "strftime"):
-                yyyymmdd: str = expiry.strftime("%Y%m%d")
-            else:
-                yyyymmdd = expiry.replace("-", "")
-            order.goodTillDate = f"{yyyymmdd} 23:59:59 US/Eastern"
-        else:
-            order.tif = tif
+    _set_tif_modifiers(order, request)
 
     return order
 
 
-def attach_oca_group(order: Any, group_id: str, oca_type: int = 1) -> None:
+def attach_oca_group(order: OrderLike, group_id: str, oca_type: int = 1) -> None:
     """Attach OCA group identity to an ib_async Order for cancel-on-fill semantics.
 
     Parameters
