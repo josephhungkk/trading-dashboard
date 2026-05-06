@@ -5,6 +5,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-06
+
+### Added — Phase 8b complete (order-type expansion + Modify/Bracket/OCO across IBKR/Futu/Schwab)
+
+41 tasks across 6 chunks shipped over a single-day burst (74 commits since v0.8.0). Plan
+[`docs/superpowers/plans/2026-05-06-phase8b-order-type-expansion-plan.md`](docs/superpowers/plans/2026-05-06-phase8b-order-type-expansion-plan.md).
+17 architect-review findings (3 CRIT + 6 HIGH + 8 MED) applied inline before implementation.
+
+#### Chunk 0 — Foundation (commits `38e4c6a..f154980`)
+
+- **Pydantic order schemas widened**: 10 OrderTypes (added TRAIL, TRAIL_LIMIT, MOC, MOO, LOC, LOO) + 5 TIFs (added IOC, FOK, GTD). New fields: `trail_offset`, `trail_offset_type`, `trail_limit_offset`, `expiry_date`. Validator rejects session-bound × non-DAY combos with `session_window_closed`. 39 schema tests.
+- **Proto fields 11-14** on PlaceOrderRequest/OrderRequest/ModifyOrderRequest/Order: `trail_offset`, `trail_offset_type`, `trail_limit_offset`, `expiry_date`. Sidecar pass-through.
+- **`app/services/market_calendar.py`** — exchange-aware GTD/MOC/MOO/LOC/LOO validation via `exchange_calendars` (XNYS/XHKG/XLON). Functions: `today_in_exchange_tz`, `eod_for_exchange`, `is_trading_day`, `next_session_open`, `is_session_window_open`. 15 unit tests covering DST, half-days, and holiday edge cases.
+- **Alembic 0012 — `broker_features` table** (PK on `broker_id, feature` with feature ∈ {modify, bracket, oco, gtd_max_days, session_cutoff_minutes, notional_orders}). Seeds 14 baseline rows.
+- **PostgreSQL LISTEN → Redis PUBLISH bridge** (`postgres_listen_bridge.py`) — wired into FastAPI lifespan. Subscribes to `app_config:invalidate:*` and republishes for in-process cache invalidation. Reconnect with exponential backoff, asyncio.Event for clean shutdown.
+- **Pre-commit guard** (`scripts/pre-commit-check-empirical-artifacts.sh`) blocks scripts/empirical/*.py that contain hardcoded broker secrets (regex matches `<key>=<long literal>`, NOT bare variable names — tightened mid-phase to eliminate false positives).
+- **Error-code wiring**: `unsupported_order_type_for_broker` envelope keys renamed `broker_id`/`tif` (was `broker`/`time_in_force`) for FE consistency.
+
+#### Chunk S — Schwab universe expansion (commits `cddd00e..6b74376`)
+
+- `to_schwab_order_payload` extended for TRAIL → "TRAILING_STOP", TRAIL_LIMIT → "TRAILING_STOP_LIMIT", MOC/MOO/LOC/LOO → MARKET_ON_CLOSE/MARKET_ON_OPEN/LIMIT_ON_CLOSE/LIMIT_ON_OPEN with session=NORMAL/AM. GTD → `duration="GOOD_TILL_CANCEL"` + `cancelTime` ISO timestamp via lazy `exchange_calendars` import in sidecar (added to `sidecar_schwab/pyproject.toml` deps).
+- **Alembic 0013** — flips 13 (type, TIF) combos to `is_supported=TRUE` for Schwab.
+- **Nightly CI matrix** extended to `{market_spy, trail_amount_spy, gtd_limit_spy}` via `--case` fixture. Workflow `.github/workflows/nightly-real-schwab-trade.yml`.
+
+#### Chunk F — Futu Modify + Bracket live + universe (commits `c48d352..3fb6637`, `279376d`, `92b74c5`, `226f6d9`)
+
+- `ModifyOrder` and `PlaceBracket` RPCs swapped from UNIMPLEMENTED → live (`futu_client.modify_order_live` + `place_bracket` 3-leg sequential). 7 sidecar tests cover paper/live env routing + FAILED_PRECONDITION on RET error.
+- `to_futu_order_params` for TRAIL → ft.OrderType.TRAILING_STOP + ft.TrailType.RATIO/AMOUNT. HKEX exchange auctions (MOO/LOO/LOC/MOC) rejected with `unsupported_for_hkex`. **Empirical SDK inspection found ft.TimeInForce only has DAY/GTC** — IOC/FOK/GTD raise `NotImplementedError("futu_gtd_unsupported")`.
+- **Alembic 0014** — flips 9 capability rows + flips broker_features modify/bracket flags TRUE. **Alembic 0014a** — reverts the 3 IOC/FOK/GTD rows after the SDK enum discovery (mid-phase correction).
+- **Empirical hard-gate** `scripts/empirical/futu_bracket_modify_paper.py` — chose 3-separate-orders path because futu-api's `place_order` has no `attached_conditional_orders` parameter.
+- **Real-broker E2E + nightly CI** (`nightly-real-futu.yml` + `test_real_futu_e2e_modify.py`). Self-hosted runner required (NUC has WG access to OpenD).
+
+#### Chunk I — IBKR full universe (commits `38ca957..5e34567`, `a82b1fa`)
+
+- **`sidecar_ibkr/order_builder.py`** — extracted `build_ib_order()` from handlers (proto-import-free) + `attach_oca_group()` helper. Maps Phase 8b types to TWS strings: TRAIL_LIMIT → "TRAIL LIMIT" (verified against TWS API docs), MOO/LOO use `tif="OPG"`, GTD → `tif="GTD"` + `goodTillDate="YYYYMMDD 23:59:59 US/Eastern"`. 16 unit tests.
+- **Alembic 0015** — flips 21 (type, TIF) combos for IBKR.
+- **Real-broker E2E + nightly CI** (`nightly-real-ibkr.yml` + `test_real_ibkr_e2e.py`) with matrix `{market_spy, trail_percent_spy, moc_spy, gtd_limit_spy}`. MOC case skipped outside ~15-20 UTC window.
+
+#### Chunk O — OCO orchestrator + native + orchestrated adapters (commits `e1a7332..2d7b1a6`)
+
+- **Alembic 0016 — `oco_links` table** with 9-state machine (`PENDING_BOTH, LEG_A/B_WORKING, LEG_A/B_FILLED, CANCELED, CANCEL_FAILED, ERROR, COMPLETED`). Partial index on non-terminal states.
+- **`backend/app/services/oco_orchestrator.py`** — single-leader service via Redis advisory lock (60s TTL, 30s renewal). 9-state machine. Per-(broker, account_id) gRPC stream subscriptions capped at 100 (`CapacityError` raised at limit). `oco_group_id_for_ibkr(uuid)` helper produces deterministic ≤32-char OCA group identifier.
+- **POST /api/orders/oco endpoint** (`backend/app/api/orders.py`) — kill-switch via `broker.oco.enabled` config (503 + `oco_disabled` if false). Same-broker + same-account guards (422). Per-leg capability gate. Atomicity: leg B failure triggers best-effort cancel of leg A. INSERTs oco_links row with status `PENDING_BOTH`.
+- **Schwab native OCO**: `to_schwab_oco_payload(order_a, order_b)` composes 2-leg `orderStrategyType="OCO"` with `childOrderStrategies`. Symbol/asset_type mismatch → ValueError.
+- **IBKR native OCO**: proto field `oco_group_id = 25` on PlaceOrderRequest. `attach_oca_group(order, group_id, oca_type=1)` stamps `ocaGroup` + `ocaType=1` on the ib_async Order before placement.
+- **Futu orchestrated OCO**: confirmed pre-existing PlaceOrder + CancelOrder + OrderEvent (asyncio.Queue maxsize=1000) surfaces sufficient — no new sidecar code; orchestrator drives state via the existing event stream.
+- **2 empirical hard-gates**: `scripts/empirical/schwab_oco_paper.py` (validates Schwab native OCO via `orderStrategyType` + `childOrderStrategies`) and `scripts/empirical/futu_oco_orchestrated_paper.py` (proves Futu has NO native OCO cascade — orchestrator required).
+- **Alembic 0017** — flips `broker_features.is_supported=TRUE` for `feature='oco'` on schwab/ibkr/futu after empirical gates pass.
+- **Killswitch integration test + cancel-always-allowed invariant test**: cancel decisions never query `broker_features` for already-placed OCO legs (protects against in-flight orphaning if the OCO flag flips OFF mid-flight).
+
+### Bonus — Phase 8c spec ready for plan-writing
+
+`docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 lines) drafted with 21 architect findings applied inline (3 CRIT + 7 HIGH + 11 MED). 5 LOWs deferred. CRIT-1 renames request-side `notional` → `cash_amount` to avoid collision with existing response-side `notional` (USD value). CRIT-2 mandates atomic 4-tuple PK migration. CRIT-3 spells out crypto bypass of `market_calendar`. Plan-writing in progress.
+
+### Operational notes
+
+- Alembic head is now `0017_oco_capability_flip`. Run `alembic upgrade head` against the prod DB to apply the 6 new migrations (0012, 0013, 0014, 0014a, 0015, 0016, 0017).
+- `sidecar_schwab` requires `uv lock && uv sync` to install `exchange-calendars>=4.5` (added for GTD `cancelTime` mapping).
+- Proto regen required after this release (new fields 11-14 + 25 + bracket children). Run `buf generate` per the canonical pipeline.
+- 3 empirical hard-gates added (`schwab_oco_paper.py`, `futu_bracket_modify_paper.py`, `futu_oco_orchestrated_paper.py`) — manual run, gated on broker paper credentials.
+- 4 nightly CI workflows now exist: `nightly-real-schwab-trade.yml` (matrix expanded), `nightly-real-futu.yml` (new), `nightly-real-ibkr.yml` (new), and the existing Alpaca read-only one. All require self-hosted runner (NUC) for WG access.
+
 ## [0.8.0] — 2026-05-06
 
 ### Added — Phase 8a complete (post-rc1: C0 PASS + A5 flip + Chunk F frontend)

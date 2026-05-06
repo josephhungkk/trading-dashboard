@@ -326,13 +326,20 @@ Phase 8 split into 8a (Schwab single-leg + capability foundation),
 - [ ] **G3** Phase 8a runbook (operator playbook)
 - [x] **G4** Close-out v0.8.0 (CHANGELOG + tag) once A5+E3+F all green  *(2026-05-06)*
 
-### Phase 8b — Order-type expansion + Futu Modify/Bracket  *(brainstorm pending)*
+### Phase 8b — Order-type expansion + Futu Modify/Bracket + OCO  *(complete — v0.9.0 · 2026-05-06)*
 
-STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6).
+41 tasks across 6 chunks shipped in single-day burst (74 commits since v0.8.0). 17 architect findings (3 CRIT + 6 HIGH + 8 MED) applied inline.
 
-### Phase 8c — Alpaca trade  *(brainstorm pending)*
+- [x] **Chunk 0** Foundation: order schemas widened to 10 types + 5 TIFs, proto fields 11-14, market_calendar service (XNYS/XHKG/XLON), Alembic 0012 broker_features, postgres LISTEN→Redis bridge, PII pre-commit guard, error-code wiring  *(commits 38e4c6a..f154980)*
+- [x] **Chunk S** Schwab universe: TRAIL/TRAIL_LIMIT/MOC/MOO/LOC/LOO normalize + GTD cancelTime via exchange_calendars, Alembic 0013 (13 row flips), nightly CI matrix expanded `{market/trail/gtd}_spy`  *(commits cddd00e..6b74376)*
+- [x] **Chunk F** Futu Modify+Bracket+universe: ModifyOrder + PlaceBracket live, TRAIL→ft.OrderType.TRAILING_STOP, HKEX auction rejection, Alembic 0014 + **0014a** (revert IOC/FOK/GTD per SDK enum discovery), empirical hard-gate, real-broker E2E + workflow  *(commits c48d352..3fb6637, 279376d, 92b74c5, 226f6d9)*
+- [x] **Chunk I** IBKR full universe: order_builder (TRAIL_LIMIT="TRAIL LIMIT" verbatim per TWS docs, MOO/LOO use OPG tif, GTD goodTillDate), Alembic 0015 (21 row flips), real-broker E2E with TRAIL+MOC+GTD matrix  *(commits 38ca957..5e34567, a82b1fa)*
+- [x] **Chunk O** OCO orchestrator: Alembic 0016 oco_links 9-state machine, oco_orchestrator.py (Redis advisory lock + per-account stream cap=100 + oco_group_id_for_ibkr helper), POST /api/orders/oco endpoint, Schwab native (orderStrategyType=OCO), IBKR native (proto field 25 oco_group_id + ocaGroup/ocaType=1), Futu orchestrated (existing event stream sufficient), 2 empirical hard-gates, Alembic 0017 OCO feature flip, killswitch test, cancel-always-allowed invariant  *(commits e1a7332..2d7b1a6)*
+- [x] **Close-out** CHANGELOG/TASKS.md/v0.9.0 tag
 
-Alpaca `PlaceOrder` (US equity + crypto). Two-layer 30-symbol cap from Phase 7c carries forward.
+### Phase 8c — Alpaca trade  *(spec done; plan-writing in progress)*
+
+Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 lines, 21 architect findings applied inline @ commit 82482e4). 4-tuple capability matrix extension (broker_id, asset_class, order_type, tif). Crypto bypass of `market_calendar`. Notional XOR via new `cash_amount` field (proto tag 15) — explicitly distinct from existing response-side `notional` (USD value). Equity bracket+OCO native, crypto bracket+OCO orchestrator-fallback (likely UNSUPPORTED, micro-empirical). Targets v0.10.0. Plan-writing dispatched to Codex; in flight.
 
 ## Phase 9 — Charting v1 + bar aggregator + historical store
 
