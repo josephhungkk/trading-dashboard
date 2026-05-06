@@ -99,7 +99,7 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self,
         *,
         label: str = "test-label",
-        broker_id: Literal["ibkr", "futu"] = "ibkr",
+        broker_id: Literal["ibkr", "futu", "schwab", "alpaca"] = "ibkr",
         accounts: list[broker_pb2.Account] | None = None,
     ) -> None:
         self._label = label
@@ -269,12 +269,29 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.ModifyOrderResponse:
         await self._before_rpc("ModifyOrder", context)
+        new_broker_order_id = f"SIM-{uuid7()}"
+        # Re-key the in-memory sim entry so a follow-up cancel finds the new id.
+        sim_meta = self._sim_orders.pop(request.broker_order_id, None)
+        if sim_meta is not None:
+            self._sim_orders[new_broker_order_id] = sim_meta
         for queue in self._event_subscribers:
             await queue.put(
                 broker_pb2.OrderEventMessage(
                     broker_order_id=request.broker_order_id,
                     client_order_id=request.client_order_id,
-                    status="modified",
+                    status="cancelled",
+                    filled_qty="0",
+                    avg_fill_price="0",
+                    raw_payload="{}",
+                    exec_id="",
+                    kind="replaced",
+                )
+            )
+            await queue.put(
+                broker_pb2.OrderEventMessage(
+                    broker_order_id=new_broker_order_id,
+                    client_order_id=request.client_order_id,
+                    status="submitted",
                     filled_qty="0",
                     avg_fill_price="0",
                     raw_payload="{}",
@@ -283,8 +300,9 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 )
             )
         return broker_pb2.ModifyOrderResponse(
-            broker_order_id=request.broker_order_id,
-            status="Modified",
+            broker_order_id=new_broker_order_id,
+            status="modify_requested",
+            parent_broker_order_id=request.broker_order_id,
         )
 
     async def PlaceBracket(  # noqa: N802
