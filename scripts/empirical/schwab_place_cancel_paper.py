@@ -59,10 +59,21 @@ def _seed_schwabdev_tokens_db(
     """
     import sqlite3
 
+    from datetime import timedelta
+
     if not refresh_token:
         return  # caller already errored on missing env
-    now = datetime.now(UTC).isoformat()
-    seed_access = access_token or "PLACEHOLDER_AWAITING_REFRESH"
+    now_dt = datetime.now(UTC)
+    now = now_dt.isoformat()
+    # If we have no real access_token, mark its issue time far in the past so
+    # schwabdev sees it as expired (>30 min) and mints a fresh one from the
+    # refresh_token on first outbound call.
+    if access_token:
+        seed_access = access_token
+        access_issued = now
+    else:
+        seed_access = "PLACEHOLDER_AWAITING_REFRESH"
+        access_issued = (now_dt - timedelta(hours=2)).isoformat()
     conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
     cur.execute(
@@ -82,7 +93,7 @@ def _seed_schwabdev_tokens_db(
     cur.execute("DELETE FROM schwabdev")
     cur.execute(
         "INSERT INTO schwabdev VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (now, now, seed_access, refresh_token, "", 1800, "Bearer", "api"),
+        (access_issued, now, seed_access, refresh_token, "", 1800, "Bearer", "api"),
     )
     conn.commit()
     conn.close()
@@ -114,14 +125,21 @@ def _require_env() -> dict[str, str]:
     return {key: os.environ[key] for key in REQUIRED_ENV}
 
 
-def _order_payload(client_order_id: str, symbol: str) -> dict[str, Any]:
+def _order_payload(symbol: str) -> dict[str, Any]:
+    """Schwab REST place-order payload for a benign $1 LIMIT BUY.
+
+    Empirical finding (2026-05-06): Schwab REJECTS `clientOrderId` as a
+    top-level field with HTTP 400 'A validation error occurred while
+    processing the request.' The sidecar's to_schwab_order_payload already
+    omits it; backend tracks the (client_order_id <-> broker_order_id)
+    mapping locally instead of relying on Schwab to round-trip it.
+    """
     return {
         "orderType": "LIMIT",
         "session": "NORMAL",
         "duration": "DAY",
         "orderStrategyType": "SINGLE",
         "price": "1.00",
-        "clientOrderId": client_order_id,
         "orderLegCollection": [
             {
                 "instruction": "BUY",
@@ -174,11 +192,9 @@ def _run() -> tuple[bool, dict[str, Any]]:
 
     env = _require_env()
     symbol = os.environ.get("SCHWAB_PAPER_SYMBOL", "F")
-    client_order_id = f"EMPIRICAL-{int(time.time())}"
     assertions: dict[str, Any] = {}
     result: dict[str, Any] = {
         "started_at": datetime.now(UTC).isoformat(),
-        "client_order_id": client_order_id,
         "symbol": symbol,
         "assertions": assertions,
         "known_statuses": sorted(KNOWN_STATUSES),
@@ -194,8 +210,8 @@ def _run() -> tuple[bool, dict[str, Any]]:
         env["SCHWAB_APP_SECRET"],
         tokens_db=TOKENS_DB_PATH,
     )
-    payload = _order_payload(client_order_id, symbol)
-    place = client.order_place(env["SCHWAB_PAPER_ACCOUNT_HASH"], payload)
+    payload = _order_payload(symbol)
+    place = client.place_order(env["SCHWAB_PAPER_ACCOUNT_HASH"], payload)
     result["place"] = {"status_code": place.status_code, "headers": dict(place.headers)}
     _assert(place.status_code in (200, 201), "place status is 200 or 201", assertions)
 
@@ -210,8 +226,8 @@ def _run() -> tuple[bool, dict[str, Any]]:
     detail = detail_response.json()
     result["detail"] = detail
     _assert(
-        detail.get("clientOrderId") == client_order_id,
-        "clientOrderId round-trips on order detail",
+        str(detail.get("orderId")) == broker_order_id,
+        "broker_order_id round-trips on order detail",
         assertions,
     )
 
@@ -223,7 +239,7 @@ def _run() -> tuple[bool, dict[str, Any]]:
     result["execution_leg_shape"] = _validate_execution_legs(detail)
     assertions["executionLeg shape matches normalizer expectations when filled"] = True
 
-    cancel = client.order_cancel(env["SCHWAB_PAPER_ACCOUNT_HASH"], broker_order_id)
+    cancel = client.cancel_order(env["SCHWAB_PAPER_ACCOUNT_HASH"], broker_order_id)
     result["cancel"] = {"status_code": cancel.status_code}
     _assert(cancel.status_code in (200, 204), "cancel status is 200 or 204", assertions)
 
