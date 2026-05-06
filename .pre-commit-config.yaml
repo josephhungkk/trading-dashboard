@@ -37,3 +37,9 @@ repos:
         stages: [commit-msg]
         entry: bash -c 'cd frontend && pnpm exec commitlint --config ../commitlint.config.cjs --edit "$1"'
         language: system
+      - id: check-empirical-artifacts
+        name: Check empirical scripts for broker artifacts
+        entry: scripts/pre-commit-check-empirical-artifacts.sh
+        language: system
+        files: ^scripts/empirical/.*\.py$
+        pass_filenames: false
