@@ -26,8 +26,20 @@ AssetClass = Literal[
     "CBBC",  # Phase 6 (M1): HK callable bull/bear contract
 ]
 OrderSide = Literal["SIDE_UNSPECIFIED", "BUY", "SELL"]
-OrderType = Literal["TYPE_UNSPECIFIED", "MARKET", "LIMIT", "STOP", "STOP_LIMIT"]
-TimeInForce = Literal["TIF_UNSPECIFIED", "DAY", "GTC", "IOC", "FOK"]
+OrderType = Literal[
+    "UNSPECIFIED",
+    "MARKET",
+    "LIMIT",
+    "STOP",
+    "STOP_LIMIT",
+    "TRAIL",
+    "TRAIL_LIMIT",
+    "MOC",
+    "MOO",
+    "LOC",
+    "LOO",
+]
+TimeInForce = Literal["UNSPECIFIED", "DAY", "GTC", "IOC", "FOK", "GTD"]
 OrderStatus = Literal[
     "STATUS_UNSPECIFIED",
     "PENDING",
