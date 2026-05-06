@@ -61,3 +61,26 @@ SCHWAB_MODIFY_ORDER_DURATION_MS = Histogram(
     "Schwab ModifyOrder REST call duration in milliseconds.",
     buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
 )
+
+SCHWAB_ORDER_POLLER_ITERATIONS_TOTAL = Counter(
+    "schwab_order_poller_iterations_total",
+    "Total number of OrderPoller tick iterations.",
+    ["gateway_label", "account_id", "cadence"],
+)
+
+SCHWAB_ORDER_POLLER_CADENCE_CHANGED_TOTAL = Counter(
+    "schwab_order_poller_cadence_changed_total",
+    "Number of cadence transitions (idle <-> fast).",
+    ["gateway_label", "account_id", "from_cadence", "to_cadence"],
+)
+
+SCHWAB_ORDER_EVENT_EMITTED_TOTAL = Counter(
+    "schwab_order_event_emitted_total",
+    "Wire events emitted to fan-out subscribers.",
+    ["kind"],
+)
+
+SCHWAB_FANOUT_SUBSCRIBER_DROPPED_TOTAL = Counter(
+    "schwab_fanout_subscriber_dropped_total",
+    "Fan-out subscribers dropped due to bounded-queue overflow.",
+)
