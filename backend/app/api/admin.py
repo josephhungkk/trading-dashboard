@@ -405,3 +405,55 @@ async def delete_secret(
         existed,
     )
     return Response(status_code=204)
+
+
+@router.get("/brokers/{label}/account-hashes")
+async def list_broker_account_hashes(
+    label: str,
+    identity: IdentityDep,
+) -> list[dict[str, str]]:
+    """Operator-only: returns sidecar-side (account_number, account_hash, mode)
+    for a broker gateway label.
+
+    Used to discover SCHWAB_PAPER_ACCOUNT_HASH for the C0 empirical hard-gate
+    script (and equivalent operator workflows for other brokers). Bypasses the
+    boundary-stripping in AccountResponse / _account_from_proto by reading
+    response.accounts directly from the sidecar's ListManagedAccounts gRPC.
+
+    `label` is the gateway label (e.g. "schwab", "isa-paper", "futu",
+    "alpaca-paper") — not the broker_id.
+    """
+    from app._generated.broker.v1 import broker_pb2
+    from app.core.deps import get_broker_registry
+    from app.services.broker_registry_factory import SIDECAR_BROKERS
+
+    if label not in SIDECAR_BROKERS:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_gateway_label", "known": sorted(SIDECAR_BROKERS)},
+        )
+
+    registry = get_broker_registry()
+    client = await registry.get_client(label)
+    response = await client._call(
+        method="ListManagedAccounts",
+        rpc=client.stub.ListManagedAccounts,
+        request=broker_pb2.Empty(),
+    )
+    rows = [
+        {
+            "account_number": acct.account_number,
+            "account_hash": acct.account_hash,
+            "mode": broker_pb2.TradingMode.Name(acct.mode),
+            "gateway_label": acct.gateway_label,
+            "currency_base": acct.currency_base,
+        }
+        for acct in response.accounts
+    ]
+    log.info(
+        "admin_list_broker_account_hashes label=%s actor=%s rows=%d",
+        label,
+        identity.email,
+        len(rows),
+    )
+    return rows
