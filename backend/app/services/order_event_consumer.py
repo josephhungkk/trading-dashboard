@@ -405,6 +405,20 @@ class OrderEventConsumer:
             client_order_id = _parse_client_order_id(event.client_order_id)
 
             async with self._session_factory() as session, session.begin():
+                # CRIT-2 (Phase 8a): no-op on same-rank-same-status events with no new
+                # exec_id. Defends against sidecar restart re-emitting `submitted` for
+                # in-flight orders.
+                current = await session.execute(
+                    text(
+                        "SELECT status::text FROM orders "
+                        "WHERE broker_order_id = :b AND account_id = :a"
+                    ),
+                    {"b": event.broker_order_id, "a": account.account_id},
+                )
+                cur = current.scalar_one_or_none()
+                if cur is not None and cur == status and not event.exec_id:
+                    return  # idempotent echo from sidecar restart hydration
+
                 async with session.begin_nested():
                     order_id = await self._matching_order_id(session, account, client_order_id)
                     event_id = await self._insert_order_event(
