@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -37,6 +38,7 @@ from app.services.broker_registry_factory import MissingBrokerSecrets, build_bro
 from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistry
 from app.services.config import ConfigService
 from app.services.config_cache import ConfigCache
+from app.services.oco_orchestrator import OcoOrchestrator
 from app.services.order_event_consumer import OrderEventConsumer
 from app.services.pending_fills_sweeper import PendingFillsSweeper
 from app.services.pending_submit_watchdog import PendingSubmitWatchdog
@@ -77,6 +79,8 @@ async def lifespan(_app: FastAPI) -> Any:
     pending_watchdog: PendingSubmitWatchdog | None = None
     pending_fills_sweeper: PendingFillsSweeper | None = None
     pending_fills_task: asyncio.Task[None] | None = None
+    oco_orchestrator: OcoOrchestrator | None = None
+    oco_orchestrator_task: asyncio.Task[None] | None = None
 
     try:
         try:
@@ -102,6 +106,8 @@ async def lifespan(_app: FastAPI) -> Any:
         await order_consumer.start()
         await pending_watchdog.start()
         pending_fills_task = asyncio.create_task(pending_fills_sweeper.run())
+        oco_orchestrator = OcoOrchestrator(db=session_factory, redis=redis)
+        oco_orchestrator_task = asyncio.create_task(oco_orchestrator.start())
         log.info("broker_lifespan_started")
     except MissingBrokerSecrets as exc:
         log.warning("broker_lifespan_skipped", reason=str(exc))
@@ -117,6 +123,12 @@ async def lifespan(_app: FastAPI) -> Any:
                 await pending_fills_task
             except asyncio.CancelledError:
                 pass
+        if oco_orchestrator is not None:
+            await oco_orchestrator.stop()
+        if oco_orchestrator_task is not None:
+            oco_orchestrator_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await oco_orchestrator_task
         if pending_watchdog is not None:
             await pending_watchdog.stop()
         if order_consumer is not None:
