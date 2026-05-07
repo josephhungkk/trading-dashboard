@@ -74,6 +74,7 @@ async def run_async_migrations() -> None:
     and associate a connection with the context.
 
     """
+    from sqlalchemy import text
 
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -82,6 +83,16 @@ async def run_async_migrations() -> None:
     )
 
     async with connectable.connect() as connection:
+        # Pre-create alembic_version with widened column. Phase 7c+ revisions
+        # like 0020a_alpaca_crypto_capability_flip exceed alembic's default
+        # varchar(32). Idempotent; alembic skips creation when the table exists.
+        await connection.execute(text(
+            "CREATE TABLE IF NOT EXISTS alembic_version ("
+            "  version_num VARCHAR(64) NOT NULL,"
+            "  CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+            ")"
+        ))
+        await connection.commit()
         await connection.run_sync(do_run_migrations)
 
     await connectable.dispose()
