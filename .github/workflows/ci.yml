@@ -33,10 +33,12 @@ jobs:
         with:
           python-version: '3.14'
       - name: Install sidecar deps
-        working-directory: sidecar
+        # Renamed `sidecar/` → `sidecar_ibkr/` on 2026-05-04 (Phase 4 sidecar topology).
+        # Other 3 sidecars (alpaca, schwab, futu) have nightly real-broker workflows.
+        working-directory: sidecar_ibkr
         run: uv sync --extra dev --frozen
       - name: Generate proto stubs (grpc_tools)
-        working-directory: sidecar
+        working-directory: sidecar_ibkr
         run: |
           mkdir -p _generated/broker/v1
           : > _generated/__init__.py
@@ -48,10 +50,10 @@ jobs:
             --grpc_python_out=_generated \
             --pyi_out=_generated \
             broker/v1/broker.proto
-          sed -i 's|^from broker\.v1 import broker_pb2|from sidecar._generated.broker.v1 import broker_pb2|' \
+          sed -i 's|^from broker\.v1 import broker_pb2|from sidecar_ibkr._generated.broker.v1 import broker_pb2|' \
             _generated/broker/v1/broker_pb2_grpc.py
       - name: Pytest (skip real_ibkr)
-        working-directory: sidecar
+        working-directory: sidecar_ibkr
         env:
           REAL_IBKR: ''
         run: uv run pytest --cov=sidecar_ibkr --cov-fail-under=80 -m 'not real_ibkr'
