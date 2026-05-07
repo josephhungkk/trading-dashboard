@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.accounts import BrokerMaintenance
 
@@ -39,6 +39,7 @@ CapStatus = Literal["ok", "near", "exceeded"]
 PositionSanityStatus = Literal["ok", "high", "extreme"]
 SESSION_BOUND_ORDER_TYPES = {"MOC", "MOO", "LOC", "LOO"}
 DECIMAL_8_PATTERN = r"^\d+(\.\d{1,8})?$"
+DECIMAL_10_PATTERN = r"^\d{1,10}(\.\d{1,10})?$"
 
 
 class ContractSummary(BaseModel):
@@ -54,7 +55,8 @@ class PreviewRequest(BaseModel):
     side: OrderSide
     order_type: OrderType
     tif: OrderTif
-    qty: str = Field(pattern=DECIMAL_8_PATTERN)
+    qty: str | None = Field(default=None, pattern=DECIMAL_10_PATTERN)
+    cash_amount: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
     limit_price: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
     stop_price: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
     trail_offset: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
@@ -64,6 +66,14 @@ class PreviewRequest(BaseModel):
 
     @field_validator(
         "qty",
+        mode="before",
+    )
+    @classmethod
+    def _qty_decimal_inputs_to_wire_string(cls, value: object) -> object:
+        return _coerce_decimal_10(value)
+
+    @field_validator(
+        "cash_amount",
         "limit_price",
         "stop_price",
         "trail_offset",
@@ -76,6 +86,15 @@ class PreviewRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_order_type_prices(self) -> Self:
+        if (self.qty is None) == (self.cash_amount is None):
+            raise ValueError("cash_amount_xor_qty")
+        if self.cash_amount is not None:
+            if self.side != "BUY":
+                raise ValueError("cash_amount_buy_only")
+            if self.order_type != "MARKET":
+                raise ValueError("cash_amount_market_only")
+            if self.tif != "DAY":
+                raise ValueError("cash_amount_day_only")
         _validate_order_shape(
             order_type=self.order_type,
             tif=self.tif,
@@ -348,8 +367,10 @@ def _validate_order_shape(
 class OrderModifyRequest(BaseModel):
     """PUT /api/orders/{id} body. account_id/conid/side immutable."""
 
+    model_config = ConfigDict(extra="forbid")
+
     nonce: str = Field(min_length=1, max_length=128)
-    qty: str = Field(pattern=r"^\d+(\.\d+)?$")
+    qty: str = Field(pattern=DECIMAL_10_PATTERN)
     limit_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
     order_type: OrderType
     tif: OrderTif
@@ -361,6 +382,13 @@ class OrderModifyRequest(BaseModel):
 
     @field_validator(
         "qty",
+        mode="before",
+    )
+    @classmethod
+    def _qty_decimal_inputs_to_wire_string(cls, value: object) -> object:
+        return _coerce_decimal_10(value)
+
+    @field_validator(
         "limit_price",
         "stop_price",
         "trail_offset",
@@ -407,6 +435,8 @@ class OrderBracketResponse(BaseModel):
 
 
 class OrderBracketRequest(BaseModel):
+    # bracket children always carry qty; notional flows only to parent leg
+    # (enforced at OCO endpoint, not schema)
     nonce: str = Field(min_length=1, max_length=128)
     account_id: UUID
     client_order_id: UUID
@@ -414,7 +444,7 @@ class OrderBracketRequest(BaseModel):
     side: Literal["BUY", "SELL"]
     order_type: Literal["LIMIT"]
     tif: Literal["DAY", "GTC"]
-    qty: str = Field(pattern=r"^\d+(\.\d+)?$")
+    qty: str = Field(pattern=DECIMAL_10_PATTERN)
     limit_price: str = Field(pattern=r"^\d+(\.\d+)?$")
     stop_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")
     target_price: str | None = Field(default=None, pattern=r"^\d+(\.\d+)?$")

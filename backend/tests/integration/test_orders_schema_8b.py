@@ -200,3 +200,90 @@ def test_session_bound_non_day_error_code() -> None:
 def test_capability_gate_uses_existing_code() -> None:
     # FE relies on this byte-exact error code; do not rename without coordination.
     assert "unsupported_order_type_for_broker" == "unsupported_order_type_for_broker"
+
+
+# ---------------------------------------------------------------------------
+# T-0.7: qty/cash_amount XOR and 10dp qty validation
+# ---------------------------------------------------------------------------
+
+
+def test_qty_only_accepted() -> None:
+    PlaceOrderRequest.model_validate(
+        _base_place(qty="1", side="BUY", order_type="MARKET", tif="DAY")
+    )
+
+
+def test_cash_amount_only_accepted() -> None:
+    PlaceOrderRequest.model_validate(
+        _base_place(qty=None, cash_amount="100.00", side="BUY", order_type="MARKET", tif="DAY")
+    )
+
+
+def test_both_qty_and_cash_amount_rejected() -> None:
+    with pytest.raises(ValidationError) as exc:
+        PlaceOrderRequest.model_validate(
+            _base_place(
+                qty="1",
+                cash_amount="100.00",
+                side="BUY",
+                order_type="MARKET",
+                tif="DAY",
+            )
+        )
+    assert "cash_amount_xor_qty" in str(exc.value)
+
+
+def test_neither_qty_nor_cash_amount_rejected() -> None:
+    body = _base_place()
+    body.pop("qty")
+
+    with pytest.raises(ValidationError):
+        PlaceOrderRequest.model_validate(body)
+
+
+def test_cash_amount_with_sell_rejected() -> None:
+    with pytest.raises(ValidationError) as exc:
+        PlaceOrderRequest.model_validate(
+            _base_place(
+                qty=None,
+                cash_amount="100.00",
+                side="SELL",
+                order_type="MARKET",
+                tif="DAY",
+            )
+        )
+    assert "cash_amount_buy_only" in str(exc.value)
+
+
+def test_cash_amount_with_limit_rejected() -> None:
+    with pytest.raises(ValidationError) as exc:
+        PlaceOrderRequest.model_validate(
+            _base_place(qty=None, cash_amount="100.00", order_type="LIMIT", tif="DAY")
+        )
+    assert "cash_amount_market_only" in str(exc.value)
+
+
+def test_cash_amount_with_gtc_rejected() -> None:
+    with pytest.raises(ValidationError) as exc:
+        PlaceOrderRequest.model_validate(
+            _base_place(qty=None, cash_amount="100.00", order_type="MARKET", tif="GTC")
+        )
+    assert "cash_amount_day_only" in str(exc.value)
+
+
+def test_cash_amount_on_modify_rejected() -> None:
+    with pytest.raises(ValidationError):
+        OrderModifyRequest.model_validate({"cash_amount": "100"})
+
+
+def test_qty_10dp_accepted() -> None:
+    PlaceOrderRequest.model_validate(
+        _base_place(qty="0.0000000001", side="BUY", order_type="MARKET", tif="DAY")
+    )
+
+
+def test_qty_11dp_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PlaceOrderRequest.model_validate(
+            _base_place(qty="0.00000000001", side="BUY", order_type="MARKET", tif="DAY")
+        )
