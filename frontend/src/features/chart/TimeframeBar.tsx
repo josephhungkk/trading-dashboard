@@ -43,12 +43,16 @@ export function TimeframeBar(): React.JSX.Element {
             key={r}
             type="button"
             aria-label={`Range ${r}`}
+            // TODO(Task 36 follow-up): call setFetchRange(r) when range wiring is implemented.
+            // Marked aria-disabled + tabIndex=-1 until wiring lands.
+            aria-disabled="true"
+            tabIndex={-1}
             className={cn(
               'min-h-[2.75rem] min-w-[2.75rem] rounded px-2 text-xs',
               'text-fg-muted hover:bg-muted/10 hover:text-fg',
               'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-active',
+              'cursor-not-allowed opacity-60',
             )}
-            // TODO(Task 36 follow-up): call setFetchRange(r) when range wiring is implemented.
             onClick={() => undefined}
           >
             {r}

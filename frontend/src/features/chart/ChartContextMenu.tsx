@@ -9,7 +9,8 @@
  * Position fixed at clientX/clientY of the originating right-click event.
  * Closes on Escape keydown or outside mousedown.
  */
-import { useEffect, useRef, useState } from 'react';
+import * as React from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useChartStore } from './stores/chartStore';
 
 export interface ChartContextMenuProps {
@@ -32,13 +33,17 @@ export function ChartContextMenu({
   const ref = useRef<HTMLUListElement>(null);
   const [submenuOpen, setSubmenuOpen] = useState(false);
 
-  // Close the submenu and notify the parent. Called from event handler
-  // callbacks (keydown, mousedown) — never directly from an effect body —
-  // so react-hooks/set-state-in-effect does not trigger.
-  const closeAll = (): void => {
+  // Keep onClose ref fresh so document listeners always call the latest prop.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
+  // Stable close callback — safe to include in effect dep array.
+  const closeAll = useCallback(() => {
     setSubmenuOpen(false);
-    onClose();
-  };
+    onCloseRef.current();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -56,9 +61,7 @@ export function ChartContextMenu({
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('mousedown', onOutsideClick);
     };
-    // closeAll is stable within one open session; eslint-disable is intentional.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, closeAll]);
 
   if (!open) return null;
 

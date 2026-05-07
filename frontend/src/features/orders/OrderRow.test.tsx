@@ -10,6 +10,7 @@ import {
 } from '@tanstack/react-router';
 import { OrderRow } from './OrderRow';
 import type { OrderRowData } from './OrderRow';
+// ViewChartLink is now used inside OrderRow (MED-F); row tests exercise it via integration.
 
 function makeOrder(overrides: Partial<OrderRowData> = {}): OrderRowData {
   return {

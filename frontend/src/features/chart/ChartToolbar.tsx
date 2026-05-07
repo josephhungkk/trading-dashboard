@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { useState, useCallback } from 'react';
+import { Square, Pencil, Save, Maximize2, Camera } from 'lucide-react';
 import { useChartStore } from './stores/chartStore';
 import { IndicatorPicker } from './IndicatorPicker';
 import { Button } from '@/components/primitives/Button';
@@ -18,16 +19,19 @@ function noop(): void {
   // Fullscreen not supported or rejected — silently ignore.
 }
 
+export interface ChartToolbarProps {
+  /** Whether the drawings panel is open. Lifted to ChartPage (MED-C). */
+  drawingsOpen: boolean;
+  /** Callback to toggle the drawings panel. Lifted to ChartPage (MED-C). */
+  onToggleDrawings: () => void;
+}
+
 /** Top toolbar: chart-type selector, indicators, drawings, save, fullscreen, screenshot. */
-export function ChartToolbar(): React.JSX.Element {
+export function ChartToolbar({ drawingsOpen, onToggleDrawings }: ChartToolbarProps): React.JSX.Element {
   const chartType = useChartStore((s) => s.chartType);
   const setChartType = useChartStore((s) => s.setChartType);
 
   const [indicatorOpen, setIndicatorOpen] = useState(false);
-  // Local toggle for drawings panel — Task 38 owns DrawingTools; this just
-  // tracks whether the drawings panel is open. Exposed via data attribute for
-  // Task 38 to read if needed.
-  const [drawingsOpen, setDrawingsOpen] = useState(false);
 
   const handleChartTypeChange = useCallback(
     (value: string) => {
@@ -77,10 +81,10 @@ export function ChartToolbar(): React.JSX.Element {
         onClick={() => setIndicatorOpen(true)}
       >
         <span className="hidden md:inline">Indicators</span>
-        <span aria-hidden="true" className="md:hidden">&#8862;</span>
+        <Square className="h-4 w-4 md:hidden" aria-hidden="true" />
       </Button>
 
-      {/* Drawings — local toggle; DrawingTools panel wired by Task 38 */}
+      {/* Drawings — state lifted to ChartPage (MED-C); panel shown by ChartPage */}
       <Button
         variant="ghost"
         size="sm"
@@ -88,10 +92,10 @@ export function ChartToolbar(): React.JSX.Element {
         className="h-[2.75rem] min-w-[2.75rem] px-2 md:h-9"
         aria-label="Drawings"
         aria-pressed={drawingsOpen}
-        onClick={() => setDrawingsOpen((prev) => !prev)}
+        onClick={onToggleDrawings}
       >
         <span className="hidden md:inline">Drawings</span>
-        <span aria-hidden="true" className="md:hidden">&#9998;</span>
+        <Pencil className="h-4 w-4 md:hidden" aria-hidden="true" />
       </Button>
 
       {/* Save layout — TODO(v0.9.1): wire instrument_id + etag */}
@@ -104,7 +108,7 @@ export function ChartToolbar(): React.JSX.Element {
         title="Save layout (instrument_id wiring pending v0.9.1)"
       >
         <span className="hidden md:inline">Save</span>
-        <span aria-hidden="true" className="md:hidden">&#128190;</span>
+        <Save className="h-4 w-4 md:hidden" aria-hidden="true" />
       </Button>
 
       {/* Fullscreen */}
@@ -117,7 +121,7 @@ export function ChartToolbar(): React.JSX.Element {
         onClick={handleFullscreen}
       >
         <span className="hidden md:inline">Fullscreen</span>
-        <span aria-hidden="true" className="md:hidden">&#10070;</span>
+        <Maximize2 className="h-4 w-4 md:hidden" aria-hidden="true" />
       </Button>
 
       {/* Screenshot — deferred v0.9.1 */}
@@ -131,7 +135,7 @@ export function ChartToolbar(): React.JSX.Element {
         disabled
       >
         <span className="hidden md:inline">Screenshot</span>
-        <span aria-hidden="true" className="md:hidden">&#128247;</span>
+        <Camera className="h-4 w-4 md:hidden" aria-hidden="true" />
       </Button>
 
       <IndicatorPicker open={indicatorOpen} onOpenChange={setIndicatorOpen} />

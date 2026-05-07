@@ -118,4 +118,38 @@ describe('ChartContextMenu', () => {
 
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('stale-closure regression: calls latest onClose after prop update', () => {
+    // MED-A regression: if onClose ref is not kept fresh, the original (stale)
+    // callback is called after a re-render with a new onClose prop.
+    const firstClose = vi.fn();
+    const secondClose = vi.fn();
+
+    const { rerender } = render(
+      <ChartContextMenu
+        open={true}
+        position={DEFAULT_POSITION}
+        onClose={firstClose}
+        onAddIndicator={vi.fn()}
+        onCopySnapshot={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    // Re-render with a *different* onClose before the menu is dismissed.
+    rerender(
+      <ChartContextMenu
+        open={true}
+        position={DEFAULT_POSITION}
+        onClose={secondClose}
+        onAddIndicator={vi.fn()}
+        onCopySnapshot={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    // Dismiss via Escape — should call the *latest* onClose, not the stale one.
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(firstClose).not.toHaveBeenCalled();
+    expect(secondClose).toHaveBeenCalledTimes(1);
+  });
 });

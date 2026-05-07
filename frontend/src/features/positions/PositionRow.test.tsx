@@ -10,6 +10,7 @@ import {
 } from '@tanstack/react-router';
 import { PositionRow } from './PositionRow';
 import type { PositionRowData } from './PositionRow';
+// ViewChartLink is now used inside PositionRow (MED-F); row tests exercise it via integration.
 
 function makePosition(overrides: Partial<PositionRowData> = {}): PositionRowData {
   return {

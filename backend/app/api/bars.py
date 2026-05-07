@@ -329,6 +329,11 @@ async def ws_bars(ws: WebSocket, canonical_id: str, timeframe: str) -> None:
     if not authed:
         return
 
+    # NOTE: the bearer.<jwt> echo back via Sec-WebSocket-Protocol is visible in
+    # browser devtools / extensions / proxies. This is the established Phase 7b.1
+    # ws_auth pattern. Phase 9.5 may negotiate a neutral subprotocol after
+    # verification (requires coordinated FE update to offer ['bars-v1',
+    # 'bearer.<jwt>'] subprotocols). Tracking as security-MED.
     await ws.accept(subprotocol="bearer." + (_extract_bearer_jwt(ws) or ""))
 
     # ── Config ──────────────────────────────────────────────────────────────

@@ -7,8 +7,7 @@
  * canonicalisation is complete and remove the null-guard here.
  */
 import * as React from 'react';
-import { Link } from '@tanstack/react-router';
-import { LineChart } from 'lucide-react';
+import { ViewChartLink } from '@/components/primitives/ViewChartLink';
 
 export interface WatchlistRowData {
   symbol: string;
@@ -27,17 +26,7 @@ export function WatchlistRow({ row }: WatchlistRowProps): React.JSX.Element {
     <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5 text-xs last:border-b-0">
       <span className="font-mono text-fg">{row.symbol}</span>
       <div className="flex items-center gap-2">
-        {canonicalId ? (
-          <Link
-            to="/chart/$canonicalId"
-            params={{ canonicalId }}
-            aria-label="View Chart"
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-fg-muted hover:bg-muted/20 hover:text-fg"
-          >
-            <LineChart className="h-3.5 w-3.5" aria-hidden="true" />
-            <span className="hidden md:inline">View Chart</span>
-          </Link>
-        ) : null}
+        <ViewChartLink canonicalId={canonicalId} />
       </div>
     </div>
   );

@@ -12,6 +12,7 @@
  * when `activeDrawingTool` changes in chartStore. This component only manages
  * the selection state; the actual klinecharts integration is a separate wiring step.
  */
+import * as React from 'react';
 import { useChartStore } from './stores/chartStore';
 
 /**
