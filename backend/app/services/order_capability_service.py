@@ -9,6 +9,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,9 +20,13 @@ log = logging.getLogger(__name__)
 KNOWN_BROKERS = frozenset({"ibkr", "futu", "schwab", "alpaca"})
 ORDER_CAPABILITY_INVALIDATION_CHANNEL = "app_config:invalidate:order_capabilities"
 _CACHE_TTL_SECONDS = 60.0
-_CACHE_MAX_SIZE = 1024
+_CACHE_MAX_SIZE = 2048
 
-_CacheKey = tuple[str, str, str]
+_CacheKey = tuple[str, str, str, str]
+# ETF collapses into STOCK rows (capability matrix is keyed on the equity
+# bucket; alembic 0018 CHECK constraint allows STOCK/CRYPTO/OPTION/FUTURE/
+# FOREX/BOND and backfills existing rows with 'STOCK').
+_ASSET_CLASS_BUCKET = {"STOCK": "STOCK", "ETF": "STOCK"}
 
 
 class RedisLike(Protocol):
@@ -47,14 +52,17 @@ class OrderCapabilityService:
         self._now = now
         self._cache: OrderedDict[_CacheKey, tuple[dict[str, Any] | None, float]] = OrderedDict()
 
-    async def is_supported(self, broker_id: str, order_type: str, tif: str) -> bool:
+    async def is_supported(
+        self, broker_id: str, asset_class: str, order_type: str, time_in_force: str
+    ) -> bool:
         if broker_id not in KNOWN_BROKERS:
             metrics.order_capability_check_total.labels(
                 broker=broker_id, result="unknown_broker"
             ).inc()
             return False
 
-        row = await self._get_capability(broker_id, order_type, tif)
+        bucket = self._asset_class_bucket(asset_class)
+        row = await self._get_capability(broker_id, bucket, order_type, time_in_force)
         supported = bool(row is not None and row["is_supported"])
         metrics.order_capability_check_total.labels(
             broker=broker_id,
@@ -62,29 +70,71 @@ class OrderCapabilityService:
         ).inc()
         return supported
 
-    async def get_notes(self, broker_id: str, order_type: str, tif: str) -> str:
+    async def is_supported_3tuple_deprecated(
+        self, broker_id: str, order_type: str, time_in_force: str
+    ) -> bool:
+        structlog.get_logger(__name__).warning(
+            "order_capability.legacy_3tuple_call",
+            broker_id=broker_id,
+        )
+        metrics.order_capability_legacy_3tuple_calls_total.labels(broker_id=broker_id).inc()
+        return await self.is_supported(broker_id, "STOCK", order_type, time_in_force)
+
+    async def get_notes(
+        self, broker_id: str, asset_class: str, order_type: str, time_in_force: str
+    ) -> str:
         if broker_id not in KNOWN_BROKERS:
             return ""
-        row = await self._get_capability(broker_id, order_type, tif)
+        bucket = self._asset_class_bucket(asset_class)
+        row = await self._get_capability(broker_id, bucket, order_type, time_in_force)
         if row is None:
             return ""
         return str(row.get("notes") or "")
 
-    async def list_capabilities(self, broker_id: str) -> list[dict[str, Any]]:
+    async def list_capabilities(
+        self, broker_id: str, asset_class: str | None = None
+    ) -> dict[str, list[dict[str, Any]]] | list[dict[str, Any]]:
         if broker_id not in KNOWN_BROKERS:
             return []
+        if asset_class is not None:
+            result = await self._db.execute(
+                text(
+                    """
+                    SELECT broker_id, asset_class, order_type, time_in_force,
+                           is_supported AS supported, notes
+                    FROM broker_order_capability
+                    WHERE broker_id = :broker_id
+                      AND asset_class = :asset_class
+                    ORDER BY order_type, time_in_force
+                    """
+                ),
+                {"broker_id": broker_id, "asset_class": asset_class},
+            )
+            return [dict(row) for row in result.mappings().all()]
+
         result = await self._db.execute(
             text(
                 """
-                SELECT broker_id, order_type, time_in_force, is_supported, notes
+                SELECT broker_id, asset_class, order_type, time_in_force,
+                       is_supported AS supported, notes
                 FROM broker_order_capability
                 WHERE broker_id = :broker_id
-                ORDER BY order_type, time_in_force
+                ORDER BY asset_class, order_type, time_in_force
                 """
             ),
             {"broker_id": broker_id},
         )
-        return [dict(row) for row in result.mappings().all()]
+        rows = [dict(row) for row in result.mappings().all()]
+        supported_asset_classes = {
+            str(row["asset_class"]) for row in rows if bool(row.get("supported"))
+        }
+        if len(supported_asset_classes) <= 1:
+            return rows
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["asset_class"]), []).append(row)
+        return grouped
 
     def invalidate(self, broker_id: str) -> None:
         for key in list(self._cache):
@@ -136,36 +186,38 @@ class OrderCapabilityService:
                 attempt += 1
 
     async def _get_capability(
-        self, broker_id: str, order_type: str, tif: str
+        self, broker_id: str, asset_class: str, order_type: str, time_in_force: str
     ) -> dict[str, Any] | None:
-        key = (broker_id, order_type, tif)
+        key = (broker_id, asset_class, order_type, time_in_force)
         cached = self._get_cached(key)
         if cached is not _CACHE_MISS:
             metrics.order_capability_cache_hits_total.labels(broker=broker_id).inc()
             return cast(dict[str, Any] | None, cached)
 
         metrics.order_capability_cache_misses_total.labels(broker=broker_id).inc()
-        row = await self._fetch_capability(broker_id, order_type, tif)
+        row = await self._fetch_capability(broker_id, asset_class, order_type, time_in_force)
         self._set_cached(key, row)
         return row
 
     async def _fetch_capability(
-        self, broker_id: str, order_type: str, tif: str
+        self, broker_id: str, asset_class: str, order_type: str, time_in_force: str
     ) -> dict[str, Any] | None:
         result = await self._db.execute(
             text(
                 """
-                SELECT broker_id, order_type, time_in_force, is_supported, notes
+                SELECT broker_id, asset_class, order_type, time_in_force, is_supported, notes
                 FROM broker_order_capability
                 WHERE broker_id = :broker_id
+                  AND asset_class = :asset_class
                   AND order_type = :order_type
                   AND time_in_force = :time_in_force
                 """
             ),
             {
                 "broker_id": broker_id,
+                "asset_class": asset_class,
                 "order_type": order_type,
-                "time_in_force": tif,
+                "time_in_force": time_in_force,
             },
         )
         row = result.mappings().first()
@@ -188,7 +240,12 @@ class OrderCapabilityService:
         self._cache[key] = (row, self._now())
         self._cache.move_to_end(key)
         while len(self._cache) > self._max_cache_size:
-            self._cache.popitem(last=False)
+            evicted_key, _ = self._cache.popitem(last=False)
+            metrics.order_capability_cache_evictions_total.labels(broker_id=evicted_key[0]).inc()
+
+    @staticmethod
+    def _asset_class_bucket(asset_class: str) -> str:
+        return _ASSET_CLASS_BUCKET.get(asset_class, asset_class)
 
     @staticmethod
     def _decode_message(data: object) -> str:

@@ -224,6 +224,20 @@ order_capability_cache_misses_total = Counter(
     registry=registry,
 )
 
+order_capability_legacy_3tuple_calls_total = Counter(
+    "order_capability_legacy_3tuple_calls_total",
+    "Deprecated 3-tuple order capability checks.",
+    labelnames=["broker_id"],
+    registry=registry,
+)
+
+order_capability_cache_evictions_total = Counter(
+    "order_capability_cache_evictions_total",
+    "LRU evictions from the broker order capability cache.",
+    labelnames=["broker_id"],
+    registry=registry,
+)
+
 order_capability_pubsub_invalidations_total = Counter(
     "order_capability_pubsub_invalidations_total",
     "Capability cache invalidations triggered by Redis pubsub",

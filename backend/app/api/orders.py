@@ -40,6 +40,7 @@ from app.services.orders_service import (
     PreviewUnavailable,
     RedisLike,
     as_order_sidecar_client,
+    canonicalize_qty,
     capability_broker_id,
     resolve_account,
     validate_pre_dispatch,
@@ -422,6 +423,7 @@ async def place_oco_order(
             cfg=cfg,
             capability=capability,
             broker_label=account_a.gateway_label,
+            asset_class="STOCK",
             order_type=body.order_a.order_type,
             tif=body.order_a.tif,
             skip_operational_checks=True,
@@ -430,6 +432,7 @@ async def place_oco_order(
             cfg=cfg,
             capability=capability,
             broker_label=account_b.gateway_label,
+            asset_class="STOCK",
             order_type=body.order_b.order_type,
             tif=body.order_b.tif,
             skip_operational_checks=True,
@@ -442,6 +445,7 @@ async def place_oco_order(
     # ------------------------------------------------------------------
     client_a = await registry.get_client(account_a.gateway_label)
     order_client_a = as_order_sidecar_client(client_a)
+    qty_a = canonicalize_qty(body.order_a.qty)
 
     try:
         client_order_id_a = str(uuid4())
@@ -452,7 +456,7 @@ async def place_oco_order(
             body.order_a.side,
             body.order_a.order_type,
             body.order_a.tif,
-            body.order_a.qty,
+            qty_a,
             body.order_a.limit_price or "",
             body.order_a.stop_price or "",
         )
@@ -470,6 +474,7 @@ async def place_oco_order(
     # ------------------------------------------------------------------
     # Step 7: Place leg B; on failure cancel leg A (best-effort)
     # ------------------------------------------------------------------
+    qty_b = canonicalize_qty(body.order_b.qty)
     try:
         client_order_id_b = str(uuid4())
         sidecar_b = await order_client_a.place_order(
@@ -479,7 +484,7 @@ async def place_oco_order(
             body.order_b.side,
             body.order_b.order_type,
             body.order_b.tif,
-            body.order_b.qty,
+            qty_b,
             body.order_b.limit_price or "",
             body.order_b.stop_price or "",
         )

@@ -96,7 +96,11 @@ class _CancelOrderClient(Protocol):
 TERMINAL_STATUSES = ("filled", "cancelled", "rejected", "expired")
 
 
-def canonicalize_qty(qty: str) -> str:
+def canonicalize_qty(qty: str | None) -> str:
+    # T-0.7 widened PreviewRequest.qty to `str | None` (XOR with cash_amount).
+    # cash_amount routing comes in chunk C; until then, reject the new path here.
+    if qty is None:
+        raise NotImplementedError("cash_amount path not yet wired (Phase 8c chunk C)")
     return format(Decimal(qty).quantize(Decimal("1e-8")), "f")
 
 
@@ -116,6 +120,7 @@ async def validate_pre_dispatch(
     cfg: ConfigService,
     capability: OrderCapabilityService,
     broker_label: str,
+    asset_class: str,
     order_type: str,
     tif: str,
     skip_operational_checks: bool = False,
@@ -138,10 +143,10 @@ async def validate_pre_dispatch(
                 {"Retry-After": str(_retry_after(now, maintenance))},
             )
 
-    if await capability.is_supported(broker_id, order_type, tif):
+    if await capability.is_supported(broker_id, asset_class, order_type, tif):
         return
 
-    notes = await capability.get_notes(broker_id, order_type, tif)
+    notes = await capability.get_notes(broker_id, asset_class, order_type, tif)
     raise PreviewUnavailable(
         422,
         {
@@ -192,7 +197,8 @@ async def preview_order(
         )
 
     request = PreviewRequest.model_validate(request_data)
-    request = request.model_copy(update={"qty": canonicalize_qty(request.qty)})
+    canonical_qty = canonicalize_qty(request.qty)
+    request = request.model_copy(update={"qty": canonical_qty})
     await _check_rate_limit(redis, user_key)
 
     account = await resolve_account(db, request.account_id)
@@ -200,13 +206,14 @@ async def preview_order(
         cfg=cfg,
         capability=capability,
         broker_label=account.gateway_label,
+        asset_class="STOCK",
         order_type=request.order_type,
         tif=request.tif,
         skip_operational_checks=True,
     )
     client = await registry.get_client(account.gateway_label)
     contract = await _resolve_contract(client, request.conid)
-    qty = Decimal(request.qty)
+    qty = Decimal(canonical_qty)
     notional_native = await _native_notional(redis, request, contract, qty)
     fx_rate = await _fx_rate(redis, contract.currency, account.currency_base)
     notional = (notional_native * fx_rate).quantize(Decimal("1e-8"))
@@ -265,19 +272,21 @@ async def place_order(
         )
 
     request = PlaceOrderRequest.model_validate(request_data)
-    request = request.model_copy(update={"qty": _canonicalize_qty(request.qty)})
+    canonical_qty = canonicalize_qty(request.qty)
+    request = request.model_copy(update={"qty": canonical_qty})
     account = await resolve_account(db, request.account_id)
     await validate_pre_dispatch(
         cfg=cfg,
         capability=capability,
         broker_label=account.gateway_label,
+        asset_class="STOCK",
         order_type=request.order_type,
         tif=request.tif,
         skip_operational_checks=True,
     )
     client = await registry.get_client(account.gateway_label)
     contract = await _resolve_contract(client, request.conid)
-    qty = Decimal(request.qty)
+    qty = Decimal(canonical_qty)
     notional_native = await _native_notional(redis, request, contract, qty)
     fx_rate = await _fx_rate(redis, contract.currency, account.currency_base)
     notional = (notional_native * fx_rate).quantize(Decimal("1e-8"))
@@ -324,7 +333,7 @@ async def place_order(
             request.side,
             request.order_type,
             request.tif,
-            request.qty,
+            canonical_qty,
             request.limit_price or "",
             request.stop_price or "",
         )
@@ -430,6 +439,7 @@ async def modify_order(
         cfg=config,
         capability=capability,
         broker_label=account.gateway_label,
+        asset_class="STOCK",
         order_type=str(row["order_type"]),
         tif=request.tif,
         skip_operational_checks=True,
@@ -1031,6 +1041,7 @@ async def _insert_order(
     contract: base.Contract,
     notional: Decimal,
 ) -> dict[str, Any] | None:
+    qty_str = canonicalize_qty(request.qty)
     result = await db.execute(
         text(
             """
@@ -1057,7 +1068,7 @@ async def _insert_order(
             "side": request.side,
             "order_type": request.order_type,
             "tif": request.tif,
-            "qty": request.qty,
+            "qty": qty_str,
             "limit_price": request.limit_price,
             "stop_price": request.stop_price,
             "notional": _format_decimal_8(notional),
@@ -1148,13 +1159,14 @@ def _order_response_from_mapping(
 
 def _nonce_and_payload_hash(request: PreviewRequest) -> tuple[str, str]:
     nonce = str(uuid4())
+    qty_str = canonicalize_qty(request.qty)
     payload = {
         "account_id": str(request.account_id),
         "conid": request.conid,
         "side": request.side,
         "order_type": request.order_type,
         "tif": request.tif,
-        "qty": request.qty,
+        "qty": qty_str,
         "limit_price": _canonical_decimal_or_none(request.limit_price),
         "stop_price": _canonical_decimal_or_none(request.stop_price),
     }
