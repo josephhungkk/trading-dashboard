@@ -78,4 +78,5 @@ markers = [
     "real_schwab: requires SCHWAB_APP_KEY/SCHWAB_APP_SECRET/SCHWAB_PAPER_ACCOUNT_HASH env vars; live API calls",
     "real_futu: requires FUTU_HOST/FUTU_PORT env vars; live futu OpenD calls",
     "real_ibkr: requires IBKR_PAPER_ACCOUNT + CF_ACCESS_* env vars; live IBKR paper gateway calls",
+    "real_alpaca_equity: real Alpaca paper equity E2E (requires ALPACA_PAPER_API_KEY + ALPACA_PAPER_API_SECRET)",
 ]

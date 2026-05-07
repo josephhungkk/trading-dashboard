@@ -1,0 +1,36 @@
+name: nightly-real-alpaca-equity
+
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"  # post-NYSE close
+  workflow_dispatch:
+
+jobs:
+  nightly-alpaca-equity-e2e:
+    runs-on: [self-hosted, nuc]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [market_spy, limit_spy, trail_spy]
+    env:
+      ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
+      ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run real Alpaca paper equity E2E
+        run: |
+          cd backend && uv run pytest tests/real_broker/test_real_alpaca_equity_e2e.py -m real_alpaca_equity --case ${{ matrix.case }} -v
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-alpaca-equity-results-${{ github.run_id }}-${{ matrix.case }}
+          path: backend/test-results/
+          retention-days: 30
