@@ -31,6 +31,9 @@ MarketOnOpenOrderRequest: Any | None = None
 LimitOnCloseOrderRequest: Any | None = None
 LimitOnOpenOrderRequest: Any | None = None
 ReplaceOrderRequest: Any | None = None
+OrderClass: Any | None = None
+TakeProfitRequest: Any | None = None
+StopLossRequest: Any | None = None
 
 
 _TRADING_CLIENTS: dict[tuple[str, str], Any] = {}
@@ -212,8 +215,12 @@ def load_order_request_classes() -> dict[str, Any]:
     global LimitOnCloseOrderRequest
     global LimitOnOpenOrderRequest
     global ReplaceOrderRequest
+    global OrderClass
+    global TakeProfitRequest
+    global StopLossRequest
 
-    if MarketOrderRequest is None:
+    if MarketOrderRequest is None or OrderClass is None:
+        from alpaca.trading.enums import OrderClass as _OrderClass
         from alpaca.trading.requests import (
             LimitOnCloseOrderRequest as _LimitOnCloseOrderRequest,
             LimitOnOpenOrderRequest as _LimitOnOpenOrderRequest,
@@ -222,8 +229,10 @@ def load_order_request_classes() -> dict[str, Any]:
             MarketOnOpenOrderRequest as _MarketOnOpenOrderRequest,
             MarketOrderRequest as _MarketOrderRequest,
             ReplaceOrderRequest as _ReplaceOrderRequest,
+            StopLossRequest as _StopLossRequest,
             StopLimitOrderRequest as _StopLimitOrderRequest,
             StopOrderRequest as _StopOrderRequest,
+            TakeProfitRequest as _TakeProfitRequest,
             TrailingStopOrderRequest as _TrailingStopOrderRequest,
         )
 
@@ -237,6 +246,9 @@ def load_order_request_classes() -> dict[str, Any]:
         LimitOnCloseOrderRequest = _LimitOnCloseOrderRequest
         LimitOnOpenOrderRequest = _LimitOnOpenOrderRequest
         ReplaceOrderRequest = _ReplaceOrderRequest
+        OrderClass = _OrderClass
+        TakeProfitRequest = _TakeProfitRequest
+        StopLossRequest = _StopLossRequest
     return {
         "MARKET": MarketOrderRequest,
         "LIMIT": LimitOrderRequest,
@@ -249,6 +261,9 @@ def load_order_request_classes() -> dict[str, Any]:
         "LOC": LimitOnCloseOrderRequest,
         "LOO": LimitOnOpenOrderRequest,
         "REPLACE": ReplaceOrderRequest,
+        "ORDER_CLASS": OrderClass,
+        "BRACKET_TP": TakeProfitRequest,
+        "BRACKET_SL": StopLossRequest,
     }
 
 

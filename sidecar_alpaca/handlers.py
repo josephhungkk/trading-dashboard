@@ -264,8 +264,24 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         request: broker_pb2.PlaceBracketRequest,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.PlaceBracketResponse:
-        await self._abort_unimplemented(context, "Alpaca PlaceBracket lands in Phase 8")
-        return broker_pb2.PlaceBracketResponse()
+        account_id = self._account_id(request.parent.account_number)
+        client = await self._configured_trading_client(account_id, context)
+        try:
+            order_request = self._build_bracket_order_request(request)
+            order = await asyncio.to_thread(client.submit_order, order_request)
+        except (Exception,) as exc:
+            await self._abort_internal(context, exc)
+            return broker_pb2.PlaceBracketResponse()
+
+        legs = list(getattr(order, "legs", None) or [])
+        take_profit_leg = legs[0] if len(legs) > 0 else None
+        stop_loss_leg = legs[1] if len(legs) > 1 else None
+        return broker_pb2.PlaceBracketResponse(
+            parent_broker_order_id=str(getattr(order, "id", "")),
+            stop_loss_broker_order_id=str(getattr(stop_loss_leg, "id", "")),
+            take_profit_broker_order_id=str(getattr(take_profit_leg, "id", "")),
+            status=_enum_value(getattr(order, "status", "")),
+        )
 
     async def SearchContracts(  # noqa: N802
         self,
@@ -392,6 +408,42 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         if order_type == "TRAIL_LIMIT":
             values["limit_price"] = Decimal(request.trail_limit_offset)
         return request_class(**values)
+
+    def _build_bracket_order_request(
+        self,
+        request: broker_pb2.PlaceBracketRequest,
+    ) -> Any:
+        request_classes = load_order_request_classes()
+        parent = request.parent
+        order_type = _normalize_order_type(parent.order_type)
+        if order_type not in {"MARKET", "LIMIT"}:
+            raise ValueError("alpaca_bracket_parent_must_be_market_or_limit")
+        if parent.tif and parent.tif.upper() != "DAY":
+            raise ValueError("alpaca_bracket_tif_must_be_day")
+
+        values: dict[str, Any] = {
+            "symbol": _alpaca_symbol(parent.conid),
+            "qty": Decimal(parent.qty),
+            "side": parent.side.lower(),
+            "time_in_force": "day",
+            "order_class": request_classes["ORDER_CLASS"].BRACKET,
+        }
+        if parent.client_order_id:
+            values["client_order_id"] = parent.client_order_id
+        if order_type == "LIMIT":
+            values["limit_price"] = Decimal(parent.limit_price)
+        if request.has_take_profit:
+            values["take_profit"] = request_classes["BRACKET_TP"](
+                limit_price=Decimal(request.take_profit.limit_price),
+            )
+        if request.has_stop_loss:
+            stop_loss_values: dict[str, Any] = {
+                "stop_price": Decimal(request.stop_loss.stop_price),
+            }
+            if request.stop_loss.limit_price:
+                stop_loss_values["limit_price"] = Decimal(request.stop_loss.limit_price)
+            values["stop_loss"] = request_classes["BRACKET_SL"](**stop_loss_values)
+        return request_classes[order_type](**values)
 
     def _build_replace_order_request(
         self,
