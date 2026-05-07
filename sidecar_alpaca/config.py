@@ -11,6 +11,9 @@ if MODE not in {"live", "paper"}:
 GRPC_PORT = int(os.environ.get("GRPC_PORT", "9091"))
 BACKEND_ADMIN_GRPC = os.environ.get("BACKEND_ADMIN_GRPC", "backend:8001")
 ALPACA_ACCOUNT_LABEL = os.environ.get("ALPACA_ACCOUNT_LABEL", "default")
+USE_IN_MEMORY_DEDUPE = (
+    os.environ.get("BROKER_ALPACA_USE_IN_MEMORY_DEDUPE", "false").lower() == "true"
+)
 
 BASE_URL_REST = (
     "https://api.alpaca.markets/v2"

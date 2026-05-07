@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +19,22 @@ from sidecar_alpaca.metrics import (
 log = structlog.get_logger(__name__)
 
 TradingClient: Any | None = None
+TradingStream: Any | None = None
+APIError: Any | None = None
+MarketOrderRequest: Any | None = None
+LimitOrderRequest: Any | None = None
+StopOrderRequest: Any | None = None
+StopLimitOrderRequest: Any | None = None
+TrailingStopOrderRequest: Any | None = None
+MarketOnCloseOrderRequest: Any | None = None
+MarketOnOpenOrderRequest: Any | None = None
+LimitOnCloseOrderRequest: Any | None = None
+LimitOnOpenOrderRequest: Any | None = None
+ReplaceOrderRequest: Any | None = None
+
+
+_TRADING_CLIENTS: dict[tuple[str, str], Any] = {}
+_TRADING_CLIENT_CREDENTIALS: dict[tuple[str, str], tuple[str, str, bool]] = {}
 
 
 @dataclass
@@ -95,7 +113,7 @@ class AlpacaClient:
             ALPACA_HTTP_REQUESTS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             ALPACA_ACCOUNT_READ_FAILURES_TOTAL.labels(kind=endpoint).inc()
             raise AlpacaClientError(endpoint=endpoint, message=str(exc)) from exc
-        except Exception as exc:
+        except (Exception,) as exc:
             ALPACA_HTTP_REQUESTS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             ALPACA_ACCOUNT_READ_FAILURES_TOTAL.labels(kind=endpoint).inc()
             raise AlpacaClientError(endpoint=endpoint, message=str(exc)) from exc
@@ -138,3 +156,132 @@ class AlpacaClient:
             "limit_price": str(order.limit_price) if order.limit_price else "",
             "stop_price": str(order.stop_price) if order.stop_price else "",
         }
+
+
+def configure_trading_client(
+    *,
+    account_id: str,
+    mode: str,
+    api_key: str,
+    api_secret: str,
+    paper: bool,
+) -> Any:
+    """Create or refresh the lazily shared trading client for an account/mode."""
+    key = (account_id, mode)
+    credentials = (api_key, api_secret, paper)
+    if (
+        key not in _TRADING_CLIENTS
+        or _TRADING_CLIENT_CREDENTIALS.get(key) != credentials
+    ):
+        trading_client = _load_trading_client_class()
+        _TRADING_CLIENTS[key] = trading_client(
+            api_key,
+            api_secret,
+            paper=paper,
+            raw_data=False,
+        )
+        _TRADING_CLIENT_CREDENTIALS[key] = credentials
+    return _TRADING_CLIENTS[key]
+
+
+def get_trading_client(*, account_id: str, mode: str) -> Any | None:
+    return _TRADING_CLIENTS.get((account_id, mode))
+
+
+def clear_trading_clients() -> None:
+    for client in list(_TRADING_CLIENTS.values()):
+        close = getattr(client, "close", None)
+        if close is None:
+            continue
+        try:
+            close()
+        except (RuntimeError, ConnectionError) as exc:
+            log.warning("alpaca_trading_client_close_failed", exc_info=exc)
+    _TRADING_CLIENTS.clear()
+    _TRADING_CLIENT_CREDENTIALS.clear()
+
+
+def load_order_request_classes() -> dict[str, Any]:
+    global MarketOrderRequest
+    global LimitOrderRequest
+    global StopOrderRequest
+    global StopLimitOrderRequest
+    global TrailingStopOrderRequest
+    global MarketOnCloseOrderRequest
+    global MarketOnOpenOrderRequest
+    global LimitOnCloseOrderRequest
+    global LimitOnOpenOrderRequest
+    global ReplaceOrderRequest
+
+    if MarketOrderRequest is None:
+        from alpaca.trading.requests import (
+            LimitOnCloseOrderRequest as _LimitOnCloseOrderRequest,
+            LimitOnOpenOrderRequest as _LimitOnOpenOrderRequest,
+            LimitOrderRequest as _LimitOrderRequest,
+            MarketOnCloseOrderRequest as _MarketOnCloseOrderRequest,
+            MarketOnOpenOrderRequest as _MarketOnOpenOrderRequest,
+            MarketOrderRequest as _MarketOrderRequest,
+            ReplaceOrderRequest as _ReplaceOrderRequest,
+            StopLimitOrderRequest as _StopLimitOrderRequest,
+            StopOrderRequest as _StopOrderRequest,
+            TrailingStopOrderRequest as _TrailingStopOrderRequest,
+        )
+
+        MarketOrderRequest = _MarketOrderRequest
+        LimitOrderRequest = _LimitOrderRequest
+        StopOrderRequest = _StopOrderRequest
+        StopLimitOrderRequest = _StopLimitOrderRequest
+        TrailingStopOrderRequest = _TrailingStopOrderRequest
+        MarketOnCloseOrderRequest = _MarketOnCloseOrderRequest
+        MarketOnOpenOrderRequest = _MarketOnOpenOrderRequest
+        LimitOnCloseOrderRequest = _LimitOnCloseOrderRequest
+        LimitOnOpenOrderRequest = _LimitOnOpenOrderRequest
+        ReplaceOrderRequest = _ReplaceOrderRequest
+    return {
+        "MARKET": MarketOrderRequest,
+        "LIMIT": LimitOrderRequest,
+        "STOP": StopOrderRequest,
+        "STOP_LIMIT": StopLimitOrderRequest,
+        "TRAIL": TrailingStopOrderRequest,
+        "TRAIL_LIMIT": TrailingStopOrderRequest,
+        "MOC": MarketOnCloseOrderRequest,
+        "MOO": MarketOnOpenOrderRequest,
+        "LOC": LimitOnCloseOrderRequest,
+        "LOO": LimitOnOpenOrderRequest,
+        "REPLACE": ReplaceOrderRequest,
+    }
+
+
+def load_trading_stream_class() -> Any:
+    global TradingStream
+    if TradingStream is None:
+        from alpaca.trading.stream import TradingStream as _TradingStream
+
+        TradingStream = _TradingStream
+    return TradingStream
+
+
+def load_api_error_class() -> Any:
+    global APIError
+    if APIError is None:
+        from alpaca.common.exceptions import APIError as _APIError
+
+        APIError = _APIError
+    return APIError
+
+
+def _load_trading_client_class() -> Any:
+    global TradingClient
+    if TradingClient is None:
+        from alpaca.trading.client import TradingClient as _TradingClient
+
+        TradingClient = _TradingClient
+    return TradingClient
+
+
+atexit.register(clear_trading_clients)
+
+try:
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: clear_trading_clients())
+except (ValueError, RuntimeError) as exc:
+    log.warning("alpaca_trading_client_sigterm_hook_failed", exc_info=exc)
