@@ -118,8 +118,12 @@ async def _dispatch_oco_alpaca_native(
     (sidecar_alpaca owns the SDK). Production callers must run inside an
     image that has alpaca-py installed.
     """
-    from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
-    from alpaca.trading.requests import LimitOrderRequest
+    from alpaca.trading.enums import (  # type: ignore[import-not-found]
+        OrderClass,
+        OrderSide,
+        TimeInForce,
+    )
+    from alpaca.trading.requests import LimitOrderRequest  # type: ignore[import-not-found]
 
     side = request.side.upper()
     tif = request.tif.upper()
@@ -149,9 +153,9 @@ class OcoOrchestrator:
     ``redis`` must satisfy the ``_RedisLike`` protocol; pass AsyncMock in tests.
     """
 
-    db: async_sessionmaker[AsyncSession]  # type: ignore[type-arg]  # tests inject compatible mock
+    db: async_sessionmaker[AsyncSession]  # tests inject compatible mock
     redis: _RedisLike
-    _active: dict[str, dict] = field(default_factory=dict, init=False)
+    _active: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     _streams: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict, init=False)
     _stream_last_pending: dict[tuple[str, str], float] = field(default_factory=dict, init=False)
     _leader: bool = field(default=False, init=False)
@@ -244,7 +248,9 @@ class OcoOrchestrator:
     # Fill event processing
     # ------------------------------------------------------------------
 
-    async def process_fill_event(self, broker_id: str, order_id: str, fill_data: dict) -> None:
+    async def process_fill_event(
+        self, broker_id: str, order_id: str, fill_data: dict[str, Any]
+    ) -> None:
         """Handle an order fill: transition state and cancel the sibling leg."""
         if not self._leader:
             return  # follower; leader will pick this up via DB
@@ -269,7 +275,7 @@ class OcoOrchestrator:
             )
 
     async def _transition(
-        self, link: dict, new_status: str, failure_reason: str | None = None
+        self, link: dict[str, Any], new_status: str, failure_reason: str | None = None
     ) -> None:
         """Persist a status transition for an oco_link row."""
         if link["status"] in TERMINAL_STATUSES:
@@ -287,7 +293,7 @@ class OcoOrchestrator:
         link["failure_reason"] = failure_reason
         log.info("oco_orchestrator.transition", link_id=str(link["id"]), status=new_status)
 
-    def _find_link(self, broker_id: str, order_id: str) -> dict | None:
+    def _find_link(self, broker_id: str, order_id: str) -> dict[str, Any] | None:
         """Return the oco_link containing order_id for the given broker, or None."""
         for link in self._active.values():
             if link["broker_id"] == broker_id and order_id in (

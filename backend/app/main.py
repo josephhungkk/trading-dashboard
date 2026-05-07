@@ -106,7 +106,7 @@ async def lifespan(_app: FastAPI) -> Any:
         await order_consumer.start()
         await pending_watchdog.start()
         pending_fills_task = asyncio.create_task(pending_fills_sweeper.run())
-        oco_orchestrator = OcoOrchestrator(db=session_factory, redis=redis)
+        oco_orchestrator = OcoOrchestrator(db=session_factory, redis=redis)  # type: ignore[arg-type]  # redis-py Redis satisfies _RedisLike at runtime; Protocol excludes optional kwargs
         oco_orchestrator_task = asyncio.create_task(oco_orchestrator.start())
         log.info("broker_lifespan_started")
     except MissingBrokerSecrets as exc:

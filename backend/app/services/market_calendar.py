@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any
 
-import exchange_calendars as ecals  # type: ignore[import-not-found]
+import exchange_calendars as ecals  # type: ignore[import-untyped]
 
 # Exchange code mappings: project's Contract.exchange uses "NYSE", "HKEX", "LSE",
 # "NASDAQ", etc. exchange_calendars expects ISO codes "XNYS", "XHKG", "XLON", "XNAS".
@@ -71,7 +71,7 @@ def eod_for_exchange(exchange: str, expiry_date: date) -> datetime:
     result = close_local.tz_convert("UTC").to_pydatetime()
     if not isinstance(result, datetime):
         raise ValueError(f"eod_for_exchange: expected datetime, got {type(result)!r}")
-    return cast(datetime, result)
+    return result
 
 
 def next_session_open(exchange: str, after: datetime | None = None) -> datetime:
@@ -89,7 +89,7 @@ def next_session_open(exchange: str, after: datetime | None = None) -> datetime:
     result = open_local.tz_convert("UTC").to_pydatetime()
     if not isinstance(result, datetime):
         raise ValueError(f"next_session_open: expected datetime, got {type(result)!r}")
-    return cast(datetime, result)
+    return result
 
 
 def is_session_window_open(exchange: str, order_type: str, now: datetime | None = None) -> bool:

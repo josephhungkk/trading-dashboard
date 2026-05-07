@@ -11,7 +11,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
-import asyncpg
+import asyncpg  # type: ignore[import-untyped]
 import structlog
 
 log = structlog.get_logger(__name__)
