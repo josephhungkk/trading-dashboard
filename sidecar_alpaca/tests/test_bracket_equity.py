@@ -29,10 +29,15 @@ class FakeClient:
     def submit_order(self, order_request: FakeRequest) -> SimpleNamespace:
         self.submitted.append(order_request)
         assert order_request.kwargs["order_class"] == "bracket"
+        # Set order_type on legs so _classify_bracket_legs matches by type,
+        # not by index (chunk-B C-1 leg classification fix).
         return SimpleNamespace(
             id="parent",
             status=SimpleNamespace(value="accepted"),
-            legs=[SimpleNamespace(id="tp"), SimpleNamespace(id="sl")],
+            legs=[
+                SimpleNamespace(id="tp", order_type="limit"),
+                SimpleNamespace(id="sl", order_type="stop"),
+            ],
         )
 
 

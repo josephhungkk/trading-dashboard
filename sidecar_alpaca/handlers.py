@@ -274,8 +274,21 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
             return broker_pb2.PlaceBracketResponse()
 
         legs = list(getattr(order, "legs", None) or [])
-        take_profit_leg = legs[0] if len(legs) > 0 else None
-        stop_loss_leg = legs[1] if len(legs) > 1 else None
+        # Classify legs by Alpaca order_type (chunk-B C-1): SDK does NOT
+        # contract leg ordering. Match limit→take_profit, stop|stop_limit→
+        # stop_loss. Fall back to index for fakes/edge cases.
+        take_profit_leg, stop_loss_leg = _classify_bracket_legs(legs)
+        if take_profit_leg is None or stop_loss_leg is None:
+            log.warning(
+                "alpaca_bracket_missing_legs",
+                order_id=str(getattr(order, "id", "")),
+                leg_count=len(legs),
+            )
+            await self._abort_internal(
+                context,
+                RuntimeError(f"bracket_missing_legs leg_count={len(legs)}"),
+            )
+            return broker_pb2.PlaceBracketResponse()
         return broker_pb2.PlaceBracketResponse(
             parent_broker_order_id=str(getattr(order, "id", "")),
             stop_loss_broker_order_id=str(getattr(stop_loss_leg, "id", "")),
@@ -431,6 +444,8 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         if parent.client_order_id:
             values["client_order_id"] = parent.client_order_id
         if order_type == "LIMIT":
+            if not parent.limit_price:
+                raise ValueError("alpaca_bracket_limit_requires_limit_price")
             values["limit_price"] = Decimal(parent.limit_price)
         if request.has_take_profit:
             values["take_profit"] = request_classes["BRACKET_TP"](
@@ -671,6 +686,30 @@ def _looks_like_crypto_pair(conid: str) -> bool:
             base = raw[: -len(suffix)]
             return bool(base) and base.isalpha()
     return False
+
+
+def _classify_bracket_legs(
+    legs: list[Any],
+) -> tuple[Any | None, Any | None]:
+    """Match bracket legs by Alpaca order_type, fall back to index for fakes.
+
+    Alpaca's SDK does not contract leg ordering. Match limit→take_profit and
+    stop|stop_limit→stop_loss; if order_type is missing on the leg objects
+    (e.g. test fakes), fall back to the [TP, SL] index assumption.
+    """
+    take_profit_leg = None
+    stop_loss_leg = None
+    for leg in legs:
+        kind = str(getattr(leg, "order_type", "")).lower()
+        if kind == "limit" and take_profit_leg is None:
+            take_profit_leg = leg
+        elif kind in {"stop", "stop_limit"} and stop_loss_leg is None:
+            stop_loss_leg = leg
+    if take_profit_leg is None and len(legs) > 0 and stop_loss_leg is not legs[0]:
+        take_profit_leg = legs[0]
+    if stop_loss_leg is None and len(legs) > 1 and take_profit_leg is not legs[1]:
+        stop_loss_leg = legs[1]
+    return take_profit_leg, stop_loss_leg
 
 
 def _trail_field_name(request: broker_pb2.PlaceOrderRequest) -> str:

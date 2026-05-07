@@ -15,7 +15,17 @@ def expected_prices(reference_price: int | float | Decimal):
 
 
 def build_client() -> TradingClient:
-    return TradingClient(os.environ['ALPACA_PAPER_API_KEY'], os.environ['ALPACA_PAPER_API_SECRET'], paper=True)
+    missing = [
+        k for k in ('ALPACA_PAPER_API_KEY', 'ALPACA_PAPER_API_SECRET')
+        if not os.environ.get(k)
+    ]
+    if missing:
+        raise ValueError(f'Missing env vars: {", ".join(missing)}')
+    return TradingClient(
+        os.environ['ALPACA_PAPER_API_KEY'],
+        os.environ['ALPACA_PAPER_API_SECRET'],
+        paper=True,
+    )
 
 
 def run(client=None, reference_price=100) -> int:

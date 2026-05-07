@@ -62,11 +62,21 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    # Match upgrade()'s concurrency discipline (chunk-B db H-1).
+    bind.execute(
+        sa.text("LOCK TABLE broker_order_capability IN SHARE ROW EXCLUSIVE MODE")
+    )
+    # Set is_supported = FALSE explicitly. The CRYPTO/BRACKET row was inserted
+    # by 0021-cr's upgrade() (0018 did not seed BRACKET into ORDER_TYPES), so
+    # the prior state was "no row". Downgrade keeps the row but resets it to
+    # the negative-capability default to avoid relying on the upgrade-side
+    # ON CONFLICT path remaining stable across future migrations.
     bind.execute(
         sa.text(
             """
             UPDATE broker_order_capability
-               SET notes = :notes,
+               SET is_supported = FALSE,
+                   notes = :notes,
                    updated_at = NOW()
              WHERE broker_id = :b
                AND asset_class = :a

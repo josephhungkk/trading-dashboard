@@ -17,6 +17,7 @@ async def test_alpaca_equity_bracket_supported(db_session: AsyncSession) -> None
                 "WHERE broker_id = 'alpaca' "
                 "AND asset_class = 'STOCK' "
                 "AND order_type = 'BRACKET' "
+                "AND time_in_force = 'DAY' "
                 "AND is_supported = TRUE"
             )
         )

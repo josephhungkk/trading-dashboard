@@ -8,7 +8,17 @@ from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakePro
 
 
 def build_client():
-    return TradingClient(os.environ['ALPACA_PAPER_API_KEY'], os.environ['ALPACA_PAPER_API_SECRET'], paper=True)
+    missing = [
+        k for k in ('ALPACA_PAPER_API_KEY', 'ALPACA_PAPER_API_SECRET')
+        if not os.environ.get(k)
+    ]
+    if missing:
+        raise ValueError(f'Missing env vars: {", ".join(missing)}')
+    return TradingClient(
+        os.environ['ALPACA_PAPER_API_KEY'],
+        os.environ['ALPACA_PAPER_API_SECRET'],
+        paper=True,
+    )
 
 
 def run(client=None) -> int:
