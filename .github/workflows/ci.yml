@@ -145,7 +145,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: latest
+          # Pinned to match lockfile v9.0 (frontend/pnpm-lock.yaml).
+          version: 10.33.0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -190,7 +191,8 @@ jobs:
           python-version: '3.14'
       - uses: pnpm/action-setup@v4
         with:
-          version: latest
+          # Pinned to match lockfile v9.0 (frontend/pnpm-lock.yaml).
+          version: 10.33.0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

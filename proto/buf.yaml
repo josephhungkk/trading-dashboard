@@ -32,6 +32,11 @@ lint:
     # cascade everywhere — defer to a Phase 4.x proto-style sweep.
     - ENUM_VALUE_PREFIX
     - ENUM_ZERO_VALUE_SUFFIX
+    # OrderType + TimeInForce intentionally use `allow_alias = true` so legacy
+    # broker-specific names (TRAIL, TRAIL_LIMIT, ...) coexist with the canonical
+    # ORDER_TYPE_TRAIL family. Removing aliases would break four sidecar handlers
+    # that map broker-native order-type strings via the legacy enum names.
+    - ENUM_NO_ALLOW_ALIAS
 breaking:
   use:
     - FILE
