@@ -473,3 +473,20 @@ QUOTE_WS_RECV_INVALID_TOTAL = Counter(
     labelnames=["reason"],
     registry=registry,
 )
+
+
+# ──────────────────────── Phase 9 — bar service metrics ─────────────────────
+
+bar_service_cross_worker_wait_seconds = Histogram(
+    "bar_service_cross_worker_wait_seconds",
+    "Time spent waiting for another worker to complete a bar backfill via pg_notify.",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 16.0),
+    registry=registry,
+)
+
+bar_service_backfill_total = Counter(
+    "bar_service_backfill_total",
+    "Bar backfill jobs handled by this worker.",
+    labelnames=("source", "timeframe", "outcome"),  # done|failed|coalesced_wait
+    registry=registry,
+)

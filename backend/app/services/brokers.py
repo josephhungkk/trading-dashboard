@@ -359,6 +359,48 @@ class BrokerSidecarClient:
         )
         return response.accepted
 
+    async def get_historical_bars(
+        self,
+        canonical_id: str,
+        timeframe: str,
+        range_start: datetime,
+        range_end: datetime,
+        limit: int = 1000,
+    ) -> base.HistoricalBarsResult:
+        """Fetch historical OHLCV bars from the sidecar (Phase 9 BarService)."""
+        from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
+
+        request = broker_pb2.GetHistoricalBarsRequest(
+            canonical_id=canonical_id,
+            timeframe=timeframe,
+            range_start=Timestamp(seconds=int(range_start.timestamp())),
+            range_end=Timestamp(seconds=int(range_end.timestamp())),
+            limit=limit,
+        )
+        response = await self._call(
+            method="GetHistoricalBars",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.GetHistoricalBarsRequest, broker_pb2.GetHistoricalBarsResponse]",  # noqa: E501
+                self.stub.GetHistoricalBars,
+            ),
+            request=request,
+        )
+        return base.HistoricalBarsResult(
+            bars=[
+                base.HistoricalBar(
+                    bucket_start=datetime.fromtimestamp(b.bucket_start.seconds, tz=UTC),
+                    open=Decimal(b.open) if b.open else Decimal(0),
+                    high=Decimal(b.high) if b.high else Decimal(0),
+                    low=Decimal(b.low) if b.low else Decimal(0),
+                    close=Decimal(b.close) if b.close else Decimal(0),
+                    volume=Decimal(b.volume) if b.volume else None,
+                    trade_count=b.trade_count,
+                )
+                for b in response.bars
+            ],
+            truncated=response.truncated,
+        )
+
     async def search_contracts(self, query: str, asset_class: str = "") -> list[base.Contract]:
         request = broker_pb2.SearchContractsRequest(query=query, asset_class=asset_class)
         response = await self._call(

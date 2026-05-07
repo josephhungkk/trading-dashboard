@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -197,3 +198,27 @@ class BrokerSidecarStatus(BaseModel):
 
 class BrokerSidecarStatusList(BaseModel):
     accounts: list[BrokerSidecarStatus]
+
+
+# ──────────────────────── Phase 9 — bar history types ───────────────────────
+
+
+@dataclass(frozen=True)
+class HistoricalBar:
+    """Single OHLCV bar returned by BrokerSidecarClient.get_historical_bars."""
+
+    bucket_start: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None  # None when volume_source == 'none'
+    trade_count: int
+
+
+@dataclass(frozen=True)
+class HistoricalBarsResult:
+    """Response from BrokerSidecarClient.get_historical_bars."""
+
+    bars: list[HistoricalBar]
+    truncated: bool  # True → more bars available; caller should loop
