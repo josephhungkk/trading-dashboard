@@ -116,3 +116,38 @@ def test_next_session_open_returns_utc_datetime() -> None:
     nxt = next_session_open("NYSE")
     assert nxt.tzinfo is not None
     assert nxt > datetime.now(UTC) - timedelta(days=2)
+
+
+def test_crypto_eod_basic():
+    from datetime import date, datetime
+
+    from app.services.market_calendar import crypto_eod
+
+    result = crypto_eod(date(2026, 5, 7))
+    assert result == datetime(2026, 5, 7, 23, 59, 59, tzinfo=UTC)
+
+
+def test_crypto_eod_returns_aware_datetime():
+    from datetime import date
+
+    from app.services.market_calendar import crypto_eod
+
+    result = crypto_eod(date(2026, 5, 7))
+    assert result.tzinfo is not None
+    assert result.utcoffset().total_seconds() == 0
+
+
+def test_crypto_eod_independent_of_exchange():
+    from datetime import date
+
+    from app.services.market_calendar import crypto_eod
+
+    # No exchange param — pure date→datetime mapping
+    d1 = date(2026, 1, 1)
+    d2 = date(2026, 12, 31)
+    r1 = crypto_eod(d1)
+    r2 = crypto_eod(d2)
+    assert r1.date() == d1
+    assert r2.date() == d2
+    assert r1.hour == 23 and r1.minute == 59 and r1.second == 59
+    assert r2.hour == 23 and r2.minute == 59 and r2.second == 59

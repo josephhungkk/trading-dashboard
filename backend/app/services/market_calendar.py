@@ -12,7 +12,7 @@ Per spec sec 1 CRIT-3 + HIGH-2 + sec 7 MED-3 + MED-7:
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 from typing import Any, cast
 
@@ -122,3 +122,8 @@ def is_session_window_open(exchange: str, order_type: str, now: datetime | None 
         return bool(open_utc - timedelta(minutes=60) <= when <= open_utc + timedelta(minutes=5))
     # MOC, LOC: submittable [open, close - 10min].
     return bool(open_utc <= when <= close_utc - timedelta(minutes=10))
+
+
+def crypto_eod(expiry_date: date) -> datetime:
+    """Return naive-UTC EOD for a crypto expiry (crypto trades 24/7)."""
+    return datetime.combine(expiry_date, time(23, 59, 59), UTC)
