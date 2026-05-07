@@ -19,9 +19,11 @@ from typing import Any, Final, NamedTuple
 import asyncpg  # type: ignore[import-untyped]
 import structlog
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
+from app.core.db import SessionLocal
 
 logger = structlog.get_logger(__name__)
 
@@ -697,26 +699,78 @@ class BarService:
                 end=end,
                 sidecar=client,
             )
+        except OperationalError as exc:
+            # WG-split / DB disconnect mid-fetch: the original session is poisoned.
+            # Open a fresh session to mark the job failed so the next cron cycle can retry.
+            error_msg = f"OperationalError: {exc!s}"[:500]
+            logger.error(
+                "bar_service.backfill_failed",
+                canonical_id=canonical_id,
+                timeframe=timeframe,
+                job_id=job_id,
+                error=error_msg,
+            )
+            async with SessionLocal() as recovery_session:
+                await recovery_session.execute(
+                    text(
+                        """
+                        UPDATE bar_backfill_jobs
+                           SET status='failed',
+                               error_message=:msg,
+                               finished_at=NOW()
+                         WHERE id=:job_id
+                        """
+                    ),
+                    {"msg": error_msg, "job_id": job_id},
+                )
+                await recovery_session.commit()
+            raise
         except Exception as exc:
             await self._mark_job(job_id=job_id, status="failed", error=str(exc), session=session)
             await _emit_done(job_id, session)
             raise
 
-        priority = _priority_for_source(source)
-        rows_inserted = await _upsert_bars(
-            instrument_id=instrument_id,
-            source=source,
-            source_priority=priority,
-            bars=bars,
-            session=session,
-        )
-        await self._mark_job(
-            job_id=job_id,
-            status="done",
-            rows_inserted=rows_inserted,
-            session=session,
-        )
-        await _emit_done(job_id, session)
+        try:
+            priority = _priority_for_source(source)
+            rows_inserted = await _upsert_bars(
+                instrument_id=instrument_id,
+                source=source,
+                source_priority=priority,
+                bars=bars,
+                session=session,
+            )
+            await self._mark_job(
+                job_id=job_id,
+                status="done",
+                rows_inserted=rows_inserted,
+                session=session,
+            )
+            await _emit_done(job_id, session)
+        except OperationalError as exc:
+            # WG-split mid-UPSERT: session is poisoned; recover via fresh session.
+            error_msg = f"OperationalError: {exc!s}"[:500]
+            logger.error(
+                "bar_service.backfill_failed",
+                canonical_id=canonical_id,
+                timeframe=timeframe,
+                job_id=job_id,
+                error=error_msg,
+            )
+            async with SessionLocal() as recovery_session:
+                await recovery_session.execute(
+                    text(
+                        """
+                        UPDATE bar_backfill_jobs
+                           SET status='failed',
+                               error_message=:msg,
+                               finished_at=NOW()
+                         WHERE id=:job_id
+                        """
+                    ),
+                    {"msg": error_msg, "job_id": job_id},
+                )
+                await recovery_session.commit()
+            raise
 
         logger.info(
             "bar_service.primary_fetch_done",
