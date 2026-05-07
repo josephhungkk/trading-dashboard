@@ -18,6 +18,12 @@ from sidecar_alpaca.handlers import AlpacaServicer, broker_pb2
 class FakeAPIError(Exception):
     status_code = 422
 
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        # Mirror alpaca.common.exceptions.APIError shape so the handler's
+        # safe-detail extractor (getattr(exc, "message", ...)) finds it.
+        self.message = message
+
 
 class FakeReplaceOrderRequest:
     def __init__(self, **kwargs: object) -> None:

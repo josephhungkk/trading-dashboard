@@ -21,17 +21,17 @@ _ORDER_SIDE_MAP = {
 }
 
 _ORDER_TYPE_MAP = {
-    "MARKET": broker_pb2.OrderType.MARKET,
-    "LIMIT": broker_pb2.OrderType.LIMIT,
-    "STOP": broker_pb2.OrderType.STOP,
-    "STOP_LIMIT": broker_pb2.OrderType.STOP_LIMIT,
+    "MARKET": broker_pb2.OrderType.ORDER_TYPE_MARKET,
+    "LIMIT": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
+    "STOP": broker_pb2.OrderType.ORDER_TYPE_STOP,
+    "STOP_LIMIT": broker_pb2.OrderType.ORDER_TYPE_STOP_LIMIT,
 }
 
 _TIF_MAP = {
-    "DAY": broker_pb2.TimeInForce.DAY,
-    "GTC": broker_pb2.TimeInForce.GTC,
-    "IOC": broker_pb2.TimeInForce.IOC,
-    "FOK": broker_pb2.TimeInForce.FOK,
+    "DAY": broker_pb2.TimeInForce.TIF_DAY,
+    "GTC": broker_pb2.TimeInForce.TIF_GTC,
+    "IOC": broker_pb2.TimeInForce.TIF_IOC,
+    "FOK": broker_pb2.TimeInForce.TIF_FOK,
 }
 
 _STATUS_MAP = {

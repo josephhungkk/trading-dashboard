@@ -102,7 +102,7 @@ async def test_cancel_order_non_404_maps_internal() -> None:
     svc = AlpacaServicer()
     context = FakeContext()
 
-    with pytest.raises(grpc.RpcError, match="down"):
+    with pytest.raises(grpc.RpcError, match="internal_error"):
         await svc.CancelOrder(
             broker_pb2.CancelOrderRequest(
                 account_number="acct-1",
@@ -112,4 +112,5 @@ async def test_cancel_order_non_404_maps_internal() -> None:
         ),
 
     assert context.code == grpc.StatusCode.INTERNAL
-    assert context.details == "down"
+    # Sentinel detail (security H-2): no raw SDK exception text leaks across wire.
+    assert context.details == "internal_error"

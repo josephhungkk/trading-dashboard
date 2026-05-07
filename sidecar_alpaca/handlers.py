@@ -41,10 +41,18 @@ log = structlog.get_logger(module="sidecar_alpaca.handlers")
 
 _ORDER_EVENT_QUEUES: dict[str, asyncio.Queue[broker_pb2.OrderEventMessage]] = {}
 _ORDER_EVENT_SUBSCRIPTIONS: dict[str, Any] = {}
+_ORDER_EVENT_TASKS: dict[str, asyncio.Task[None]] = {}
+_SUBSCRIPTION_LOCKS: dict[str, asyncio.Lock] = {}
 _TRADING_STREAM_COUNTS: dict[str, int] = {}
-_DEDUPE: dict[tuple[str, str, str, int], float] = {}
+_DEDUPE: dict[tuple[Any, ...], float] = {}
 _ORDER_EVENT_QUEUE_MAXSIZE = 1000
 _TRADING_STREAM_CAP = 5
+
+
+def _subscription_lock(account_id: str) -> asyncio.Lock:
+    if account_id not in _SUBSCRIPTION_LOCKS:
+        _SUBSCRIPTION_LOCKS[account_id] = asyncio.Lock()
+    return _SUBSCRIPTION_LOCKS[account_id]
 
 
 class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
@@ -188,9 +196,10 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         client = await self._configured_trading_client(account_id, context)
         order_request = self._build_order_request(request)
         try:
-            order = client.submit_order(order_request)
+            order = await asyncio.to_thread(client.submit_order, order_request)
         except (Exception,) as exc:
             await self._abort_internal(context, exc)
+            return broker_pb2.PlaceOrderResponse()
         return broker_pb2.PlaceOrderResponse(
             broker_order_id=str(getattr(order, "id", "")),
             status=_enum_value(getattr(order, "status", "")),
@@ -205,13 +214,15 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         client = await self._configured_trading_client(account_id, context)
         api_error = load_api_error_class()
         try:
-            client.cancel_order_by_id(request.broker_order_id)
+            await asyncio.to_thread(client.cancel_order_by_id, request.broker_order_id)
         except (api_error,) as exc:
             if _api_error_status(exc) in {404, 422}:
                 return broker_pb2.CancelOrderResponse(accepted=False)
             await self._abort_internal(context, exc)
+            return broker_pb2.CancelOrderResponse(accepted=False)
         except (Exception,) as exc:
             await self._abort_internal(context, exc)
+            return broker_pb2.CancelOrderResponse(accepted=False)
         return broker_pb2.CancelOrderResponse(accepted=True)
 
     async def ModifyOrder(  # noqa: N802
@@ -224,16 +235,19 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         replace_request = self._build_replace_order_request(request)
         api_error = load_api_error_class()
         try:
-            order = client.replace_order_by_id(
+            order = await asyncio.to_thread(
+                client.replace_order_by_id,
                 request.broker_order_id,
                 replace_request,
             )
         except (api_error,) as exc:
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(str(exc))
+            safe_detail = getattr(exc, "message", None) or "alpaca_replace_order_failed"
+            context.set_details(str(safe_detail))
             return broker_pb2.ModifyOrderResponse()
         except (Exception,) as exc:
             await self._abort_internal(context, exc)
+            return broker_pb2.ModifyOrderResponse()
         return broker_pb2.ModifyOrderResponse(
             broker_order_id=str(getattr(order, "id", "")),
             status=_enum_value(getattr(order, "status", "")),
@@ -389,12 +403,19 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         expired = [key for key, seen_at in _DEDUPE.items() if now - seen_at > 60]
         for key in expired:
             _DEDUPE.pop(key, None)
-        key = (
-            self._account_id(request.account_number),
-            _alpaca_symbol(request.conid),
-            request.qty,
-            int(now // 10),
-        )
+        coid = (request.client_order_id or "").strip()
+        account_id = self._account_id(request.account_number)
+        if coid:
+            key: tuple[Any, ...] = (account_id, "coid", coid)
+        else:
+            key = (
+                account_id,
+                "tuple",
+                _alpaca_symbol(request.conid),
+                str(request.qty),
+                request.side,
+                int(now // 10),
+            )
         if key in _DEDUPE:
             return True
         _DEDUPE[key] = now
@@ -432,29 +453,47 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         return queue
 
     async def _ensure_order_event_subscription(self, account_id: str) -> None:
-        if account_id in _ORDER_EVENT_SUBSCRIPTIONS:
-            return
-        api_key, api_secret = await self._auth.get_credentials()
-        trading_stream = load_trading_stream_class()(
-            api_key,
-            api_secret,
-            paper=config.MODE == "paper",
-        )
+        async with _subscription_lock(account_id):
+            if account_id in _ORDER_EVENT_SUBSCRIPTIONS:
+                return
+            api_key, api_secret = await self._auth.get_credentials()
+            trading_stream = load_trading_stream_class()(
+                api_key,
+                api_secret,
+                paper=config.MODE == "paper",
+            )
 
-        async def handler(update: Any) -> None:
-            try:
-                self._enqueue_order_event(account_id, update)
-            except (RuntimeError, ValueError, TypeError) as exc:
-                log.warning("orderevent_callback_failed", exc_info=exc)
+            async def handler(update: Any) -> None:
+                try:
+                    self._enqueue_order_event(account_id, update)
+                except Exception as exc:
+                    log.warning("orderevent_callback_failed", exc_info=exc)
 
-        trading_stream.subscribe_trade_updates(handler)
-        # Alpaca crypto order updates are not exposed by a separate alpaca-py
-        # stream; route all trade updates through TradingStream until a
-        # crypto-specific API lands.
-        run = getattr(trading_stream, "run", None)
-        if run is not None:
-            asyncio.create_task(asyncio.to_thread(run), name="alpaca-trading-stream")
-        _ORDER_EVENT_SUBSCRIPTIONS[account_id] = trading_stream
+            trading_stream.subscribe_trade_updates(handler)
+            # Alpaca crypto order updates are not exposed by a separate
+            # alpaca-py stream; route all trade updates through TradingStream
+            # until a crypto-specific API lands.
+            run = getattr(trading_stream, "run", None)
+            if run is not None:
+                task = asyncio.create_task(
+                    asyncio.to_thread(run), name="alpaca-trading-stream"
+                )
+
+                def _cleanup(t: asyncio.Task[None]) -> None:
+                    if not t.cancelled():
+                        task_exc = t.exception()
+                        if task_exc is not None:
+                            log.warning(
+                                "alpaca_trading_stream_task_failed",
+                                account_id=account_id,
+                                exc_info=task_exc,
+                            )
+                    _ORDER_EVENT_SUBSCRIPTIONS.pop(account_id, None)
+                    _ORDER_EVENT_TASKS.pop(account_id, None)
+
+                task.add_done_callback(_cleanup)
+                _ORDER_EVENT_TASKS[account_id] = task
+            _ORDER_EVENT_SUBSCRIPTIONS[account_id] = trading_stream
 
     def _enqueue_order_event(self, account_id: str, update: Any) -> None:
         queue = self._order_event_queue(account_id)
@@ -490,7 +529,8 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         exc: Exception,
     ) -> None:
         log.warning("alpaca_trade_rpc_failed", exc_info=exc)
-        await context.abort(grpc.StatusCode.INTERNAL, str(exc))
+        # Don't leak raw SDK/exception text across the wire (security H-2)
+        await context.abort(grpc.StatusCode.INTERNAL, "internal_error")
 
     @staticmethod
     async def _abort_unimplemented(

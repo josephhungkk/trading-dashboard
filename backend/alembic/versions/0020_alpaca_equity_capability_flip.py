@@ -18,10 +18,10 @@ branch_labels = None
 depends_on = None
 
 CAPABILITY_ROWS = [
+    # Alpaca REST v2 rejects MARKET orders with IOC/FOK on equity (only
+    # day/gtc accepted). IOC/FOK are LIMIT-only — see chunk-S DB review.
     ("alpaca", "STOCK", "MARKET", "DAY"),
     ("alpaca", "STOCK", "MARKET", "GTC"),
-    ("alpaca", "STOCK", "MARKET", "IOC"),
-    ("alpaca", "STOCK", "MARKET", "FOK"),
     ("alpaca", "STOCK", "LIMIT", "DAY"),
     ("alpaca", "STOCK", "LIMIT", "GTC"),
     ("alpaca", "STOCK", "LIMIT", "IOC"),
