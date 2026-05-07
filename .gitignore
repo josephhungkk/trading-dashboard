@@ -44,3 +44,6 @@ secrets/*
 # (account hashes, broker order IDs, internal status payloads). Never commit.
 scripts/empirical/artifacts/*
 !scripts/empirical/artifacts/.gitkeep
+
+# Phase 9 empirical history JSONL artifacts -- per-script timestamped runs.
+tmp/empirical/

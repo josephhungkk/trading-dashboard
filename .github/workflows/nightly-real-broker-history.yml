@@ -1,0 +1,67 @@
+name: Nightly broker history smoke
+
+on:
+  schedule:
+    - cron: "30 2 * * *"  # 02:30 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  schwab:
+    runs-on: [self-hosted, nuc]
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - run: cd backend && uv sync --frozen
+      - name: Schwab history
+        run: |
+          uv run --directory backend python ../scripts/empirical/schwab_history_paper.py \
+            || echo "::warning::schwab_history_paper FAILED"
+
+  alpaca:
+    runs-on: [self-hosted, nuc]
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - run: cd backend && uv sync --frozen
+      - name: Alpaca history
+        run: |
+          uv run --directory backend python ../scripts/empirical/alpaca_history_paper.py \
+            || echo "::warning::alpaca_history_paper FAILED"
+
+  ibkr:
+    runs-on: [self-hosted, nuc]
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - run: cd backend && uv sync --frozen
+      - name: IBKR history
+        run: |
+          uv run --directory backend python ../scripts/empirical/ibkr_history_paper.py \
+            || echo "::warning::ibkr_history_paper FAILED"
+
+  futu:
+    runs-on: [self-hosted, nuc]
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - run: cd backend && uv sync --frozen
+      - name: Futu history
+        run: |
+          uv run --directory backend python ../scripts/empirical/futu_history_paper.py \
+            || echo "::warning::futu_history_paper FAILED"
