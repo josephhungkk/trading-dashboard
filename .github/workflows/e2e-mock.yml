@@ -7,7 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18-alpine
+        # Pinned: TimescaleDB 2.26.4 on PG-18 (Phase 9 hypertables + CAGGs).
+        image: timescale/timescaledb:2.26.4-pg18
         env:
           POSTGRES_USER: trader
           POSTGRES_PASSWORD: ci
