@@ -58,6 +58,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
     def __init__(self) -> None:
         self._configure_lock = asyncio.Lock()
+        self._token_refresh_lock = asyncio.Lock()
         self._configure_count = 0
         self._client: SchwabClient | None = None
         self._token_cache: TokenCache | None = None
@@ -530,8 +531,8 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
     async def GetHistoricalBars(  # noqa: N802
         self,
-        request,
-        context,
+        request: broker_pb2.GetHistoricalBarsRequest,
+        context: grpc.aio.ServicerContext,
     ) -> broker_pb2.GetHistoricalBarsResponse:
         from sidecar_schwab.client import SchwabHTTPError
 
@@ -549,6 +550,11 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "range_start and range_end must be set",
+            )
+        if request.range_end.seconds <= request.range_start.seconds:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_end must be greater than range_start",
             )
         if self._client is None:
             await context.abort(
@@ -594,7 +600,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
     async def _fetch_price_history_payload(
         self,
-        request: Any,
+        request: broker_pb2.GetHistoricalBarsRequest,
         symbol: str,
     ) -> dict[str, Any]:
         response = await asyncio.to_thread(
@@ -636,8 +642,8 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         context: grpc.aio.ServicerContext,
         exc: BaseException,
     ) -> None:
-        body = (getattr(exc, "args", [str(exc)])[0] or "")[:200]
         status_code = _http_status_code(exc)
+        body = f"schwab HTTP {status_code or 'unknown'}"
         if status_code == 403:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, body)
             return
@@ -650,14 +656,15 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         await context.abort(grpc.StatusCode.UNAVAILABLE, body)
 
     async def _refresh_token_for_history_retry(self) -> None:
-        if self._token_cache is not None:
-            self._token_cache._access_issued_at = None
-        ensure_fresh_token = getattr(self._client, "ensure_fresh_token", None)
-        if ensure_fresh_token is None:
-            return
-        result = ensure_fresh_token()
-        if asyncio.iscoroutine(result):
-            await result
+        async with self._token_refresh_lock:
+            if self._token_cache is not None:
+                self._token_cache._access_issued_at = None
+            ensure_fresh_token = getattr(self._client, "ensure_fresh_token", None)
+            if ensure_fresh_token is None:
+                return
+            result = ensure_fresh_token()
+            if asyncio.iscoroutine(result):
+                await result
 
     def _price_history_callable(self) -> Callable[..., Any]:
         direct = getattr(self._client, "price_history", None)

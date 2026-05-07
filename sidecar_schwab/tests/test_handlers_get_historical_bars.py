@@ -46,8 +46,11 @@ def _build_servicer(
     servicer = BrokerServicer()
     servicer._client = MagicMock()
     servicer._client.ensure_fresh_token = AsyncMock()
-    servicer._client.price_history = AsyncMock(
-        return_value=payload if payload is not None else {"candles": _load_candles()}
+    candles_payload = payload if payload is not None else {"candles": _load_candles()}
+    # Mimic schwabdev response shape: object with .status_code + .json() rather than
+    # the bare dict that bypasses the production status/json code path.
+    servicer._client.price_history = MagicMock(
+        return_value=SimpleNamespace(status_code=200, json=lambda: candles_payload)
     )
     return servicer
 

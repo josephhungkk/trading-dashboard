@@ -1,3 +1,8 @@
+# NOTE: This workflow inherits DATABASE_URL from the self-hosted runner's
+# shell environment. The runner service account MUST use a read-only PG
+# role (no write permissions on app_secrets, app_config, or any table).
+# TODO(phase9-close-out): migrate to explicit secret injection once the
+# read-only role is provisioned.
 name: Nightly broker history smoke
 
 on:

@@ -330,6 +330,11 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "range_start_end_required",
             )
+        if request.range_end.seconds <= request.range_start.seconds:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_end must be greater than range_start",
+            )
 
         asset_class = _historical_asset_class(canonical_id)
         if asset_class is None:
@@ -349,9 +354,9 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 request=request,
             )
             if asset_class == "equity":
-                response = await stock_client.get_stock_bars(bars_request)
+                response = await asyncio.to_thread(stock_client.get_stock_bars, bars_request)
             else:
-                response = await crypto_client.get_crypto_bars(bars_request)
+                response = await asyncio.to_thread(crypto_client.get_crypto_bars, bars_request)
         except (grpc.RpcError, RuntimeError, ValueError) as exc:
             log.warning("alpaca_get_historical_bars_failed", exc_info=exc)
             raise

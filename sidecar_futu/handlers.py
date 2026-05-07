@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -182,6 +182,12 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 "range_start and range_end are required",
             )
             return broker_pb2.GetHistoricalBarsResponse()
+        if request.range_end.seconds <= request.range_start.seconds:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_end must be greater than range_start",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
         if not self._client.gateway_connected:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
             return broker_pb2.GetHistoricalBarsResponse()
@@ -193,11 +199,12 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             return broker_pb2.GetHistoricalBarsResponse()
 
         code = _hk_canonical_to_futu_code(request.canonical_id)
-        try:
-            self._quote_ctx = await self._resolve_quote_context()
-        except RuntimeError as exc:
-            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
-            return broker_pb2.GetHistoricalBarsResponse()
+        if self._quote_ctx is None:
+            try:
+                self._quote_ctx = await self._resolve_quote_context()
+            except RuntimeError as exc:
+                await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+                return broker_pb2.GetHistoricalBarsResponse()
         if self._quote_ctx is None:
             await context.abort(
                 grpc.StatusCode.UNAVAILABLE,
@@ -208,8 +215,8 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         ret, df, page_req_key = await asyncio.to_thread(
             self._quote_ctx.request_history_kline,
             code,
-            start=request.range_start.ToDatetime().strftime("%Y-%m-%d %H:%M:%S"),
-            end=request.range_end.ToDatetime().strftime("%Y-%m-%d %H:%M:%S"),
+            start=request.range_start.ToDatetime(tzinfo=UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            end=request.range_end.ToDatetime(tzinfo=UTC).strftime("%Y-%m-%d %H:%M:%S"),
             ktype=ft.KLType.K_1M,
             autype=ft.AuType.QFQ,
             max_count=request.limit if request.limit > 0 else 1000,

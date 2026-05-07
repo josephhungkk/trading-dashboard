@@ -163,6 +163,7 @@ class _PacingTokenBucket:
         self._refill_window_seconds: int = refill_window_seconds
         self._reserved: int = reserved
         self._tokens: int = capacity
+        self._last_refill_at: float = time.monotonic()
         self._next_refill_at: float = time.monotonic() + refill_window_seconds
         self._cooldown_until: float = 0.0
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -188,11 +189,12 @@ class _PacingTokenBucket:
                     self._next_refill_at = now
                 self._refill_if_due(now)
 
-    def release_on_pacing_violation(self) -> None:
-        now = time.monotonic()
-        self._tokens = 0
-        self._cooldown_until = now + 60.0
-        self._next_refill_at = self._cooldown_until
+    async def release_on_pacing_violation(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            self._tokens = 0
+            self._cooldown_until = now + 60.0
+            self._next_refill_at = self._cooldown_until
 
     def _can_acquire(self, *, reserve: bool) -> bool:
         if reserve:
@@ -200,10 +202,11 @@ class _PacingTokenBucket:
         return self._tokens > self._reserved
 
     def _refill_if_due(self, now: float) -> None:
-        if now < self._next_refill_at:
-            return
-        self._tokens = self._capacity
-        self._next_refill_at = now + self._refill_window_seconds
+        elapsed = max(0.0, now - self._last_refill_at)
+        tokens_to_add = (elapsed / self._refill_window_seconds) * self._capacity
+        if tokens_to_add >= 1.0:
+            self._tokens = min(self._capacity, self._tokens + int(tokens_to_add))
+            self._last_refill_at = now
 
 
 class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
@@ -1165,7 +1168,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             )
         except Exception as exc:
             if _is_ibkr_pacing_violation(exc):
-                self._pacing_bucket.release_on_pacing_violation()
+                await self._pacing_bucket.release_on_pacing_violation()
                 await context.abort(
                     grpc.StatusCode.RESOURCE_EXHAUSTED,
                     "ibkr pacing violation; retry after 60s",

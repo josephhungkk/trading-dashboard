@@ -17,10 +17,14 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.core.crypto import get_fernet
 from app.core.db import SessionLocal, engine
+
+import structlog
+
 from app.services.market_calendar import _calendar, is_trading_day
 
 # pragma: empirical
 
+log = structlog.get_logger("empirical.history")
 BROKER = "futu"
 FUTU_CODE = "HK.00700"
 CANONICAL_ID = "0700.HK"
@@ -192,7 +196,7 @@ async def _run() -> Path:
     _assert_coverage(bars, start, end)
     path = _artifact_path()
     count = _write_jsonl(path, bars)
-    print(f"PASS: broker={BROKER} symbol={CANONICAL_ID} bars={count} artifact={path}")
+    log.info("empirical.pass", broker=BROKER, bars=count, artifact=str(path))
     return path
 
 
@@ -200,7 +204,7 @@ def main() -> int:
     try:
         asyncio.run(_run())
     except (Exception,) as exc:  # noqa: B013
-        print(f"FAIL: broker={BROKER} reason={exc}", file=sys.stderr)
+        log.error("empirical.fail", broker=BROKER, reason=type(exc).__name__, message=str(exc)[:120])
         return 1
     finally:
         asyncio.run(engine.dispose())
