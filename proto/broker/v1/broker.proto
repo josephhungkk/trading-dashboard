@@ -228,6 +228,7 @@ message Order {
   // dims the value when this flag is true.
   bool avg_fill_price_inferred = 14;
   string cash_amount = 15; // Phase 8c reserved tag 15
+  reserved 16 to 20; // forward-extension reservations (R35)
   // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
   string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
   string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
@@ -275,6 +276,7 @@ message ModifyOrderRequest {
   Money stop_price = 9;
   string client_order_id = 10;
   string cash_amount = 15; // Phase 8c reserved tag 15
+  reserved 16 to 20; // forward-extension reservations (R35)
   // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
   string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
   string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"

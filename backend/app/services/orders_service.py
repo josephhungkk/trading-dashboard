@@ -161,6 +161,11 @@ async def validate_pre_dispatch(
     )
 
 
+async def _check_kill_switch(cfg: ConfigService) -> None:
+    if await is_kill_switch_active(cfg):
+        raise PreviewUnavailable(503, {"error": "kill_switch_active"})
+
+
 def capability_broker_id(broker_label: str) -> str:
     if broker_label in KNOWN_BROKERS:
         return broker_label
@@ -181,8 +186,7 @@ async def preview_order(
     request_data: dict[str, Any],
     user_key: str,
 ) -> PreviewResponse:
-    if await is_kill_switch_active(cfg):
-        raise PreviewUnavailable(503, {"error": "kill_switch_active"})
+    await _check_kill_switch(cfg)
 
     now = _utcnow()
     maintenance = compute_broker_maintenance(now)
@@ -256,8 +260,7 @@ async def place_order(
     capability: OrderCapabilityService,
     request_data: dict[str, Any],
 ) -> OrderResponse:
-    if await is_kill_switch_active(cfg):
-        raise PreviewUnavailable(503, {"error": "kill_switch_active"})
+    await _check_kill_switch(cfg)
 
     now = _utcnow()
     maintenance = compute_broker_maintenance(now)
@@ -599,6 +602,8 @@ async def list_orders(
         where_clause += " AND created_at <= :to_ts"
         params["to_ts"] = to_ts
 
+    # f-string interpolation used intentionally: where_clause is built entirely
+    # from code constants (never from user input).
     result = await db.execute(
         text(
             f"""
@@ -698,7 +703,7 @@ async def cancel_order(
     now = _utcnow()
     try:
         row = await _locked_order_for_cancel(db, order_id)
-    except Exception as exc:
+    except (asyncpg.PostgresError, DBAPIError) as exc:
         if _is_lock_not_available(exc):
             raise CancelUnavailable(
                 423,

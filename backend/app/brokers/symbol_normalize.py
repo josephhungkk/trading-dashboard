@@ -1,4 +1,8 @@
-"""Helpers for normalizing broker symbol formats."""
+"""Helpers for normalizing broker symbol formats.
+
+Warning: ValueError messages include the raw user-supplied symbol. Callers that
+surface errors to clients must catch and sanitize before returning.
+"""
 
 _QUOTE_CURRENCIES = ("USDT", "USDC", "USD", "EUR", "GBP")
 _SEPARATORS = ("/", "-", "_")

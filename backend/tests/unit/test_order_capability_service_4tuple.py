@@ -32,7 +32,7 @@ async def test_is_supported_4tuple_signature_works() -> None:
 
 
 @pytest.mark.asyncio
-async def test_etf_bucket_collapse() -> None:
+async def test_etf_bucket_collapses_to_stock() -> None:
     db = AsyncMock()
     db.execute.return_value = _result({"is_supported": True, "notes": ""})
     svc = OrderCapabilityService(db=db, redis=MagicMock())
@@ -42,7 +42,7 @@ async def test_etf_bucket_collapse() -> None:
 
     assert db.execute.await_count == 1
     _, params = db.execute.await_args.args
-    assert params["asset_class"] == "EQUITY"
+    assert params["asset_class"] == "STOCK"
 
 
 @pytest.mark.asyncio

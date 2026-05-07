@@ -31,7 +31,7 @@ ORDER_TYPES = (
 TIME_IN_FORCE = ("DAY", "GTC", "IOC", "FOK", "GTD")
 SESSION_BOUND_ORDER_TYPES = frozenset(("MOC", "MOO", "LOC", "LOO"))
 ORDER_CAPABILITY_BROKERS = ("alpaca", "schwab", "ibkr", "futu")
-NOTIFY_BROKERS = ("alpaca", "schwab", "ibkr", "futu", "nyse", "hkex")
+NOTIFY_BROKERS = ("alpaca", "schwab", "ibkr", "futu")
 
 
 def _notify_order_capability_invalidation(bind: sa.engine.Connection) -> None:
@@ -168,7 +168,11 @@ def upgrade() -> None:
             {
                 "ac": asset_class,
                 "s": is_supported,
-                "n": "" if is_supported else "Crypto bracket pending empirical validation",
+                "n": (
+                    "Phase 8c T-0.1 stock bracket seed"
+                    if is_supported
+                    else "Crypto bracket pending empirical validation"
+                ),
             },
         )
 
@@ -179,7 +183,6 @@ def downgrade() -> None:
     op.execute("LOCK TABLE broker_order_capability IN ACCESS EXCLUSIVE MODE")
     op.execute("LOCK TABLE broker_features IN ACCESS EXCLUSIVE MODE")
 
-    bind = op.get_bind()
     op.execute("DELETE FROM broker_order_capability WHERE asset_class <> 'STOCK'")
     op.execute(
         "DELETE FROM broker_features "
@@ -188,6 +191,7 @@ def downgrade() -> None:
     op.execute(
         "DELETE FROM broker_features "
         "WHERE broker_id = 'alpaca' AND asset_class = 'STOCK' AND feature = 'bracket'"
+        " AND notes LIKE '%Phase 8c T-0.1%'"
     )
 
     op.execute(
@@ -219,4 +223,4 @@ def downgrade() -> None:
     )
     op.drop_column("broker_features", "asset_class")
 
-    _notify_order_capability_invalidation(bind)
+    _notify_order_capability_invalidation(op.get_bind())

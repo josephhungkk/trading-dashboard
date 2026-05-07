@@ -20,6 +20,8 @@ QTY_COLUMNS = (
     ("positions", "qty"),
     ("orders", "qty"),
     ("orders", "filled_qty"),
+    # order_events.filled_qty is a rolled-up event value; order_events.fill_qty
+    # below is a separate per-fill column that exists only in some schemas.
     ("order_events", "filled_qty"),
     ("fills", "qty"),
     ("pending_fills", "qty"),
@@ -70,6 +72,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # f-string interpolation used intentionally: table and column names come
+    # from code constants above, never from user input.
     checks = [
         f"SELECT 1 FROM {table_name} WHERE {column_name} IS NOT NULL "
         f"AND {column_name} != trunc({column_name}, 8) LIMIT 1"

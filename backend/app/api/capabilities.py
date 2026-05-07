@@ -11,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db, get_redis
 from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 
+KNOWN_ASSET_CLASSES: frozenset[str] = frozenset(
+    {"STOCK", "CRYPTO", "OPTION", "FUTURE", "FOREX", "BOND"}
+)
+
 router = APIRouter(prefix="/api/brokers", tags=["brokers"])
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -60,5 +64,10 @@ async def get_broker_capabilities(
 ) -> dict[str, list[dict[str, Any]]] | list[dict[str, Any]]:
     if broker_id not in KNOWN_BROKERS:
         raise HTTPException(status_code=404, detail="unknown_broker")
+    if asset_class is not None and asset_class not in KNOWN_ASSET_CLASSES:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "unknown_asset_class", "value": asset_class},
+        )
 
     return await OrderCapabilityService(db, redis).list_capabilities(broker_id, asset_class)

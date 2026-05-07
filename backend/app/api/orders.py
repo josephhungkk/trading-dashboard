@@ -445,7 +445,16 @@ async def place_oco_order(
     # ------------------------------------------------------------------
     client_a = await registry.get_client(account_a.gateway_label)
     order_client_a = as_order_sidecar_client(client_a)
-    qty_a = canonicalize_qty(body.order_a.qty)
+    try:
+        qty_a = canonicalize_qty(body.order_a.qty)
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "cash_amount_not_yet_supported",
+                "message": "Phase 8c chunk C will wire crypto notional ordering",
+            },
+        ) from exc
 
     try:
         client_order_id_a = str(uuid4())
@@ -474,7 +483,16 @@ async def place_oco_order(
     # ------------------------------------------------------------------
     # Step 7: Place leg B; on failure cancel leg A (best-effort)
     # ------------------------------------------------------------------
-    qty_b = canonicalize_qty(body.order_b.qty)
+    try:
+        qty_b = canonicalize_qty(body.order_b.qty)
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "cash_amount_not_yet_supported",
+                "message": "Phase 8c chunk C will wire crypto notional ordering",
+            },
+        ) from exc
     try:
         client_order_id_b = str(uuid4())
         sidecar_b = await order_client_a.place_order(

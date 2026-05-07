@@ -61,7 +61,7 @@ class OrderCapabilityService:
             ).inc()
             return False
 
-        bucket = self._asset_class_bucket(asset_class)
+        bucket = _ASSET_CLASS_BUCKET.get(asset_class, asset_class)
         row = await self._get_capability(broker_id, bucket, order_type, time_in_force)
         supported = bool(row is not None and row["is_supported"])
         metrics.order_capability_check_total.labels(
@@ -85,7 +85,7 @@ class OrderCapabilityService:
     ) -> str:
         if broker_id not in KNOWN_BROKERS:
             return ""
-        bucket = self._asset_class_bucket(asset_class)
+        bucket = _ASSET_CLASS_BUCKET.get(asset_class, asset_class)
         row = await self._get_capability(broker_id, bucket, order_type, time_in_force)
         if row is None:
             return ""
@@ -175,7 +175,7 @@ class OrderCapabilityService:
                         metrics.order_capability_pubsub_invalidations_total.inc()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except (ConnectionError, OSError, TimeoutError) as exc:
                 log.warning(
                     "order capability listener disconnected: channel=%s attempt=%d err=%s",
                     ORDER_CAPABILITY_INVALIDATION_CHANNEL,
@@ -242,10 +242,6 @@ class OrderCapabilityService:
         while len(self._cache) > self._max_cache_size:
             evicted_key, _ = self._cache.popitem(last=False)
             metrics.order_capability_cache_evictions_total.labels(broker_id=evicted_key[0]).inc()
-
-    @staticmethod
-    def _asset_class_bucket(asset_class: str) -> str:
-        return _ASSET_CLASS_BUCKET.get(asset_class, asset_class)
 
     @staticmethod
     def _decode_message(data: object) -> str:

@@ -125,5 +125,5 @@ def is_session_window_open(exchange: str, order_type: str, now: datetime | None 
 
 
 def crypto_eod(expiry_date: date) -> datetime:
-    """Return naive-UTC EOD for a crypto expiry (crypto trades 24/7)."""
+    """Return tz-aware UTC EOD for a crypto expiry (crypto trades 24/7)."""
     return datetime.combine(expiry_date, time(23, 59, 59), UTC)

@@ -40,6 +40,8 @@ PositionSanityStatus = Literal["ok", "high", "extreme"]
 SESSION_BOUND_ORDER_TYPES = {"MOC", "MOO", "LOC", "LOO"}
 DECIMAL_8_PATTERN = r"^\d+(\.\d{1,8})?$"
 DECIMAL_10_PATTERN = r"^\d{1,10}(\.\d{1,10})?$"
+# integer max 10 digits = 9_999_999_999 units (sufficient for crypto qty);
+# fractional max 10dp matches NUMERIC(20, 10) storage from alembic 0019.
 
 
 class ContractSummary(BaseModel):
