@@ -8,6 +8,7 @@ import json
 import sys
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,11 @@ _DEDUPE: dict[tuple[Any, ...], float] = {}
 _ORDER_EVENT_QUEUE_MAXSIZE = 1000
 _TRADING_STREAM_CAP = 5
 _CRYPTO_ORDER_QUOTE_SUFFIXES = ("USDT", "USDC", "USD")
+StockHistoricalDataClient: Any | None = None
+CryptoHistoricalDataClient: Any | None = None
+StockBarsRequest: Any | None = None
+CryptoBarsRequest: Any | None = None
+TimeFrame: Any | None = None
 
 
 def _subscription_lock(account_id: str) -> asyncio.Lock:
@@ -62,6 +68,8 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
 
     def __init__(self, auth_cache: AuthCache | None = None) -> None:
         self._auth = auth_cache or AuthCache()
+        self._stock_data_client: Any | None = None
+        self._crypto_data_client: Any | None = None
 
     async def Configure(  # noqa: N802
         self,
@@ -303,6 +311,63 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
     ) -> broker_pb2.SearchContractsResponse:
         await self._abort_unimplemented(context, "Alpaca SearchContracts lands in C1")
         return broker_pb2.SearchContractsResponse()
+
+    async def GetHistoricalBars(  # noqa: N802
+        self,
+        request: broker_pb2.GetHistoricalBarsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.GetHistoricalBarsResponse:
+        if request.timeframe != "1m":
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "timeframe_1m_only")
+        canonical_id = request.canonical_id.strip()
+        if not canonical_id:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "canonical_id_required",
+            )
+        if request.range_start.seconds <= 0 or request.range_end.seconds <= 0:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_start_end_required",
+            )
+
+        asset_class = _historical_asset_class(canonical_id)
+        if asset_class is None:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "unsupported_asset_class",
+            )
+
+        try:
+            stock_client, crypto_client = await self._configured_market_data_clients(
+                context,
+            )
+            request_classes = _load_historical_data_classes()
+            bars_request = _build_historical_bars_request(
+                request_classes=request_classes,
+                symbol=_historical_alpaca_symbol(canonical_id, asset_class),
+                request=request,
+            )
+            if asset_class == "equity":
+                response = await stock_client.get_stock_bars(bars_request)
+            else:
+                response = await crypto_client.get_crypto_bars(bars_request)
+        except (grpc.RpcError, RuntimeError, ValueError) as exc:
+            log.warning("alpaca_get_historical_bars_failed", exc_info=exc)
+            raise
+        except (Exception,) as exc:  # noqa: B013 - codex_defaults A
+            await self._abort_internal(context, exc)
+            return broker_pb2.GetHistoricalBarsResponse()
+
+        symbol = _historical_alpaca_symbol(canonical_id, asset_class)
+        bars = [
+            _historical_bar_to_proto(bar)
+            for bar in _bars_from_response(response, symbol)
+        ]
+        return broker_pb2.GetHistoricalBarsResponse(
+            bars=bars,
+            truncated=bool(getattr(response, "next_page_token", False)),
+        )
 
     async def OrderEvent(  # noqa: N802
         self,
@@ -595,6 +660,26 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
             paper=config.MODE == "paper",
         )
 
+    async def _configured_market_data_clients(
+        self,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[Any, Any]:
+        try:
+            api_key, api_secret = await self._auth.get_credentials()
+        except (RuntimeError,) as exc:  # noqa: B013 - codex_defaults A
+            log.warning("alpaca_market_data_credentials_missing", exc_info=exc)
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "alpaca_credentials_not_configured",
+            )
+            raise
+        classes = _load_historical_data_classes()
+        if self._stock_data_client is None:
+            self._stock_data_client = classes["STOCK_CLIENT"](api_key, api_secret)
+        if self._crypto_data_client is None:
+            self._crypto_data_client = classes["CRYPTO_CLIENT"](api_key, api_secret)
+        return self._stock_data_client, self._crypto_data_client
+
     @staticmethod
     def _set_unavailable(
         context: grpc.aio.ServicerContext,
@@ -641,6 +726,112 @@ def _partition_crypto_symbols(
             continue
         iex_symbols.append(symbol)
     return iex_symbols, crypto_ids
+
+
+def _load_historical_data_classes() -> dict[str, Any]:
+    global StockHistoricalDataClient
+    global CryptoHistoricalDataClient
+    global StockBarsRequest
+    global CryptoBarsRequest
+    global TimeFrame
+
+    if StockHistoricalDataClient is None or CryptoHistoricalDataClient is None:
+        from alpaca.data.historical import (
+            CryptoHistoricalDataClient as _CryptoHistoricalDataClient,
+            StockHistoricalDataClient as _StockHistoricalDataClient,
+        )
+
+        StockHistoricalDataClient = _StockHistoricalDataClient
+        CryptoHistoricalDataClient = _CryptoHistoricalDataClient
+    if StockBarsRequest is None or TimeFrame is None:
+        from alpaca.data.requests import (
+            CryptoBarsRequest as _CryptoBarsRequest,
+            StockBarsRequest as _StockBarsRequest,
+        )
+        from alpaca.data.timeframe import TimeFrame as _TimeFrame
+
+        StockBarsRequest = _StockBarsRequest
+        CryptoBarsRequest = _CryptoBarsRequest
+        TimeFrame = _TimeFrame
+    return {
+        "STOCK_CLIENT": StockHistoricalDataClient,
+        "CRYPTO_CLIENT": CryptoHistoricalDataClient,
+        "STOCK_BARS_REQUEST": StockBarsRequest,
+        "CRYPTO_BARS_REQUEST": CryptoBarsRequest,
+        "TIMEFRAME": TimeFrame,
+    }
+
+
+def _build_historical_bars_request(
+    *,
+    request_classes: dict[str, Any],
+    symbol: str,
+    request: broker_pb2.GetHistoricalBarsRequest,
+) -> Any:
+    values: dict[str, Any] = {
+        "symbol_or_symbols": [symbol],
+        "timeframe": request_classes["TIMEFRAME"].Minute,
+        "start": datetime.fromtimestamp(request.range_start.seconds, UTC),
+        "end": datetime.fromtimestamp(request.range_end.seconds, UTC),
+    }
+    if request.limit > 0:
+        values["limit"] = request.limit
+    request_class = (
+        request_classes["CRYPTO_BARS_REQUEST"]
+        if "/" in symbol
+        else request_classes["STOCK_BARS_REQUEST"]
+    )
+    return request_class(**values)
+
+
+def _historical_asset_class(canonical_id: str) -> str | None:
+    if canonical_id.startswith("stock:"):
+        return "equity"
+    if canonical_id.startswith("crypto:"):
+        return "crypto"
+    if canonical_id.endswith(".US"):
+        return "equity"
+    if "/" in canonical_id:
+        return "crypto"
+    return None
+
+
+def _historical_alpaca_symbol(canonical_id: str, asset_class: str) -> str:
+    if asset_class == "crypto":
+        if canonical_id.startswith("crypto:"):
+            return normalize.canonical_to_alpaca_crypto(canonical_id)
+        return canonical_id
+    if canonical_id.startswith("stock:"):
+        parts = canonical_id.split(":")
+        if len(parts) >= 2:
+            return parts[1]
+    return canonical_id.removesuffix(".US")
+
+
+def _bars_from_response(response: Any, symbol: str) -> list[Any]:
+    data = getattr(response, "data", None)
+    if isinstance(data, dict):
+        bars = data.get(symbol)
+        if bars is not None:
+            return list(bars)
+        return [bar for symbol_bars in data.values() for bar in symbol_bars]
+    if isinstance(response, list | tuple):
+        return list(response)
+    return list(getattr(response, "bars", []))
+
+
+def _historical_bar_to_proto(bar: Any) -> broker_pb2.HistoricalBar:
+    bucket_start = Timestamp()
+    bucket_start.FromSeconds(int(bar.timestamp.timestamp()))
+    return broker_pb2.HistoricalBar(
+        bucket_start=bucket_start,
+        open=str(Decimal(str(bar.open))),
+        high=str(Decimal(str(bar.high))),
+        low=str(Decimal(str(bar.low))),
+        close=str(Decimal(str(bar.close))),
+        volume=str(Decimal(str(bar.volume))),
+        trade_count=int(bar.trade_count or 0),
+    )
 
 
 def _normalize_order_type(order_type: str) -> str:
