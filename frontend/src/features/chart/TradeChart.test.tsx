@@ -116,8 +116,8 @@ describe('TradeChart', () => {
 
     expect(capturedLoader).not.toBeNull();
     const callback = vi.fn();
-    // capturedLoader is guaranteed non-null by the assertion above.
-    const loader = capturedLoader as NonNullable<typeof capturedLoader>;
+    // Explicit cast via unknown — TS can't narrow `let` across `await` in this shape.
+    const loader = capturedLoader as unknown as { getBars: (p: { callback: () => void }) => void };
     await act(async () => {
       loader.getBars({ callback });
     });
