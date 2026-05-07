@@ -60,7 +60,7 @@ from sidecar_ibkr.normalize import (
 from sidecar_ibkr.pnl_cache import PnLCache
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
     from typing import Protocol
 
     from ib_async import (
@@ -131,6 +131,14 @@ if TYPE_CHECKING:
         execution: _IbExecution
         time: datetime
 
+    class _IbHistoricalBar(Protocol):
+        date: datetime | int | float | str
+        open: object
+        high: object
+        low: object
+        close: object
+        volume: object
+
 
 logger = structlog.get_logger(__name__)
 
@@ -138,6 +146,64 @@ type _TickCallback = Callable[[broker_pb2.QuoteMessage], None]
 
 _STREAM_QUEUE_MAX = 2048
 _CALL_SUBS_MAX = 500
+
+
+class _PacingTokenBucket:
+    """Per-process token bucket for IBKR historical-data pacing.
+    Capacity 50; refill 50 every 600s; reserve 10 for ad-hoc (non-prewarm) callers.
+    """
+
+    def __init__(
+        self,
+        capacity: int = 50,
+        refill_window_seconds: int = 600,
+        reserved: int = 10,
+    ) -> None:
+        self._capacity: int = capacity
+        self._refill_window_seconds: int = refill_window_seconds
+        self._reserved: int = reserved
+        self._tokens: int = capacity
+        self._next_refill_at: float = time.monotonic() + refill_window_seconds
+        self._cooldown_until: float = 0.0
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    async def acquire(self, *, reserve: bool = False) -> None:
+        while True:
+            wait_seconds: float = 0.0
+            async with self._lock:
+                now = time.monotonic()
+                self._refill_if_due(now)
+                if now < self._cooldown_until:
+                    wait_seconds = self._cooldown_until - now
+                elif self._can_acquire(reserve=reserve):
+                    self._tokens -= 1
+                    return
+                else:
+                    wait_seconds = max(self._next_refill_at - now, 0.0)
+
+            await asyncio.sleep(wait_seconds)
+            async with self._lock:
+                now = time.monotonic()
+                if now < self._next_refill_at:
+                    self._next_refill_at = now
+                self._refill_if_due(now)
+
+    def release_on_pacing_violation(self) -> None:
+        now = time.monotonic()
+        self._tokens = 0
+        self._cooldown_until = now + 60.0
+        self._next_refill_at = self._cooldown_until
+
+    def _can_acquire(self, *, reserve: bool) -> bool:
+        if reserve:
+            return self._tokens > 0
+        return self._tokens > self._reserved
+
+    def _refill_if_due(self, now: float) -> None:
+        if now < self._next_refill_at:
+            return
+        self._tokens = self._capacity
+        self._next_refill_at = now + self._refill_window_seconds
 
 
 class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
@@ -179,6 +245,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self._order_event_queues: dict[
             str, list[asyncio.Queue[broker_pb2.OrderEventMessage]]
         ] = {}
+        self._pacing_bucket: _PacingTokenBucket = _PacingTokenBucket()
 
     async def Health(  # noqa: N802 — gRPC servicer methods mirror proto rpc names
         self,
@@ -1016,6 +1083,106 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         del streamer._broker_servicer_tick_callbacks
         del streamer._broker_servicer_previous_tick_callback
 
+    async def GetHistoricalBars(  # noqa: N802
+        self,
+        request: broker_pb2.GetHistoricalBarsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.GetHistoricalBarsResponse:
+        if request.timeframe != "1m":
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "timeframe must be 1m",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+        if not request.canonical_id:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "canonical_id is required",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+        if request.range_start.seconds <= 0 or request.range_end.seconds <= 0:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_start and range_end are required",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+        if request.range_end.seconds <= request.range_start.seconds:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_end must be after range_start",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+
+        try:
+            connected = bool(self.ib.isConnected())
+        except Exception as exc:
+            logger.warning(
+                "ibkr.historical_bars.connection_check_failed",
+                label=self.label,
+                error=str(exc),
+            )
+            connected = False
+        if not connected:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "ibkr client is not connected",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+
+        from sidecar_ibkr.streamer import canonical_to_contract
+
+        try:
+            contract = canonical_to_contract(
+                broker_pb2.SymbolRef(canonical_id=request.canonical_id)
+            )
+        except ValueError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            return broker_pb2.GetHistoricalBarsResponse()
+
+        jitter_ms = (_instrument_id_hash(request.canonical_id) % 4) * 50
+        if jitter_ms > 0:
+            await asyncio.sleep(jitter_ms / 1000)
+
+        reserve = not _historical_bars_is_prewarm(context)
+        await self._pacing_bucket.acquire(reserve=reserve)
+
+        end_dt = request.range_end.ToDatetime(tzinfo=UTC)
+        duration_seconds = max(
+            int(request.range_end.seconds - request.range_start.seconds),
+            60,
+        )
+
+        try:
+            req_historical = self.ib.reqHistoricalDataAsync  # type: ignore[attr-defined, unused-ignore]
+            raw_bars: object = await req_historical(
+                contract,
+                endDateTime=end_dt,
+                durationStr=f"{duration_seconds} S",
+                barSizeSetting="1 min",
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=2,
+            )
+        except Exception as exc:
+            if _is_ibkr_pacing_violation(exc):
+                self._pacing_bucket.release_on_pacing_violation()
+                await context.abort(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    "ibkr pacing violation; retry after 60s",
+                )
+                return broker_pb2.GetHistoricalBarsResponse()
+            raise
+
+        bars = list(cast("Sequence[_IbHistoricalBar]", raw_bars))
+        truncated = len(bars) >= request.limit if request.limit > 0 else False
+        if request.limit > 0:
+            bars = bars[: request.limit]
+
+        return broker_pb2.GetHistoricalBarsResponse(
+            bars=[_proto_historical_bar(bar) for bar in bars],
+            truncated=truncated,
+        )
+
     async def GetContract(  # noqa: N802
         self,
         request: broker_pb2.ContractRef,
@@ -1349,6 +1516,61 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
 def _canonical_id(symbol: broker_pb2.SymbolRef) -> str:
     return symbol.canonical_id or symbol.raw_symbol
+
+
+def _instrument_id_hash(canonical_id: str) -> int:
+    digest = hashlib.sha256(canonical_id.encode()).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def _historical_bars_is_prewarm(context: object) -> bool:
+    invocation_metadata = getattr(context, "invocation_metadata", None)
+    if not callable(invocation_metadata):
+        return False
+    metadata: object = invocation_metadata()
+    for item in cast("Iterable[object]", metadata):
+        if isinstance(item, tuple) and len(item) == 2:
+            raw_key, raw_value = item
+        else:
+            raw_key = getattr(item, "key", "")
+            raw_value = getattr(item, "value", "")
+        key = str(raw_key).lower()
+        value = str(raw_value).lower()
+        if key in {"x-ibkr-prewarm", "ibkr-prewarm"} and value in {"1", "true", "yes"}:
+            return True
+    return False
+
+
+def _is_ibkr_pacing_violation(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "pacing violation" in message
+        or "historical data request pacing violation" in message
+        or "error 162" in message
+    )
+
+
+def _proto_historical_bar(bar: _IbHistoricalBar) -> broker_pb2.HistoricalBar:
+    bucket_start = Timestamp()
+    bucket_start.FromDatetime(_historical_bar_datetime(bar.date))
+    return broker_pb2.HistoricalBar(
+        bucket_start=bucket_start,
+        open=str(bar.open),
+        high=str(bar.high),
+        low=str(bar.low),
+        close=str(bar.close),
+        volume=str(bar.volume),
+    )
+
+
+def _historical_bar_datetime(value: datetime | int | float | str) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+    if isinstance(value, int | float):
+        return datetime.fromtimestamp(value, tz=UTC)
+    return datetime.fromtimestamp(float(value), tz=UTC)
 
 
 def _symbol_refs(canonical_ids: set[str]) -> list[broker_pb2.SymbolRef]:
