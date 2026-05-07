@@ -17,13 +17,15 @@ Ship a Futubull-class single-symbol charting experience plus the bar infrastruct
 
 1. `/chart/:canonical_id` route (FE) — single chart per page, sub-panes for indicators, full-screen capable, mobile-functional with simplified toolbar.
 2. Inline "View chart" links from positions, orders, and watchlist rows.
-3. **klinecharts ^10.x** integration with **~70 indicators** (27 built-ins + ~45 custom-coded TS).
+3. **klinecharts ^10.x** integration with **~70 indicators** (27 built-ins + ~45 custom-coded TS, each carrying a citation header).
 4. **All klinecharts built-in drawing tools** (~30) + **5 custom overlays** (Long Position, Short Position, Pitchfork variants ×4).
-5. **`bar_aggregator/` Docker service** consuming the existing quote bus → 6 sub-1m bucket types (1s/5s/10s/15s/30s/45s) → TimescaleDB hypertable writes.
-6. **`GetHistoricalBars` RPC** on all 4 broker sidecars with hot-30d pre-warm + cold-lazy fetch via `BarService` orchestrator.
-7. **`chart_layouts(user_id, instrument_id, payload jsonb, schema_version)` table** for per-user-per-symbol indicator + drawing persistence.
-8. **TimescaleDB hypertables + retention policies** (1s 7d, 1m 6mo; CAGGs for 5s/10s/15s/30s/45s/5m/15m/30m/1h/1d).
-9. **WS extension** — existing `/ws/quotes` gateway pattern extended with `/ws/bars/<canonical_id>/<timeframe>` channel for live tail.
+5. **`bar_aggregator/` Docker service** consuming the existing quote bus → 6 sub-1m bucket types → TimescaleDB hypertable writes; flush-ack-based WAL trim; per-channel 250ms publish coalescing; sharding key reserved (`wal:bar_aggregator:{shard}:{instrument_id}`).
+6. **`GetHistoricalBars` RPC** on all 4 broker sidecars with hot-30d pre-warm + cold-lazy fetch via `BarService` orchestrator. IBKR per-client token bucket; Schwab 401-retry-once; cross-worker coalescing via `pg_notify` for Phase 24 readiness.
+7. **`chart_layouts(instrument_id, payload jsonb, schema_version)` table** (single-tenant; UNIQUE on `instrument_id`; 64KB cap; read-side translator on schema drift; If-Match optimistic concurrency).
+8. **TimescaleDB hypertables + retention policies** (1s 7d, 1m 6mo; 10 CAGGs with `end_offset >= bucket_width` and `start_offset < base retention`; `bars_1h`/`bars_1d` retained 5y).
+9. **WS extension** — existing `/ws/quotes` gateway pattern extended with `/ws/bars/<canonical_id>/<timeframe>` channel for live tail. Token-via-subprotocol auth; idle timeout 60s; max 20 subs/conn; revision-sequenced envelope for ordering safety.
+10. **Pre-requisite migrations 0023a + 0023b**: `instrument_id BIGINT` resolver columns on `positions`/`watchlist_entries`; `tick_size NUMERIC(20,8)` on `instruments` for drag-handle SL/TP precision.
+11. **`POST /api/orders/nonce/modify`** endpoint to mint per-modify trade nonces (existing `/api/orders/modify` did not enforce nonces; Phase 9 adds the missing chokepoint).
 
 ### Non-goals (explicitly deferred)
 
@@ -144,6 +146,47 @@ Phase 9 first migration creates extension via `CREATE EXTENSION IF NOT EXISTS ti
 
 This avoids 12 separate hypertables while letting TimescaleDB auto-derive higher timeframes from base data. CAGGs auto-refresh via `add_continuous_aggregate_policy` background jobs and queries are transparent SQL (look like ordinary tables to the FE).
 
+### Pre-requisite migration 0023a — `instrument_id` resolver columns
+
+Phase 7b.1.5's `0010` left `positions.canonical_id TEXT` and gave `watchlist_entries` only `(broker_id, symbol, exchange)` — neither has `instrument_id BIGINT`. Phase 9's active-set query needs a stable resolver. **0023a** (folded into the 0023 chunk) adds:
+
+```sql
+-- Strict, indexed FK columns
+ALTER TABLE positions          ADD COLUMN instrument_id BIGINT REFERENCES instruments(id) ON DELETE SET NULL;
+ALTER TABLE watchlist_entries  ADD COLUMN instrument_id BIGINT REFERENCES instruments(id) ON DELETE SET NULL;
+
+CREATE INDEX positions_instrument_idx         ON positions(instrument_id)         WHERE instrument_id IS NOT NULL;
+CREATE INDEX watchlist_entries_instrument_idx ON watchlist_entries(instrument_id) WHERE instrument_id IS NOT NULL;
+
+-- Backfill from existing canonical_id / symbol_aliases — best-effort, NULL for unresolved rows
+-- (resolver service handles lazy resolution per Phase 7b.1.5 pattern; no NOT NULL until backfill complete)
+UPDATE positions p
+   SET instrument_id = i.id
+  FROM instruments i
+ WHERE i.canonical_id = p.canonical_id
+   AND p.canonical_id IS NOT NULL;
+
+UPDATE watchlist_entries w
+   SET instrument_id = sa.instrument_id
+  FROM symbol_aliases sa
+ WHERE sa.source     = w.broker_id
+   AND sa.raw_symbol = w.symbol;
+```
+
+The columns stay nullable; rows that don't resolve (broker-specific symbols not yet in `symbol_aliases`) are simply absent from the active-set until the existing 7b.1.5 lazy resolver fills them.
+
+### Pre-requisite migration 0023b — `tick_size` on `instruments`
+
+Drag-handle SL/TP needs per-instrument tick precision (BTC at Alpaca = $0.01; HK equities tier from HK$0.001/0.01/0.05; penny stocks $0.0001).
+
+```sql
+ALTER TABLE instruments ADD COLUMN tick_size NUMERIC(20,8);
+COMMENT ON COLUMN instruments.tick_size IS
+  'Minimum price increment. NULL until first observation from broker contract spec.';
+```
+
+Sidecar contract-detail responses populate this on first `GetContract` for an instrument; chart drag-handle reads it to snap.
+
 ### Base tables
 
 #### `bars_1s` (Alembic 0024) — populated by `bar_aggregator` from quote bus
@@ -152,16 +195,21 @@ This avoids 12 separate hypertables while letting TimescaleDB auto-derive higher
 CREATE TABLE bars_1s (
   instrument_id    BIGINT        NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
   bucket_start     TIMESTAMPTZ   NOT NULL,
-  source           TEXT          NOT NULL,          -- 'aggregator-{streamer-source}'
-  source_priority  SMALLINT      NOT NULL DEFAULT 99,  -- aggregator built = 99
+  source           TEXT          NOT NULL,           -- 'aggregator-{streamer-source}'
+  source_priority  SMALLINT      NOT NULL DEFAULT 99,
   open             NUMERIC(20,8) NOT NULL,
   high             NUMERIC(20,8) NOT NULL,
   low              NUMERIC(20,8) NOT NULL,
   close            NUMERIC(20,8) NOT NULL,
-  volume           NUMERIC(20,8) NOT NULL DEFAULT 0,
+  volume           NUMERIC(20,8),                    -- NULL when source has no trade-tape (IBKR Level-1 quote-only)
+  volume_source    TEXT          NOT NULL,           -- 'tape' | 'quote_proxy' | 'none'
   trade_count      INTEGER       NOT NULL DEFAULT 0,
-  inserted_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (instrument_id, bucket_start)
+  PRIMARY KEY (instrument_id, bucket_start),
+  CONSTRAINT bars_1s_volume_source_chk CHECK (volume_source IN ('tape', 'quote_proxy', 'none')),
+  CONSTRAINT bars_1s_volume_consistent_chk CHECK (
+    (volume_source = 'none' AND volume IS NULL) OR
+    (volume_source <> 'none' AND volume IS NOT NULL)
+  )
 );
 SELECT create_hypertable('bars_1s', 'bucket_start',
   chunk_time_interval => INTERVAL '6 hours');
@@ -169,27 +217,45 @@ CREATE INDEX bars_1s_inst_time_idx ON bars_1s (instrument_id, bucket_start DESC)
 SELECT add_retention_policy('bars_1s', INTERVAL '7 days');
 ```
 
+Note: `inserted_at` removed (architect MED #5 — unused for tie-breaking, ~500MB/yr saved at 1000 instruments). `volume` is nullable with `volume_source` discriminator (architect HIGH #1 — IBKR Level-1 doesn't carry trade-tape; aggregator-built volume from quote-only is documented `quote_proxy` and not used for HFT-grade analysis).
+
 #### `bars_1m` (Alembic 0024) — populated by sidecar `GetHistoricalBars` + aggregator minute-emitter
 
 ```sql
 CREATE TABLE bars_1m (
   instrument_id    BIGINT        NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
   bucket_start     TIMESTAMPTZ   NOT NULL,
-  source           TEXT          NOT NULL,          -- 'schwab', 'alpaca', 'ibkr', 'futu', 'aggregator-*'
-  source_priority  SMALLINT      NOT NULL,          -- 1=schwab, 2=alpaca, 3=ibkr, 4=futu, 99=aggregator
+  source           TEXT          NOT NULL,           -- 'schwab', 'alpaca', 'ibkr', 'futu', 'aggregator-*'
+  source_priority  SMALLINT      NOT NULL,
   open             NUMERIC(20,8) NOT NULL,
   high             NUMERIC(20,8) NOT NULL,
   low              NUMERIC(20,8) NOT NULL,
   close            NUMERIC(20,8) NOT NULL,
-  volume           NUMERIC(20,8) NOT NULL DEFAULT 0,
+  volume           NUMERIC(20,8),
+  volume_source    TEXT          NOT NULL,
   trade_count      INTEGER       NOT NULL DEFAULT 0,
-  inserted_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (instrument_id, bucket_start)
+  PRIMARY KEY (instrument_id, bucket_start),
+  CONSTRAINT bars_1m_volume_source_chk CHECK (volume_source IN ('tape', 'quote_proxy', 'none')),
+  CONSTRAINT bars_1m_volume_consistent_chk CHECK (
+    (volume_source = 'none' AND volume IS NULL) OR
+    (volume_source <> 'none' AND volume IS NOT NULL)
+  ),
+  CONSTRAINT bars_1m_priority_chk CHECK (source_priority IN (1, 2, 3, 4, 99))
 );
 SELECT create_hypertable('bars_1m', 'bucket_start',
   chunk_time_interval => INTERVAL '7 days');
 CREATE INDEX bars_1m_inst_time_idx ON bars_1m (instrument_id, bucket_start DESC);
 SELECT add_retention_policy('bars_1m', INTERVAL '6 months');
+```
+
+**Source priority assignment (canonical):** `schwab=1, alpaca=2, ibkr=3, futu=4, aggregator-*=99`. The CHECK constraint enforces this; BarService's `_priority_for_source()` is the single mapper:
+
+```python
+_SOURCE_PRIORITY: Final[Mapping[str, int]] = {
+    "schwab": 1, "alpaca": 2, "ibkr": 3, "futu": 4,
+    "aggregator-schwab": 99, "aggregator-alpaca": 99,
+    "aggregator-ibkr": 99,   "aggregator-futu": 99,
+}
 ```
 
 ### Priority-encoded UPSERT (BarService chokepoint)
@@ -209,22 +275,26 @@ ON CONFLICT (instrument_id, bucket_start) DO UPDATE
 
 Single-row PK keeps reads simple (`SELECT * FROM bars_1m WHERE instrument_id=$1 AND bucket_start BETWEEN $2 AND $3`); priority enforcement is the single chokepoint at INSERT. Aggregator-built 1m bars (priority 99) get cleanly overwritten when broker historical fetches land later (priorities 1–4). No double-count, no zombie rows.
 
-### Continuous aggregates (Alembic 0025 — 10 CAGGs)
+### Continuous aggregates (Alembic 0025 — 10 CAGGs, **created in Chunk B-bis after aggregator validates base table shape**)
 
-| CAGG | Source | Bucket | Refresh policy |
-|---|---|---|---|
-| `bars_5s` | `bars_1s` | 5s | last 7d, refresh every 30s, end_offset 1s |
-| `bars_10s` | `bars_1s` | 10s | same |
-| `bars_15s` | `bars_1s` | 15s | same |
-| `bars_30s` | `bars_1s` | 30s | same |
-| `bars_45s` | `bars_1s` | 45s | same |
-| `bars_5m` | `bars_1m` | 5m | last 6mo, refresh every 1m, end_offset 1m |
-| `bars_15m` | `bars_1m` | 15m | same |
-| `bars_30m` | `bars_1m` | 30m | same |
-| `bars_1h` | `bars_1m` | 1h | last 5y, refresh every 5m, end_offset 1m |
-| `bars_1d` | `bars_1m` | 1d | last 5y, refresh every 1h, end_offset 1m |
+**Two correctness invariants (architect CRIT #2 + HIGH #5):**
+1. `end_offset >= bucket_width` — ensures only **closed** buckets are materialized; otherwise CAGG re-materializes the same bucket on each refresh and disagrees with live-tail Redis publish.
+2. `start_offset < base table retention` — prevents CAGG refresh from deleting boundary buckets when `bars_1s` retention drops the source chunk.
 
-Pattern:
+| CAGG | Source | Bucket | start_offset | end_offset | schedule_interval | CAGG retention |
+|---|---|---|---|---|---|---|
+| `bars_5s` | `bars_1s` | 5s | 6 days | 5s | 30s | (bounded by base) |
+| `bars_10s` | `bars_1s` | 10s | 6 days | 10s | 30s | (bounded by base) |
+| `bars_15s` | `bars_1s` | 15s | 6 days | 15s | 30s | (bounded by base) |
+| `bars_30s` | `bars_1s` | 30s | 6 days | 30s | 30s | (bounded by base) |
+| `bars_45s` | `bars_1s` | 45s | 6 days | 45s | 60s | (bounded by base) |
+| `bars_5m` | `bars_1m` | 5m | 5 months | 5m | 1m | 5 months |
+| `bars_15m` | `bars_1m` | 15m | 5 months | 15m | 1m | 5 months |
+| `bars_30m` | `bars_1m` | 30m | 5 months | 30m | 5m | 5 months |
+| `bars_1h` | `bars_1m` | 1h | 5 months | 1h | 5m | 5 years (own retention policy) |
+| `bars_1d` | `bars_1m` | 1d | 5 months | 1d | 1h | 5 years (own retention policy) |
+
+**Pattern (each CAGG):**
 
 ```sql
 CREATE MATERIALIZED VIEW bars_5s
@@ -236,33 +306,46 @@ SELECT
   max(high) AS high,
   min(low)  AS low,
   last(close, bucket_start) AS close,
-  sum(volume) AS volume,
+  sum(volume) AS volume,                 -- nulls coalesce to 0 in sum() — preserves volume_source semantics at the read layer
   sum(trade_count) AS trade_count
 FROM bars_1s
 GROUP BY instrument_id, time_bucket(INTERVAL '5 seconds', bucket_start);
 
 SELECT add_continuous_aggregate_policy('bars_5s',
-  start_offset => INTERVAL '7 days',
-  end_offset   => INTERVAL '1 second',
+  start_offset      => INTERVAL '6 days',
+  end_offset        => INTERVAL '5 seconds',
   schedule_interval => INTERVAL '30 seconds');
 ```
 
+**For `bars_1h` and `bars_1d`** — keep them past the `bars_1m` 6-month base retention via explicit retention policy on the CAGG hypertable (architect LOW #5 syntax pin):
+
+```sql
+SELECT add_retention_policy('bars_1d', INTERVAL '5 years');
+SELECT add_retention_policy('bars_1h', INTERVAL '5 years');
+```
+
+**Live-tail caveat:** the FE never reads CAGGs for the trailing window — live-tail comes from the Redis `bar.<canonical_id>.<tf>` channel. CAGGs serve scrollback only. The 5–60s refresh lag at the leading edge is therefore invisible to users.
+
 ### `chart_layouts` (Alembic 0026)
+
+The deployment is **single-tenant** (CLAUDE.md non-goals: "multi-tenant"); no `users` table exists or is planned (CF Access + Google IdP gates the perimeter, not row-level auth). `chart_layouts` is keyed only by `instrument_id`. If multi-tenant ever happens (post-v1.0), a future migration adds `user_id` and rewrites the unique constraint.
 
 ```sql
 CREATE TABLE chart_layouts (
-  id              BIGSERIAL    PRIMARY KEY,
-  user_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  instrument_id   BIGINT       NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
-  payload         JSONB        NOT NULL,         -- { indicators[], drawings[], chart_type, default_timeframe, panes }
-  schema_version  INTEGER      NOT NULL DEFAULT 1,
-  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  UNIQUE (user_id, instrument_id)
+  id              BIGSERIAL     PRIMARY KEY,
+  instrument_id   BIGINT        NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+  payload         JSONB         NOT NULL,         -- { indicators[], drawings[], chart_type, default_timeframe, panes }
+  schema_version  INTEGER       NOT NULL DEFAULT 1,
+  updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  UNIQUE (instrument_id),
+  CONSTRAINT chart_layouts_payload_size_chk CHECK (octet_length(payload::text) < 65536)
 );
-CREATE INDEX chart_layouts_user_idx ON chart_layouts (user_id);
+CREATE INDEX chart_layouts_updated_at_idx ON chart_layouts (updated_at DESC);
 ```
 
-`updated_at` doubles as the recency signal for the active-set definition. `schema_version` lets us evolve the JSONB shape (e.g., add new indicator fields) with a one-shot upgrade migration.
+- `updated_at` doubles as the recency signal for the active-set definition.
+- `schema_version` evolves the JSONB shape via one-shot Alembic data migrations + a **read-side translator** (architect HIGH #8). Reads NEVER mutate the row. Forward translation happens in `_translate_chart_layout(payload, from_version, to_version)` returning the current shape; PUTs always write at the latest version.
+- Hard 64KB cap (architect MED #8) — at 70 indicators × ~200 bytes config + 200 drawings × ~150 bytes = ~44KB worst-case under realistic use.
 
 ### `bar_backfill_jobs` (Alembic 0027) — idempotency + dedup
 
@@ -307,6 +390,8 @@ All under `namespace = 'charts'`. The existing `app_config` schema is `(namespac
 
 ### Active-set definition (consumed by hot-30d pre-warm cron)
 
+After 0023a backfills `instrument_id` on `positions` + `watchlist_entries` (rows that fail to resolve via canonical_id / symbol_aliases stay NULL and are filtered out). Hard `LIMIT 1000` matches the per-aggregator memory cap (architect MED #1).
+
 ```sql
 WITH cfg AS (
   SELECT value::int AS recency_days
@@ -314,13 +399,24 @@ WITH cfg AS (
   WHERE namespace = 'charts'
     AND key = 'bar_active_set_recency_days'
 )
-SELECT DISTINCT instrument_id FROM positions
-UNION
-SELECT DISTINCT instrument_id FROM watchlist_entries
-UNION
-SELECT DISTINCT instrument_id FROM chart_layouts
-  WHERE updated_at > NOW() - (SELECT recency_days FROM cfg) * INTERVAL '1 day';
+SELECT instrument_id, MAX(recency_score) AS recency_score
+FROM (
+  SELECT instrument_id, EXTRACT(EPOCH FROM NOW())::bigint AS recency_score
+    FROM positions WHERE instrument_id IS NOT NULL
+  UNION ALL
+  SELECT instrument_id, EXTRACT(EPOCH FROM NOW())::bigint
+    FROM watchlist_entries WHERE instrument_id IS NOT NULL
+  UNION ALL
+  SELECT instrument_id, EXTRACT(EPOCH FROM updated_at)::bigint
+    FROM chart_layouts
+    WHERE updated_at > NOW() - (SELECT recency_days FROM cfg) * INTERVAL '1 day'
+) sources
+GROUP BY instrument_id
+ORDER BY recency_score DESC
+LIMIT 1000;
 ```
+
+If real-world load ever exceeds 1000, the aggregator sharding plan (architect MED #10, see §4 below) supersedes the cap.
 
 ### Retention summary
 
@@ -334,11 +430,25 @@ SELECT DISTINCT instrument_id FROM chart_layouts
 
 | # | Change |
 |---|---|
-| 0023 | `CREATE EXTENSION timescaledb` |
-| 0024 | `bars_1s` + `bars_1m` hypertables, retention policies, source_priority column |
-| 0025 | 10 continuous aggregates + refresh policies |
-| 0026 | `chart_layouts` |
+| 0023 | `CREATE EXTENSION timescaledb` (idempotent) |
+| 0023a | `instrument_id BIGINT` resolver column + best-effort backfill on `positions` + `watchlist_entries` |
+| 0023b | `tick_size NUMERIC(20,8)` column on `instruments` |
+| 0024 | `bars_1s` + `bars_1m` hypertables, retention policies, `source_priority` + `volume_source` columns + CHECK constraints |
+| 0025 | 10 continuous aggregates with `end_offset >= bucket_width` and `start_offset < base retention` (in **Chunk B-bis** after Chunk B locks aggregator schema) |
+| 0026 | `chart_layouts` (single-tenant; UNIQUE on `instrument_id`; 64KB payload cap; read-side translator on schema_version drift) |
 | 0027 | `bar_backfill_jobs` (partial unique on pending+in_progress) |
+
+### Storage budget (architect MED #4)
+
+Per-row bytes (PG row overhead ≈ 28 + columns):
+- `bars_1s` row ≈ 28 + 8 (instrument_id) + 8 (bucket_start) + 24 (source text) + 2 (priority) + 5×17 (NUMERIC) + 4 (volume_source label) + 4 (trade_count) ≈ **150 bytes**.
+- 1 active instrument × 86,400 s/day × 150 bytes = **~12.4 MB/day**.
+- 100 instruments × 7-day retention = **~8.7 GB**.
+- 1000 instruments × 7-day retention = **~87 GB**.
+
+`bars_1m` ~150 bytes/row × 1440 rows/day × 100 instruments × 6mo = **~3.9 GB**. CAGGs add ≤30% on top.
+
+**Hard budget for NUC PG storage: 200 GB allocated headroom; 1000-instrument operating ceiling is OK.** Above 1000 needs aggregator sharding (architect MED #10) AND/OR shorter `bars_1s` retention. The Chunk I E2E suite includes a perf-smoke that measures actual disk usage at 100-instrument steady state and projects.
 
 ---
 
@@ -362,11 +472,51 @@ bar_aggregator/
 └─ tests/
 ```
 
-**Crash recovery via WAL.** Every tick writes to a Redis Stream `wal:bar_aggregator:{instrument_id}` *before* bucket mutation; on startup, replay any unacked entries. Stream trimmed to last 5 minutes per instrument (`XADD MAXLEN ~`).
+**Crash recovery via WAL (architect CRIT #5).** Every tick writes to a Redis Stream `wal:bar_aggregator:{shard}:{instrument_id}` *before* bucket mutation. Trim semantics are **flush-ack-based, not time-based**: aggregator only `XTRIM MINID` entries the flush has confirmed in PG.
 
-**Memory bounds.** In-flight buckets are a `dict[(instrument_id, source), BucketState]` capped to active-set size (~few hundred). Idle entries evicted after N minutes of no quotes. Hard cap at 1000 active instruments per aggregator; `bar_aggregator_active_instruments` metric for observability.
+Durability bound is honestly stated:
+- Tick → WAL: synchronous `XADD` round-trip (no `WAIT` since Redis is single primary; ≈1ms).
+- Aggregator crash → Docker restart → replay all unacked entries from oldest WAL ID. **Zero-tick loss within Redis uptime.**
+- Redis crash (Redis is non-replicated) → bounded by `redis-py` outstanding ack queue at moment of crash. Documented loss bound: ≤ 1 batch (≤ 2s × tick rate per active instrument).
+- Aggregator down longer than `wal:* MAXLEN ~ 50000` per instrument (≈ 90 min at 10 ticks/s) → emit `CRITICAL` log + `bar_aggregator_wal_truncated_total{instrument}` counter; on boot, refuse replay if oldest WAL entry has gap to last-flushed entry > `2× FLUSH_INTERVAL_MS`.
 
-**Backpressure.** If `bars_1s` flush falls behind, log a structured warn + emit `bar_aggregator_flush_lag_seconds` metric. Hard-fail-loudly via healthcheck if lag > 10s (Docker restart picks it up).
+Metrics:
+- `bar_aggregator_wal_depth_bytes` — alert at 80% of `redis.maxmemory`.
+- `bar_aggregator_wal_lag_seconds` — gauge of (now − last-flushed-entry-ts).
+- `bar_aggregator_wal_truncated_total{instrument}` — counter of detected gaps.
+
+**Per-(instrument, tf) live-tail conflation (architect CRIT #3).** Per-tick partial-bar publish is **gated by a 250ms coalescing window per channel**:
+
+```python
+class _ChannelCoalescer:
+    """One per (instrument_id, tf). Coalesces N ticks within 250ms into one publish."""
+    def __init__(self, channel: str, max_interval_ms: int = 250) -> None:
+        self._channel = channel
+        self._max_interval = max_interval_ms / 1000
+        self._latest: BucketSnapshot | None = None
+        self._last_publish_at: float = 0.0
+        self._task: asyncio.Task[None] | None = None
+```
+
+The aggregator updates `_latest` on each tick; a deferred `_task` publishes after `max_interval` has elapsed since the last publish. **Final** (closed-bucket) publishes bypass coalescing and emit immediately with `revision = MAX_INT` (architect HIGH #2).
+
+Metric: `bar_aggregator_partial_publish_ratio` = publishes / ticks. Target ratio ≤ 0.4 (i.e. at least 60% of ticks coalesced into a later publish).
+
+**FE WS gateway pattern (matches `phase7b1_shipped` INV-Q-1).** The gateway has **one** Redis subscriber per worker; FE WS connections fan in-process. The aggregator's publishes are never re-subscribed by the publisher. This is the same single-worker loopback-suppression rule as `backend/app/services/quotes/engine.py`.
+
+**Memory bounds.** In-flight buckets `dict[(instrument_id, source), BucketState]` capped to active-set size (LIMIT 1000 in §3 query). Idle entries evicted after 5 min of no quotes. Hard cap at 1000 active instruments per aggregator. Above this needs sharding (below).
+
+**Sharding plan (architect MED #10).** WAL stream key is `wal:bar_aggregator:{shard}:{instrument_id}`. With `shard = instrument_id % N`, sharded aggregators run as `bar_aggregator_0..N-1` containers; each subscribes to the shard-modulo subset of `quote.*` topics. Phase 9 ships `N = 1` (single shard); the namespace is reserved so post-v1.0 horizontal scaling doesn't require breaking-change migration. Backend WS gateway routes by shard; pubsub key `bar.<canonical_id>.<tf>` is unsharded so subscribers don't need shard awareness.
+
+**Backpressure.** If `bars_1s` flush falls behind, log + emit `bar_aggregator_flush_lag_seconds`. Healthcheck fails at lag > 10s; Docker restart picks it up.
+
+**WG split tolerance (architect MED #3, new failure-matrix row).** PG sits on NUC over WG; aggregator on VPS. If WG drops, aggregator can't write PG but Redis (VPS-local) is fine. Behavior:
+- Pause `bars_1s` flush on PG `OperationalError`.
+- WAL accumulates (bounded by `MAXLEN ~ 50000` per instrument).
+- Live-tail Redis pub/sub continues (FE charts keep painting).
+- Auto-resume flush on first successful PG ping.
+- Metric `bar_aggregator_pg_unreachable_seconds` increments while paused; alert at 60s.
+- After 5 minutes paused, healthcheck fails → Docker restart → on-boot WAL replay handles the buffered ticks.
 
 ### `backend/app/services/bar_service.py` (new orchestrator)
 
@@ -377,40 +527,96 @@ class BarService:
         # 2. Detect cache gap: query bars_{tf} for [start, end); compute missing ranges
         # 3. If gaps exist and tf >= '1m':
         #    a. Determine source via app_config.bar_source_priority for asset_class
-        #    b. Acquire bar_backfill_jobs row (UPSERT on partial-unique-pending index)
-        #    c. Call sidecar GetHistoricalBars(canonical_id, tf, gap_start, gap_end)
-        #    d. Coalesce concurrent first-callers via job lookup + asyncio.Event
-        #    e. UPSERT into bars_1m with priority encoding
-        #    f. Mark job done; release event
+        #    b. UPSERT bar_backfill_jobs row, capturing was_new (partial-unique-pending)
+        #    c. If was_new: this worker fetches via sidecar GetHistoricalBars (chunked loop)
+        #       Otherwise: this worker waits via _wait_for_job(job_id) — pg_notify channel
+        #         'bar_backfill_done' OR poll status every 250ms (cap 16s)
+        #    d. After fetch (or wait): UPSERT into bars_1m with priority encoding
+        #    e. Mark job done; pg_notify 'bar_backfill_done' with payload=job_id
         # 4. Return paginated rows with next_cursor (sub-1m never backfills — cache-only)
 
     async def pre_warm_active_set() -> None:
         # Cron: backend startup + nightly post-close (per asset-class market clock)
-        # active_set = positions ∪ watchlist ∪ recent chart_layouts
+        # active_set = (active-set query — see §3, LIMIT 1000)
         # for inst in active_set:
         #   for tf in ('1m','1h','1d'):  # 5m/15m/30m derived via CAGG, no fetch
         #     last_done = bar_backfill_jobs.where(...).order_by(finished_at desc).first()
         #     gap = (last_done.range_end if last_done else now-30d, now)
         #     await get_bars(inst.canonical_id, tf, *gap)  # writes through cache
+        # Pacing: yields between instruments via `await asyncio.sleep(0)` to share event loop.
 
     async def subscribe_live_tail(canonical_id, timeframe) -> AsyncIterator[Bar]:
         # WS handler: subscribe Redis bar.<canonical_id>.<tf>
-        # Yield each pubsub message as a parsed Bar payload
+        # Yield each pubsub message as a parsed Bar payload (revision-sequenced)
 ```
 
-Coalescing pattern mirrors `sidecar_alpaca._ensure_order_event_subscription`'s per-account `asyncio.Lock` — concurrent first-callers on the same `(instrument, tf, range)` wait on a shared `asyncio.Event` rather than each spawning a duplicate fetch.
+**Cross-worker coalescing (architect CRIT #4).** Phase 24 will split backend to N>1 uvicorn workers. The pattern:
+
+1. **Same-worker fast path:** in-process `dict[(instrument_id, tf, gap_start, gap_end), asyncio.Event]`. Concurrent first-callers on the same key wait on the shared `Event`. This is the only place a process-local primitive is acceptable, and only as an optimization.
+2. **Cross-worker chokepoint:** `bar_backfill_jobs` partial-unique index. UPSERT returns `was_new`:
+   - `was_new=true`: this worker is the primary fetcher.
+   - `was_new=false`: this worker waits via PostgreSQL `LISTEN bar_backfill_done` channel; on notify, checks if `job_id` matches; if not, continues waiting. Bounded wait = 16s (gRPC deadline 15s + 1s grace).
+3. **Notify on completion:** primary fetcher executes `pg_notify('bar_backfill_done', job_id::text)` after marking job `done` or `failed`.
+4. **Fallback:** if `LISTEN` not available (e.g., during connection-pool churn), poll `bar_backfill_jobs.status` every 250ms with the same 16s ceiling.
+
+Metric `bar_service_cross_worker_wait_seconds` (histogram) tracks contention.
+
+**Coalescing primitive note:** the architect correctly flagged that the previous "per-account `asyncio.Lock`" reference was misleading (`Lock` = mutual exclusion; `Event` = broadcast). For request-coalescing where N first-callers want the same result, **`asyncio.Event` is the right primitive** (set on completion → all waiters proceed).
+
+**Chunked historical fetch (architect MED #2).** `GetHistoricalBarsResponse.truncated=true` triggers BarService's chunk loop:
+
+```python
+async def _fetch_with_chunks(canonical_id, tf, start, end, sidecar) -> list[HistoricalBar]:
+    bars: list[HistoricalBar] = []
+    cursor = start
+    for chunk_idx in range(100):                    # hard cap: 100 chunks per gap-fill
+        resp = await sidecar.GetHistoricalBars(
+            canonical_id=canonical_id, timeframe=tf,
+            range_start=cursor, range_end=end,
+            limit=1000,                              # per-broker pacing budget
+        )
+        bars.extend(resp.bars)
+        if not resp.truncated or not resp.bars:
+            return bars
+        cursor = resp.bars[-1].bucket_start + tf_to_interval(tf)
+    raise BarFetchTooLarge(f"chunked fetch exceeded 100 chunks for {canonical_id}/{tf}")
+```
+
+**Cursor pagination encoding (architect MED #6).** With single-row PK `(instrument_id, bucket_start)`:
+
+```python
+cursor = base64url(json.dumps({"v": 1, "last_bucket_start": "2026-04-30T15:30:00Z"}))
+# Query: WHERE bucket_start < $cursor.last_bucket_start
+#        ORDER BY bucket_start DESC LIMIT $limit
+# next_cursor = base64url({"v": 1, "last_bucket_start": <oldest_in_page>})  if total > limit
+```
+
+`v` is the cursor schema version for forward-compat.
 
 ### `backend/app/api/bars.py` (new router)
 
 ```
 GET    /api/bars?canonical_id&timeframe&start&end&limit=10000&cursor=...   → BarPage
-GET    /api/chart/layouts/:instrument_id                                    → ChartLayout | 404
-PUT    /api/chart/layouts/:instrument_id  (body=ChartLayoutPayload)         → ChartLayout
+GET    /api/chart/layouts/:instrument_id                                    → ChartLayout | 404 (read-side translator)
+PUT    /api/chart/layouts/:instrument_id  (body, If-Match etag header)      → ChartLayout (etag = updated_at ISO8601)
 DELETE /api/chart/layouts/:instrument_id                                    → 204
+POST   /api/orders/nonce/modify  body={order_id}                            → {nonce, expires_at}  (architect HIGH #7)
 WS     /ws/bars/:canonical_id/:timeframe                                    → live-tail Bar stream
 ```
 
-Auth: existing JWT middleware. Trade-execution endpoints (drag-stop → ModifyOrder) reuse the existing **trade nonce** CSRF flow — no new chokepoint.
+**Auth (architect MED #9).** Existing JWT middleware on REST. WS handshake mirrors `/ws/quotes`:
+- Token-on-connect via `Sec-WebSocket-Protocol: bearer.<jwt>` subprotocol.
+- Idle timeout 60s (server-initiated PING; client must reply within 30s).
+- Max **20 subscriptions per connection** (rate-limit knob in `app_config`).
+- 429 close-frame on attempt-21st subscription with reason `subscription_limit_exceeded`.
+
+**Modify-nonce flow (architect HIGH #7).** Drag-handle SL/TP currently piggybacks on `/api/orders/modify`'s nonce semantics, which the existing endpoint at `backend/app/api/orders.py:247` does NOT consume. Phase 9 adds the missing nonce mint:
+- `POST /api/orders/nonce/modify` returns a fresh nonce keyed `nonce:modify:{order_id}` in Redis with TTL 30s.
+- ConfirmDialog requests on **dialog open** (not on submit — avoids double-mint if user cancels).
+- `POST /api/orders/modify` now requires the nonce; `redis.GETDEL("nonce:modify:{order_id}:{nonce}")` consumes it (matches existing OCO pattern at `orders.py:411-416`).
+- 412 if nonce missing/expired.
+
+**Optimistic concurrency on chart_layouts (architect MED #13).** PUT requires `If-Match: <etag>` (etag = `updated_at` ISO8601). Backend rejects 412 on mismatch; FE merges from server state and prompts user to reconcile (rare in single-tenant single-user but cheap to implement).
 
 ### `proto/broker/v1/broker.proto` extension
 
@@ -441,9 +647,9 @@ message HistoricalBar {
 
 ### Sidecar implementations (4 files modified)
 
-- **`sidecar_schwab/handlers.py`** — `schwabdev` `pricehistory` endpoint (CHART_EQUITY) — generous quota, free for US equities.
+- **`sidecar_schwab/handlers.py`** — `schwabdev` `pricehistory` endpoint (CHART_EQUITY) — generous quota, free for US equities. Catches `401 invalid_token` once + retries after re-acquiring from `app_secrets` (architect MED #3 row 4).
 - **`sidecar_alpaca/handlers.py`** — `alpaca-py` `StockHistoricalDataClient.get_stock_bars` / `CryptoHistoricalDataClient.get_crypto_bars`.
-- **`sidecar_ibkr/handlers.py`** — `ib_async.reqHistoricalDataAsync` with pacing-violation backoff (IBKR caps ~60 historical reqs / 10min — needs token-bucket throttle in sidecar).
+- **`sidecar_ibkr/handlers.py`** — `ib_async.reqHistoricalDataAsync` with **per-client-id token bucket** (architect HIGH #3): capacity 50, refill 50/600s. Reserves 10 reqs/window for ad-hoc cold fetches by users. BarService's pre-warm cron `await sidecar.acquire_pacing_token()` blocks if bucket empty. Pre-warm staggered across 4 IBKR clients via `instrument_id % 4`. **Source priority hard rule:** for US equities, BarService skips IBKR entirely during pre-warm if Schwab or Alpaca is healthy — IBKR is fallback only when free-tier sources fail.
 - **`sidecar_futu/handlers.py`** — `futu-api request_history_kline` — HK only initially.
 
 ---
@@ -504,11 +710,13 @@ Toolbar collapses below `md` breakpoint to **5–7 most-used drawings**: Trend L
 
 ### Drag-handle SL/TP flow (`PositionOverlay.tsx`)
 
-1. Open positions for the current instrument render as a Long/Short Position overlay (entry price line + draggable SL/TP boxes if a bracket exists, or a "+ add SL/TP" handle if not).
-2. User drags an SL/TP handle to a new price level.
-3. On `pointerup`, show confirm dialog with: instrument, side, qty, current → new SL/TP price, est P&L impact.
-4. User confirms → POST to existing `/api/orders/modify` (bracket leg) or `/api/orders/bracket` (new bracket on naked position) with the existing trade-nonce CSRF flow.
-5. Success → overlay updates with new SL/TP; failure → toast + revert handle.
+See **Flow 6 in §6** for the full data flow including the per-leg `pending_modify_id` state machine, modify-nonce mint, and OrderEvent reconciliation. Key UX rules:
+
+1. Open positions for the current instrument render as a Long/Short Position overlay (entry price line + draggable SL/TP boxes if a bracket exists; v0.9.0 doesn't allow drag-to-create on naked positions — that's deferred to v0.9.1).
+2. **Tick snapping (architect MED #12):** drag target snaps to `instruments.tick_size` (per-instrument from broker contract spec; null until first observation). Confirm dialog displays the tick boundary explicitly: e.g. "$184.99 (rounded to $0.01 tick)".
+3. **Single-flight per leg:** while `pending_modify_id[leg_id]` is set, drag is disabled, handle is yellow ghost with spinner. The state clears on (a) matching OrderEvent, (b) 5s timeout (then fallback `GET /api/orders/{leg_id}`), or (c) explicit cancel.
+4. **Touch parity:** unified `pointerdown/pointermove/pointerup`. On mobile, `tick_size` snapping is more important since touch precision is coarser.
+5. **Confirm dialog requests nonce on open** (not on submit) via `POST /api/orders/nonce/modify {order_id}` — avoids double-mint if user cancels.
 
 ### klinecharts version pin
 
@@ -565,19 +773,38 @@ FE: user pans chart left, klinecharts emits "load more" event at left edge
 
 ### Flow 4 — Live tail (steady state)
 
-Live-tail responsiveness is decoupled from durability. The aggregator publishes a partial-bar update on **every tick** (running open/high/low/close of the in-progress bucket) for instant FE paint; the 2-second batch-flush to `bars_1s` is for durability and survives independently.
+Live-tail responsiveness is decoupled from durability. The aggregator publishes coalesced partial-bar updates per channel; the batch-flush to `bars_1s` writes only **closed** buckets at 1s boundaries.
+
+**Message envelope (architect HIGH #2):**
+```json
+{
+  "canonical_id": "AAPL.US",
+  "tf":           "1s",
+  "bucket_start": "2026-05-07T15:30:00Z",
+  "revision":     12,                  // monotonic per (canonical_id, tf, bucket_start)
+  "partial":      true,                // false ⇒ revision = MAX_INT, FE locks the bucket
+  "ohlcv":        { "o": "...", "h": "...", "l": "...", "c": "...", "v": "...", "trade_count": 7 }
+}
+```
+
+FE `liveTailStore` discards messages with `revision <= last_seen[bucket_start]`. On `partial=false`, store snaps to canonical close and disables further updates for that bucket.
 
 ```
 sidecar_*_streamer publishes quote.<src>.<canonical_id> on Redis
  → bar_aggregator subscribes; updates in-mem 1s bucket; WAL-write tick
- ├─ ON EVERY TICK: publish bar.<canonical_id>.1s with current bucket's running OHLCV (partial=true)
- │  → backend /ws/bars/<id>/<tf> consumer fans to FE WS
+ ├─ COALESCED PARTIAL PUBLISH (per-channel 250ms window):
+ │  publish bar.<canonical_id>.1s {partial=true, revision=N+1}
+ │  → backend /ws/bars/<id>/<tf> consumer fans in-process to FE WS conns
  │  → klinecharts updateOrAddData() on the latest candle  [latency ≤ 200ms tick→paint]
- └─ EVERY 2s (independent): batch-COPY in-flight buckets → bars_1s with source_priority
-    + emit bar.<canonical_id>.1s with partial=false (final closed bucket) for FE consolidation
+ └─ EVERY 1s ON BOUNDARY (architect HIGH #4): flush only CLOSED buckets where bucket_end < now
+    → batch-COPY into bars_1s; XTRIM MINID corresponding WAL entries
+    → publish bar.<canonical_id>.1s {partial=false, revision=MAX_INT}
+    → on flush-ack, BarService /ws/bars consumer re-emits final to FE for consolidation
 ```
 
-The FE distinguishes partial (in-progress, still updating) from final (closed) by the `partial` flag in the message envelope and only persists final bars to its local cache for scroll-back consistency.
+In-progress (still-open) buckets live only in memory + WAL — they are **never** in `bars_1s`. BarService's REST `/api/bars` query for the trailing-2s window must consult `bar_aggregator`'s `/internal/in_flight_bucket?canonical_id=...&tf=...` endpoint or simply request via the live-tail pub/sub. The FE implementation only ever reads in-flight via WS, so the REST path doesn't need to handle this.
+
+**WS reconnect repair:** on reconnect, FE refetches the trailing 2 closed buckets via REST to repair any gap-during-disconnect.
 
 ### Flow 5 — On-minute-boundary 1m emission (no broker historical for newest minute)
 
@@ -589,18 +816,40 @@ At HH:MM:00, bar_aggregator's minute_emitter:
  → 5–30 minutes later, sidecar GetHistoricalBars (next pre-warm tick) overwrites with priority 1–4
 ```
 
-### Flow 6 — Drag SL/TP on open position
+### Flow 6 — Drag SL/TP on open position (architect HIGH #6 + HIGH #7)
+
+PositionOverlay maintains a per-bracket-leg `pending_modify_id: Map<leg_id, {nonce, target_price, started_at}>`. While a leg is `pending`, its handle becomes a yellow ghost with a spinner, and dragging is disabled. Optimistic local price never persists past the next OrderEvent — server is authoritative.
 
 ```
 FE: PositionOverlay sees user drag SL handle from $190 → $185
- → on pointerup: open ConfirmDialog(side, qty, $190 → $185, est_loss=...)
+ → on pointerdown: snap target to instrument.tick_size; show ghost handle at target
+ → on pointerup at $185:
+   ├─ POST /api/orders/nonce/modify {order_id: <leg_id>}  → {nonce, expires_at}
+   └─ open ConfirmDialog(side, qty, $190 → $185, est_loss=..., expires_at)
  → user clicks Confirm
- → POST /api/orders/modify  (existing endpoint + trade-nonce CSRF)
-   body: { order_id: <bracket_sl_leg_id>, stop_price: 185.00 }
- → backend → Sidecar.ModifyOrder → broker
- → on success: existing OrderEvent stream pushes update
- → FE PositionOverlay updates handle position
+   ├─ pending_modify_id[leg_id] = {nonce, target_price: 185, started_at: now}
+   ├─ handle becomes yellow ghost + spinner; further drag disabled
+   └─ POST /api/orders/modify  (with nonce — existing CSRF flow)
+      body: { order_id: <bracket_sl_leg_id>, stop_price: 185.00, nonce: ... }
+
+ → backend: nonce GETDEL; if missing → 412
+   → Sidecar.ModifyOrder → broker
+   → broker accepts → OrderEvent {modify_id, status=modified, stop_price=185}
+
+ → FE: existing /ws/orders consumer dispatches OrderEvent
+   ├─ if event.modify_id == pending_modify_id[leg_id].nonce:
+   │   - clear pending state
+   │   - snap handle to event.stop_price (server's truth)
+   │   - re-enable drag
+   └─ else (rejection or stale): toast broker error; revert handle to last-known-good
+
+ Failure paths:
+   - Nonce expired → 412 → toast "drag expired, try again"; revert
+   - Broker rejects (e.g., stop would trigger immediately) → toast; revert
+   - 5s timeout with no OrderEvent → fallthrough: GET /api/orders/{leg_id}, snap to authoritative state
 ```
+
+Per-leg drag is single-flight: the `pending_modify_id` Map prevents a second drag from issuing a competing `ModifyOrder` until the first event lands or times out.
 
 ### Flow 7 — Layout persistence (debounced)
 
@@ -628,9 +877,11 @@ bar_aggregator crashes mid-bucket
 
 ## 7. Indicator Inventory (Bucket A, ~70 indicators)
 
-### A1 — klinecharts built-ins (27, free)
+### A1 — klinecharts built-ins (verified against v9.8.12; **re-verify against v10 at scaffold time** — architect MED #7)
 
 MA, SMA, EMA, BBI, AO, CCI, KDJ, MACD, MTM, PSY, ROC, RSI, TRIX, WR, BOLL, BIAS, SAR, VOL, OBV, PVT, VR, EMV, AVP, DMI, DMA, BRAR, CR.
+
+**Verification step in Chunk E:** `grep 'name:' node_modules/klinecharts/dist/index.esm.js | sort -u` and reconcile against this list. Any klinecharts v10 built-in renames or removals get reflected in the inventory before Chunk F starts (custom indicators).
 
 ### A2 — custom-coded TS (~45)
 
@@ -669,6 +920,19 @@ export const vwapTemplate: IndicatorTemplate = {
 
 **Per-indicator test:** `*.test.ts` with golden-vector OHLCV input → expected output array. Test set generated from canonical references (TradingView Pine sources, klinecharts source, Wikipedia formulas — cross-validated).
 
+**Citation requirement (architect MED #7).** Each custom indicator's `*.ts` file MUST start with a header comment citing the canonical reference used to derive `calc()`. Without citation, golden-vector tests will diverge between Codex generations of the same indicator. Header format:
+
+```ts
+/**
+ * VWAP — Volume-Weighted Average Price
+ * Reference: https://www.tradingview.com/pine-script-reference/v5/#fun_ta.vwap
+ *            https://en.wikipedia.org/wiki/Volume-weighted_average_price
+ * Cross-validated against: klinecharts.VOL / OBV (volume conventions)
+ */
+```
+
+Codex dispatch prompts inject this requirement; reviewer chain rejects custom indicator files without a `Reference:` line.
+
 ---
 
 ## 8. Drawing Tools
@@ -704,6 +968,11 @@ Pattern/wave overlays (ABCD, XABCD, Three Drives, Head & Shoulders, 3/5/8 Waves)
 | Layout JSONB schema drift | `payload.schema_version` mismatch on GET | Backend runs forward-migration function; if unmigratable, return 200 with default + log warning |
 | User drags SL/TP, broker rejects ModifyOrder | OrderEvent rejection or 4xx response | Toast with broker error; revert handle position; existing trade-error semantics (per Phase 5b/5c) |
 | Aggregator gets ticks before instrument exists | Race on first quote subscribe | Aggregator silently drops ticks for unknown instrument_id; structlog DEBUG (not WARN — expected during seed) |
+| Quote-bus producer (sidecar streamer) silent — no quotes on a previously-active symbol | `bar_aggregator_idle_seconds{instrument}` gauge > 60s | FE `liveTailStore` shows "stale" badge after 60s; chart freezes with last partial. Aggregator increments `bar_aggregator_idle_total{instrument}` counter for alerting |
+| TimescaleDB extension version mismatch on PG-18 (architect risk #1) | Alembic 0023 fails on `CREATE EXTENSION` | Fallback path: feature-flag `app_config.charts.timescale_enabled = false` enables vanilla PG declarative range partitioning by `bucket_start` week; CAGGs replaced by hand-rolled materialized views refreshed via cron. Documented as ~3–5 day rework |
+| WG tunnel split between VPS (backend + aggregator) and NUC (PG + IBKR/Futu sidecars) | aggregator catches `OperationalError` on PG flush | Aggregator pauses flush, accumulates ticks in WAL (bounded by `MAXLEN ~ 50000` per instrument); live-tail Redis pub/sub continues; auto-resume on PG ping success; `bar_aggregator_pg_unreachable_seconds` gauge alerts at 60s; healthcheck fails at 5min triggering Docker restart + WAL replay |
+| Schwab token rotation mid-fetch | sidecar catches `401 invalid_token` during paginated chunk | Sidecar re-acquires token from `app_secrets`, retries the failed chunk once; if still 401, returns gRPC `UNAUTHENTICATED` with details; BarService marks job failed and surfaces in next pre-warm cycle |
+| `pg_dump` blocks CAGG refresh window | Timescale CAGG `last_run_started_at` lag > 5min while pg_dump is running | Schedule `pg_dump` outside CAGG refresh windows in cron config (NUC PowerShell scheduled task); document the conflict in `docs/NETWORK.md`. If unavoidable, switch to `pg_basebackup` which doesn't take metadata locks |
 
 ### Hard invariants enforced
 
@@ -751,19 +1020,45 @@ Pattern/wave overlays (ABCD, XABCD, Three Drives, Head & Shoulders, 3/5/8 Waves)
 - `scripts/empirical/schwab_history_paper.py` — fetches AAPL 1m for last 30d via real Schwab API, asserts ≥1 bar/min coverage during market hours.
 - Same for IBKR / Futu / Alpaca. Each excluded from CI (real-broker), runs on-demand or via nightly self-hosted GHA runner.
 
+**Cred isolation (architect MED #11).** Empirical scripts use a separate **paper** namespace in `app_secrets`:
+- `paper.schwab.app_key` / `paper.schwab.app_secret` (distinct from `schwab.app_key`)
+- `paper.alpaca.api_key` / `paper.alpaca.api_secret`
+- IBKR: paper-account login already separate (4 gateways already split prod/paper).
+- Futu: paper trading creds via OpenD's paper mode.
+The Chunk C empirical-script PR adds these secret namespaces; nightly self-hosted GHA runner reads only `paper.*` keys.
+
+### Per-chunk reviewer composition (architect LOW #4)
+
+| Chunk | Reviewers (always: spec-compliance + code-reviewer + security-reviewer) | + |
+|---|---|---|
+| A | base | python-reviewer (sonnet), database-reviewer (sonnet) |
+| B | base | python-reviewer, silent-failure-hunter (sonnet — WAL replay correctness) |
+| B-bis | base | database-reviewer (CAGG correctness focus) |
+| C | base | python-reviewer ×4 sidecars (parallel) |
+| D | base | python-reviewer, database-reviewer (cross-worker coalescing), security-reviewer focus on nonce |
+| E | base | typescript-reviewer (haiku) |
+| F1 / F2 | base | typescript-reviewer (golden-vector test correctness) |
+| G | base | typescript-reviewer + security-reviewer focus on drag/nonce/CSRF |
+| H | base | typescript-reviewer + database-reviewer (If-Match + JSONB translator) |
+| I | base | full chain + ARCHITECT-REVIEW once at end (post-shipment retrospective per `feedback_review_per_chunk`) |
+
+Model routing per CLAUDE.md: spec-compliance/python-reviewer/typescript-reviewer → haiku; code-reviewer/security-reviewer/database-reviewer/silent-failure-hunter → sonnet; ARCHITECT-REVIEW → opus.
+
 ---
 
 ## 11. Migration & Rollout
 
-### Alembic chain (5 new migrations)
+### Alembic chain (7 new migrations)
 
-| # | Change |
-|---|---|
-| 0023 | `CREATE EXTENSION timescaledb` (idempotent) |
-| 0024 | base hypertables `bars_1s` + `bars_1m` with retention policies, PK `(instrument_id, bucket_start)`, source_priority column |
-| 0025 | 10 continuous aggregates with refresh policies |
-| 0026 | `chart_layouts` (user_id, instrument_id, payload jsonb, schema_version) |
-| 0027 | `bar_backfill_jobs` (with partial unique index on pending+in_progress) |
+| # | Change | Lands in chunk |
+|---|---|---|
+| 0023 | `CREATE EXTENSION timescaledb` (idempotent) | A |
+| 0023a | `instrument_id BIGINT` resolver columns + best-effort backfill on `positions`/`watchlist_entries` | A |
+| 0023b | `tick_size NUMERIC(20,8)` on `instruments` | A |
+| 0024 | base hypertables `bars_1s` + `bars_1m` with retention, PK `(instrument_id, bucket_start)`, `source_priority` + `volume_source` + CHECK constraints | A |
+| 0026 | `chart_layouts` (single-tenant; UNIQUE on `instrument_id`; 64KB cap) | A |
+| 0027 | `bar_backfill_jobs` (partial unique on pending+in_progress) | A |
+| 0025 | 10 CAGGs with `end_offset >= bucket_width` and `start_offset < base retention`; CAGG retention for `bars_1h`/`bars_1d` | **B-bis** (after Chunk B locks aggregator schema) |
 
 Each migration tested via `backend/tests/integration/test_alembic_<rev>.py` round-trip on real PG+Timescale.
 
@@ -787,19 +1082,21 @@ Each migration tested via `backend/tests/integration/test_alembic_<rev>.py` roun
 - New routes auto-wired via TanStack Router file-based routing under `frontend/src/routes/chart.$canonicalId.tsx`.
 - New feature module under `frontend/src/features/chart/` — boundaries config already permits `features/` reach.
 
-### Rollout plan (9 chunks)
+### Rollout plan (10 chunks; resequenced per architect HIGH #9 + LOW #10)
 
-1. **Chunk A — TimescaleDB foundation:** migrations 0023–0025, BarService skeleton, TimescaleDB pinned dependency. Reviewer chain.
-2. **Chunk B — bar_aggregator service:** new Docker service, WAL+flush+publish, sidecar streamer integration. Reviewer chain.
-3. **Chunk C — sidecar GetHistoricalBars:** all 4 sidecars, proto extension, contract tests, empirical scripts. Reviewer chain.
-4. **Chunk D — backend orchestration:** BarService gap detection, source priority, pre-warm cron, /api/bars + /ws/bars + /api/chart/layouts. Reviewer chain.
-5. **Chunk E — FE chart feature:** TradeChart wrapper, indicator picker, drawing tools (built-ins only), TimeframeBar, ChartPage route, inline links. Reviewer chain.
-6. **Chunk F — Custom indicators:** ~45 TS indicators with golden-vector unit tests. Reviewer chain.
-7. **Chunk G — Drag-handle SL/TP:** PositionOverlay, ModifyOrder/PlaceBracket integration, mobile touch path. Reviewer chain.
-8. **Chunk H — Layout persistence + mobile parity:** chart_layouts CRUD, debounced sync, mobile toolbar collapse. Reviewer chain.
-9. **Chunk I — E2E + perf + close-out:** Playwright flows, perf smoke tests, CHANGELOG/TASKS/CLAUDE.md updates, tag v0.9.0.
+1. **Chunk A — Foundation:** 0023, 0023a (instrument_id resolver), 0023b (tick_size), 0024 (base hypertables), 0026 (chart_layouts), 0027 (bar_backfill_jobs); BarService skeleton; TimescaleDB pinned. Reviewer chain.
+2. **Chunk B — bar_aggregator service:** Docker service, WAL flush-ack-trim, per-channel coalescing window, flush-on-closed-bucket-only, sharding key `wal:bar_aggregator:{shard}:{instrument_id}` (N=1), WG-split tolerance. Reviewer chain.
+3. **Chunk B-bis — CAGG creation:** 0025 (10 CAGGs with corrected `end_offset >= bucket_width` + `start_offset < base retention`); only after Chunk B's flush has been validated against real `bars_1s` data. Reviewer chain (database-reviewer focus).
+4. **Chunk C — sidecar GetHistoricalBars:** all 4 sidecars, proto extension, IBKR per-client token bucket + jittered scheduling, Schwab 401-retry-once, contract tests, empirical scripts. Reviewer chain.
+5. **Chunk D — Backend orchestration:** BarService cross-worker coalescing (pg_notify + status-poll fallback), gap detection, source priority hard rule (skip IBKR for US equities during pre-warm if Schwab/Alpaca healthy), pre-warm cron, `/api/bars` cursor pagination, `/api/chart/layouts/*` with read-side translator + If-Match, `/api/orders/nonce/modify`, `/ws/bars` with handshake + 20-sub limit, dual-emission revision sequencing on FE WS gateway. Reviewer chain.
+6. **Chunk E — FE chart feature:** TradeChart wrapper, IndicatorPicker, DrawingTools (built-ins only), TimeframeBar, ChartPage route, inline links from positions/orders/watchlist; klinecharts v10 inventory verification (re-grep built-ins, reconcile §7); CLAUDE.md `klineschart→klinecharts` typo fix. Reviewer chain.
+7. **Chunk F1 — Custom indicators (first 22):** Moving averages + Volatility/channels groups; golden-vector tests with citations enforced. Reviewer chain.
+8. **Chunk F2 — Custom indicators (remaining ~23):** Momentum/oscillators + Volume/flow + Pattern/signal + Misc groups; same standards. Reviewer chain.
+9. **Chunk G — Drag-handle SL/TP:** PositionOverlay with per-leg `pending_modify_id` state machine, modify-nonce mint flow, OrderEvent reconciliation, tick-size snapping, mobile touch path. Reviewer chain (security-reviewer focus on nonce flow).
+10. **Chunk H — Layout persistence + mobile parity:** chart_layouts CRUD, debounced sync with If-Match, read-side translator implementation, mobile toolbar collapse (5–7 most-used drawings: Trend Line, Horizontal Line, Fib Retracement, Rectangle, Text, Long/Short Position + Indicator picker access). Reviewer chain.
+11. **Chunk I — E2E + perf + close-out:** Playwright flows incl. aggregator crash injection + WG-split simulation; perf smoke tests; storage-budget projection at 100-instrument steady state; CHANGELOG/TASKS/CLAUDE.md updates; tag v0.9.0.
 
-Estimated cadence: ~1 chunk per day with reviewers, **~1.5–2 weeks total**. Matches Phase 8c (~10 days, 4 chunks but heavier per chunk).
+Estimated cadence: ~1 chunk per day with reviewers; F1 + F2 split addresses architect LOW #10 (45 indicators don't fit 1 day). **Total: ~2–2.5 weeks** (slightly longer than original 1.5–2w estimate to accommodate B-bis and split F).
 
 ### Codex delegation pattern (per `feedback_codex_delegation.md`)
 
@@ -815,13 +1112,18 @@ None for the user surface. Phase 9 is greenfield — nothing to gate against. `a
 
 ### Top risks
 
-1. **TimescaleDB v2.17+ on PG-18 compatibility.** PG-18 is recent; verify Timescale's PG-18 support matrix at scaffold time. Mitigation: pin TS version via bootstrap script; if support gaps emerge, fall back to vanilla PG partitioning + cron-based aggregation (more code, no Timescale dep — adds ~3–5 days).
-2. **Aggregator memory under symbol fan-out.** If the active set grows to thousands of instruments, in-flight bucket dict could balloon. Mitigation: hard cap at 1000 active instruments per aggregator; eviction policy on stale buckets; emit `bar_aggregator_active_instruments` metric.
-3. **IBKR pacing violations** during pre-warm. IBKR caps ~60 historical reqs / 10min. With 100+ symbols hot-pre-warming `1m`, easy to trip. Mitigation: per-sidecar token bucket, jittered scheduling, fall through to next priority source if IBKR refuses.
-4. **Klinecharts custom indicator perf.** 45 custom indicators in worst-case all enabled at once on 30k bar dataset. Each indicator is `O(n)`. Total ~1.4M ops on every recalc. Probably fine on modern hardware; smoke-test in Chunk F.
-5. **CAGG refresh lag** during heavy ingest. If 1s aggregator flushes 10k rows/sec and CAGG `bars_5s` policy refreshes every 30s, refresh window can grow. Mitigation: tune `start_offset` + `end_offset`; if stalls, switch to per-flush manual `refresh_continuous_aggregate()` call.
-6. **Mobile drag handle precision.** Touch points are coarser than mouse; SL price snapping on tiny price ranges (e.g. crypto sub-cent) needs careful UX. Mitigation: snap to nearest tick by default; show price as user drags; require explicit confirm.
-7. **Trade nonce reuse on rapid drags.** If user drags multiple times within nonce TTL, replay defense may reject. Mitigation: each drag-release fetches a fresh nonce; existing CSRF infra already supports this.
+1. **TimescaleDB v2.17+ on PG-18 compatibility.** PG-18 is recent; verify support matrix at scaffold time. Mitigation: feature flag `app_config.charts.timescale_enabled = true|false`; vanilla-PG fallback path uses declarative range partitioning by `bucket_start` week + cron-refreshed materialized views (~3–5 day rework).
+2. **Aggregator memory + CPU under symbol fan-out** (architect MED #10). 1000 active instruments × 6 timeframes × ~200 bytes/bucket ≈ 1.2 MB state; CPU bottleneck on per-tick traversal. Mitigation: WAL stream namespace `wal:bar_aggregator:{shard}:{instrument_id}` reserves the sharding key; Phase 9 ships N=1, but post-v1.0 horizontal scaling doesn't need a breaking-change migration. Evict idle buckets after 5 min.
+3. **IBKR pacing violations** (architect HIGH #3). IBKR caps ~60 historical reqs / 10min **per client ID**, and the project runs 4 clients. Mitigation: per-sidecar token bucket (capacity 50, refill 50/600s, reserve 10 for ad-hoc), jittered scheduling, stagger pre-warm via `instrument_id % 4` across clients, **hard rule:** for US equities skip IBKR entirely during pre-warm if Schwab/Alpaca are healthy.
+4. **Klinecharts custom indicator perf.** 45 custom indicators in worst-case all enabled on 30k bar dataset, ~1.4M ops/recalc. Probably fine; smoke-test in Chunks F1/F2.
+5. **CAGG refresh lag during heavy ingest.** Mitigated by `end_offset >= bucket_width` + `start_offset < base retention` (architect CRIT #2 + HIGH #5).
+6. **Mobile drag handle precision** (architect MED #12). Mitigation: `instruments.tick_size` snap; show snapped price during drag; explicit confirm.
+7. **Trade nonce mint for modify path** (architect HIGH #7). Mitigation: new `POST /api/orders/nonce/modify` mints; ConfirmDialog requests on dialog open; Redis `GETDEL` consumes on submit; 30s TTL prevents reuse.
+8. **WAL durability bound** (architect CRIT #5). Honestly stated: zero-tick loss within Redis uptime; ≤1 batch loss on Redis crash (Redis is single primary). 5-minute / `MAXLEN ~ 50000` retention is replaced by **flush-ack-based** trim. On boot, refuse replay if oldest WAL entry has gap to last-flushed > `2× FLUSH_INTERVAL_MS` (= 4s) — emit CRITICAL log + counter; document silent-gap window.
+9. **CAGG retention vs base retention** (architect HIGH #5). Mitigated by `start_offset < base retention` invariant in §3 CAGG table.
+10. **Drag-handle race against existing OrderEvent stream** (architect HIGH #6). Mitigated by per-leg `pending_modify_id` Map + 5s timeout fallthrough to `GET /api/orders/{leg_id}`.
+11. **Cross-worker coalescing in Phase 24 multi-worker future** (architect CRIT #4). Phase 9 ships single-worker but `bar_backfill_jobs` partial-unique + `pg_notify('bar_backfill_done')` are the cross-worker chokepoint. Phase 24 inherits this without rework.
+12. **Live-tail message ordering** (architect HIGH #2). Mitigated by `revision` field in WS envelope; FE discards stale revisions; `partial=false` carries `revision = MAX_INT`.
 
 ### Deferred to v0.9.1 mini-phase (immediately after v0.9.0)
 
