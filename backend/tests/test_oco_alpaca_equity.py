@@ -10,6 +10,11 @@ from alpaca.trading.enums import OrderClass
 
 from app.services.oco_orchestrator import dispatch_oco_alpaca_equity
 
+# Test does not touch DB — opt out of the autouse migration fixture so this
+# module can run in a sidecar-image CI context that has no Postgres
+# (chunk-OCO spec H-1).
+pytestmark = pytest.mark.no_db
+
 
 class FakeAlpacaClient:
     def __init__(self) -> None:

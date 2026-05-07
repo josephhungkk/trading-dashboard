@@ -91,6 +91,8 @@ async def dispatch_oco_alpaca_crypto(
     request: Any,
     alpaca_client: Any,
     *,
+    # Default FALSE: crypto OCO is empirically unconfirmed (spec §6, Alembic 0022).
+    # Caller must pass crypto_oco_supported=True only after T-O.5 PASS branch confirms.
     crypto_oco_supported: bool = False,
 ) -> OcoOrderResponse:
     """Dispatch crypto OCO only when empirical support has been explicitly enabled."""
@@ -105,23 +107,22 @@ async def _dispatch_oco_alpaca_native(
 ) -> OcoOrderResponse:
     """Shared OCO submission path for equity and crypto.
 
+    Wire shape matches the empirically-validated paper script
+    (scripts/empirical/alpaca_equity_oco_paper.py): LimitOrderRequest with
+    order_class=OCO, limit_price for the take-profit leg, stop_price for the
+    stop-loss trigger. No nested TakeProfitRequest/StopLossRequest objects —
+    Alpaca's OCO contract differs from BRACKET in that the parent fields ARE
+    the legs (chunk-OCO spec H-2).
+
     Lazy alpaca-py import: backend does not ship alpaca-py as a runtime dep
     (sidecar_alpaca owns the SDK). Production callers must run inside an
     image that has alpaca-py installed.
     """
     from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
-    from alpaca.trading.requests import (
-        LimitOrderRequest,
-        StopLossRequest,
-        TakeProfitRequest,
-    )
+    from alpaca.trading.requests import LimitOrderRequest
 
     side = request.side.upper()
     tif = request.tif.upper()
-    stop_loss_kwargs: dict[str, Decimal] = {"stop_price": Decimal(request.stop_price)}
-    if getattr(request, "stop_limit_price", None):
-        stop_loss_kwargs["limit_price"] = Decimal(request.stop_limit_price)
-
     order_data = LimitOrderRequest(
         symbol=request.symbol,
         qty=Decimal(request.qty),
@@ -129,8 +130,7 @@ async def _dispatch_oco_alpaca_native(
         time_in_force=TimeInForce[tif],
         order_class=OrderClass.OCO,
         limit_price=Decimal(request.limit_price),
-        take_profit=TakeProfitRequest(limit_price=Decimal(request.limit_price)),
-        stop_loss=StopLossRequest(**stop_loss_kwargs),
+        stop_price=Decimal(request.stop_price),
     )
     order = await asyncio.to_thread(alpaca_client.submit_order, order_data=order_data)
     return OcoOrderResponse(

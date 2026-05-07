@@ -21,11 +21,19 @@ EQUITY_ROW = ("alpaca", "STOCK", "OCO", "GTC")
 CRYPTO_ROW = ("alpaca", "CRYPTO", "OCO", "GTC")
 EQUITY_NOTES = "Phase 8c equity OCO empirical PASS (T-O.5)"
 CRYPTO_NOTES = "Alpaca crypto OCO not supported per Phase 8c empirical gate (T-O.5)"
-DOWNGRADE_NOTES = "Reverted Phase 8c OCO capability"
+EQUITY_DOWNGRADE_NOTES = "Reverted Phase 8c equity OCO (was TRUE)"
+CRYPTO_DOWNGRADE_NOTES = "Reverted Phase 8c crypto OCO (already FALSE)"
 
 
-def _upsert_capability(row: tuple[str, str, str, str], is_supported: bool, notes: str) -> None:
-    bind = op.get_bind()
+def _upsert_capability(
+    bind: sa.engine.Connection,
+    row: tuple[str, str, str, str],
+    is_supported: bool,
+    notes: str,
+) -> None:
+    # bind is passed in (chunk-OCO db M-2) so the helper's connection
+    # dependency is explicit and won't silently re-acquire op.get_bind() if
+    # moved outside this migration module.
     bind.execute(
         sa.text(
             """
@@ -57,13 +65,41 @@ def _upsert_capability(row: tuple[str, str, str, str], is_supported: bool, notes
     )
 
 
+def _update_capability_notes(
+    bind: sa.engine.Connection,
+    row: tuple[str, str, str, str],
+    notes: str,
+) -> None:
+    bind.execute(
+        sa.text(
+            """
+            UPDATE broker_order_capability
+               SET is_supported = FALSE,
+                   notes = :notes,
+                   updated_at = NOW()
+             WHERE broker_id = :b
+               AND asset_class = :a
+               AND order_type = :o
+               AND time_in_force = :t
+            """
+        ),
+        {
+            "b": row[0],
+            "a": row[1],
+            "o": row[2],
+            "t": row[3],
+            "notes": notes,
+        },
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     bind.execute(
         sa.text("LOCK TABLE broker_order_capability IN SHARE ROW EXCLUSIVE MODE")
     )
-    _upsert_capability(EQUITY_ROW, True, EQUITY_NOTES)
-    _upsert_capability(CRYPTO_ROW, False, CRYPTO_NOTES)
+    _upsert_capability(bind, EQUITY_ROW, True, EQUITY_NOTES)
+    _upsert_capability(bind, CRYPTO_ROW, False, CRYPTO_NOTES)
     bind.execute(
         sa.text("SELECT pg_notify('app_config:invalidate:order_capabilities', 'alpaca')")
     )
@@ -74,21 +110,10 @@ def downgrade() -> None:
     bind.execute(
         sa.text("LOCK TABLE broker_order_capability IN SHARE ROW EXCLUSIVE MODE")
     )
-    bind.execute(
-        sa.text(
-            """
-            UPDATE broker_order_capability
-               SET is_supported = FALSE,
-                   notes = :notes,
-                   updated_at = NOW()
-             WHERE broker_id = 'alpaca'
-               AND order_type = 'OCO'
-               AND time_in_force = 'GTC'
-               AND asset_class IN ('STOCK', 'CRYPTO')
-            """
-        ),
-        {"notes": DOWNGRADE_NOTES},
-    )
+    # Per-row notes (chunk-OCO db M-1) keep the audit trail clear: equity
+    # reverts from TRUE → FALSE; crypto stays FALSE (already negative).
+    _update_capability_notes(bind, EQUITY_ROW, EQUITY_DOWNGRADE_NOTES)
+    _update_capability_notes(bind, CRYPTO_ROW, CRYPTO_DOWNGRADE_NOTES)
     bind.execute(
         sa.text("SELECT pg_notify('app_config:invalidate:order_capabilities', 'alpaca')")
     )

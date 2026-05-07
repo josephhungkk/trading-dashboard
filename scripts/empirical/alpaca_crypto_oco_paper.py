@@ -43,4 +43,11 @@ def run(client=None) -> int:
 
 
 if __name__ == '__main__':
-    raise SystemExit(run())
+    try:
+        raise SystemExit(run())
+    except (Exception,) as exc:
+        # Mirrors equity script: any exception outside run()'s try/except
+        # (e.g. missing env vars in build_client) prints a friendly FAIL
+        # instead of a raw traceback (chunk-OCO spec MED-3).
+        print(f'FAIL: {exc}')
+        raise SystemExit(1)
