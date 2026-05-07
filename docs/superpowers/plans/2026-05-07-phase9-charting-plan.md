@@ -1502,14 +1502,30 @@ git push origin main --tags
 
 ---
 
-### Task 53: Cleanup follow-up
+### Task 53: Cleanup follow-up + CI debt repayment
+
+**CI debt context** (added 2026-05-07): CI has been red since multiple prior phases — possibly all the way back to Phase 0 per user clarification. User feedback `feedback_ci_review_per_phase_owed.md` directs that CI cleanup is its own multi-phase reconciliation effort, scheduled here at the very end of Phase 9 (NOT bundled into Chunk A through I work). This task expands to absorb that debt repayment for **every phase 0 through 8** that is missing its reviewer chain pass.
 
 - [ ] **Step 1: Rename memory** — `phase9_pg_cert_auth.md` → `phase24_pg_cert_auth.md` (PG cert auth moved Phase 9 → Phase 24 per ROADMAP §42; flagged in `phase9_brainstorm.md`).
 - [ ] **Step 2: Update `MEMORY.md` index pointer accordingly.**
-- [ ] **Step 3: Commit**
+
+- [ ] **Step 3: CI debt repayment — bisect-and-fix per workflow**
+  - **`.github/workflows/ci.yml` backend job:** confirm `Pytest` step runs cleanly against fresh PG-18+TimescaleDB. Most likely root cause: a missing prerequisite migration that adds `BRACKET` to `order_types` before `0021_eq_alpaca_equity_bracket` references it. Bisect to find the phase where the gap was introduced (Phase 8b/8c suspected). Add a small idempotent shim migration if needed (`INSERT INTO order_types (...) ON CONFLICT DO NOTHING`).
+  - **`.github/workflows/ci.yml` sidecar job:** verify the `sidecar_ibkr` path fix from `cc4232b` actually runs through to coverage gate. If still failing, surface logs.
+  - **`.github/workflows/e2e-mock.yml`:** investigate failures (separate workflow, likely related rot in test fixtures).
+  - **`.github/workflows/deploy.yml`:** investigate failures (likely related, possibly mTLS or env-var drift).
+- [ ] **Step 4: Per-phase missing reviewer chains (Phase 0 → Phase 8c)** — user clarified 2026-05-07 the gap may track back to Phase 0. Procedure:
+  1. For each phase tag (`v0.1.0` through `v0.10.0`) where the `phase{N}_shipped.md` memory does NOT mention reviewer findings applied: enumerate the commit range (`git log <prev-tag>..<this-tag>`).
+  2. Run the chunk-end 5-reviewer chain (spec-compliance + code-reviewer + security-reviewer + database-reviewer + language-reviewer per `feedback_review_per_chunk.md`) against that commit range.
+  3. Apply CRIT+HIGH+MED inline per `feedback_architect_findings_apply_through_medium.md`.
+  4. Update the corresponding `phase{N}_shipped.md` memory to reflect findings + commits.
+  5. Commit each phase's findings under one squashed commit per phase: `fix(ci): retroactive reviewer chain for phase{N} (commits {a}..{b})`.
+- [ ] **Step 5: Validate CI green end-to-end** — push + watch; confirm all 4 workflows pass.
+- [ ] **Step 6: Commit**
 
 ```bash
 git commit -m "chore(memory): rename phase9_pg_cert_auth → phase24_pg_cert_auth"
+git commit -m "fix(ci): debt repayment — bisect + per-phase reviewer chains for phases 5-8"
 ```
 
 ---
