@@ -367,7 +367,10 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         }
         if request.client_order_id:
             values["client_order_id"] = request.client_order_id
-        if request.qty:
+        cash_amount = getattr(request, "cash_amount", "")
+        if cash_amount and order_type == "MARKET":
+            values["notional"] = Decimal(cash_amount)
+        elif request.qty:
             values["qty"] = Decimal(request.qty)
         if order_type in {"LIMIT", "STOP_LIMIT", "LOC", "LOO"}:
             values["limit_price"] = Decimal(request.limit_price)

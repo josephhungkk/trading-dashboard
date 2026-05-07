@@ -266,7 +266,7 @@ class PositionsResponse(_message.Message):
     def __init__(self, positions: _Optional[_Iterable[_Union[Position, _Mapping]]] = ...) -> None: ...
 
 class Order(_message.Message):
-    __slots__ = ("order_id", "contract", "side", "order_type", "quantity", "limit_price", "stop_price", "time_in_force", "status", "quantity_filled", "avg_fill_price", "submitted_at", "updated_at", "avg_fill_price_inferred", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date")
+    __slots__ = ("order_id", "contract", "side", "order_type", "quantity", "limit_price", "stop_price", "time_in_force", "status", "quantity_filled", "avg_fill_price", "submitted_at", "updated_at", "avg_fill_price_inferred", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date")
     ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     CONTRACT_FIELD_NUMBER: _ClassVar[int]
     SIDE_FIELD_NUMBER: _ClassVar[int]
@@ -281,6 +281,7 @@ class Order(_message.Message):
     SUBMITTED_AT_FIELD_NUMBER: _ClassVar[int]
     UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
     AVG_FILL_PRICE_INFERRED_FIELD_NUMBER: _ClassVar[int]
+    CASH_AMOUNT_FIELD_NUMBER: _ClassVar[int]
     TRAIL_OFFSET_FIELD_NUMBER: _ClassVar[int]
     TRAIL_OFFSET_TYPE_FIELD_NUMBER: _ClassVar[int]
     TRAIL_LIMIT_OFFSET_FIELD_NUMBER: _ClassVar[int]
@@ -299,11 +300,12 @@ class Order(_message.Message):
     submitted_at: _timestamp_pb2.Timestamp
     updated_at: _timestamp_pb2.Timestamp
     avg_fill_price_inferred: bool
+    cash_amount: str
     trail_offset: str
     trail_offset_type: str
     trail_limit_offset: str
     expiry_date: str
-    def __init__(self, order_id: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., quantity: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., time_in_force: _Optional[_Union[TimeInForce, str]] = ..., status: _Optional[_Union[OrderStatus, str]] = ..., quantity_filled: _Optional[str] = ..., avg_fill_price: _Optional[_Union[Money, _Mapping]] = ..., submitted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., avg_fill_price_inferred: bool = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
+    def __init__(self, order_id: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., quantity: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., time_in_force: _Optional[_Union[TimeInForce, str]] = ..., status: _Optional[_Union[OrderStatus, str]] = ..., quantity_filled: _Optional[str] = ..., avg_fill_price: _Optional[_Union[Money, _Mapping]] = ..., submitted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., avg_fill_price_inferred: bool = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
 
 class OrdersResponse(_message.Message):
     __slots__ = ("orders",)
@@ -312,7 +314,7 @@ class OrdersResponse(_message.Message):
     def __init__(self, orders: _Optional[_Iterable[_Union[Order, _Mapping]]] = ...) -> None: ...
 
 class PlaceOrderRequest(_message.Message):
-    __slots__ = ("account_number", "client_order_id", "conid", "side", "order_type", "tif", "qty", "limit_price", "stop_price", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date")
+    __slots__ = ("account_number", "client_order_id", "conid", "side", "order_type", "tif", "qty", "limit_price", "stop_price", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date", "oco_group_id")
     ACCOUNT_NUMBER_FIELD_NUMBER: _ClassVar[int]
     CLIENT_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     CONID_FIELD_NUMBER: _ClassVar[int]
@@ -322,10 +324,12 @@ class PlaceOrderRequest(_message.Message):
     QTY_FIELD_NUMBER: _ClassVar[int]
     LIMIT_PRICE_FIELD_NUMBER: _ClassVar[int]
     STOP_PRICE_FIELD_NUMBER: _ClassVar[int]
+    CASH_AMOUNT_FIELD_NUMBER: _ClassVar[int]
     TRAIL_OFFSET_FIELD_NUMBER: _ClassVar[int]
     TRAIL_OFFSET_TYPE_FIELD_NUMBER: _ClassVar[int]
     TRAIL_LIMIT_OFFSET_FIELD_NUMBER: _ClassVar[int]
     EXPIRY_DATE_FIELD_NUMBER: _ClassVar[int]
+    OCO_GROUP_ID_FIELD_NUMBER: _ClassVar[int]
     account_number: str
     client_order_id: str
     conid: str
@@ -335,11 +339,13 @@ class PlaceOrderRequest(_message.Message):
     qty: str
     limit_price: str
     stop_price: str
+    cash_amount: str
     trail_offset: str
     trail_offset_type: str
     trail_limit_offset: str
     expiry_date: str
-    def __init__(self, account_number: _Optional[str] = ..., client_order_id: _Optional[str] = ..., conid: _Optional[str] = ..., side: _Optional[str] = ..., order_type: _Optional[str] = ..., tif: _Optional[str] = ..., qty: _Optional[str] = ..., limit_price: _Optional[str] = ..., stop_price: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
+    oco_group_id: str
+    def __init__(self, account_number: _Optional[str] = ..., client_order_id: _Optional[str] = ..., conid: _Optional[str] = ..., side: _Optional[str] = ..., order_type: _Optional[str] = ..., tif: _Optional[str] = ..., qty: _Optional[str] = ..., limit_price: _Optional[str] = ..., stop_price: _Optional[str] = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ..., oco_group_id: _Optional[str] = ...) -> None: ...
 
 class PlaceOrderResponse(_message.Message):
     __slots__ = ("broker_order_id", "status")
@@ -350,7 +356,7 @@ class PlaceOrderResponse(_message.Message):
     def __init__(self, broker_order_id: _Optional[str] = ..., status: _Optional[str] = ...) -> None: ...
 
 class ModifyOrderRequest(_message.Message):
-    __slots__ = ("broker_order_id", "account_number", "contract", "side", "order_type", "tif", "qty", "limit_price", "stop_price", "client_order_id", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date")
+    __slots__ = ("broker_order_id", "account_number", "contract", "side", "order_type", "tif", "qty", "limit_price", "stop_price", "client_order_id", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date")
     BROKER_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     ACCOUNT_NUMBER_FIELD_NUMBER: _ClassVar[int]
     CONTRACT_FIELD_NUMBER: _ClassVar[int]
@@ -361,6 +367,7 @@ class ModifyOrderRequest(_message.Message):
     LIMIT_PRICE_FIELD_NUMBER: _ClassVar[int]
     STOP_PRICE_FIELD_NUMBER: _ClassVar[int]
     CLIENT_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
+    CASH_AMOUNT_FIELD_NUMBER: _ClassVar[int]
     TRAIL_OFFSET_FIELD_NUMBER: _ClassVar[int]
     TRAIL_OFFSET_TYPE_FIELD_NUMBER: _ClassVar[int]
     TRAIL_LIMIT_OFFSET_FIELD_NUMBER: _ClassVar[int]
@@ -375,11 +382,12 @@ class ModifyOrderRequest(_message.Message):
     limit_price: Money
     stop_price: Money
     client_order_id: str
+    cash_amount: str
     trail_offset: str
     trail_offset_type: str
     trail_limit_offset: str
     expiry_date: str
-    def __init__(self, broker_order_id: _Optional[str] = ..., account_number: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., tif: _Optional[_Union[TimeInForce, str]] = ..., qty: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., client_order_id: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
+    def __init__(self, broker_order_id: _Optional[str] = ..., account_number: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., tif: _Optional[_Union[TimeInForce, str]] = ..., qty: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., client_order_id: _Optional[str] = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
 
 class ModifyOrderResponse(_message.Message):
     __slots__ = ("broker_order_id", "status", "parent_broker_order_id")
