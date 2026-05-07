@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -355,6 +355,142 @@ async def list_fills(
 # ---------------------------------------------------------------------------
 
 _log = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Task 30: POST /api/orders/nonce/modify  +  POST /api/orders/modify
+# ---------------------------------------------------------------------------
+
+_MODIFY_NONCE_TTL = 30  # seconds
+
+
+class ModifyNonceMintRequest(BaseModel):
+    """Body for POST /api/orders/nonce/modify."""
+
+    order_id: str = Field(min_length=1, max_length=64)
+
+
+class ModifyNonceMintResponse(BaseModel):
+    """Response for POST /api/orders/nonce/modify."""
+
+    nonce: str  # 32-char UUID4 hex
+    expires_at: datetime
+
+
+class PostModifyRequest(BaseModel):
+    """Body for POST /api/orders/modify (nonce-gated modify shortcut)."""
+
+    order_id: str = Field(min_length=1, max_length=64)
+    nonce: str = Field(min_length=1, max_length=128)
+    qty: str
+    order_type: str
+    tif: str
+    limit_price: str | None = None
+    stop_price: str | None = None
+    trail_offset: str | None = None
+    trail_offset_type: str | None = None
+    trail_limit_offset: str | None = None
+    expiry_date: str | None = None
+
+
+@router.post("/nonce/modify", response_model=ModifyNonceMintResponse)
+async def mint_modify_nonce(
+    body: ModifyNonceMintRequest,
+    redis: RedisDep,
+    _identity: IdentityDep,
+) -> ModifyNonceMintResponse:
+    """Mint a single-use 30-second nonce for PUT /api/orders/{id} (drag-handle SL/TP).
+
+    Stores ``nonce:modify:{order_id}:{nonce}`` in Redis with TTL 30 s.
+    Consumed via GETDEL at modify time (Task 30 CSRF gate).
+    """
+    nonce = uuid4().hex
+    key = f"nonce:modify:{body.order_id}:{nonce}"
+    await redis.set(key, "1", ex=_MODIFY_NONCE_TTL)
+    expires_at = datetime.now(UTC) + timedelta(seconds=_MODIFY_NONCE_TTL)
+    _log.info("modify_nonce_minted", order_id=body.order_id)
+    return ModifyNonceMintResponse(nonce=nonce, expires_at=expires_at)
+
+
+@router.post("/modify", response_model=None)
+async def post_modify_order(
+    body: PostModifyRequest,
+    redis: RedisDep,
+    db: DbDep,
+    cfg: ConfigDep,
+    registry: RegistryDep,
+    capability: CapabilityDep,
+    _identity: IdentityDep,
+) -> dict[str, Any] | JSONResponse:
+    """POST /api/orders/modify — nonce-gated modify endpoint for FE drag-handle SL/TP.
+
+    Step 1: Consume ``nonce:modify:{order_id}:{nonce}`` via GETDEL.
+             412 if missing / expired / already consumed.
+    Step 2: Delegate to the existing modify service with the supplied fields.
+
+    Breaking change: callers that submit modify without obtaining a nonce via
+    POST /api/orders/nonce/modify will receive a 412 (pre-Task-43 FE callers
+    should migrate to the new two-step flow).
+    """
+    started = time.perf_counter()
+    try:
+        # --- Step 1: Consume nonce (CSRF gate, single-use) ---
+        nonce_key = f"nonce:modify:{body.order_id}:{body.nonce}"
+        consumed = await redis.execute_command("GETDEL", nonce_key)
+        if consumed is None:
+            raise HTTPException(status_code=412, detail="nonce_invalid_or_expired")
+
+        # --- Step 2: Validate + call modify service ---
+        try:
+            order_id = UUID(body.order_id)
+        except ValueError:
+            return JSONResponse(status_code=422, content={"detail": "invalid order_id UUID"})
+        modify_request = OrderModifyRequest.model_validate(
+            {
+                "nonce": body.nonce,
+                "qty": body.qty,
+                "order_type": body.order_type,
+                "tif": body.tif,
+                "limit_price": body.limit_price,
+                "stop_price": body.stop_price,
+                "trail_offset": body.trail_offset,
+                "trail_offset_type": body.trail_offset_type,
+                "trail_limit_offset": body.trail_limit_offset,
+                "expiry_date": body.expiry_date,
+            }
+        )
+        _log.info("modify_nonce_consumed", order_id=body.order_id)
+        return await orders_service.modify_order(
+            db=db,
+            redis=redis,
+            config=cfg,
+            registry=registry,
+            capability=capability,
+            order_id=order_id,
+            request=modify_request,
+        )
+    except ValidationError as exc:
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    except PreviewUnavailable as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.payload,
+            headers=exc.headers,
+        )
+    except BrokerSidecarUnavailable as exc:
+        if exc.grpc_code in {"UNKNOWN", "INVALID_ARGUMENT", "NOT_FOUND"}:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "broker_modify_rejected",
+                    "detail": exc.grpc_details or str(exc),
+                },
+            )
+        return JSONResponse(
+            status_code=503,
+            content={"error": "sidecar_unreachable", "label": exc.label},
+        )
+    finally:
+        metrics.broker_order_modify_duration_ms.observe((time.perf_counter() - started) * 1000)
 
 
 @router.post("/oco", response_model=OcoOrderResponse)
