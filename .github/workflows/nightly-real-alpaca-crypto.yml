@@ -1,0 +1,25 @@
+name: nightly-real-alpaca-crypto
+
+on:
+  schedule:
+    - cron: "30 6 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  real-alpaca-crypto:
+    runs-on: [self-hosted, nuc]
+    timeout-minutes: 15
+    env:
+      ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
+      ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run real Alpaca paper crypto E2E
+        run: |
+          cd backend && uv run python -m pytest tests/real_broker/test_real_alpaca_crypto_e2e.py -v -m real_broker
