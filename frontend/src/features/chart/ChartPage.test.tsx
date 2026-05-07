@@ -5,6 +5,28 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as ReactQuery from '@tanstack/react-query';
 import { ChartPage } from './ChartPage';
 
+// Mock klinecharts so TradeChart (rendered by ChartPage when not loading) doesn't
+// crash in jsdom where HTMLCanvasElement.getContext() is not implemented.
+vi.mock('klinecharts', () => ({
+  init: vi.fn(() => ({
+    setDataLoader: vi.fn(),
+    setSymbol: vi.fn(),
+    setPeriod: vi.fn(),
+    createIndicator: vi.fn(),
+  })),
+  dispose: vi.fn(),
+}));
+
+// Mock WebSocket so openLiveTail doesn't throw in jsdom.
+vi.stubGlobal('WebSocket', vi.fn(() => ({
+  onopen: null,
+  onmessage: null,
+  onclose: null,
+  onerror: null,
+  send: vi.fn(),
+  close: vi.fn(),
+})));
+
 // Single top-level mock so Vitest hoisting works correctly.
 // Individual tests override useQuery via vi.mocked(...).mockImplementation.
 vi.mock('@tanstack/react-query', async (importOriginal) => {
@@ -30,7 +52,13 @@ describe('ChartPage', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Chart — AAPL.US');
   });
 
-  it('renders trade-chart placeholder', () => {
+  it('renders TradeChart when query succeeds', () => {
+    vi.spyOn(ReactQuery, 'useQuery').mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: null,
+    } as unknown as ReturnType<typeof ReactQuery.useQuery>);
+
     renderWithQuery(<ChartPage canonicalId="AAPL.US" />);
     expect(screen.getByTestId('trade-chart')).toBeInTheDocument();
   });
