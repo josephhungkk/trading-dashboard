@@ -11,6 +11,7 @@ import contextlib
 import time
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Protocol
 
 import structlog
@@ -45,6 +46,29 @@ class CapacityError(RuntimeError):
     """Raised when MAX_STREAMS would be exceeded."""
 
 
+@dataclass
+class OcoOrderResponse:
+    """Response from a native broker OCO placement."""
+
+    external_order_id: str
+    leg_order_ids: list[str]
+
+
+@dataclass
+class AlpacaOcoOrderRequest:
+    """Minimal native Alpaca OCO request shape consumed by the Alpaca client."""
+
+    symbol: str
+    qty: Decimal
+    side: str
+    time_in_force: str
+    order_class: str
+    limit_price: Decimal
+    stop_price: Decimal
+    stop_limit_price: Decimal | None
+    asset_class: str
+
+
 def oco_group_id_for_ibkr(oco_link_id: uuid.UUID) -> str:
     """Build a deterministic OCA group ID for IBKR (max 32 chars).
 
@@ -56,6 +80,63 @@ def oco_group_id_for_ibkr(oco_link_id: uuid.UUID) -> str:
     if len(raw) > 32:
         raise AssertionError(f"oca group id too long: {raw}")
     return raw
+
+
+async def dispatch_oco_alpaca_equity(request: Any, alpaca_client: Any) -> OcoOrderResponse:
+    """Submit an Alpaca equity OCO using Alpaca's native order_class support."""
+    return await _dispatch_oco_alpaca_native(request, alpaca_client)
+
+
+async def dispatch_oco_alpaca_crypto(
+    request: Any,
+    alpaca_client: Any,
+    *,
+    crypto_oco_supported: bool = False,
+) -> OcoOrderResponse:
+    """Dispatch crypto OCO only when empirical support has been explicitly enabled."""
+    if not crypto_oco_supported:
+        raise NotImplementedError("alpaca_crypto_oco_not_supported")
+    return await _dispatch_oco_alpaca_native(request, alpaca_client)
+
+
+async def _dispatch_oco_alpaca_native(
+    request: Any,
+    alpaca_client: Any,
+) -> OcoOrderResponse:
+    """Shared OCO submission path for equity and crypto.
+
+    Lazy alpaca-py import: backend does not ship alpaca-py as a runtime dep
+    (sidecar_alpaca owns the SDK). Production callers must run inside an
+    image that has alpaca-py installed.
+    """
+    from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+    from alpaca.trading.requests import (
+        LimitOrderRequest,
+        StopLossRequest,
+        TakeProfitRequest,
+    )
+
+    side = request.side.upper()
+    tif = request.tif.upper()
+    stop_loss_kwargs: dict[str, Decimal] = {"stop_price": Decimal(request.stop_price)}
+    if getattr(request, "stop_limit_price", None):
+        stop_loss_kwargs["limit_price"] = Decimal(request.stop_limit_price)
+
+    order_data = LimitOrderRequest(
+        symbol=request.symbol,
+        qty=Decimal(request.qty),
+        side=OrderSide[side],
+        time_in_force=TimeInForce[tif],
+        order_class=OrderClass.OCO,
+        limit_price=Decimal(request.limit_price),
+        take_profit=TakeProfitRequest(limit_price=Decimal(request.limit_price)),
+        stop_loss=StopLossRequest(**stop_loss_kwargs),
+    )
+    order = await asyncio.to_thread(alpaca_client.submit_order, order_data=order_data)
+    return OcoOrderResponse(
+        external_order_id=str(order.id),
+        leg_order_ids=[str(leg.id) for leg in getattr(order, "legs", [])],
+    )
 
 
 @dataclass

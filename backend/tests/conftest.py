@@ -34,7 +34,7 @@ from tests.fixtures.sidecar_servicer import sidecar_server as sidecar_server  # 
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _apply_migrations() -> None:
+def _apply_migrations(request: pytest.FixtureRequest) -> None:
     """Ensure the schema exists before any test runs. Locally this is a no-op
     (NUC's `dashboard` DB already has migrations applied); in CI the fresh
     Postgres container starts empty.
@@ -43,6 +43,10 @@ def _apply_migrations() -> None:
     otherwise it resets the root logger and pytest's caplog handler misses
     every subsequent log record in the test run.
     """
+    if request.session.items and all(
+        item.get_closest_marker("no_db") for item in request.session.items
+    ):
+        return
     cfg = Config("alembic.ini")
     cfg.config_file_name = None
     cfg.set_main_option("script_location", "alembic")

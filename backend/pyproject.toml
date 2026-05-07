@@ -80,4 +80,5 @@ markers = [
     "real_futu: requires FUTU_HOST/FUTU_PORT env vars; live futu OpenD calls",
     "real_ibkr: requires IBKR_PAPER_ACCOUNT + CF_ACCESS_* env vars; live IBKR paper gateway calls",
     "real_alpaca_equity: real Alpaca paper equity E2E (requires ALPACA_PAPER_API_KEY + ALPACA_PAPER_API_SECRET)",
+    "no_db: test does not require database migrations",
 ]
