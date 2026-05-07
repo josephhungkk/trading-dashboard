@@ -13,11 +13,13 @@ import os
 import sys
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
+from requests import HTTPError
 
 _GENERATED_ROOT = Path(__file__).resolve().parent / "_generated"
 if str(_GENERATED_ROOT) not in sys.path:
@@ -150,7 +152,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                     app_secret=meta["app_secret"],
                     token_cache=self._token_cache,
                 )
-            except ValueError:
+            except (ValueError,) as _exc:
                 log.warning("schwab_client_init_failed; using deferred client shell")
                 self._client = SchwabClient(
                     schwabdev_client=None,
@@ -326,7 +328,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             result = await self._client.place_order(
                 account_hash=account_hash, payload=payload
             )
-        except SchwabHTTPError as exc:
+        except (SchwabHTTPError,) as exc:
             SCHWAB_PLACE_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
             await self._abort_for_http(context, exc)
         except (OSError, TimeoutError) as exc:
@@ -392,7 +394,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 account_hash=account_hash,
                 order_id=request.broker_order_id,
             )
-        except SchwabHTTPError as exc:
+        except (SchwabHTTPError,) as exc:
             SCHWAB_CANCEL_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
             await self._abort_for_http(context, exc)
         except (OSError, TimeoutError) as exc:
@@ -456,7 +458,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 order_id=request.broker_order_id,
                 payload=payload,
             )
-        except SchwabHTTPError as exc:
+        except (SchwabHTTPError,) as exc:
             SCHWAB_MODIFY_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
             await self._abort_for_http(context, exc)
         except (OSError, TimeoutError) as exc:
@@ -507,7 +509,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         await self._client.ensure_fresh_token()
         try:
             results = await self._client.search_instruments(query=request.query)
-        except SchwabHTTPError as exc:
+        except (SchwabHTTPError,) as exc:
             await self._abort_for_http(context, exc)
         except (OSError, TimeoutError) as exc:
             await context.abort(grpc.StatusCode.UNAVAILABLE, f"schwab transport: {exc}")
@@ -525,6 +527,147 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             del self._search_cache[oldest]
         self._search_cache[cache_key] = (contracts, now)
         return broker_pb2.SearchContractsResponse(contracts=contracts)
+
+    async def GetHistoricalBars(  # noqa: N802
+        self,
+        request,
+        context,
+    ) -> broker_pb2.GetHistoricalBarsResponse:
+        from sidecar_schwab.client import SchwabHTTPError
+
+        if request.timeframe != "1m":
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "timeframe must be 1m",
+            )
+        if not request.canonical_id:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "canonical_id must not be empty",
+            )
+        if request.range_start.seconds <= 0 or request.range_end.seconds <= 0:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_start and range_end must be set",
+            )
+        if self._client is None:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "schwab sidecar not configured",
+            )
+
+        symbol = request.canonical_id.removesuffix(".US")
+        try:
+            payload = await self._fetch_price_history_payload(request, symbol)
+        except (HTTPError, SchwabHTTPError) as exc:
+            if _http_status_code(exc) != 401:
+                await self._abort_for_history_http(context, exc)
+            await self._refresh_token_for_history_retry()
+            try:
+                payload = await self._fetch_price_history_payload(request, symbol)
+            except (HTTPError, SchwabHTTPError) as retry_exc:
+                if _http_status_code(retry_exc) == 401:
+                    await context.abort(
+                        grpc.StatusCode.UNAUTHENTICATED,
+                        "schwab price_history returned 401 invalid_token",
+                    )
+                await self._abort_for_history_http(context, retry_exc)
+
+        candles = payload.get("candles") or []
+        bars = [
+            broker_pb2.HistoricalBar(
+                bucket_start=Timestamp(seconds=int(candle["datetime"]) // 1000),
+                open=str(Decimal(str(candle["open"]))),
+                high=str(Decimal(str(candle["high"]))),
+                low=str(Decimal(str(candle["low"]))),
+                close=str(Decimal(str(candle["close"]))),
+                volume=str(Decimal(str(candle["volume"]))),
+                trade_count=0,
+            )
+            for candle in candles
+        ]
+        truncated = request.limit > 0 and len(candles) >= request.limit
+        return broker_pb2.GetHistoricalBarsResponse(
+            bars=bars,
+            truncated=truncated,
+        )
+
+    async def _fetch_price_history_payload(
+        self,
+        request: Any,
+        symbol: str,
+    ) -> dict[str, Any]:
+        response = await asyncio.to_thread(
+            self._price_history_callable(),
+            symbol=symbol,
+            periodType="day",
+            frequencyType="minute",
+            frequency=1,
+            startDate=int(request.range_start.seconds * 1000),
+            endDate=int(request.range_end.seconds * 1000),
+            needExtendedHoursData=True,
+        )
+        if asyncio.iscoroutine(response):
+            response = await response
+        status_code = int(
+            getattr(
+                response,
+                "status_code",
+                getattr(response, "status", 200),
+            )
+        )
+        if status_code >= 400:
+            from sidecar_schwab.client import SchwabHTTPError
+
+            raise SchwabHTTPError(
+                f"/pricehistory returned status={status_code}",
+                status_code=status_code,
+                endpoint="/pricehistory",
+            )
+        if hasattr(response, "json"):
+            payload = response.json()
+            if asyncio.iscoroutine(payload):
+                payload = await payload
+            return dict(payload)
+        return dict(response)
+
+    async def _abort_for_history_http(
+        self,
+        context: grpc.aio.ServicerContext,
+        exc: BaseException,
+    ) -> None:
+        body = (getattr(exc, "args", [str(exc)])[0] or "")[:200]
+        status_code = _http_status_code(exc)
+        if status_code == 403:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, body)
+            return
+        if status_code == 429:
+            await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, body)
+            return
+        if status_code is not None and 400 <= status_code < 500:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, body)
+            return
+        await context.abort(grpc.StatusCode.UNAVAILABLE, body)
+
+    async def _refresh_token_for_history_retry(self) -> None:
+        if self._token_cache is not None:
+            self._token_cache._access_issued_at = None
+        ensure_fresh_token = getattr(self._client, "ensure_fresh_token", None)
+        if ensure_fresh_token is None:
+            return
+        result = ensure_fresh_token()
+        if asyncio.iscoroutine(result):
+            await result
+
+    def _price_history_callable(self) -> Callable[..., Any]:
+        direct = getattr(self._client, "price_history", None)
+        if direct is not None:
+            return direct
+        wrapped = getattr(self._client, "_client", None)
+        nested = getattr(wrapped, "price_history", None)
+        if nested is not None:
+            return nested
+        raise RuntimeError("schwab price_history client method unavailable")
 
     async def OrderEvent(  # noqa: N802
         self,
@@ -568,7 +711,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             )
             try:
                 await streamer.start()
-            except Exception:
+            except (Exception,) as _exc:
                 # Init failure must not leak a partially-started streamer
                 # — orphaned sockets / refcount tables would accumulate
                 # under repeated transient network errors.
@@ -585,7 +728,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
     ) -> AsyncIterator[broker_pb2.QuoteMessage]:
         try:
             streamer = await self._get_or_init_schwab_streamer()
-        except RuntimeError as exc:
+        except (RuntimeError,) as exc:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
             return
 
@@ -600,7 +743,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         def tick_callback(message: broker_pb2.QuoteMessage) -> None:
             try:
                 queue.put_nowait(message)
-            except asyncio.QueueFull:
+            except (asyncio.QueueFull,) as _exc:
                 # Drop oldest, then enqueue. Best-effort — a competing
                 # producer could refill before our get_nowait, in which
                 # case this tick is silently dropped.
@@ -667,7 +810,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                     call_subs.clear()
                     call_subs.update(_canonical_id(s) for s in symbols)
                 # heartbeat (and any unknown op) — keep-alive only, no-op
-            except Exception as exc:  # noqa: BLE001
+            except (Exception,) as exc:  # noqa: BLE001
                 # Malformed frame must not tear the bidi call down — log
                 # and continue draining the iterator.
                 log.warning(
@@ -696,7 +839,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 if previous is not None:
                     try:
                         previous(message)
-                    except Exception as exc:  # noqa: BLE001
+                    except (Exception,) as exc:  # noqa: BLE001
                         log.warning(
                             "schwab.stream_quotes.previous_callback_error",
                             error=str(exc),
@@ -704,7 +847,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 for registered in tuple(callbacks):
                     try:
                         registered(message)
-                    except Exception as exc:  # noqa: BLE001
+                    except (Exception,) as exc:  # noqa: BLE001
                         log.warning(
                             "schwab.stream_quotes.tick_callback_error",
                             error=str(exc),
@@ -736,7 +879,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         h = self._client.hash_for(account_number)
         try:
             return await self._client.get_account_details(h)
-        except SchwabAccountHashStaleError:
+        except (SchwabAccountHashStaleError,) as _exc:
             await self._client.refresh_hashes(reason="404_retry")
             h = self._client.hash_for(account_number)
             return await self._client.get_account_details(h)
@@ -759,7 +902,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             return datetime.now(UTC)
         try:
             return datetime.fromisoformat(s).astimezone(UTC)
-        except ValueError:
+        except (ValueError,) as _exc:
             return datetime.now(UTC)
 
 
@@ -772,3 +915,14 @@ def _symbol_refs(canonical_ids: set[str]) -> list[broker_pb2.SymbolRef]:
         broker_pb2.SymbolRef(canonical_id=canonical_id)
         for canonical_id in sorted(canonical_ids)
     ]
+
+
+def _http_status_code(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        return int(status_code)
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return int(status_code)
+    return None
