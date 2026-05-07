@@ -5,7 +5,7 @@ Self-hosted multi-broker, multi-account trading dashboard. Stocks, forex, commod
 ## Stack
 
 - **BE:** Python 3.14 · FastAPI · SQLAlchemy 2.0 async · Alembic · Pydantic v2 · asyncpg
-- **FE:** React 19 · Vite 7 · TS 6.0 strict · Tailwind v4 (`@theme`) · shadcn/ui (in-repo) · Zustand · Storybook 10 · klineschart (Phase 9+)
+- **FE:** React 19 · Vite 7 · TS 6.0 strict · Tailwind v4 (`@theme`) · shadcn/ui (in-repo) · Zustand · Storybook 10 · klinecharts (Phase 9+)
 - **Test:** Vitest 4 + RTL 16 (FE); pytest 9 + pytest-asyncio + httpx (BE); Playwright (Phase 5+)
 - **Infra:** Redis 7 · PostgreSQL 18 native on Windows NUC (never containerized) · Docker Compose (docker-ce in WSL on NUC) · Cloudflare Tunnel (TLS at edge) + nginx defense-in-depth · CF Access + Google IdP
 - **Broker SDKs:** `ib_async` · `futu-api` · `schwabdev` (read-only) · `alpaca-py`
