@@ -7,6 +7,7 @@ function resetStore(): void {
     indicators: [],
     drawings: [],
     chartType: 'candle',
+    activeDrawingTool: null,
   });
 }
 
@@ -45,5 +46,26 @@ describe('useChartStore', () => {
   it('setChartType updates chartType', () => {
     useChartStore.getState().setChartType('area');
     expect(useChartStore.getState().chartType).toBe('area');
+  });
+
+  it('activeDrawingTool starts null', () => {
+    expect(useChartStore.getState().activeDrawingTool).toBeNull();
+  });
+
+  it('setActiveDrawingTool sets a tool name', () => {
+    useChartStore.getState().setActiveDrawingTool('priceLine');
+    expect(useChartStore.getState().activeDrawingTool).toBe('priceLine');
+  });
+
+  it('setActiveDrawingTool(null) clears the active tool', () => {
+    useChartStore.getState().setActiveDrawingTool('rect');
+    useChartStore.getState().setActiveDrawingTool(null);
+    expect(useChartStore.getState().activeDrawingTool).toBeNull();
+  });
+
+  it('setActiveDrawingTool replaces a previous selection', () => {
+    useChartStore.getState().setActiveDrawingTool('segment');
+    useChartStore.getState().setActiveDrawingTool('circle');
+    expect(useChartStore.getState().activeDrawingTool).toBe('circle');
   });
 });

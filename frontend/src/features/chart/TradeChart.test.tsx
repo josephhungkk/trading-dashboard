@@ -48,6 +48,7 @@ function resetStores(): void {
     indicators: [],
     drawings: [],
     chartType: 'candle',
+    activeDrawingTool: null,
   });
   useLiveTailStore.setState({
     lastSeen: new Map(),
