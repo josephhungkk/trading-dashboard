@@ -337,7 +337,7 @@ async def place_order(
             request.limit_price or "",
             request.stop_price or "",
         )
-    except BrokerSidecarTimeout, BrokerSidecarUnavailable:
+    except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
         await db.commit()
         return _order_response_from_mapping(row, submission_state="pending_unknown")
 
@@ -351,7 +351,7 @@ async def place_order(
     if await is_kill_switch_active(cfg):
         try:
             await order_client.cancel_order(account.account_number, sidecar_result.broker_order_id)
-        except BrokerSidecarTimeout, BrokerSidecarUnavailable:
+        except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
             pass
 
     return _order_response_from_mapping(submitted or row, submission_state="submitted")
@@ -745,7 +745,7 @@ async def cancel_order(
             str(row["account_number"]),
             str(broker_order_id),
         )
-    except BrokerSidecarTimeout, BrokerSidecarUnavailable:
+    except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
         await db.execute(
             text(
                 """
@@ -928,7 +928,7 @@ async def _resolve_contract(client: _ContractSearchClient, conid: str) -> base.C
     # round-trips correctly.
     try:
         return await client.get_contract(conid)
-    except BrokerSidecarUnavailable, BrokerSidecarTimeout:
+    except (BrokerSidecarUnavailable, BrokerSidecarTimeout) as _exc:
         raise
     except Exception as exc:  # contract not found / sidecar logic error
         raise PreviewUnavailable(404, {"error": "contract_not_found", "conid": conid}) from exc
