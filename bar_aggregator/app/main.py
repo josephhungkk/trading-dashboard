@@ -25,9 +25,7 @@ from bar_aggregator.app.config import Settings
 from bar_aggregator.app.flush import Flusher
 from bar_aggregator.app.metrics import (
     CONSUMER_ERRORS_TOTAL,
-    FLUSH_LAG_SECONDS,
     IDLE_SECONDS,
-    PG_UNREACHABLE_SECONDS,
     TICKS_CONSUMED_TOTAL,
     WAL_REPLAYED_TOTAL,
 )
@@ -41,6 +39,7 @@ _INSTRUMENTS_SQL = """
 SELECT id, symbol || '.' || COALESCE(exchange, 'XX') AS canonical_id
 FROM instruments
 """
+_ALLOWED_SOURCES: frozenset[str] = frozenset({"schwab", "alpaca", "ibkr", "futu"})
 
 
 class _TestOverrides(TypedDict, total=False):
@@ -220,12 +219,20 @@ class AggregatorApp:
     async def _handle_quote_message(self, message: Mapping[str, Any]) -> None:
         payload = _decode_json_payload(message["data"])
         instrument_id = int(payload["instrument_id"])
+        source = str(payload["source"])
         if instrument_id % self._settings.aggregator_shard_count != self._settings.aggregator_shard:
             return
         if instrument_id in self._paused_instruments:
             return
+        if source not in _ALLOWED_SOURCES:
+            CONSUMER_ERRORS_TOTAL.inc()
+            log.warning("consumer.unknown_source", source=source)
+            return
+        if instrument_id not in self._canonical_id_lookup:
+            CONSUMER_ERRORS_TOTAL.inc()
+            log.warning("consumer.unknown_instrument", instrument_id=instrument_id)
+            return
 
-        source = str(payload["source"])
         ts = _parse_ts(str(payload["ts"]))
         kind = str(payload["kind"])
         record = WALTickRecord(
@@ -305,8 +312,9 @@ class AggregatorApp:
         await self._http_site.start()
 
     async def _healthz(self, _request: web.Request) -> web.Response:
-        flush_lag = cast(Any, FLUSH_LAG_SECONDS)._value.get()
-        pg_unreachable = cast(Any, PG_UNREACHABLE_SECONDS)._value.get()
+        flusher = self._require_flusher()
+        flush_lag = flusher.flush_lag_seconds()
+        pg_unreachable = flusher.pg_unreachable_seconds()
         healthy = flush_lag < 10 and pg_unreachable < 300
         status = 200 if healthy else 503
         return web.json_response(

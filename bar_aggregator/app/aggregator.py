@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, TypedDict, Unpack
 
+from prometheus_client import Counter
+
 VolumeSource = Literal["tape", "quote_proxy", "none"]
+
+ENGINE_INSTRUMENTS_CAP_HIT_TOTAL = Counter(
+    "bar_aggregator_engine_instruments_cap_hit_total",
+    "Ticks or quotes rejected because the engine instrument cap was reached.",
+)
 
 
 class BucketFields(TypedDict, total=False):
@@ -59,9 +66,14 @@ class BucketState:
 
 @dataclass
 class AggregatorEngine:
+    max_instruments: InitVar[int] = 1000
     buckets: dict[tuple[int, str], dict[datetime, BucketState]] = field(default_factory=dict)
+    _max_instruments: int = field(init=False)
     _last_updated: dict[tuple[int, str, datetime], int] = field(default_factory=dict)
     _update_sequence: int = 0
+
+    def __post_init__(self, max_instruments: int) -> None:
+        self._max_instruments = max_instruments
 
     def on_tick(
         self,
@@ -72,6 +84,9 @@ class AggregatorEngine:
         volume: Decimal,
     ) -> None:
         bucket = self._get_or_create_bucket(instrument_id, source, ts.replace(microsecond=0))
+        if bucket is None:
+            return
+
         bucket.apply_tick(price, volume)
         self._mark_updated(instrument_id, source, bucket.bucket_start)
 
@@ -84,6 +99,9 @@ class AggregatorEngine:
         ask: Decimal,
     ) -> None:
         bucket = self._get_or_create_bucket(instrument_id, source, ts.replace(microsecond=0))
+        if bucket is None:
+            return
+
         bucket.apply_quote(bid, ask)
         self._mark_updated(instrument_id, source, bucket.bucket_start)
 
@@ -117,12 +135,28 @@ class AggregatorEngine:
         self._mark_updated(instrument_id, source, bucket_start)
         return bucket
 
+    def remove_bucket(self, instrument_id: int, source: str, bucket_start: datetime) -> None:
+        """Public: remove bucket from buckets and last_updated. Idempotent."""
+        source_buckets = self.buckets.get((instrument_id, source))
+        if source_buckets is not None:
+            source_buckets.pop(bucket_start, None)
+            if not source_buckets:
+                self.buckets.pop((instrument_id, source), None)
+        self._last_updated.pop((instrument_id, source, bucket_start), None)
+
     def _get_or_create_bucket(
         self,
         instrument_id: int,
         source: str,
         bucket_start: datetime,
-    ) -> BucketState:
+    ) -> BucketState | None:
+        if (
+            (instrument_id, source) not in self.buckets
+            and len(self.buckets) >= self._max_instruments
+        ):
+            ENGINE_INSTRUMENTS_CAP_HIT_TOTAL.inc()
+            return None
+
         source_buckets = self.buckets.setdefault((instrument_id, source), {})
         bucket = source_buckets.get(bucket_start)
         if bucket is None:

@@ -53,6 +53,9 @@ class _MinuteBar:
     volume_source: VolumeSource
 
 
+_EmittedBar = tuple[BarSnapshot, str]
+
+
 class MinuteEmitter:
     def __init__(
         self,
@@ -78,7 +81,7 @@ class MinuteEmitter:
         if not bars:
             return 0
 
-        emitted = 0
+        emitted: list[_EmittedBar] = []
         try:
             async with self._pg_pool.acquire() as conn:
                 async with conn.transaction():
@@ -97,14 +100,27 @@ class MinuteEmitter:
                             bar.trade_count,
                             bar.volume_source,
                         )
-                        await self._publish_final(bar)
-                        MINUTE_BARS_EMITTED_TOTAL.labels(source=bar.source).inc()
-                        emitted += 1
+                        snap = self._snapshot(bar)
+                        if snap is not None:
+                            emitted.append((snap, bar.source))
         except (asyncpg.exceptions.OperationalError,) as exc:
             log.warning("minute_emitter.pg_unreachable", exc_info=exc)
             return 0
 
-        return emitted
+        published = 0
+        for snap, source in emitted:
+            try:
+                await self._bar_pubsub.publish_final(snap)
+                MINUTE_BARS_EMITTED_TOTAL.labels(source=source).inc()
+                published += 1
+            except (Exception,) as exc:
+                log.warning(
+                    "minute_emitter.publish_final.failed",
+                    instrument_id=snap.instrument_id,
+                    exc_info=exc,
+                )
+
+        return published
 
     async def run_loop(self, *, stop: asyncio.Event) -> None:
         """Sleep to next minute boundary, call tick(), repeat until stop is set."""
@@ -188,7 +204,7 @@ class MinuteEmitter:
             volume_source=self._best_volume_source(ordered),
         )
 
-    async def _publish_final(self, bar: _MinuteBar) -> None:
+    def _snapshot(self, bar: _MinuteBar) -> BarSnapshot | None:
         canonical_id = self._canonical_id_lookup.get(bar.instrument_id)
         if canonical_id is None:
             log.warning(
@@ -196,24 +212,22 @@ class MinuteEmitter:
                 instrument_id=bar.instrument_id,
                 source=bar.source,
             )
-            return
+            return None
 
-        await self._bar_pubsub.publish_final(
-            BarSnapshot(
-                canonical_id=canonical_id,
-                instrument_id=bar.instrument_id,
-                tf="1m",
-                bucket_start=bar.bucket_start,
-                open=bar.open,
-                high=bar.high,
-                low=bar.low,
-                close=bar.close,
-                volume=bar.volume,
-                volume_source=bar.volume_source,
-                trade_count=bar.trade_count,
-                revision=FINAL_REVISION,
-                partial=False,
-            )
+        return BarSnapshot(
+            canonical_id=canonical_id,
+            instrument_id=bar.instrument_id,
+            tf="1m",
+            bucket_start=bar.bucket_start,
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+            volume_source=bar.volume_source,
+            trade_count=bar.trade_count,
+            revision=FINAL_REVISION,
+            partial=False,
         )
 
     @staticmethod

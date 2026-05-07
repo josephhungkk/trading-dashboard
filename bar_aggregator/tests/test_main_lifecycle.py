@@ -40,7 +40,7 @@ class _AcquireContext:
 class _Connection:
     def __init__(self) -> None:
         self.fetch = AsyncMock(return_value=[{"id": 42, "canonical_id": "AAPL.US"}])
-        self.copy_records_to_table = AsyncMock(return_value=None)
+        self.executemany = AsyncMock(return_value=None)
 
 
 class _Pool:

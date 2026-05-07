@@ -33,9 +33,25 @@ class _AcquireContext:
         return False
 
 
+class _Transaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        return False
+
+
 class _Connection:
     def __init__(self) -> None:
-        self.copy_records_to_table = AsyncMock(return_value=None)
+        self.executemany = AsyncMock(return_value=None)
+
+    def transaction(self) -> _Transaction:
+        return _Transaction()
 
 
 class _Pool:
@@ -49,6 +65,7 @@ class _Pool:
 class _StubWAL:
     def __init__(self) -> None:
         self.ack_flushed = AsyncMock(return_value=None)
+        self.set_last_flushed = AsyncMock(return_value=None)
 
 
 class _StubBarPubSub:
@@ -92,7 +109,7 @@ async def test_only_closed_buckets_flushed() -> None:
     rows = await flusher.flush_once(now=t0 + dt.timedelta(seconds=1, milliseconds=500))
 
     assert rows == 1
-    records = connection.copy_records_to_table.await_args.kwargs["records"]
+    records = connection.executemany.await_args.args[1]
     assert len(records) == 1
     assert records[0][1] == t0
     assert t0 not in engine.buckets[(1, "schwab")]
@@ -109,7 +126,7 @@ async def test_in_flight_bucket_never_flushed() -> None:
     rows = await flusher.flush_once(now=now)
 
     assert rows == 0
-    connection.copy_records_to_table.assert_not_awaited()
+    connection.executemany.assert_not_awaited()
     assert bucket_start in engine.buckets[(1, "schwab")]
 
 
@@ -126,6 +143,7 @@ async def test_flush_success_calls_ack_flushed_and_publish_final() -> None:
 
     assert rows == 1
     wal.ack_flushed.assert_awaited_once_with(1, "1700000000-0")
+    wal.set_last_flushed.assert_awaited_once_with(1, t0)
     bar_pubsub.publish_final.assert_awaited_once()
     snap = bar_pubsub.publish_final.await_args.args[0]
     assert isinstance(snap, BarSnapshot)
@@ -140,9 +158,7 @@ async def test_pg_operational_error_pauses_flush() -> None:
     t0 = dt.datetime(2026, 5, 7, 15, 30, tzinfo=dt.UTC)
     engine.apply_test_bucket(1, "schwab", t0, **_bucket_fields())
     connection = _Connection()
-    connection.copy_records_to_table.side_effect = asyncpg.exceptions.OperationalError(
-        "pg down"
-    )
+    connection.executemany.side_effect = asyncpg.exceptions.OperationalError("pg down")
     flusher, _connection, wal, _bar_pubsub = _flusher(
         engine,
         connection=connection,
@@ -162,7 +178,7 @@ async def test_flush_resumes_after_pg_recovers() -> None:
     t0 = dt.datetime(2026, 5, 7, 15, 30, tzinfo=dt.UTC)
     engine.apply_test_bucket(1, "schwab", t0, **_bucket_fields())
     connection = _Connection()
-    connection.copy_records_to_table.side_effect = [
+    connection.executemany.side_effect = [
         asyncpg.exceptions.OperationalError("pg down"),
         None,
     ]

@@ -4,6 +4,8 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml /app/
 RUN uv pip install --system --no-cache .
 COPY app/ /app/app/
+RUN adduser --no-create-home --disabled-password --uid 1001 aggregator
+USER aggregator
 EXPOSE 9100
 CMD ["python", "-m", "app.main"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
