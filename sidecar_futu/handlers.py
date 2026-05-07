@@ -5,9 +5,11 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import grpc  # type: ignore[import-untyped]
+import pandas as pd  # type: ignore[import-untyped]
 import structlog
 from google.protobuf.timestamp_pb2 import Timestamp
 
@@ -41,6 +43,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self._started_at = started_at
         self._sim_mode = simulator
         self._client = FutuClient()
+        self._quote_ctx: Any | None = None
         self._sim_orders: dict[str, dict[str, str]] = {}
 
     async def Health(  # noqa: N802
@@ -157,6 +160,83 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             contract.exchange = "SEHK"
         return broker_pb2.ContractResponse(contract=contract)
 
+    async def GetHistoricalBars(  # noqa: N802
+        self,
+        request: broker_pb2.GetHistoricalBarsRequest,
+        context: Any,
+    ) -> broker_pb2.GetHistoricalBarsResponse:
+        import futu as ft  # type: ignore[import-untyped]
+
+        if request.timeframe != "1m":
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "unsupported timeframe",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+        if not request.canonical_id:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "canonical_id required")
+            return broker_pb2.GetHistoricalBarsResponse()
+        if request.range_start.seconds <= 0 or request.range_end.seconds <= 0:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "range_start and range_end are required",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+        if not self._client.gateway_connected:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
+            return broker_pb2.GetHistoricalBarsResponse()
+        if not request.canonical_id.endswith(".HK"):
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "futu sidecar supports HK instruments only",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+
+        code = _hk_canonical_to_futu_code(request.canonical_id)
+        try:
+            self._quote_ctx = await self._resolve_quote_context()
+        except RuntimeError as exc:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+            return broker_pb2.GetHistoricalBarsResponse()
+        if self._quote_ctx is None:
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "futu quote context not configured",
+            )
+            return broker_pb2.GetHistoricalBarsResponse()
+
+        ret, df, page_req_key = await asyncio.to_thread(
+            self._quote_ctx.request_history_kline,
+            code,
+            start=request.range_start.ToDatetime().strftime("%Y-%m-%d %H:%M:%S"),
+            end=request.range_end.ToDatetime().strftime("%Y-%m-%d %H:%M:%S"),
+            ktype=ft.KLType.K_1M,
+            autype=ft.AuType.QFQ,
+            max_count=request.limit if request.limit > 0 else 1000,
+        )
+        if ret != ft.RET_OK:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(df))
+            return broker_pb2.GetHistoricalBarsResponse()
+
+        bars = [
+            broker_pb2.HistoricalBar(
+                bucket_start=Timestamp(
+                    seconds=int(pd.Timestamp(row["time_key"]).timestamp())
+                ),
+                open=str(Decimal(str(row["open"]))),
+                high=str(Decimal(str(row["high"]))),
+                low=str(Decimal(str(row["low"]))),
+                close=str(Decimal(str(row["close"]))),
+                volume=str(Decimal(str(row["volume"]))),
+                trade_count=0,
+            )
+            for row in df.to_dict("records")
+        ]
+        return broker_pb2.GetHistoricalBarsResponse(
+            bars=bars,
+            truncated=bool(page_req_key),
+        )
+
     async def PlaceOrder(  # noqa: N802
         self,
         request: broker_pb2.PlaceOrderRequest,
@@ -211,7 +291,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 self._client._order_event_queues[request.account_number].remove(
                     queue
                 )
-            except (KeyError, ValueError):
+            except (KeyError, ValueError) as _exc:
                 pass
             log.info("orderevent_unsubscribed", account=request.account_number)
 
@@ -288,7 +368,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             streamer = FutuStreamer(quote_ctx)
             try:
                 await streamer.start()
-            except Exception:
+            except Exception as _exc:
                 with contextlib.suppress(Exception):
                     await streamer.stop()
                 raise
@@ -314,7 +394,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         def tick_callback(message: broker_pb2.QuoteMessage) -> None:
             try:
                 queue.put_nowait(message)
-            except asyncio.QueueFull:
+            except asyncio.QueueFull as _exc:
                 # Drop oldest, then enqueue. If still full (race with
                 # competing producer), record the drop + log so the
                 # silent-failure path is visible in dashboards.
@@ -322,7 +402,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                     queue.get_nowait()
                 try:
                     queue.put_nowait(message)
-                except asyncio.QueueFull:
+                except asyncio.QueueFull as _exc:
                     metrics.futu_stream_quote_drops_total.inc()
                     log.warning("futu.stream_quotes.dropped")
 
@@ -439,6 +519,8 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         del streamer._broker_servicer_previous_tick_callback
 
     async def _resolve_quote_context(self) -> Any | None:
+        if self._quote_ctx is not None:
+            return self._quote_ctx
         getter = getattr(self._client, "get_quote_context", None)
         if getter is not None:
             result = getter()
@@ -493,6 +575,11 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
 def _canonical_id(symbol: broker_pb2.SymbolRef) -> str:
     return symbol.canonical_id or symbol.raw_symbol
+
+
+def _hk_canonical_to_futu_code(canonical_id: str) -> str:
+    symbol = canonical_id.removesuffix(".HK")
+    return f"HK.{symbol.zfill(5)}"
 
 
 def _symbol_refs(canonical_ids: set[str]) -> list[broker_pb2.SymbolRef]:
