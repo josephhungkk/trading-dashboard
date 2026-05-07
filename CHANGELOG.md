@@ -5,6 +5,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-07
+
+### Added — Phase 8c complete (Alpaca trade write path: equity + crypto + bracket + OCO)
+
+23 tasks across 4 chunks shipped (19 commits since v0.9.0). Plan
+[`docs/superpowers/plans/2026-05-06-phase8c-alpaca-trade-plan.md`](docs/superpowers/plans/2026-05-06-phase8c-alpaca-trade-plan.md).
+Per-chunk reviewer chain (5 agents at end of each chunk) caught CRIT/HIGH defects before merge —
+fixes batched into single commits per chunk: `0666f0b` (S), `b5fc398` (C), `458709c` (B), `f0d20e7` (OCO).
+
+#### Chunk S — Alpaca equity trade write path (commits `70fd771..0666f0b`)
+
+- **PlaceOrder/CancelOrder/ModifyOrder live** for Alpaca equity (sidecar_alpaca/handlers.py). All blocking SDK calls wrapped in `asyncio.to_thread` so the gRPC event loop stays responsive. `_abort_internal` returns sentinel `"internal_error"` instead of raw exception strings to prevent Alpaca API response leakage.
+- **TradingStream cap=5** per account → `RESOURCE_EXHAUSTED + details=trading_stream_cap_5`. `_ensure_order_event_subscription` guarded by per-account `asyncio.Lock` against duplicate stream creation under concurrent first-callers.
+- **client_order_id round-trip + dedupe** via 60s TTL key `(account_id, "coid", coid)` when present, fallback `(account_id, "tuple", symbol, qty, side, time_bucket)`.
+- **Alembic 0020** — flips 16 Alpaca STOCK capability rows TRUE: MARKET (DAY/GTC), LIMIT (DAY/GTC/IOC/FOK), STOP (DAY/GTC), STOP_LIMIT (DAY/GTC), TRAIL (DAY/GTC), MOC/MOO/LOC/LOO (DAY each). Alpaca rejects MARKET+IOC/FOK so those are deliberately omitted.
+- **Empirical script** `scripts/empirical/alpaca_equity_place_cancel_paper.py` (5 assertions including client_order_id preservation). **Nightly CI** matrix `{market_spy, limit_spy, trail_spy}` on self-hosted NUC runner.
+- **Phase 8b regression fix**: `OrderType.MARKET` → `ORDER_TYPE_MARKET` rename (commit 9b1e380) broke `sidecar_alpaca/normalize.py` import. Restored alongside chunk-S reviewer fixes.
+
+#### Chunk C — Alpaca crypto trade write path (commits `89fcc4a..b5fc398`)
+
+- **`sidecar_alpaca/streaming.py`** — `crypto_order_event_source` async generator + `build_crypto_stream()` helper (deferred-future-use; `TradingStream.subscribe_trade_updates` covers both equity and crypto today; alpaca-py has no separate CryptoTradeStream API yet).
+- **cash_amount → notional**: `_build_order_request` routes MARKET orders with `cash_amount` to `notional=Decimal(cash_amount)` (Alpaca's notional crypto buy path). Backend Pydantic XOR validator (chunk-0 T-0.7) is the single enforcement point; sidecar guards with explicit `cash_amount_market_only` ValueError if upstream is bypassed.
+- **Symbol normalization on ingress**: `_alpaca_symbol(conid)` detects bare crypto suffix patterns (BTCUSD, ETHUSDT, SHIBUSD) and routes through `canonical_crypto_symbol()` to return BTC/USD canonical form.
+- **`ALPACA_CRYPTO_LOCATION` env var** (default `"us"`, validation rejects unsupported values at import). Per-account routing deferred to Phase 16 per spec HIGH-6.
+- **Alembic 0020a** — flips 4 Alpaca CRYPTO rows: MARKET (DAY/GTC) + LIMIT (DAY/GTC). Conservative empirical-PASS subset; STOP_LIMIT pending its own empirical script.
+- **Empirical script** `alpaca_crypto_place_cancel_paper.py` validates BTC/USD `notional` round-trip via `MarketOrderRequest`. **Nightly CI** workflow `nightly-real-alpaca-crypto.yml`.
+
+#### Chunk B — Bracket asymmetry: equity native, crypto unsupported (commits `8fa6b3e..458709c`)
+
+- **`PlaceBracket` live for Alpaca equity** (sidecar_alpaca/handlers.py). Maps to `OrderClass.BRACKET` with `TakeProfitRequest(limit_price)` + `StopLossRequest(stop_price, limit_price?)`. Parent restricted to MARKET or LIMIT; tif restricted to DAY (Alpaca rejects bracket+GTC). `_classify_bracket_legs` helper matches return legs by `order_type` (limit→TP, stop|stop_limit→SL) instead of array index — SDK does not contract leg ordering.
+- **Alembic 0021-eq** — flips (alpaca, STOCK, BRACKET, DAY) TRUE.
+- **Alembic 0021-cr** — explicit negative capability: (alpaca, CRYPTO, BRACKET, DAY) FALSE with `notes='Alpaca crypto bracket not supported per Phase 8c empirical gate (T-B-cr.1)'`. FE renders distinct "not supported" state instead of "unknown".
+- **Empirical scripts**: `alpaca_equity_bracket_paper.py` (PASS branch — places + cancels 3-leg bracket); `alpaca_crypto_bracket_paper.py` (EXPECTED_FAIL branch — confirms Alpaca rejects crypto bracket; UNEXPECTED_PASS=regression signal). Re-run after every alpaca-py upgrade.
+
+#### Chunk OCO — OCO asymmetry: equity native, crypto NotImplementedError (commits `6fcda69..f0d20e7`)
+
+- **`dispatch_oco_alpaca_equity` + `dispatch_oco_alpaca_crypto`** in `oco_orchestrator.py`. Equity uses Alpaca's native `order_class=OCO` (LimitOrderRequest with parent `limit_price` for take-profit leg + `stop_price` for stop-loss trigger). Crypto defaults `crypto_oco_supported=False` and raises `NotImplementedError("alpaca_crypto_oco_not_supported")` per spec §6.
+- **Lazy alpaca-py import**: backend doesn't ship alpaca-py as a runtime dep (sidecar_alpaca owns the SDK). Production callers run inside an alpaca-py-equipped image. Tests `pytest.importorskip("alpaca")` for graceful skip.
+- **Alembic 0022** — flips (alpaca, STOCK, OCO, GTC) TRUE + (alpaca, CRYPTO, OCO, GTC) FALSE in a single migration with per-row notes for audit clarity.
+- **Empirical scripts** (`alpaca_equity_oco_paper.py` PASS + `alpaca_crypto_oco_paper.py` EXPECTED_FAIL) confirm the wire shape that the dispatcher emits.
+
+#### Cross-cutting
+
+- **`no_db` pytest marker** (backend/pyproject.toml + conftest hook): tests opt out of the autouse migration fixture when ALL collected items have the marker. Lets sidecar-image CI runs collect-and-run alpaca-only tests without Postgres.
+- **Phase 8c migration discipline** (matches chunks C/B/OCO): `LOCK TABLE broker_order_capability IN SHARE ROW EXCLUSIVE MODE` in upgrade() + downgrade(); `INSERT ... ON CONFLICT DO UPDATE`; `pg_notify('app_config:invalidate:order_capabilities', 'alpaca')` for runtime cache invalidation.
+- **Per-chunk reviewer rule** (memory `feedback_review_per_chunk.md`) honored: 4-5 reviewer agents (spec/code/security/db/python) dispatched at end of every chunk ≥5 commits. CRITs caught and fixed before merge.
+
 ## [0.9.0] — 2026-05-06
 
 ### Added — Phase 8b complete (order-type expansion + Modify/Bracket/OCO across IBKR/Futu/Schwab)

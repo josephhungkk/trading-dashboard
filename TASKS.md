@@ -337,9 +337,16 @@ Phase 8 split into 8a (Schwab single-leg + capability foundation),
 - [x] **Chunk O** OCO orchestrator: Alembic 0016 oco_links 9-state machine, oco_orchestrator.py (Redis advisory lock + per-account stream cap=100 + oco_group_id_for_ibkr helper), POST /api/orders/oco endpoint, Schwab native (orderStrategyType=OCO), IBKR native (proto field 25 oco_group_id + ocaGroup/ocaType=1), Futu orchestrated (existing event stream sufficient), 2 empirical hard-gates, Alembic 0017 OCO feature flip, killswitch test, cancel-always-allowed invariant  *(commits e1a7332..2d7b1a6)*
 - [x] **Close-out** CHANGELOG/TASKS.md/v0.9.0 tag
 
-### Phase 8c — Alpaca trade  *(spec done; plan-writing in progress)*
+### Phase 8c — Alpaca trade  *(complete — v0.10.0 · 2026-05-07)*
 
-Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 lines, 21 architect findings applied inline @ commit 82482e4). 4-tuple capability matrix extension (broker_id, asset_class, order_type, tif). Crypto bypass of `market_calendar`. Notional XOR via new `cash_amount` field (proto tag 15) — explicitly distinct from existing response-side `notional` (USD value). Equity bracket+OCO native, crypto bracket+OCO orchestrator-fallback (likely UNSUPPORTED, micro-empirical). Targets v0.10.0. Plan-writing dispatched to Codex; in flight.
+Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 lines, 21 architect findings applied inline @ commit 82482e4). Plan at `docs/superpowers/plans/2026-05-06-phase8c-alpaca-trade-plan.md` (4169 lines, 37 tasks). 23 tasks shipped across 4 chunks (S/C/B/OCO; chunk 0 already in v0.9.0); 19 commits since v0.9.0. Per-chunk reviewer chain caught 4 CRIT + 7 HIGH defects across chunks before merge.
+
+- [x] **Chunk S** Alpaca equity trade write-path: PlaceOrder/CancelOrder/ModifyOrder live, TradingStream cap=5, client_order_id dedupe, Alembic 0020 (16 STOCK rows), nightly E2E. *(commits `70fd771..0666f0b`)*
+- [x] **Chunk C** Alpaca crypto trade write-path: streaming.py (deferred-future-use), cash_amount→notional, BTCUSD→BTC/USD ingress normalization, ALPACA_CRYPTO_LOCATION env, Alembic 0020a (4 CRYPTO rows). *(commits `89fcc4a..b5fc398`)*
+- [x] **Chunk B** Bracket asymmetry: PlaceBracket equity native (OrderClass.BRACKET + leg classification by order_type), Alembic 0021-eq TRUE / 0021-cr FALSE explicit negative capability, empirical PASS/EXPECTED_FAIL scripts. *(commits `8fa6b3e..458709c`)*
+- [x] **Chunk OCO** OCO asymmetry: dispatch_oco_alpaca_equity (native order_class=OCO), dispatch_oco_alpaca_crypto (default crypto_oco_supported=False), Alembic 0022, lazy alpaca-py import + no_db marker. *(commits `6fcda69..f0d20e7`)*
+- [x] **Close-out** CHANGELOG.md / TASKS.md
+- [ ] **v0.10.0 tag** *(deferred to user — `git tag v0.10.0 && git push --tags`)*
 
 ## Phase 9 — Charting v1 + bar aggregator + historical store
 
