@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
@@ -18,6 +20,7 @@ from app.api import admin_instruments
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.admin_metrics import router as admin_metrics_router
+from app.api.bars import router as bars_router  # Task 28: GET /api/bars
 from app.api.brokers import router as brokers_router
 from app.api.brokers_admin import router as brokers_admin_router
 from app.api.capabilities import router as capabilities_router
@@ -49,6 +52,21 @@ from app.services.quotes.instruments_seed import seed_instruments_from_positions
 
 configure_logging()
 log = structlog.get_logger(__name__)
+
+
+_bar_service: BarService | None = None  # Set in lifespan; read by _run_pre_warm.
+
+
+async def _run_pre_warm() -> None:
+    """Run BarService.pre_warm_active_set in a new session; called by the cron scheduler."""
+    if _bar_service is None:
+        log.warning("pre_warm.skipped_not_ready")
+        return
+    async with SessionLocal() as session:
+        try:
+            await _bar_service.pre_warm_active_set(session)
+        except Exception as exc:
+            log.error("pre_warm.failed", error=str(exc))
 
 
 @asynccontextmanager
@@ -114,15 +132,38 @@ async def lifespan(_app: FastAPI) -> Any:
     except MissingBrokerSecrets as exc:
         log.warning("broker_lifespan_skipped", reason=str(exc))
 
+    global _bar_service
     bar_service = BarService()
+    _bar_service = bar_service
     _app.state.bar_service = bar_service
     await bar_service.start()
+
+    # ── Cron scheduler for periodic bar pre-warming ──────────────────────────
+    # TODO: dynamic per-asset-class via market_calendar.py next_close (Phase 10).
+    scheduler = AsyncIOScheduler()
+    # NYSE close ~21:00 UTC (16:00 ET + 5h)
+    scheduler.add_job(_run_pre_warm, CronTrigger(hour=21, minute=5, timezone="UTC"))
+    # HKEX close ~08:30 UTC (16:30 HKT - 8h)
+    scheduler.add_job(_run_pre_warm, CronTrigger(hour=8, minute=35, timezone="UTC"))
+    # FX rollover ~22:00 UTC
+    scheduler.add_job(_run_pre_warm, CronTrigger(hour=22, minute=5, timezone="UTC"))
+    scheduler.start()
+    _app.state.scheduler = scheduler
+
+    # Run once immediately on startup (non-blocking).
+    pre_warm_task: asyncio.Task[None] = asyncio.create_task(_run_pre_warm())
 
     log.info("startup_ok", env=settings.env)
     try:
         yield
     finally:
+        # Cancel the initial pre-warm task if still running (codex-default B).
+        pre_warm_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pre_warm_task
+        scheduler.shutdown(wait=False)
         await _app.state.bar_service.stop()
+        _bar_service = None
         if pending_fills_sweeper is not None:
             await pending_fills_sweeper.stop()
         if pending_fills_task is not None:
@@ -198,6 +239,7 @@ app.include_router(sse_router)
 app.include_router(admin_metrics_router)
 app.include_router(ws_quotes_router)
 app.include_router(chart_layouts_router)
+app.include_router(bars_router)  # Task 28: GET /api/bars cursor pagination
 
 
 @app.get("/health")

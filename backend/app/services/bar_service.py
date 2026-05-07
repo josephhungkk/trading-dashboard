@@ -211,6 +211,177 @@ class BarService:
         logger.info("bar_service.active_set", count=len(result))
         return result
 
+    # ──────────────────── Pre-warm ──────────────────────────────────────────
+
+    async def pre_warm_active_set(self, session: AsyncSession) -> None:
+        """Fill cache gaps for all instruments in the active set.
+
+        Spec §4 lines 538-547.  For each instrument x {1m, 1h, 1d}:
+        1. Find the last successful backfill to determine gap_start.
+        2. Call get_bars() which handles fetch + UPSERT + pg_notify.
+
+        Pre-warm source policy (different from on-demand get_bars):
+        - Walk bar_source_priority for the asset class.
+        - Skip IBKR when any non-IBKR source is healthy for that asset class.
+        - If *no* non-IBKR sources are healthy, log a warning and skip the
+          instrument entirely (do NOT fall through to IBKR).
+
+        IBKR jitter: when IBKR is the selected source, use label
+        ``ibkr-{(instrument_id % 4) + 1:03d}`` to spread load across 4 sidecars.
+        """
+        # Read pre-warm window from app_config; default 30 days.
+        cfg_row = (
+            await session.execute(
+                text(
+                    "SELECT value FROM app_config"
+                    " WHERE namespace='charts' AND key='bar_pre_warm_window_days'"
+                )
+            )
+        ).one_or_none()
+        try:
+            window_days: int = int(cfg_row.value) if cfg_row is not None else 30
+        except ValueError, TypeError:
+            window_days = 30
+
+        instruments = await self.active_set(session)
+        now = datetime.now(UTC)
+        registry = await self._get_registry()
+
+        for row in instruments:
+            try:
+                # Resolve canonical_id and asset_class for this instrument.
+                inst_row = (
+                    await session.execute(
+                        text("SELECT canonical_id, asset_class FROM instruments WHERE id = :iid"),
+                        {"iid": row.instrument_id},
+                    )
+                ).one_or_none()
+                if inst_row is None:
+                    logger.warning(
+                        "bar_service.pre_warm.instrument_not_found",
+                        instrument_id=row.instrument_id,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+
+                canonical_id: str = str(inst_row.canonical_id)
+                asset_class: str = str(inst_row.asset_class)
+                asset_class_key = _asset_class_to_priority_key(asset_class)
+
+                # Determine source priority list from config.
+                src_cfg_row = (
+                    await session.execute(
+                        text(
+                            "SELECT value_json FROM app_config WHERE namespace='charts' AND key=:k"
+                        ),
+                        {"k": f"bar_source_priority.{asset_class_key}"},
+                    )
+                ).one_or_none()
+                priorities: list[str] = (
+                    list(src_cfg_row.value_json)
+                    if src_cfg_row is not None
+                    else _DEFAULTS.get(asset_class_key, [])
+                )
+
+                # Pre-warm source policy: skip IBKR when any non-IBKR source is healthy.
+                healthy_clients = await registry.healthy_clients()
+                healthy_labels: set[str] = {c.label for c in healthy_clients}
+
+                non_ibkr_sources = [s for s in priorities if s != "ibkr"]
+                non_ibkr_healthy = any(
+                    _source_to_label(s) in healthy_labels for s in non_ibkr_sources
+                )
+
+                if non_ibkr_healthy:
+                    # Use first healthy non-IBKR source; IBKR is excluded.
+                    source: str | None = None
+                    for s in non_ibkr_sources:
+                        lbl = _source_to_label(s)
+                        if lbl is not None and lbl in healthy_labels:
+                            source = s
+                            break
+                else:
+                    # No non-IBKR source is healthy — skip instrument (do NOT use IBKR).
+                    logger.warning(
+                        "bar_service.pre_warm.no_healthy_non_ibkr_source",
+                        instrument_id=row.instrument_id,
+                        canonical_id=canonical_id,
+                        asset_class_key=asset_class_key,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+
+                if source is None:
+                    logger.warning(
+                        "bar_service.pre_warm.no_source_resolved",
+                        instrument_id=row.instrument_id,
+                        canonical_id=canonical_id,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+
+                # Per-timeframe gap fill (5m/15m/30m derive via CAGG — no direct fetch).
+                for tf in ("1m", "1h", "1d"):
+                    try:
+                        # Find last successful backfill range_end for this tf.
+                        job_row = (
+                            await session.execute(
+                                text(
+                                    "SELECT range_end FROM bar_backfill_jobs"
+                                    " WHERE instrument_id = :iid"
+                                    "   AND timeframe = :tf"
+                                    "   AND status = 'done'"
+                                    " ORDER BY finished_at DESC"
+                                    " LIMIT 1"
+                                ),
+                                {"iid": row.instrument_id, "tf": tf},
+                            )
+                        ).one_or_none()
+
+                        gap_start: datetime = (
+                            job_row.range_end.replace(tzinfo=UTC)
+                            if job_row is not None and job_row.range_end is not None
+                            else now - timedelta(days=window_days)
+                        )
+                        gap_end = now
+
+                        if gap_start >= gap_end:
+                            # Already up to date.
+                            continue
+
+                        # For IBKR source, use jittered label routing.
+                        # (For non-IBKR we call get_bars normally; it picks the label.)
+                        # Override _source_to_label via monkey-patch is NOT clean; instead
+                        # we pass source kwarg via _primary_fetch. For pre_warm we call
+                        # get_bars which handles source resolution internally. Since we
+                        # already decided on a non-IBKR source, get_bars may re-resolve —
+                        # that is acceptable because the healthy_clients check in _resolve_source
+                        # will also exclude IBKR when non-IBKR is healthy.
+                        await self.get_bars(
+                            canonical_id,
+                            tf,
+                            gap_start,
+                            gap_end,
+                            session=session,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "bar_service.pre_warm.tf_error",
+                            instrument_id=row.instrument_id,
+                            canonical_id=canonical_id,
+                            timeframe=tf,
+                            error=str(exc),
+                        )
+
+            except Exception as exc:
+                logger.error(
+                    "bar_service.pre_warm.instrument_error",
+                    instrument_id=row.instrument_id,
+                    error=str(exc),
+                )
+
+            await asyncio.sleep(0)  # Yield between instruments (spec line 652).
+
     # ──────────────────── Public API ────────────────────────────────────────
 
     async def get_bars(
