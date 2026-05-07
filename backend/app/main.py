@@ -21,6 +21,7 @@ from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.admin_metrics import router as admin_metrics_router
 from app.api.bars import router as bars_router  # Task 28: GET /api/bars
+from app.api.bars import ws_router as bars_ws_router  # Task 31: WS /ws/bars
 from app.api.brokers import router as brokers_router
 from app.api.brokers_admin import router as brokers_admin_router
 from app.api.capabilities import router as capabilities_router
@@ -240,6 +241,7 @@ app.include_router(admin_metrics_router)
 app.include_router(ws_quotes_router)
 app.include_router(chart_layouts_router)
 app.include_router(bars_router)  # Task 28: GET /api/bars cursor pagination
+app.include_router(bars_ws_router)  # Task 31: WS /ws/bars live-tail
 
 
 @app.get("/health")
