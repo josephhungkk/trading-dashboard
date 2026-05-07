@@ -36,6 +36,7 @@ from sidecar_alpaca.client import (
     load_trading_stream_class,
 )
 from sidecar_alpaca.streamer import AlpacaStreamer
+from sidecar_alpaca.symbol_util import canonical_crypto_symbol
 
 log = structlog.get_logger(module="sidecar_alpaca.handlers")
 
@@ -47,6 +48,7 @@ _TRADING_STREAM_COUNTS: dict[str, int] = {}
 _DEDUPE: dict[tuple[Any, ...], float] = {}
 _ORDER_EVENT_QUEUE_MAXSIZE = 1000
 _TRADING_STREAM_CAP = 5
+_CRYPTO_ORDER_QUOTE_SUFFIXES = ("USDT", "USDC", "USD")
 
 
 def _subscription_lock(account_id: str) -> asyncio.Lock:
@@ -594,7 +596,20 @@ def _alpaca_symbol(conid: str) -> str:
         parts = conid.split(":")
         if len(parts) >= 2:
             return parts[1]
+    if _looks_like_crypto_pair(conid):
+        return canonical_crypto_symbol(conid)
     return conid
+
+
+def _looks_like_crypto_pair(conid: str) -> bool:
+    raw = conid.strip().upper()
+    if "/" in raw:
+        return True
+    for suffix in _CRYPTO_ORDER_QUOTE_SUFFIXES:
+        if raw.endswith(suffix):
+            base = raw[: -len(suffix)]
+            return bool(base) and base.isalpha()
+    return False
 
 
 def _trail_field_name(request: broker_pb2.PlaceOrderRequest) -> str:
