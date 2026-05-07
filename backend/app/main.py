@@ -33,6 +33,7 @@ from app.core.crypto import get_fernet
 from app.core.db import SessionLocal, engine
 from app.core.deps import set_account_service, set_broker_registry, set_config_service
 from app.core.logging import configure_logging
+from app.services.bar_service import BarService
 from app.services.broker_callback_server import start_backend_callback_server
 from app.services.broker_registry_factory import MissingBrokerSecrets, build_broker_registry
 from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistry
@@ -112,10 +113,15 @@ async def lifespan(_app: FastAPI) -> Any:
     except MissingBrokerSecrets as exc:
         log.warning("broker_lifespan_skipped", reason=str(exc))
 
+    bar_service = BarService()
+    _app.state.bar_service = bar_service
+    await bar_service.start()
+
     log.info("startup_ok", env=settings.env)
     try:
         yield
     finally:
+        await _app.state.bar_service.stop()
         if pending_fills_sweeper is not None:
             await pending_fills_sweeper.stop()
         if pending_fills_task is not None:
