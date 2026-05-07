@@ -74,7 +74,8 @@ def _make_mock_session(
     )
 
     cache_result = AsyncMock()
-    cache_result.one = MagicMock(return_value=_FakeRow(cnt=cache_row_count))
+    # MED-19: _has_cache_gap now uses EXISTS(...) AS has_data instead of COUNT(*).
+    cache_result.one = MagicMock(return_value=_FakeRow(has_data=cache_row_count > 0))
 
     config_result = AsyncMock()
     config_result.one_or_none = MagicMock(return_value=None)
@@ -90,13 +91,13 @@ def _make_mock_session(
     generic_result = AsyncMock()
     generic_result.all = MagicMock(return_value=[])
     generic_result.one_or_none = MagicMock(return_value=None)
-    generic_result.one = MagicMock(return_value=_FakeRow(cnt=0))
+    generic_result.one = MagicMock(return_value=_FakeRow(has_data=False))
 
     async def _execute_side_effect(stmt: object, params: object = None, **kw: object) -> object:
         sql = str(stmt)
         if "FROM instruments" in sql:
             return inst_result
-        if "COUNT(*)" in sql and "bars_" in sql:
+        if "EXISTS" in sql and "bars_" in sql:
             return cache_result
         if "FROM app_config" in sql and "bar_source_priority" in sql:
             return config_result
@@ -329,18 +330,24 @@ async def test_pre_warm_skips_failed_instrument_until_next_cycle() -> None:
             r.one_or_none = MagicMock(return_value=None)
             return r
 
-        if "SELECT canonical_id, asset_class" in sql:
-            iid = params.get("iid") if isinstance(params, dict) else None
-            if iid is not None and int(iid) in inst_map:
-                row = inst_map[int(iid)]
-                r.one_or_none = MagicMock(
-                    return_value=_LocalRow(
-                        canonical_id=row.canonical_id, asset_class=row.asset_class
+        # HIGH-7: batch instrument lookup (WHERE id = ANY(:ids)) — returns all rows.
+        if "ANY(:ids)" in sql and "canonical_id" in sql:
+            result = AsyncMock()
+            ids = params.get("ids") if isinstance(params, dict) else None
+            if ids is not None:
+                rows = [
+                    _LocalRow(
+                        id=iid,
+                        canonical_id=inst_map[iid].canonical_id,
+                        asset_class=inst_map[iid].asset_class,
                     )
-                )
+                    for iid in [int(x) for x in ids]
+                    if iid in inst_map
+                ]
             else:
-                r.one_or_none = MagicMock(return_value=None)
-            return r
+                rows = []
+            result.all = MagicMock(return_value=rows)
+            return result
 
         if "FROM app_config" in sql:
             r.one_or_none = MagicMock(return_value=None)
@@ -353,7 +360,7 @@ async def test_pre_warm_skips_failed_instrument_until_next_cycle() -> None:
 
         r.all = MagicMock(return_value=[])
         r.one_or_none = MagicMock(return_value=None)
-        r.one = MagicMock(return_value=_LocalRow(cnt=0))
+        r.one = MagicMock(return_value=_LocalRow(has_data=False))
         return r
 
     session.execute.side_effect = _execute_side_effect

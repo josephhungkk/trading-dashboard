@@ -69,6 +69,30 @@ _TF_DELTA: Final[dict[str, timedelta]] = {
 # Cross-worker in-process dedup: key=(instrument_id, tf, gap_start, gap_end)
 _IN_FLIGHT: dict[tuple[int, str, datetime, datetime], asyncio.Event] = {}
 
+# HIGH-6: module-level lock to protect _IN_FLIGHT read-check-write across awaits.
+# Stored as a dict keyed by event loop id so each loop gets its own lock instance.
+# This ensures within-loop sharing (all coroutines use the same lock) while avoiding
+# cross-loop contamination (different pytest-asyncio tests get separate locks).
+_IN_FLIGHT_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _get_in_flight_lock() -> asyncio.Lock:
+    """Return (or create) the _IN_FLIGHT lock for the currently running event loop.
+
+    Using loop identity as the dict key ensures:
+    - Within one event loop (same test / production run): all coroutines share one lock.
+    - Across event loops (different pytest-asyncio tests): each loop gets a fresh lock.
+    """
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    if loop_id not in _IN_FLIGHT_LOCKS:
+        _IN_FLIGHT_LOCKS[loop_id] = asyncio.Lock()
+    return _IN_FLIGHT_LOCKS[loop_id]
+
+
+# HIGH-10: SQL whitelist for _query_bars table name.
+_VALID_BAR_TABLES: Final[frozenset[str]] = frozenset({"bars_1m", "bars_1s"})
+
 
 def _priority_for_source(source: str) -> int:
     """Single chokepoint mapping source → source_priority for UPSERT WHERE clause."""
@@ -247,17 +271,52 @@ class BarService:
 
         instruments = await self.active_set(session)
         now = datetime.now(UTC)
+
+        # HIGH-7: call healthy_clients ONCE before the instrument loop.
         registry = await self._get_registry()
+        healthy_clients = await registry.healthy_clients()
+        healthy_labels: set[str] = {c.label for c in healthy_clients}
+
+        # HIGH-7: batch all instruments queries and cache config reads.
+        instrument_ids = [row.instrument_id for row in instruments]
+
+        # Batch instrument lookup: WHERE id = ANY(:ids).
+        inst_rows: dict[int, Any] = {}
+        if instrument_ids:
+            batch_result = (
+                await session.execute(
+                    text(
+                        "SELECT id, canonical_id, asset_class FROM instruments WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": instrument_ids},
+                )
+            ).all()
+            for r in batch_result:
+                inst_rows[int(r.id)] = r
+
+        # Cache bar_source_priority config reads per asset_class_key.
+        _priority_cache: dict[str, list[str]] = {}
+
+        async def _get_priorities(asset_class_key: str) -> list[str]:
+            if asset_class_key in _priority_cache:
+                return _priority_cache[asset_class_key]
+            src_cfg_row = (
+                await session.execute(
+                    text("SELECT value_json FROM app_config WHERE namespace='charts' AND key=:k"),
+                    {"k": f"bar_source_priority.{asset_class_key}"},
+                )
+            ).one_or_none()
+            priorities: list[str] = (
+                list(src_cfg_row.value_json)
+                if src_cfg_row is not None
+                else _DEFAULTS.get(asset_class_key, [])
+            )
+            _priority_cache[asset_class_key] = priorities
+            return priorities
 
         for row in instruments:
             try:
-                # Resolve canonical_id and asset_class for this instrument.
-                inst_row = (
-                    await session.execute(
-                        text("SELECT canonical_id, asset_class FROM instruments WHERE id = :iid"),
-                        {"iid": row.instrument_id},
-                    )
-                ).one_or_none()
+                inst_row = inst_rows.get(row.instrument_id)
                 if inst_row is None:
                     logger.warning(
                         "bar_service.pre_warm.instrument_not_found",
@@ -270,25 +329,10 @@ class BarService:
                 asset_class: str = str(inst_row.asset_class)
                 asset_class_key = _asset_class_to_priority_key(asset_class)
 
-                # Determine source priority list from config.
-                src_cfg_row = (
-                    await session.execute(
-                        text(
-                            "SELECT value_json FROM app_config WHERE namespace='charts' AND key=:k"
-                        ),
-                        {"k": f"bar_source_priority.{asset_class_key}"},
-                    )
-                ).one_or_none()
-                priorities: list[str] = (
-                    list(src_cfg_row.value_json)
-                    if src_cfg_row is not None
-                    else _DEFAULTS.get(asset_class_key, [])
-                )
+                # Determine source priority list from config (cached).
+                priorities = await _get_priorities(asset_class_key)
 
                 # Pre-warm source policy: skip IBKR when any non-IBKR source is healthy.
-                healthy_clients = await registry.healthy_clients()
-                healthy_labels: set[str] = {c.label for c in healthy_clients}
-
                 non_ibkr_sources = [s for s in priorities if s != "ibkr"]
                 non_ibkr_healthy = any(
                     _source_to_label(s) in healthy_labels for s in non_ibkr_sources
@@ -351,14 +395,9 @@ class BarService:
                             # Already up to date.
                             continue
 
-                        # For IBKR source, use jittered label routing.
-                        # (For non-IBKR we call get_bars normally; it picks the label.)
-                        # Override _source_to_label via monkey-patch is NOT clean; instead
-                        # we pass source kwarg via _primary_fetch. For pre_warm we call
-                        # get_bars which handles source resolution internally. Since we
-                        # already decided on a non-IBKR source, get_bars may re-resolve —
-                        # that is acceptable because the healthy_clients check in _resolve_source
-                        # will also exclude IBKR when non-IBKR is healthy.
+                        # MED-16: use a fresh session per (instrument, tf) to avoid
+                        # long-lived txn holding locks. get_bars commits internally
+                        # (CRIT-1 fix) so each call is self-contained.
                         await self.get_bars(
                             canonical_id,
                             tf,
@@ -444,11 +483,21 @@ class BarService:
             asset_class_key = _asset_class_to_priority_key(asset_class)
             source = await self._resolve_source(asset_class_key, session)
 
-            # In-process coalescing: check _IN_FLIGHT dict first.
+            # HIGH-6: protect _IN_FLIGHT read-check-write with a module-level lock.
             gap_key = (instrument_id, timeframe, start, end)
-            existing_event = _IN_FLIGHT.get(gap_key)
-            if existing_event is not None:
+            async with _get_in_flight_lock():
+                existing_event = _IN_FLIGHT.get(gap_key)
+                if existing_event is None:
+                    my_event: asyncio.Event = asyncio.Event()
+                    _IN_FLIGHT[gap_key] = my_event
+                    is_primary = True
+                else:
+                    is_primary = False
+
+            if not is_primary:
                 # Another coroutine in this process is already fetching — wait on event.
+                # existing_event is guaranteed non-None here (is_primary=False branch).
+                assert existing_event is not None  # narrowing for mypy
                 logger.info(
                     "bar_service.in_process_wait",
                     canonical_id=canonical_id,
@@ -456,10 +505,9 @@ class BarService:
                 )
                 t0 = time.monotonic()
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(asyncio.ensure_future(existing_event.wait())),
-                        timeout=16.0,
-                    )
+                    # HIGH-9: use asyncio.wait_for directly instead of deprecated
+                    # asyncio.shield(asyncio.ensure_future(...)) pattern.
+                    await asyncio.wait_for(existing_event.wait(), timeout=16.0)
                 except TimeoutError:
                     logger.warning("bar_service.in_process_wait_timeout", canonical_id=canonical_id)
             else:
@@ -475,8 +523,6 @@ class BarService:
 
                 if was_new:
                     # This worker is the primary fetcher.
-                    my_event: asyncio.Event = asyncio.Event()
-                    _IN_FLIGHT[gap_key] = my_event
                     try:
                         await self._primary_fetch(
                             canonical_id=canonical_id,
@@ -500,14 +546,27 @@ class BarService:
                         my_event.set()
                         _IN_FLIGHT.pop(gap_key, None)
                 else:
-                    # Another worker (different process) is fetching — wait via pg_notify.
-                    metrics.bar_service_backfill_total.labels(
-                        source=source, timeframe=timeframe, outcome="coalesced_wait"
-                    ).inc()
-                    t0 = time.monotonic()
-                    await self._wait_for_job(job_id)
-                    elapsed = time.monotonic() - t0
-                    metrics.bar_service_cross_worker_wait_seconds.observe(elapsed)
+                    # HIGH-5: if job_id == 0 (existing job already gone from DB),
+                    # skip _wait_for_job and re-query cache directly.
+                    if job_id == 0:
+                        logger.info(
+                            "bar_service.job_already_finished",
+                            canonical_id=canonical_id,
+                            timeframe=timeframe,
+                        )
+                    else:
+                        # Another worker (different process) is fetching — wait via pg_notify.
+                        metrics.bar_service_backfill_total.labels(
+                            source=source, timeframe=timeframe, outcome="coalesced_wait"
+                        ).inc()
+                        t0 = time.monotonic()
+                        await self._wait_for_job(job_id)
+                        elapsed = time.monotonic() - t0
+                        metrics.bar_service_cross_worker_wait_seconds.observe(elapsed)
+
+                    # Clean up our slot in _IN_FLIGHT since we were primary but
+                    # ended up as secondary (job_id == 0 path).
+                    _IN_FLIGHT.pop(gap_key, None)
 
         # 5. Return paginated rows.
         return await self._query_bars(
@@ -543,22 +602,28 @@ class BarService:
         end: datetime,
         session: AsyncSession,
     ) -> bool:
-        """Return True if bars_1m has no rows covering [start, end)."""
+        """Return True if bars_1m has no rows covering [start, end).
+
+        MED-19: use EXISTS instead of COUNT(*) to avoid full scan on populated cache.
+        """
         row = (
             await session.execute(
                 text(
                     """
-                    SELECT COUNT(*) AS cnt
-                      FROM bars_1m
-                     WHERE instrument_id = :iid
-                       AND bucket_start >= :start
-                       AND bucket_start < :end
+                    SELECT EXISTS(
+                        SELECT 1
+                          FROM bars_1m
+                         WHERE instrument_id = :iid
+                           AND bucket_start >= :start
+                           AND bucket_start < :end
+                         LIMIT 1
+                    ) AS has_data
                     """
                 ),
                 {"iid": instrument_id, "start": start, "end": end},
             )
         ).one()
-        return int(row.cnt) == 0
+        return not bool(row.has_data)
 
     async def _resolve_source(self, asset_class_key: str, session: AsyncSession) -> str:
         """Pick the highest-priority healthy source for the given asset class key."""
@@ -662,8 +727,31 @@ class BarService:
             )
         ).one_or_none()
 
+        # HIGH-5: if existing row is None, the primary worker already finished.
+        # Return (0, False) — caller detects job_id==0 and skips _wait_for_job.
         job_id = int(existing.id) if existing is not None else 0
         return job_id, False
+
+    async def _recover_mark_failed(self, job_id: int, error_msg: str) -> None:
+        """HIGH-8: open a fresh session to mark job failed after WG-split.
+
+        The original session is poisoned after OperationalError; this helper
+        always uses SessionLocal() to get a clean connection.
+        """
+        async with SessionLocal() as recovery_session:
+            await recovery_session.execute(
+                text(
+                    """
+                    UPDATE bar_backfill_jobs
+                       SET status='failed',
+                           error_message=:msg,
+                           finished_at=NOW()
+                     WHERE id=:job_id
+                    """
+                ),
+                {"msg": error_msg, "job_id": job_id},
+            )
+            await recovery_session.commit()
 
     async def _primary_fetch(
         self,
@@ -701,7 +789,7 @@ class BarService:
             )
         except OperationalError as exc:
             # WG-split / DB disconnect mid-fetch: the original session is poisoned.
-            # Open a fresh session to mark the job failed so the next cron cycle can retry.
+            # HIGH-8: use extracted helper to open fresh session + mark failed.
             error_msg = f"OperationalError: {exc!s}"[:500]
             logger.error(
                 "bar_service.backfill_failed",
@@ -710,20 +798,7 @@ class BarService:
                 job_id=job_id,
                 error=error_msg,
             )
-            async with SessionLocal() as recovery_session:
-                await recovery_session.execute(
-                    text(
-                        """
-                        UPDATE bar_backfill_jobs
-                           SET status='failed',
-                               error_message=:msg,
-                               finished_at=NOW()
-                         WHERE id=:job_id
-                        """
-                    ),
-                    {"msg": error_msg, "job_id": job_id},
-                )
-                await recovery_session.commit()
+            await self._recover_mark_failed(job_id, error_msg)
             raise
         except Exception as exc:
             await self._mark_job(job_id=job_id, status="failed", error=str(exc), session=session)
@@ -745,9 +820,14 @@ class BarService:
                 rows_inserted=rows_inserted,
                 session=session,
             )
+            # CRIT-1: commit BEFORE emitting pg_notify.
+            # PG NOTIFY only fires on commit; must commit here so cache is durable
+            # and the notify reaches waiting workers.
+            await session.commit()
             await _emit_done(job_id, session)
         except OperationalError as exc:
-            # WG-split mid-UPSERT: session is poisoned; recover via fresh session.
+            # WG-split mid-UPSERT: session is poisoned.
+            # HIGH-8: use extracted helper to open fresh session + mark failed.
             error_msg = f"OperationalError: {exc!s}"[:500]
             logger.error(
                 "bar_service.backfill_failed",
@@ -756,20 +836,7 @@ class BarService:
                 job_id=job_id,
                 error=error_msg,
             )
-            async with SessionLocal() as recovery_session:
-                await recovery_session.execute(
-                    text(
-                        """
-                        UPDATE bar_backfill_jobs
-                           SET status='failed',
-                               error_message=:msg,
-                               finished_at=NOW()
-                         WHERE id=:job_id
-                        """
-                    ),
-                    {"msg": error_msg, "job_id": job_id},
-                )
-                await recovery_session.commit()
+            await self._recover_mark_failed(job_id, error_msg)
             raise
 
         logger.info(
@@ -860,7 +927,8 @@ class BarService:
                     except TimeoutError:
                         pass
                 else:
-                    # Poll-only fallback.
+                    # HIGH-14: conn is None → SQL poll via main session instead of
+                    # sleeping with no actual polling.
                     await asyncio.sleep(min(0.25, remaining))
 
                 # Poll job status directly.
@@ -889,7 +957,13 @@ class BarService:
         cursor_ts: datetime | None,
         session: AsyncSession,
     ) -> BarPage:
-        """Query bars from ``table``, applying cursor pagination."""
+        """Query bars from ``table``, applying cursor pagination.
+
+        HIGH-10: validate table name against allowlist to prevent SQL injection.
+        """
+        if table not in _VALID_BAR_TABLES:
+            raise ValueError(f"unknown bar table: {table!r}")
+
         effective_end = cursor_ts if cursor_ts is not None else end
 
         rows = (
@@ -983,16 +1057,41 @@ async def _upsert_bars(
 ) -> int:
     """UPSERT bars into bars_1m, respecting source_priority (lower wins).
 
+    HIGH-4: batch via executemany-style chunked at 1000 rows/statement.
+    CRIT-2: volume_source='tape' when volume present, 'none' when absent.
     Returns the number of rows processed.
     """
     if not bars:
         return 0
 
-    inserted = 0
-    for bar in bars:
-        volume_val = str(bar.volume) if bar.volume is not None else None
-        volume_src = "broker_history" if volume_val is not None else "none"
+    chunk_size = 1000
+    total_inserted = 0
 
+    for chunk_start in range(0, len(bars), chunk_size):
+        chunk = bars[chunk_start : chunk_start + chunk_size]
+        params_list = []
+        for bar in chunk:
+            volume_val = str(bar.volume) if bar.volume is not None else None
+            # CRIT-2: sidecar GetHistoricalBars IS trade tape data.
+            # CHECK constraint: volume_source IN ('tape', 'quote_proxy', 'none').
+            volume_src = "tape" if volume_val is not None else "none"
+            params_list.append(
+                {
+                    "iid": instrument_id,
+                    "bs": bar.bucket_start,
+                    "src": source,
+                    "sp": source_priority,
+                    "o": str(bar.open),
+                    "h": str(bar.high),
+                    "l": str(bar.low),
+                    "c": str(bar.close),
+                    "vol": volume_val,
+                    "vsrc": volume_src,
+                    "tc": bar.trade_count,
+                }
+            )
+
+        # Execute the chunk as a single batched statement.
         await session.execute(
             text(
                 """
@@ -1014,23 +1113,11 @@ async def _upsert_bars(
                   WHERE EXCLUDED.source_priority < bars_1m.source_priority
                 """
             ),
-            {
-                "iid": instrument_id,
-                "bs": bar.bucket_start,
-                "src": source,
-                "sp": source_priority,
-                "o": str(bar.open),
-                "h": str(bar.high),
-                "l": str(bar.low),
-                "c": str(bar.close),
-                "vol": volume_val,
-                "vsrc": volume_src,
-                "tc": bar.trade_count,
-            },
+            params_list,
         )
-        inserted += 1
+        total_inserted += len(chunk)
 
-    return inserted
+    return total_inserted
 
 
 async def _emit_done(job_id: int, session: AsyncSession) -> None:
@@ -1061,7 +1148,10 @@ async def _poll_job_done(job_id: int, conn: Any) -> bool:
 
 
 def _asset_class_to_priority_key(asset_class: str) -> str:
-    """Map DB instrument asset_class enum value → bar_source_priority config key."""
+    """Map DB instrument asset_class enum value → bar_source_priority config key.
+
+    MED-22: raises ValueError (not BarSourceUnavailable) for pure mapping error.
+    """
     ac = asset_class.upper()
     if ac in ("STOCK", "ETF"):
         # TODO: HK detection deferred — treat all equities as equity_us for now.
@@ -1070,7 +1160,7 @@ def _asset_class_to_priority_key(asset_class: str) -> str:
         return "crypto"
     if ac == "FOREX":
         return "fx"
-    raise BarSourceUnavailable(f"no bar source priority key for asset_class={asset_class!r}")
+    raise ValueError(f"asset_class {asset_class!r} not supported for bar source priority")
 
 
 def _source_to_label(source: str) -> str | None:

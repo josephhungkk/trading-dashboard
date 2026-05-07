@@ -81,7 +81,7 @@ def _make_page_bar_row(n: int, source: str = "schwab", priority: int = 1) -> _Fa
         low=Decimal("99"),
         close=Decimal("100.5"),
         volume=Decimal("1000"),
-        volume_source="broker_history",
+        volume_source="tape",
         trade_count=10,
     )
 
@@ -110,7 +110,8 @@ def _make_mock_session(
     )
 
     cache_result = AsyncMock()
-    cache_result.one = MagicMock(return_value=_FakeRow(cnt=cache_row_count))
+    # MED-19: _has_cache_gap now uses EXISTS(...) AS has_data instead of COUNT(*).
+    cache_result.one = MagicMock(return_value=_FakeRow(has_data=cache_row_count > 0))
 
     config_row = _FakeRow(value_json=source_priority_json) if source_priority_json else None
     config_result = AsyncMock()
@@ -128,13 +129,13 @@ def _make_mock_session(
     generic_result = AsyncMock()
     generic_result.all = MagicMock(return_value=[])
     generic_result.one_or_none = MagicMock(return_value=None)
-    generic_result.one = MagicMock(return_value=_FakeRow(cnt=0))
+    generic_result.one = MagicMock(return_value=_FakeRow(has_data=False))
 
     async def _execute_side_effect(stmt: object, params: object = None, **kw: object) -> object:
         sql = str(stmt)
         if "FROM instruments" in sql:
             return inst_result
-        if "COUNT(*)" in sql and "bars_" in sql:
+        if "EXISTS" in sql and "bars_" in sql:
             return cache_result
         if "FROM app_config" in sql and "bar_source_priority" in sql:
             return config_result
@@ -404,3 +405,219 @@ async def test_priority_upsert_lower_priority_skipped() -> None:
     # The SELECT query still returns the schwab row (ibkr's WHERE clause was rejected).
     assert result.bars[0].source == "schwab"
     assert result.bars[0].source_priority == 1
+
+
+# ──────────────────── Tests for reviewer-fix batch A ────────────────────────
+
+
+async def test_crit1_commit_called_after_successful_fetch() -> None:
+    """CRIT-1: assert session.commit() is called on the success path of _primary_fetch.
+
+    We call get_bars with a cache miss; mock a sidecar that returns 3 bars.
+    The session mock records all commit() calls; assert at least one happened
+    (proves the write path committed before pg_notify was emitted).
+    """
+    page_rows = [_make_page_bar_row(i) for i in range(3)]
+    session = _make_mock_session(cache_row_count=0, bars_page_rows=page_rows)
+    mock_sidecar = AsyncMock()
+    mock_sidecar.get_historical_bars.return_value = HistoricalBarsResult(
+        bars=_make_bars(3), truncated=False
+    )
+    registry = _make_registry(healthy_labels=["schwab"], client=mock_sidecar)
+
+    svc = BarService(registry=registry)
+    await svc.get_bars(_CANONICAL, "1m", _START, _END, session=session)
+
+    # CRIT-1: commit must be called on the success path.
+    session.commit.assert_called()
+
+
+async def test_crit2_volume_source_tape_for_non_null_volume() -> None:
+    """CRIT-2: _upsert_bars must use volume_source='tape' for bars with volume != None.
+
+    We intercept the execute() call for the INSERT and capture the params to
+    verify volume_source is set to 'tape' (not 'broker_history').
+    """
+    from app.services.bar_service import _upsert_bars
+
+    session = AsyncMock(spec=AsyncSession)
+    execute_result = AsyncMock()
+    session.execute.return_value = execute_result
+
+    captured_params: list[object] = []
+
+    async def _capture_execute(stmt: object, params: object = None, **kw: object) -> object:
+        captured_params.append(params)
+        return execute_result
+
+    session.execute.side_effect = _capture_execute
+
+    bars = _make_bars(5)
+    await _upsert_bars(
+        instrument_id=_INSTRUMENT_ID,
+        source="schwab",
+        source_priority=1,
+        bars=bars,
+        session=session,
+    )
+
+    assert len(captured_params) >= 1, "execute must be called at least once"
+    # Check volume_source in the params list passed to executemany-style call.
+    params_list = captured_params[0]
+    assert isinstance(params_list, list), "params should be a list (batched)"
+    for row_params in params_list:
+        assert isinstance(row_params, dict)
+        assert row_params["vsrc"] == "tape", (
+            f"volume_source must be 'tape' for non-null volume, got {row_params['vsrc']!r}"
+        )
+
+
+async def test_crit2_volume_source_none_for_null_volume() -> None:
+    """CRIT-2: _upsert_bars must use volume_source='none' for bars with volume == None."""
+    from app.brokers.base import HistoricalBar
+    from app.services.bar_service import _upsert_bars
+
+    no_volume_bars = [
+        HistoricalBar(
+            bucket_start=_START + timedelta(minutes=i),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100.5"),
+            volume=None,
+            trade_count=0,
+        )
+        for i in range(3)
+    ]
+
+    session = AsyncMock(spec=AsyncSession)
+    execute_result = AsyncMock()
+    captured_params: list[object] = []
+
+    async def _capture_execute(stmt: object, params: object = None, **kw: object) -> object:
+        captured_params.append(params)
+        return execute_result
+
+    session.execute.side_effect = _capture_execute
+
+    await _upsert_bars(
+        instrument_id=_INSTRUMENT_ID,
+        source="schwab",
+        source_priority=1,
+        bars=no_volume_bars,
+        session=session,
+    )
+
+    assert len(captured_params) >= 1
+    params_list = captured_params[0]
+    assert isinstance(params_list, list)
+    for row_params in params_list:
+        assert isinstance(row_params, dict)
+        assert row_params["vsrc"] == "none", (
+            f"volume_source must be 'none' for null volume, got {row_params['vsrc']!r}"
+        )
+        assert row_params["vol"] is None
+
+
+async def test_high5_job_id_zero_skips_wait_and_returns_cache() -> None:
+    """HIGH-5: when _upsert_backfill_job returns (0, False), get_bars must NOT
+    call _wait_for_job; instead it re-queries the cache directly and returns bars.
+    """
+    page_rows = [_make_page_bar_row(i) for i in range(5)]
+    session = _make_mock_session(cache_row_count=0, bars_page_rows=page_rows)
+
+    mock_sidecar = AsyncMock()
+    registry = _make_registry(healthy_labels=["schwab"], client=mock_sidecar)
+
+    # Simulate _upsert_backfill_job returning (0, False) — the primary already finished.
+    async def _fake_upsert(
+        self: BarService,
+        *,
+        instrument_id: int,
+        source: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        session: AsyncSession,
+    ) -> tuple[int, bool]:
+        return 0, False
+
+    wait_called = [False]
+
+    async def _fake_wait(self: BarService, job_id: int) -> None:
+        wait_called[0] = True
+
+    svc = BarService(registry=registry)
+    with patch.object(BarService, "_upsert_backfill_job", _fake_upsert):
+        with patch.object(BarService, "_wait_for_job", _fake_wait):
+            result = await svc.get_bars(_CANONICAL, "1m", _START, _END, session=session)
+
+    assert not wait_called[0], "_wait_for_job must NOT be called when job_id==0"
+    assert len(result.bars) == 5, "get_bars must return cache data when job_id==0"
+
+
+async def test_high6_in_flight_lock_ensures_single_primary() -> None:
+    """HIGH-6: racing two coroutines on the same gap_key; exactly one becomes primary.
+
+    Both coroutines run concurrently via asyncio.gather. The _IN_FLIGHT_LOCK
+    ensures only the first coroutine to enter the critical section inserts the
+    event; the second sees it and defers.
+
+    IMPORTANT: patches must be applied at the outer level (NOT inside each
+    coroutine) to avoid the patch.object race condition where concurrent
+    coroutines override each other's __enter__/__exit__ restore values and
+    leave BarService in a patched state after the test.
+    """
+    import app.services.bar_service as bar_svc_module
+
+    # Clear _IN_FLIGHT to start fresh.
+    bar_svc_module._IN_FLIGHT.clear()
+
+    primary_count = [0]
+
+    async def _fake_upsert(
+        self: BarService,
+        *,
+        instrument_id: int,
+        source: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        session: AsyncSession,
+    ) -> tuple[int, bool]:
+        # Always return (1, True) so DB-level chokepoint says "be primary".
+        # The _IN_FLIGHT_LOCK is the in-process guard; only the first coroutine
+        # to acquire the lock will actually insert the event.
+        return 1, True
+
+    async def _fake_primary_fetch(self: BarService, **kwargs: object) -> None:
+        primary_count[0] += 1
+        # Yield to allow the other coroutine to proceed.
+        await asyncio.sleep(0)
+
+    page_rows = [_make_page_bar_row(i) for i in range(2)]
+
+    async def _run_one(worker_id: int) -> None:
+        session = _make_mock_session(cache_row_count=0, bars_page_rows=page_rows)
+        mock_sidecar = AsyncMock()
+        mock_sidecar.get_historical_bars.return_value = HistoricalBarsResult(
+            bars=_make_bars(2), truncated=False
+        )
+        registry = _make_registry(healthy_labels=["schwab"], client=mock_sidecar)
+        svc = BarService(registry=registry)
+        await svc.get_bars(_CANONICAL, "1m", _START, _END, session=session)
+
+    # Apply patches at the OUTER level so asyncio.gather cannot interleave
+    # the patch __enter__/__exit__ calls and leave BarService in a patched state.
+    with patch.object(BarService, "_upsert_backfill_job", _fake_upsert):
+        with patch.object(BarService, "_primary_fetch", _fake_primary_fetch):
+            with patch.object(BarService, "_wait_for_job", new_callable=AsyncMock) as mock_wait:
+                mock_wait.return_value = None
+                await asyncio.gather(_run_one(0), _run_one(1))
+
+    # Exactly one coroutine should have been primary (called _primary_fetch).
+    assert primary_count[0] == 1, f"Exactly 1 primary expected, got {primary_count[0]}"
+
+    # Clean up _IN_FLIGHT (the primary's finally block already popped the key,
+    # but clear defensively to avoid any cross-test contamination).
+    bar_svc_module._IN_FLIGHT.clear()

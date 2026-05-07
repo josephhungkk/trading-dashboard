@@ -109,7 +109,7 @@ def _make_pre_warm_session(
     generic_result = AsyncMock()
     generic_result.all = MagicMock(return_value=[])
     generic_result.one_or_none = MagicMock(return_value=None)
-    generic_result.one = MagicMock(return_value=_FakeRow(cnt=0))
+    generic_result.one = MagicMock(return_value=_FakeRow(has_data=False))
 
     async def _execute_side_effect(stmt: object, params: object = None, **kw: object) -> object:
         sql = str(stmt)
@@ -122,17 +122,23 @@ def _make_pre_warm_session(
         if "FROM app_config" in sql and "bar_pre_warm_window_days" in sql:
             return window_result
 
-        # instrument lookup (canonical_id + asset_class)
-        if "SELECT canonical_id, asset_class" in sql:
+        # HIGH-7: batch instrument lookup (WHERE id = ANY(:ids)) — returns all rows.
+        if "ANY(:ids)" in sql and "canonical_id" in sql:
             result = AsyncMock()
-            iid = params.get("iid") if isinstance(params, dict) else None
-            if iid is not None and int(iid) in inst_map:
-                r = inst_map[int(iid)]
-                result.one_or_none = MagicMock(
-                    return_value=_FakeRow(canonical_id=r.canonical_id, asset_class=r.asset_class)
-                )
+            ids = params.get("ids") if isinstance(params, dict) else None
+            if ids is not None:
+                rows = [
+                    _FakeRow(
+                        id=iid,
+                        canonical_id=inst_map[iid].canonical_id,
+                        asset_class=inst_map[iid].asset_class,
+                    )
+                    for iid in [int(x) for x in ids]
+                    if iid in inst_map
+                ]
             else:
-                result.one_or_none = MagicMock(return_value=None)
+                rows = []
+            result.all = MagicMock(return_value=rows)
             return result
 
         # source_priority config — the key 'bar_source_priority.*' is passed as :k param,
@@ -528,4 +534,74 @@ async def test_pre_warm_handles_get_bars_error_gracefully() -> None:
     # Instrument 2: 1m raised, but 1h and 1d should have succeeded.
     assert "1h" in iid2_tfs and "1d" in iid2_tfs, (
         "Instrument 2: 1h and 1d should succeed even though 1m raised"
+    )
+
+
+# ──────────────────── Tests for reviewer-fix batch A (HIGH-7) ────────────────
+
+
+async def test_high7_instruments_queried_with_any_ids_batch() -> None:
+    """HIGH-7: assert instruments table is queried with ANY(:ids) (1 query for N instruments).
+
+    We intercept session.execute() and count how many times a query matching
+    'ANY(:ids)' is executed for the instruments table. For N instruments, it
+    must be exactly 1.
+    """
+    n = 5
+    instruments = _make_instruments(list(range(1, n + 1)))
+    session = _make_pre_warm_session(instruments, last_done_range_end=_30D_AGO)
+    registry = _make_registry(healthy_labels=["schwab"])
+
+    any_ids_call_count = [0]
+    original_side_effect = session.execute.side_effect
+
+    async def _tracking_execute(stmt: object, params: object = None, **kw: object) -> object:
+        sql = str(stmt)
+        if "ANY(:ids)" in sql and "canonical_id" in sql:
+            any_ids_call_count[0] += 1
+        return await original_side_effect(stmt, params, **kw)
+
+    session.execute.side_effect = _tracking_execute
+
+    async def _fake_get_bars(self: BarService, *_: object, **__: object) -> object:
+        return MagicMock(bars=[], next_cursor=None)
+
+    svc = BarService(registry=registry)
+    with patch.object(BarService, "get_bars", _fake_get_bars):
+        with patch("app.services.bar_service.datetime") as mock_dt:
+            mock_dt.now.return_value = _NOW
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            await svc.pre_warm_active_set(session)
+
+    assert any_ids_call_count[0] == 1, (
+        f"instruments table must be queried exactly once using ANY(:ids), "
+        f"got {any_ids_call_count[0]} calls"
+    )
+
+
+async def test_high7_healthy_clients_called_once_per_cycle() -> None:
+    """HIGH-7: registry.healthy_clients() must be called exactly once per pre_warm cycle,
+    not once per instrument.
+    """
+    n = 4
+    instruments = _make_instruments(list(range(1, n + 1)))
+    session = _make_pre_warm_session(instruments, last_done_range_end=_30D_AGO)
+    registry = _make_registry(healthy_labels=["schwab"])
+
+    async def _fake_get_bars(self: BarService, *_: object, **__: object) -> object:
+        return MagicMock(bars=[], next_cursor=None)
+
+    svc = BarService(registry=registry)
+    with patch.object(BarService, "get_bars", _fake_get_bars):
+        with patch("app.services.bar_service.datetime") as mock_dt:
+            mock_dt.now.return_value = _NOW
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            await svc.pre_warm_active_set(session)
+
+    # healthy_clients() should have been called once (by pre_warm) + once (by _get_registry
+    # in get_bars if get_bars is patched then healthy_clients is NOT called inside the loop).
+    # Since get_bars is patched away, the only call is from pre_warm_active_set itself.
+    assert registry.healthy_clients.call_count == 1, (
+        f"healthy_clients() must be called once per cycle, "
+        f"got {registry.healthy_clients.call_count}"
     )
