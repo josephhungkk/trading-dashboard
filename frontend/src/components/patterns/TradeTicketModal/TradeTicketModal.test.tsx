@@ -254,6 +254,10 @@ describe('TradeTicketModal — mode prop (6 new tests)', () => {
     const { unmount } = render(<TradeTicketModal {...defaultProps} />);
     const qtyInput = screen.getByLabelText('Qty');
 
+    // Drop any mount-time fetch calls (initial preview, nonce mint, etc.) so the
+    // assertion below isolates debounce behavior, not initial-render side effects.
+    fetchMock.mockClear();
+
     // Fire 3 rapid change events — each arms the debounce timer, cancelling the previous
     act(() => { fireEvent.change(qtyInput, { target: { value: '1' } }); });
     act(() => { fireEvent.change(qtyInput, { target: { value: '12' } }); });

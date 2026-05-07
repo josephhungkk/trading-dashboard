@@ -62,7 +62,7 @@ enum AssetClass {
   BOND = 7;
   MUTUAL_FUND = 8;
   WARRANT = 9;
-  CBBC = 10;  // HK callable bull/bear contract (牛熊證) — Phase 6 (M1)
+  CBBC = 10; // HK callable bull/bear contract (牛熊證) — Phase 6 (M1)
 }
 
 enum OrderSide {
@@ -230,10 +230,10 @@ message Order {
   string cash_amount = 15; // Phase 8c reserved tag 15
   reserved 16 to 20; // forward-extension reservations (R35)
   // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
-  string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
-  string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
-  string trail_limit_offset = 23;  // Decimal — TRAIL_LIMIT only
-  string expiry_date = 24;         // ISO "YYYY-MM-DD" — GTD only
+  string trail_offset = 21; // Decimal-as-string e.g. "0.50" or "5.0"
+  string trail_offset_type = 22; // "AMOUNT" | "PERCENT"
+  string trail_limit_offset = 23; // Decimal — TRAIL_LIMIT only
+  string expiry_date = 24; // ISO "YYYY-MM-DD" — GTD only
 }
 message OrdersResponse {
   repeated Order orders = 1;
@@ -251,11 +251,11 @@ message PlaceOrderRequest {
   string stop_price = 9; // decimal-as-string, "" unless STOP
   string cash_amount = 15; // Phase 8c reserved tag 15
   // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
-  string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
-  string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
-  string trail_limit_offset = 23;  // Decimal — TRAIL_LIMIT only
-  string expiry_date = 24;         // ISO "YYYY-MM-DD" — GTD only
-  string oco_group_id = 25;   // optional OCA group identifier (≤32 chars) for OCO placement (Phase 8b T-O.8)
+  string trail_offset = 21; // Decimal-as-string e.g. "0.50" or "5.0"
+  string trail_offset_type = 22; // "AMOUNT" | "PERCENT"
+  string trail_limit_offset = 23; // Decimal — TRAIL_LIMIT only
+  string expiry_date = 24; // ISO "YYYY-MM-DD" — GTD only
+  string oco_group_id = 25; // optional OCA group identifier (≤32 chars) for OCO placement (Phase 8b T-O.8)
   reserved 10 to 14, 16 to 20; // forward-extension reservations (R35)
 }
 
@@ -278,10 +278,10 @@ message ModifyOrderRequest {
   string cash_amount = 15; // Phase 8c reserved tag 15
   reserved 16 to 20; // forward-extension reservations (R35)
   // Phase 8b reserved tags 21-24 (see docs/superpowers/specs/2026-05-06-phase8b-order-type-expansion-design.md)
-  string trail_offset = 21;        // Decimal-as-string e.g. "0.50" or "5.0"
-  string trail_offset_type = 22;   // "AMOUNT" | "PERCENT"
-  string trail_limit_offset = 23;  // Decimal — TRAIL_LIMIT only
-  string expiry_date = 24;         // ISO "YYYY-MM-DD" — GTD only
+  string trail_offset = 21; // Decimal-as-string e.g. "0.50" or "5.0"
+  string trail_offset_type = 22; // "AMOUNT" | "PERCENT"
+  string trail_limit_offset = 23; // Decimal — TRAIL_LIMIT only
+  string expiry_date = 24; // ISO "YYYY-MM-DD" — GTD only
 }
 
 message ModifyOrderResponse {
@@ -364,14 +364,18 @@ message ConfigureResponse {
 
 message StreamQuotesRequest {
   oneof op {
-    Subscribe   subscribe   = 1;
+    Subscribe subscribe = 1;
     Unsubscribe unsubscribe = 2;
-    Heartbeat   heartbeat   = 3;
-    Resync      resync      = 4;
+    Heartbeat heartbeat = 3;
+    Resync resync = 4;
   }
 
-  message Subscribe   { repeated SymbolRef symbols = 1; }
-  message Unsubscribe { repeated SymbolRef symbols = 1; }
+  message Subscribe {
+    repeated SymbolRef symbols = 1;
+  }
+  message Unsubscribe {
+    repeated SymbolRef symbols = 1;
+  }
   message Heartbeat {
     google.protobuf.Timestamp client_time = 1;
     int32 tick_count_received = 2;
@@ -379,49 +383,51 @@ message StreamQuotesRequest {
   // Sidecar reconciles its upstream-broker refcount against `expected`; only
   // diff propagates to broker socket. Used when gRPC reconnects but sidecar
   // process didn't restart (Health.started_at unchanged).
-  message Resync { repeated SymbolRef expected = 1; }
+  message Resync {
+    repeated SymbolRef expected = 1;
+  }
 }
 
 message SymbolRef {
   string canonical_id = 1;
-  string raw_symbol   = 2;
+  string raw_symbol = 2;
   AssetClass asset_class = 3;
-  string exchange     = 4;
-  string currency     = 5;
-  bytes  source_meta  = 6;
-  reserved 7 to 15;  // Phase 12/14 contract_extra extensions
+  string exchange = 4;
+  string currency = 5;
+  bytes source_meta = 6;
+  reserved 7 to 15; // Phase 12/14 contract_extra extensions
 }
 
 message QuoteMessage {
   string canonical_id = 1;
-  google.protobuf.Timestamp tick_time   = 2;
+  google.protobuf.Timestamp tick_time = 2;
   google.protobuf.Timestamp received_at = 3;
   string source = 4;
   // Reserved tags 5-9: future top-level metadata (e.g. sequence_number,
   // partition_key) without disturbing the price block below.
   reserved 5 to 9;
 
-  string last       = 10;
-  string bid        = 11;
-  string ask        = 12;
-  string volume     = 13;
-  string day_high   = 14;
-  string day_low    = 15;
-  string open       = 16;
+  string last = 10;
+  string bid = 11;
+  string ask = 12;
+  string volume = 13;
+  string day_high = 14;
+  string day_low = 15;
+  string open = 16;
   string prev_close = 17;
   string change_pct = 18;
-  string change     = 19;
+  string change = 19;
   // Reserved tags 20-29: future price-block extensions (mid, vwap, last_size,
   // bid_size, ask_size, etc.) — kept contiguous with the price band.
   reserved 20 to 29;
 
-  bool   is_delayed     = 30;
-  int32  delay_seconds  = 31;
+  bool is_delayed = 30;
+  int32 delay_seconds = 31;
   // Reserved tags 32-89: future staleness/feed-state extensions
   // (e.g. is_trading_halted, halt_reason, feed_status, market_session).
   reserved 32 to 89;
 
-  bytes  raw_payload    = 90;
+  bytes raw_payload = 90;
   // Reserved tags 91-200: keep open for future debug/trace fields, but tag 90
   // is the canonical "escape hatch" — bump only with a clear reason.
   reserved 91 to 200;
@@ -439,7 +445,7 @@ service BackendCallback {
 }
 
 message TokenRefreshRequest {
-  string broker_id = 1;  // "schwab" — distinguishes if other brokers ever need this pattern
+  string broker_id = 1; // "schwab" — distinguishes if other brokers ever need this pattern
 }
 
 message TokenRefreshResponse {
