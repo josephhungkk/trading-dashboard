@@ -1,9 +1,20 @@
-"""Alpaca streaming event sources."""
+"""Alpaca streaming event sources.
+
+Phase 8c chunk-C scope: helpers for a future crypto-specific order event stream.
+Currently unused in the production handler — `TradingStream.subscribe_trade_updates`
+in handlers.py covers BOTH equity AND crypto order updates (alpaca-py does not
+expose a separate CryptoTradeStream API). When/if alpaca-py adds a dedicated
+crypto trade stream, wire `crypto_order_event_source` into
+`AlpacaServicer._ensure_order_event_subscription` as a second feed merging into
+the existing per-account queue. The `_map_crypto_trade_update` symbol
+canonicalization is the load-bearing piece kept here for the future wiring.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 import structlog
@@ -27,7 +38,9 @@ def _map_crypto_trade_update(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
-async def crypto_order_event_source(stream_factory):
+async def crypto_order_event_source(
+    stream_factory: Callable[[], Any],
+) -> AsyncGenerator[dict[str, str], None]:
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(
         maxsize=_CRYPTO_ORDER_EVENT_QUEUE_MAXSIZE
     )

@@ -20,5 +20,6 @@ async def test_alpaca_crypto_rows_supported(db_session: AsyncSession) -> None:
             )
         )
     ).scalar_one()
-    # Conservative empirical PASS set: MARKET (DAY/GTC) + LIMIT (DAY/GTC).
-    assert n >= 4
+    # 4 rows: MARKET (DAY/GTC) + LIMIT (DAY/GTC). STOP_LIMIT/IOC/FOK pending
+    # empirical validation per migration 0020a comment.
+    assert n == 4

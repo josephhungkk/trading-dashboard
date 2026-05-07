@@ -6,6 +6,7 @@ are not set. Invoked by .github/workflows/nightly-real-alpaca-crypto.yml.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from decimal import Decimal
 
@@ -28,17 +29,17 @@ async def test_real_alpaca_crypto_notional_market_order() -> None:
         os.environ["ALPACA_PAPER_API_SECRET"],
         paper=True,
     )
-    order = client.submit_order(
+    # Wrap blocking SDK calls so the asyncio event loop stays responsive
+    # (chunk-C python MED-3 / spec HIGH-1).
+    order = await asyncio.to_thread(
+        client.submit_order,
         MarketOrderRequest(
             symbol="BTC/USD",
             notional=Decimal("1.00"),
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-        )
+        ),
     )
 
     assert order.id
-    cancel_succeeded = False
-    client.cancel_order_by_id(order.id)
-    cancel_succeeded = True
-    assert cancel_succeeded
+    await asyncio.to_thread(client.cancel_order_by_id, order.id)

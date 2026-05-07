@@ -18,8 +18,11 @@ branch_labels = None
 depends_on = None
 
 CAPABILITY_ROWS = [
-    # Alpaca crypto docs list market, limit, and stop_limit support. Keep this
-    # migration to the empirical PASS branch confirmed for Phase 8c T-C.6.
+    # Alpaca crypto docs list MARKET, LIMIT, and STOP_LIMIT support. This
+    # migration ships only the empirical-PASS subset confirmed by T-C.5
+    # (MARKET DAY/GTC + LIMIT DAY/GTC). STOP_LIMIT is deferred pending its
+    # own empirical script — flagged for a follow-up migration after the
+    # next Alpaca-paper validation run.
     ("alpaca", "CRYPTO", "MARKET", "DAY"),
     ("alpaca", "CRYPTO", "MARKET", "GTC"),
     ("alpaca", "CRYPTO", "LIMIT", "DAY"),
@@ -31,6 +34,10 @@ NOTES = "Phase 8c T-C.6 -- Alpaca crypto empirical PASS (MED-4)"
 
 def upgrade() -> None:
     bind = op.get_bind()
+    # Match 0018 concurrency discipline (chunk-C db MED-2).
+    bind.execute(
+        sa.text("LOCK TABLE broker_order_capability IN SHARE ROW EXCLUSIVE MODE")
+    )
     for broker_id, asset_class, order_type, tif in CAPABILITY_ROWS:
         bind.execute(
             sa.text(
@@ -68,6 +75,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    bind.execute(
+        sa.text("LOCK TABLE broker_order_capability IN SHARE ROW EXCLUSIVE MODE")
+    )
     for broker_id, asset_class, order_type, tif in CAPABILITY_ROWS:
         bind.execute(
             sa.text(

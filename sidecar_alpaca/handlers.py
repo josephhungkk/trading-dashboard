@@ -186,7 +186,8 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.PlaceOrderResponse:
         cash_amount = getattr(request, "cash_amount", "")
-        log.debug("place_order_cash_amount_received", cash_amount=cash_amount)
+        # Bound length: cash_amount is gRPC-untrusted (chunk-C sec MED-2).
+        log.debug("place_order_cash_amount_received", cash_amount=str(cash_amount)[:32])
 
         account_id = self._account_id(request.account_number)
         if config.USE_IN_MEMORY_DEDUPE:
@@ -196,10 +197,13 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                     "client_order_id_duplicate",
                 )
         client = await self._configured_trading_client(account_id, context)
-        order_request = self._build_order_request(request)
         try:
+            order_request = self._build_order_request(request)
             order = await asyncio.to_thread(client.submit_order, order_request)
         except (Exception,) as exc:
+            # _build_order_request may raise InvalidOperation/ValueError on bad
+            # input; keep inside try so _abort_internal sends the sentinel
+            # instead of leaking raw input via gRPC INTERNAL detail.
             await self._abort_internal(context, exc)
             return broker_pb2.PlaceOrderResponse()
         return broker_pb2.PlaceOrderResponse(
@@ -234,9 +238,9 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
     ) -> broker_pb2.ModifyOrderResponse:
         account_id = self._account_id(request.account_number)
         client = await self._configured_trading_client(account_id, context)
-        replace_request = self._build_replace_order_request(request)
         api_error = load_api_error_class()
         try:
+            replace_request = self._build_replace_order_request(request)
             order = await asyncio.to_thread(
                 client.replace_order_by_id,
                 request.broker_order_id,
@@ -370,7 +374,12 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         if request.client_order_id:
             values["client_order_id"] = request.client_order_id
         cash_amount = getattr(request, "cash_amount", "")
-        if cash_amount and order_type == "MARKET":
+        if cash_amount:
+            if order_type != "MARKET":
+                # Backend XOR validator (chunk-0 T-0.7) enforces this upstream;
+                # explicit guard here surfaces an INVALID_ARGUMENT instead of a
+                # silent contract violation if the validator is bypassed.
+                raise ValueError("cash_amount_market_only")
             values["notional"] = Decimal(cash_amount)
         elif request.qty:
             values["qty"] = Decimal(request.qty)

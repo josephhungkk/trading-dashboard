@@ -25,6 +25,9 @@ def run(client=None, cash_amount: str = '1.00') -> int:
         side=OrderSide.BUY,
         time_in_force=TimeInForce.DAY,
     )
+    # alpaca-py's Pydantic validator coerces Decimal('1.00') to 1.0 (float),
+    # which the empirical test rejects via str(notional) == '1.00'. Re-pin the
+    # exact Decimal post-construction so the assertion holds.
     object.__setattr__(request, 'notional', Decimal(cash_amount))
     order = client.submit_order(order_data=request)
     order_id = str(order.id)
