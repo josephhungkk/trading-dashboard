@@ -4,7 +4,7 @@ import { useLiveTailStore, FINAL_REVISION_VAL } from './liveTailStore';
 function resetStore(): void {
   useLiveTailStore.setState({
     lastSeen: new Map(),
-    lockedBuckets: new Set(),
+    lockedBuckets: new Map(),
   });
 }
 
@@ -53,5 +53,58 @@ describe('useLiveTailStore', () => {
 
   it('FINAL_REVISION_VAL equals 2^31 - 1', () => {
     expect(FINAL_REVISION_VAL).toBe(2 ** 31 - 1);
+  });
+
+  // MED-2: nested Map structure tests — verify the store uses canonical → tf → bucket nesting
+  // to avoid separator collision (e.g. a canonical_id containing '|' would collide with
+  // the old flat-string key scheme).
+
+  describe('MED-2: nested Map structure', () => {
+    it('lastSeen uses nested Map: canonical → tf → bucket_start → revision', () => {
+      const { recordSeen } = useLiveTailStore.getState();
+      recordSeen(CANONICAL, TF, BUCKET, 7);
+
+      const { lastSeen } = useLiveTailStore.getState();
+      const canonMap = lastSeen.get(CANONICAL);
+      expect(canonMap).toBeInstanceOf(Map);
+      const tfMap = canonMap?.get(TF);
+      expect(tfMap).toBeInstanceOf(Map);
+      expect(tfMap?.get(BUCKET)).toBe(7);
+    });
+
+    it('lockedBuckets uses nested Map: canonical → tf → Set<bucket_start>', () => {
+      const { lockBucket } = useLiveTailStore.getState();
+      lockBucket(CANONICAL, TF, BUCKET);
+
+      const { lockedBuckets } = useLiveTailStore.getState();
+      const canonMap = lockedBuckets.get(CANONICAL);
+      expect(canonMap).toBeInstanceOf(Map);
+      const bucketSet = canonMap?.get(TF);
+      expect(bucketSet).toBeInstanceOf(Set);
+      expect(bucketSet?.has(BUCKET)).toBe(true);
+    });
+
+    it('canonicals with pipe characters do not collide with each other', () => {
+      // If flat string keys were used: "A|B|1m" and "A|B" + tf "1m" would both produce
+      // "A|B|1m" — indistinguishable. Nested Maps eliminate the collision entirely.
+      const PIPE_CANONICAL = 'A|B';
+      const OTHER_CANONICAL = 'A';
+      const PIPE_TF = 'B|1m'; // edge-case tf containing pipe
+
+      useLiveTailStore.getState().recordSeen(PIPE_CANONICAL, TF, BUCKET, 1);
+      useLiveTailStore.getState().recordSeen(OTHER_CANONICAL, PIPE_TF, BUCKET, 99);
+
+      // They must not interfere with each other.
+      expect(useLiveTailStore.getState().shouldAccept(PIPE_CANONICAL, TF, BUCKET, 1)).toBe(false);
+      expect(useLiveTailStore.getState().shouldAccept(OTHER_CANONICAL, PIPE_TF, BUCKET, 99)).toBe(false);
+      expect(useLiveTailStore.getState().shouldAccept(PIPE_CANONICAL, TF, BUCKET, 2)).toBe(true);
+    });
+
+    it('lockedBuckets pipe collision guard', () => {
+      const PIPE_CANONICAL = 'X|Y';
+      useLiveTailStore.getState().lockBucket(PIPE_CANONICAL, TF, BUCKET);
+      // Must not lock ordinary canonical at same tf+bucket.
+      expect(useLiveTailStore.getState().shouldAccept(CANONICAL, TF, BUCKET, 1)).toBe(true);
+    });
   });
 });

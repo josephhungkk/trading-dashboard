@@ -21,7 +21,8 @@ export async function putChartLayout(
     credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
-      'If-Match': `"${ifMatchEtag}"`,
+      // HIGH-7: strip control characters before injecting into header value.
+      'If-Match': `"${ifMatchEtag.replace(/[^\x20-\x7E]/g, '')}"`,
     },
     body: JSON.stringify(layout),
   });

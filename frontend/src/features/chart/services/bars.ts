@@ -20,6 +20,7 @@ export interface FetchBarsParams {
   end: Date;
   cursor?: string;
   limit?: number;
+  signal?: AbortSignal;
 }
 
 export async function fetchBars(params: FetchBarsParams): Promise<BarPage> {
@@ -29,9 +30,16 @@ export async function fetchBars(params: FetchBarsParams): Promise<BarPage> {
   url.searchParams.set('start', params.start.toISOString());
   url.searchParams.set('end', params.end.toISOString());
   if (params.cursor) url.searchParams.set('cursor', params.cursor);
-  if (params.limit) url.searchParams.set('limit', String(params.limit));
+  // MED-5: guard against NaN / non-positive limit values
+  if (Number.isFinite(params.limit) && (params.limit ?? 0) > 0) {
+    url.searchParams.set('limit', String(params.limit));
+  }
 
-  const res = await fetch(url.toString(), { credentials: 'same-origin' });
+  // HIGH-4: pass AbortSignal when provided; omit the property entirely when absent
+  // to satisfy exactOptionalPropertyTypes (RequestInit.signal is AbortSignal | null, not | undefined).
+  const fetchInit: RequestInit = { credentials: 'same-origin' };
+  if (params.signal != null) fetchInit.signal = params.signal;
+  const res = await fetch(url.toString(), fetchInit);
   if (!res.ok) throw new Error(`bars fetch failed: ${res.status}`);
   return res.json() as Promise<BarPage>;
 }

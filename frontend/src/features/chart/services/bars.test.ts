@@ -66,6 +66,82 @@ describe('fetchBars', () => {
     const calledInit = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
     expect(calledInit.credentials).toBe('same-origin');
   });
+
+  // HIGH-4: AbortSignal propagation
+  it('passes AbortSignal to fetch when signal is provided', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bars: [], next_cursor: null }),
+    } as Response);
+
+    const controller = new AbortController();
+    await fetchBars({ ...BASE_PARAMS, signal: controller.signal });
+
+    const calledInit = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect(calledInit.signal).toBe(controller.signal);
+  });
+
+  it('omits signal from fetch when not provided', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bars: [], next_cursor: null }),
+    } as Response);
+
+    await fetchBars(BASE_PARAMS);
+
+    const calledInit = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    // signal is undefined when not passed
+    expect(calledInit.signal).toBeUndefined();
+  });
+
+  // MED-5: NaN / non-positive limit guard
+  it('does not append limit param when limit is NaN', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bars: [], next_cursor: null }),
+    } as Response);
+
+    await fetchBars({ ...BASE_PARAMS, limit: NaN });
+
+    const calledUrl = vi.mocked(fetch).mock.calls[0]?.[0] as string;
+    expect(calledUrl).not.toContain('limit=');
+  });
+
+  it('does not append limit param when limit is 0', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bars: [], next_cursor: null }),
+    } as Response);
+
+    await fetchBars({ ...BASE_PARAMS, limit: 0 });
+
+    const calledUrl = vi.mocked(fetch).mock.calls[0]?.[0] as string;
+    expect(calledUrl).not.toContain('limit=');
+  });
+
+  it('does not append limit param when limit is negative', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bars: [], next_cursor: null }),
+    } as Response);
+
+    await fetchBars({ ...BASE_PARAMS, limit: -100 });
+
+    const calledUrl = vi.mocked(fetch).mock.calls[0]?.[0] as string;
+    expect(calledUrl).not.toContain('limit=');
+  });
+
+  it('does not append limit param when limit is Infinity', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bars: [], next_cursor: null }),
+    } as Response);
+
+    await fetchBars({ ...BASE_PARAMS, limit: Infinity });
+
+    const calledUrl = vi.mocked(fetch).mock.calls[0]?.[0] as string;
+    expect(calledUrl).not.toContain('limit=');
+  });
 });
 
 describe('toChartBars', () => {

@@ -19,17 +19,28 @@ export interface LiveTailHandle {
 export function openLiveTail(
   canonicalId: string,
   timeframe: string,
-  jwt: string,
+  // HIGH-5: accept a callback so each reconnect reads a fresh JWT.
+  getJwt: () => string | null,
   onMessage: (env: BarEnvelope) => void,
   onReconnect?: () => void, // callback to refetch trailing 2 closed buckets via REST
+  // MED-4: surface protocol error frames to caller; no-op by default.
+  onError?: (frame: Record<string, unknown>) => void,
 ): LiveTailHandle {
   let ws: WebSocket | null = null;
   let backoff = 1000;
   let closed = false;
 
   function connect(): void {
+    // HIGH-5: re-read JWT on every connect attempt; abort if missing.
+    const jwt = getJwt();
+    if (!jwt) {
+      // No credentials available — do not attempt connection.
+      return;
+    }
+
+    // HIGH-6: URL-encode both path segments to handle special chars safely.
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${window.location.host}/ws/bars/${canonicalId}/${timeframe}`;
+    const url = `${proto}://${window.location.host}/ws/bars/${encodeURIComponent(canonicalId)}/${encodeURIComponent(timeframe)}`;
     ws = new WebSocket(url, [`bearer.${jwt}`]);
 
     ws.onopen = () => {
@@ -47,15 +58,24 @@ export function openLiveTail(
           ws?.send(JSON.stringify({ op: 'pong' }));
           return;
         }
-        if (frame['op'] === 'error') return; // silently ignore protocol errors
+        if (frame['op'] === 'error') {
+          // MED-4: surface error frames to caller instead of silently dropping.
+          onError?.(frame);
+          return;
+        }
         onMessage(data as BarEnvelope);
       } catch {
         /* ignore malformed frames */
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       if (closed) return;
+      // MED-1: code 4001 = auth failure — do not retry, set closed flag.
+      if (ev.code === 4001) {
+        closed = true;
+        return;
+      }
       setTimeout(connect, backoff);
       backoff = Math.min(backoff * 2, 30_000);
     };

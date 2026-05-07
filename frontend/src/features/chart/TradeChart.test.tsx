@@ -28,19 +28,26 @@ vi.mock('klinecharts', () => ({
   dispose: mockDispose,
 }));
 
-// Minimal WebSocket mock
+// WebSocket mock that records every instantiated instance and exposes close code support.
 class MockWebSocket {
+  static instances: MockWebSocket[] = [];
+  url: string;
+  protocols: string | string[];
   onopen: (() => void) | null = null;
   onmessage: ((ev: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((ev: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   send = vi.fn();
-  close = vi.fn(() => {
-    this.onclose?.();
+  close = vi.fn((code = 1000) => {
+    this.onclose?.({ code });
   });
-}
 
-let mockWs: MockWebSocket;
+  constructor(url: string, protocols?: string | string[]) {
+    this.url = url;
+    this.protocols = protocols ?? [];
+    MockWebSocket.instances.push(this);
+  }
+}
 
 function resetStores(): void {
   useChartStore.setState({
@@ -50,14 +57,16 @@ function resetStores(): void {
     chartType: 'candle',
     activeDrawingTool: null,
   });
+  // MED-2: liveTailStore now uses nested Maps for both lastSeen and lockedBuckets.
   useLiveTailStore.setState({
     lastSeen: new Map(),
-    lockedBuckets: new Set(),
+    lockedBuckets: new Map(),
   });
 }
 
 describe('TradeChart', () => {
   beforeEach(() => {
+    MockWebSocket.instances = [];
     resetStores();
     mockInit.mockClear();
     mockSetDataLoader.mockClear();
@@ -66,9 +75,8 @@ describe('TradeChart', () => {
     mockCreateIndicator.mockClear();
     mockDispose.mockClear();
 
-    mockWs = new MockWebSocket();
-    // Must use a real function (not arrow) so `new WebSocket(...)` works as a constructor.
-    vi.stubGlobal('WebSocket', function MockWsConstructor() { return mockWs; });
+    // Must use a class constructor — can't use arrow function for `new WebSocket(...)`.
+    vi.stubGlobal('WebSocket', MockWebSocket);
 
     vi.stubGlobal(
       'fetch',
@@ -175,5 +183,74 @@ describe('TradeChart', () => {
     const { unmount } = render(<TradeChart canonicalId="AAPL.US" />);
     unmount();
     expect(mockDispose).toHaveBeenCalledTimes(1);
+  });
+
+  // HIGH-1: stable selector test — no spurious WS reconnect on store action calls.
+  // If the whole liveTail store object were subscribed instead of individual selectors,
+  // every recordSeen call (on each WS tick) would produce a new store reference,
+  // causing useEffect to re-run and tear down + reconnect the WS.
+  it('HIGH-1: does not create extra WS connections when liveTail actions fire', async () => {
+    vi.useFakeTimers();
+    await act(async () => {
+      render(<TradeChart canonicalId="AAPL.US" />);
+    });
+
+    // One WS should have been opened for the live tail.
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    // Simulate store action calls (recordSeen / lockBucket) that mutate the store.
+    // If TradeChart subscribed to the whole store these would re-trigger useEffect.
+    await act(async () => {
+      useLiveTailStore.getState().recordSeen('AAPL.US', '1m', '2026-05-07T14:00:00Z', 1);
+      useLiveTailStore.getState().recordSeen('AAPL.US', '1m', '2026-05-07T14:00:00Z', 2);
+      useLiveTailStore.getState().lockBucket('AAPL.US', '1m', '2026-05-07T14:00:00Z');
+    });
+
+    // Still exactly 1 WS — no reconnect storm.
+    expect(MockWebSocket.instances).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  // HIGH-4: AbortController — fetch is aborted on unmount.
+  it('HIGH-4: aborts in-flight fetch on unmount', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    vi.mocked(fetch).mockImplementation((...args) => {
+      const init = args[1] as RequestInit | undefined;
+      capturedSignal = init?.signal ?? undefined;
+      // Return a promise that never resolves (simulates a slow fetch).
+      return new Promise(() => undefined);
+    });
+
+    let capturedLoader: Parameters<typeof mockSetDataLoader>[0] | null = null;
+    mockSetDataLoader.mockImplementation((loader: Parameters<typeof mockSetDataLoader>[0]) => {
+      capturedLoader = loader;
+    });
+
+    const { unmount } = render(<TradeChart canonicalId="AAPL.US" />);
+
+    // Trigger getBars so a fetch is in flight.
+    const callback = vi.fn();
+    await act(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (capturedLoader as any)?.getBars({ callback });
+    });
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal?.aborted).toBe(false);
+
+    unmount();
+
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  // HIGH-5: getJwt callback — WS uses cookie value at connect time (not a captured string).
+  it('HIGH-5: opens WS using JWT read from cookie at connect time', async () => {
+    await act(async () => {
+      render(<TradeChart canonicalId="AAPL.US" />);
+    });
+
+    const ws = MockWebSocket.instances[0];
+    // The WS should carry the JWT from the cookie as a bearer subprotocol.
+    expect(ws?.protocols).toContain('bearer.test-jwt');
   });
 });
