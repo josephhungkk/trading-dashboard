@@ -239,16 +239,39 @@ def _coerce_decimal_8(value: object) -> object:
     return value
 
 
+def _coerce_decimal_10(value: object) -> object:
+    if isinstance(value, Decimal):
+        return _serialize_decimal_10(value)
+    return value
+
+
 def _serialize_decimal_8(value: Decimal | None) -> str | None:
     if value is None:
         return None
     return format(value.quantize(Decimal("1e-8")), "f")
 
 
+def _serialize_decimal_10(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return format(value.quantize(Decimal("0.0000000001")), "f")
+
+
 def _format_decimal_8(value: Decimal) -> str:
     """Non-Optional sibling of `_serialize_decimal_8` for callers passing
     a guaranteed-non-None Decimal (mypy needs the narrower return type)."""
     return format(value.quantize(Decimal("1e-8")), "f")
+
+
+def _format_decimal_10(value: Decimal) -> str:
+    """Non-Optional sibling of `_serialize_decimal_10` for qty values."""
+    return format(value.quantize(Decimal("0.0000000001")), "f")
+
+
+def format_qty(value: Decimal, asset_class: str) -> str:
+    if asset_class == "crypto":
+        return _format_decimal_10(value)
+    return _format_decimal_8(value)
 
 
 def _validate_order_shape(
