@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 from alpaca.data.live.crypto import CryptoDataStream
 
+from sidecar_alpaca import config
 from sidecar_alpaca.symbol_util import canonical_crypto_symbol
 
 log = structlog.get_logger(module="sidecar_alpaca.streaming")
@@ -55,6 +56,6 @@ async def crypto_order_event_source(stream_factory):
 
 
 def build_crypto_stream(
-    api_key: str, api_secret: str, crypto_feed: str = "us"
+    api_key: str, api_secret: str, crypto_feed: str = config.CRYPTO_LOCATION
 ) -> CryptoDataStream:
     return CryptoDataStream(api_key, api_secret, feed=crypto_feed)
