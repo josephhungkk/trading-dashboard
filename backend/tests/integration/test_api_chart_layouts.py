@@ -7,6 +7,7 @@ breakage from parallel task changes to orders.py. Only chart_layouts.router
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -348,3 +349,177 @@ def test_translator_downgrade_raises() -> None:
     """translate_chart_layout({}, 2, 1) raises InvalidLayoutSchema."""
     with pytest.raises(InvalidLayoutSchema, match="cannot downgrade 2 -> 1"):
         translate_chart_layout({}, from_version=2, to_version=1)
+
+
+# ---------------------------------------------------------------------------
+# Test 11: HIGH-11 — concurrent PUTs with same etag: exactly one 200, one 412
+# (DB-dependent — requires live Postgres)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_puts_with_same_etag_one_wins(
+    db: AsyncSession, instrument_id: int, mock_cfg: AsyncMock
+) -> None:
+    """Two concurrent PUTs with the same valid etag: exactly one returns 200, the other 412.
+
+    Uses two separate DB sessions to simulate concurrent requests.
+    """
+    from app.api.chart_layouts import _etag as _chart_etag
+
+    # First, create the initial row so both PUTs have a valid etag to compete with.
+    await _cleanup(db, instrument_id)
+    await db.execute(
+        text(
+            "INSERT INTO chart_layouts (instrument_id, payload, schema_version) "
+            "VALUES (:iid, CAST(:p AS JSONB), 1)"
+        ),
+        {"iid": instrument_id, "p": json.dumps({"v": 0})},
+    )
+    await db.commit()
+
+    # Fetch the etag from a fresh query
+    row = (
+        await db.execute(
+            text("SELECT updated_at FROM chart_layouts WHERE instrument_id = :iid"),
+            {"iid": instrument_id},
+        )
+    ).one()
+    shared_etag = _chart_etag(row.updated_at)
+
+    engine2 = create_async_engine(settings.database_url, poolclass=NullPool)
+    factory2 = async_sessionmaker(engine2, class_=AsyncSession, expire_on_commit=False)
+
+    # Issue two concurrent PUTs via two separate HTTP clients (each with own DB session)
+    async def _do_put(session: AsyncSession) -> int:
+        _app = _make_app(session, mock_cfg)
+        async with AsyncClient(transport=ASGITransport(app=_app), base_url="http://test") as c:
+            r = await c.put(
+                f"/api/chart/layouts/{instrument_id}",
+                json={"payload": {"v": 1}, "schema_version": 1},
+                headers={"If-Match": shared_etag},
+            )
+            return r.status_code
+
+    async with factory2() as s1, factory2() as s2:
+        results = await asyncio.gather(
+            _do_put(s1),
+            _do_put(s2),
+            return_exceptions=True,
+        )
+
+    await engine2.dispose()
+    await _cleanup(db, instrument_id)
+
+    # Filter out exceptions (shouldn't happen, but be safe)
+    status_codes = [r for r in results if isinstance(r, int)]
+    assert sorted(status_codes) == [200, 412], (
+        f"Expected exactly one 200 and one 412; got: {status_codes}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 12: HIGH-13/MED-24 — translator NotImplementedError returns generic 500
+# Uses mocked DB session — no live Postgres required.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.no_db
+async def test_get_translator_not_implemented_returns_generic_500_mocked() -> None:
+    """GET with a future schema_version triggers NotImplementedError; response detail is generic.
+
+    Uses a fully mocked DB session + config — no live Postgres required.
+    """
+    from datetime import UTC, datetime
+    from typing import NamedTuple
+    from unittest.mock import MagicMock
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.api.chart_layouts import router as chart_layouts_router
+    from app.core.cf_access import AdminIdentity
+    from app.core.deps import get_config, get_db, require_admin_jwt
+
+    class _FakeRow(NamedTuple):
+        payload: dict[str, Any]
+        schema_version: int
+        updated_at: datetime
+
+    fake_row = _FakeRow(
+        payload={"seed": True},
+        schema_version=1,
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    # Mock DB session that returns the fake row
+    mock_result = MagicMock()
+    mock_result.one_or_none.return_value = fake_row
+    mock_session = AsyncMock(spec=AsyncSession)
+    mock_session.execute.return_value = mock_result
+
+    # Mock cfg returning schema_version=2 (future version — triggers NotImplementedError)
+    mock_cfg = AsyncMock()
+    mock_cfg.get_int = AsyncMock(return_value=2)
+
+    _app = FastAPI()
+    _app.include_router(chart_layouts_router)
+
+    async def _fake_admin() -> AdminIdentity:
+        return AdminIdentity(email="ci@example.com", kind="user", claims={})
+
+    async def _fake_db():  # type: ignore[return]
+        yield mock_session
+
+    _app.dependency_overrides[require_admin_jwt] = _fake_admin
+    _app.dependency_overrides[get_db] = _fake_db
+    _app.dependency_overrides[get_config] = lambda: mock_cfg
+
+    async with AsyncClient(transport=ASGITransport(app=_app), base_url="http://test") as c:
+        r = await c.get("/api/chart/layouts/42")
+
+    assert r.status_code == 500, r.text
+    detail = r.json().get("detail", "")
+    assert "not yet implemented" not in detail, f"Internal exception leaked: {detail!r}"
+    assert "schema_translation_failed" in detail, f"Generic message missing: {detail!r}"
+
+
+# ---------------------------------------------------------------------------
+# Test 13: MED-25 — ETag comparison uses full quoted form
+# (DB-dependent — requires live Postgres)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_etag_uses_quoted_form(client: AsyncClient, instrument_id: int) -> None:
+    """PUT with ETag in correct quoted form succeeds; bare (unquoted) fails with 412."""
+    # First write — creates the row
+    r1 = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 1}, "schema_version": 1},
+        headers={"If-Match": '"initial"'},
+    )
+    assert r1.status_code == 200, r1.text
+    quoted_etag = r1.headers["ETag"]  # e.g. '"2026-05-07T..."'
+    assert quoted_etag.startswith('"') and quoted_etag.endswith('"'), (
+        f"ETag not properly quoted: {quoted_etag!r}"
+    )
+
+    # Try with bare (unquoted) etag — must fail
+    bare_etag = quoted_etag.strip('"')
+    r2 = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 2}, "schema_version": 1},
+        headers={"If-Match": bare_etag},
+    )
+    assert r2.status_code == 412, f"Expected 412 for bare ETag, got {r2.status_code}: {r2.text}"
+
+    # Try with the correct quoted etag — must succeed
+    r3 = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 2}, "schema_version": 1},
+        headers={"If-Match": quoted_etag},
+    )
+    assert r3.status_code == 200, f"Expected 200 for quoted ETag, got {r3.status_code}: {r3.text}"

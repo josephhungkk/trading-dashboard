@@ -592,3 +592,221 @@ async def test_unsubscribe_stops_delivery(monkeypatch: pytest.MonkeyPatch) -> No
         if m["type"] == "websocket.send" and json.loads(m["text"]).get("canonical_id") == _CANONICAL
     ]
     assert len(bar_msgs) == 0, f"Bar received after unsubscribe: {bar_msgs}"
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — HIGH-12: prod dev-bypass safety guard closes WS 4001
+# ---------------------------------------------------------------------------
+
+
+async def test_prod_dev_bypass_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In prod env with trusted_dev_nets set, dev-bypass IP must be rejected with 4001.
+
+    Mirrors the safety check in deps.py:require_admin_jwt (lines 120-130).
+    """
+    from app.core import config as _cfg_mod
+
+    # Patch settings so env=prod + trusted_dev_nets is non-empty
+    monkeypatch.setattr(_cfg_mod.settings, "env", "prod")
+    monkeypatch.setattr(_cfg_mod.settings, "trusted_dev_nets", ["10.10.0.0/24"])
+
+    # check_dev_bypass returns a valid identity (IP matched dev nets)
+    monkeypatch.setattr(
+        _deps_mod._verifier,
+        "check_dev_bypass",
+        MagicMock(return_value=MagicMock(email="admin@dev.local")),
+    )
+
+    app = _make_app()
+    messages: list[Message] = []
+    queue: asyncio.Queue[Message] = asyncio.Queue()
+    await queue.put({"type": "websocket.connect"})
+
+    # Scope with client IP inside trusted_dev_nets
+    scope = _make_scope(_WS_PATH, [_VALID_SUBPROTOCOL])
+    scope["client"] = ("10.10.0.5", 50001)
+    # Also patch client_ip_in_trusted_nets to return True for this IP
+    import app.api.bars as _bars_m
+
+    monkeypatch.setattr(
+        _bars_m,
+        "client_ip_in_trusted_nets",
+        MagicMock(return_value=True),
+    )
+
+    async def receive() -> Message:
+        return await queue.get()
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=3.0)
+
+    close = next((m for m in messages if m["type"] == "websocket.close"), None)
+    assert close is not None, f"Expected close, got: {[m['type'] for m in messages]}"
+    assert close["code"] == 4001, f"Expected 4001, got {close['code']}"
+
+
+# ---------------------------------------------------------------------------
+# Test 12 — MED-21: second call within 60s does not re-hit DB
+# ---------------------------------------------------------------------------
+
+
+async def test_get_ws_max_subs_caches_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Second call to _get_ws_max_subs within 60s returns cached value without DB."""
+    import app.api.bars as bars_module
+
+    # Clear the cache before the test
+    bars_module._WS_MAX_SUBS_CACHE.clear()
+
+    # Track how many times SessionLocal is called
+    call_count = 0
+
+    class _FakeRow:
+        def __getitem__(self, idx: int) -> int:
+            return 15
+
+    class _FakeResult:
+        def one_or_none(self) -> _FakeRow:
+            return _FakeRow()
+
+    class _FakeSession:
+        async def execute(self, *args: Any, **kwargs: Any) -> _FakeResult:
+            nonlocal call_count
+            call_count += 1
+            return _FakeResult()
+
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+    class _FakeSessionLocal:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    monkeypatch.setattr(bars_module, "_WS_MAX_SUBS_CACHE", {})
+    # Use a counter-based fake that never exhausts
+    _time_counter = [100.0]
+
+    def _fake_monotonic() -> float:
+        v = _time_counter[0]
+        _time_counter[0] += 10.0
+        return v
+
+    monkeypatch.setattr(bars_module.time, "monotonic", _fake_monotonic)
+
+    import app.core.db as _db_mod
+
+    monkeypatch.setattr(_db_mod, "SessionLocal", _FakeSessionLocal())
+
+    # First call (t=100) — should hit DB; cache set with expires_at=160
+    result1 = await bars_module._get_ws_max_subs()
+    assert result1 == 15
+    assert call_count == 1
+
+    # Second call (t=110, within 60s of 100+60=160) — should use cache
+    result2 = await bars_module._get_ws_max_subs()
+    assert result2 == 15
+    assert call_count == 1, (
+        f"DB called twice; expected cache hit on second call (count={call_count})"
+    )
+
+    # Clean up cache
+    bars_module._WS_MAX_SUBS_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# Test 13 — MED-27: invalid canonical_id returns error frame (not close)
+# ---------------------------------------------------------------------------
+
+
+async def test_subscribe_invalid_canonical_id_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subscribe with lowercase canonical_id returns {op: error, detail: invalid_canonical_id}."""
+    import app.api.bars as bars_module
+
+    monkeypatch.setattr(_deps_mod._verifier, "verify", MagicMock(return_value=_valid_identity()))
+    monkeypatch.setattr(bars_module, "_WS_PING_INTERVAL", 999.0)
+    monkeypatch.setattr(bars_module, "_get_ws_max_subs", _fake_get_ws_max_subs)
+
+    app = _make_app()
+    messages: list[Message] = []
+    queue: asyncio.Queue[Message] = asyncio.Queue()
+    await queue.put({"type": "websocket.connect"})
+    scope = _make_scope(_WS_PATH, [_VALID_SUBPROTOCOL])
+
+    # invalid canonical_id: lowercase letters not allowed by _CANONICAL_ID_RE
+    bad_sub = json.dumps({"op": "subscribe", "canonical_id": "aapl.us", "timeframe": "1m"})
+    error_received = asyncio.Event()
+
+    async def receive() -> Message:
+        return await queue.get()
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+        if message["type"] == "websocket.accept":
+            await queue.put({"type": "websocket.receive", "text": bad_sub, "bytes": None})
+        elif message["type"] == "websocket.send":
+            data = json.loads(message["text"])
+            if data.get("op") == "error" and data.get("detail") == "invalid_canonical_id":
+                error_received.set()
+                await queue.put({"type": "websocket.disconnect", "code": 1000})
+
+    task = asyncio.create_task(app(scope, receive, send))
+    try:
+        await asyncio.wait_for(error_received.wait(), timeout=3.0)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert error_received.is_set(), f"Expected error frame; messages={messages}"
+
+
+# ---------------------------------------------------------------------------
+# Test 14 — MED-27: invalid timeframe returns error frame
+# ---------------------------------------------------------------------------
+
+
+async def test_subscribe_invalid_timeframe_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subscribe with invalid timeframe ('2m') returns {op: error, detail: invalid_timeframe}."""
+    import app.api.bars as bars_module
+
+    monkeypatch.setattr(_deps_mod._verifier, "verify", MagicMock(return_value=_valid_identity()))
+    monkeypatch.setattr(bars_module, "_WS_PING_INTERVAL", 999.0)
+    monkeypatch.setattr(bars_module, "_get_ws_max_subs", _fake_get_ws_max_subs)
+
+    app = _make_app()
+    messages: list[Message] = []
+    queue: asyncio.Queue[Message] = asyncio.Queue()
+    await queue.put({"type": "websocket.connect"})
+    scope = _make_scope(_WS_PATH, [_VALID_SUBPROTOCOL])
+
+    bad_sub = json.dumps({"op": "subscribe", "canonical_id": "AAPL.US", "timeframe": "2m"})
+    error_received = asyncio.Event()
+
+    async def receive() -> Message:
+        return await queue.get()
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+        if message["type"] == "websocket.accept":
+            await queue.put({"type": "websocket.receive", "text": bad_sub, "bytes": None})
+        elif message["type"] == "websocket.send":
+            data = json.loads(message["text"])
+            if data.get("op") == "error" and data.get("detail") == "invalid_timeframe":
+                error_received.set()
+                await queue.put({"type": "websocket.disconnect", "code": 1000})
+
+    task = asyncio.create_task(app(scope, receive, send))
+    try:
+        await asyncio.wait_for(error_received.wait(), timeout=3.0)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert error_received.is_set(), f"Expected error frame; messages={messages}"

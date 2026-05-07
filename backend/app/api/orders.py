@@ -366,7 +366,13 @@ _MODIFY_NONCE_TTL = 30  # seconds
 class ModifyNonceMintRequest(BaseModel):
     """Body for POST /api/orders/nonce/modify."""
 
-    order_id: str = Field(min_length=1, max_length=64)
+    # MED-26: enforce UUID4 pattern to prevent phantom nonce spam against Redis.
+    # TODO: add existence-check against orders table before minting (requires service call).
+    order_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
 
 
 class ModifyNonceMintResponse(BaseModel):

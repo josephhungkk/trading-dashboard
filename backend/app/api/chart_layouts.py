@@ -121,9 +121,11 @@ async def get_chart_layout(
             from_version=row.schema_version,
             to_version=latest,
         )
-    except InvalidLayoutSchema as exc:
+    except (InvalidLayoutSchema, NotImplementedError) as exc:
+        # HIGH-13: do not leak internal exception message in the 500 detail.
+        # MED-24: also catch NotImplementedError for unimplemented forward migrations.
         log.error(
-            "chart_layout.translate_error",
+            "chart_layouts.translation_failed",
             instrument_id=instrument_id,
             from_version=row.schema_version,
             to_version=latest,
@@ -131,7 +133,7 @@ async def get_chart_layout(
         )
         raise HTTPException(
             status_code=500,
-            detail=f"chart layout schema translation failed: {exc}",
+            detail="schema_translation_failed",
         ) from exc
 
     body = ChartLayoutResponse(
@@ -170,6 +172,8 @@ async def put_chart_layout(
     - Always writes at latest schema version.
     """
     # --- 64 KB cap ---
+    # MED-20: post-Pydantic-parse size is the canonical measurement — Pydantic strips
+    # whitespace, so this is defense-in-depth on top of nginx client_max_body_size 1m.
     if len(json.dumps(body.payload).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise HTTPException(
             status_code=413,
@@ -183,49 +187,76 @@ async def put_chart_layout(
             status_code=428,
             detail="If-Match header is required for PUT /api/chart/layouts",
         )
-    incoming_etag = if_match_raw.strip('"')
+    # MED-25: use _etag() for both sides to avoid fragile string comparison
+    # and ensure the same RFC-7232 quoting is used throughout.
+    incoming_etag = if_match_raw.strip()
 
-    # --- Load current row (if any) and check etag ---
-    row = (
+    latest = await _latest_version(cfg)
+
+    # HIGH-11: atomic ETag check + upsert via WHERE clause in ON CONFLICT DO UPDATE.
+    # If a row exists and updated_at doesn't match expected_ts, the DO UPDATE skips
+    # (returns no rows) and we raise 412.  INSERT (no existing row) always proceeds —
+    # per RFC 7232, absent If-Match allows first-write; the ETag check only applies
+    # when a row already exists.
+    # First, peek whether a row exists to decide whether to enforce the etag.
+    existing = (
         await db.execute(
             text("SELECT updated_at FROM chart_layouts WHERE instrument_id = :iid"),
             {"iid": instrument_id},
         )
     ).one_or_none()
 
-    if row is not None:
-        current_etag = row.updated_at.isoformat()
+    if existing is not None:
+        # Row exists — enforce ETag using _etag() for both sides (MED-25).
+        current_etag = _etag(existing.updated_at)
         if incoming_etag != current_etag:
-            raise HTTPException(
-                status_code=412,
-                detail="etag_mismatch",
+            raise HTTPException(status_code=412, detail="etag_mismatch")
+        # Perform atomic UPDATE WHERE updated_at = :expected_ts to guard against TOCTOU.
+        result = (
+            await db.execute(
+                text(
+                    """
+                    UPDATE chart_layouts
+                        SET payload        = CAST(:payload AS JSONB),
+                            schema_version = :sv,
+                            updated_at     = NOW()
+                        WHERE instrument_id = :iid
+                          AND updated_at = :expected_ts
+                    RETURNING updated_at
+                    """
+                ),
+                {
+                    "iid": instrument_id,
+                    "payload": json.dumps(body.payload),
+                    "sv": latest,
+                    "expected_ts": existing.updated_at,
+                },
             )
+        ).one_or_none()
+        if result is None:
+            # Concurrent PUT won the race — our etag is now stale.
+            raise HTTPException(status_code=412, detail="etag_mismatch")
+    else:
+        # No existing row — first write; insert unconditionally.
+        result = (
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO chart_layouts
+                        (instrument_id, payload, schema_version, updated_at)
+                    VALUES
+                        (:iid, CAST(:payload AS JSONB), :sv, NOW())
+                    RETURNING updated_at
+                    """
+                ),
+                {
+                    "iid": instrument_id,
+                    "payload": json.dumps(body.payload),
+                    "sv": latest,
+                },
+            )
+        ).one()
 
-    latest = await _latest_version(cfg)
-
-    # --- Upsert at latest schema version ---
-    result = (
-        await db.execute(
-            text(
-                """
-                INSERT INTO chart_layouts
-                    (instrument_id, payload, schema_version, updated_at)
-                VALUES
-                    (:iid, CAST(:payload AS JSONB), :sv, NOW())
-                ON CONFLICT (instrument_id) DO UPDATE
-                    SET payload        = CAST(EXCLUDED.payload AS JSONB),
-                        schema_version = EXCLUDED.schema_version,
-                        updated_at     = NOW()
-                RETURNING updated_at
-                """
-            ),
-            {
-                "iid": instrument_id,
-                "payload": json.dumps(body.payload),
-                "sv": latest,
-            },
-        )
-    ).one()
     await db.commit()
 
     new_updated_at: datetime = result.updated_at

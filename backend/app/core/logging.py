@@ -20,7 +20,19 @@ _SECRET_PATTERNS = [
     re.compile(r"api_key=[^&\s]+"),
     re.compile(r"schwab[._-]?(password|totp_secret|app_secret|refresh_token|access_token)", re.I),
 ]
-_ACCOUNT_KEYS = frozenset({"account", "account_number", "acctNumber", "nonce"})
+_ACCOUNT_KEYS = frozenset(
+    {
+        "account",
+        "account_number",
+        "acctNumber",
+        "nonce",
+        "token",
+        "jwt",
+        "authorization",
+        "access_token",
+        "refresh_token",
+    }
+)
 _REDACTED = "<redacted>"
 
 

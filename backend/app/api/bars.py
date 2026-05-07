@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
 from typing import Annotated, Any
@@ -36,7 +37,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import deps as _deps_mod
-from app.core.cf_access import NoIdentityClaimError
+from app.core.cf_access import NoIdentityClaimError, client_ip_in_trusted_nets
+from app.core.config import settings
 from app.core.deps import get_db, require_admin_jwt
 from app.services.bar_service import (
     BarFetchTooLarge,
@@ -71,6 +73,15 @@ _FINAL_REVISION: int = 2**31 - 1
 _WS_PING_INTERVAL: float = 60.0  # seconds between server-initiated pings
 _WS_PONG_TIMEOUT: float = 30.0  # seconds client has to reply with pong
 _WS_DEFAULT_MAX_SUBS: int = 20  # fallback if app_config key is missing
+
+# MED-27: conservative pattern for dashboard canonical_id format (e.g. AAPL.US, BTC-USD.CRYPTO)
+_CANONICAL_ID_RE = re.compile(r"^[A-Z0-9._-]{1,64}$")
+
+# Allowed WS timeframes
+_VALID_TIMEFRAMES = frozenset({"1s", "1m", "5m", "15m", "30m", "1h", "1d"})
+
+# MED-21: module-level cache for ws_max_subs; (value, expires_at) keyed by "v"
+_WS_MAX_SUBS_CACHE: dict[str, tuple[int, float]] = {}
 
 
 class BarItem(BaseModel):
@@ -243,19 +254,42 @@ async def _ws_bars_auth(ws: WebSocket) -> bool:
     client_ip: str = client.host if client is not None else ""
     bypass = _deps_mod._verifier.check_dev_bypass(client_ip)
     if bypass is not None:
+        # HIGH-12: mirror the prod safety check from deps.py:require_admin_jwt.
+        # If env=prod AND trusted_dev_nets is set, dev-bypass must never succeed —
+        # treat as misconfiguration and close WS (prevents silent prod dev-bypass).
+        if (
+            settings.env == "prod"
+            and settings.trusted_dev_nets
+            and client_ip_in_trusted_nets(client_ip, settings.trusted_dev_nets)
+        ):
+            log.critical(
+                "ws_bars.dev_bypass_attempted_in_prod",
+                client_ip=client_ip,
+            )
+            await ws.close(code=4001, reason="unauthenticated")
+            return False
         return True
 
     try:
         _deps_mod._verifier.verify(token, client_ip=client_ip)
-    except NoIdentityClaimError, PyJWTError, Exception:
+    except NoIdentityClaimError, PyJWTError:
         await ws.close(code=4001, reason="unauthenticated")
         return False
     return True
 
 
 async def _get_ws_max_subs() -> int:
-    """Read ``charts.ws_max_subs_per_conn`` from app_config; fall back to 20."""
+    """Read ``charts.ws_max_subs_per_conn`` from app_config; fall back to 20.
+
+    MED-21: cached with 60s TTL to avoid per-connection DB queries.
+    """
     from app.core.db import SessionLocal  # local import — avoids circular dep at module level
+
+    # Check cache first
+    cached = _WS_MAX_SUBS_CACHE.get("v")
+    now = time.monotonic()
+    if cached is not None and cached[1] > now:
+        return cached[0]
 
     try:
         async with SessionLocal() as session:
@@ -268,8 +302,11 @@ async def _get_ws_max_subs() -> int:
                     )
                 )
             ).one_or_none()
-            return int(row[0]) if row else _WS_DEFAULT_MAX_SUBS
-    except Exception:
+            value = int(row[0]) if row else _WS_DEFAULT_MAX_SUBS
+            _WS_MAX_SUBS_CACHE["v"] = (value, now + 60.0)
+            return value
+    except Exception as exc:
+        log.warning("ws_bars.get_max_subs_failed", error=str(exc))
         return _WS_DEFAULT_MAX_SUBS
 
 
@@ -298,8 +335,8 @@ async def ws_bars(ws: WebSocket, canonical_id: str, timeframe: str) -> None:
     max_subs: int = _WS_DEFAULT_MAX_SUBS
     try:
         max_subs = await _get_ws_max_subs()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("ws_bars.startup_config_load_failed", error=str(exc))
 
     # ── State ────────────────────────────────────────────────────────────────
     # subscriptions: set of (canonical_id, timeframe) tuples active for this conn
@@ -352,8 +389,12 @@ async def ws_bars(ws: WebSocket, canonical_id: str, timeframe: str) -> None:
                     else:
                         payload = json.loads(data_bytes)
                     bar_queue.put_nowait(payload)
-                except Exception:
-                    log.warning("ws_bars.pubsub.bad_payload", channel=msg.get("channel"))
+                except (json.JSONDecodeError, UnicodeDecodeError, KeyError, ValueError) as exc:
+                    log.warning(
+                        "ws_bars.pubsub.bad_payload",
+                        channel=msg.get("channel"),
+                        error=str(exc),
+                    )
         finally:
             await pubsub.aclose()
 
@@ -366,7 +407,8 @@ async def ws_bars(ws: WebSocket, canonical_id: str, timeframe: str) -> None:
                 break
             try:
                 await ws.send_text(_make_ping_frame())
-            except Exception:
+            except (RuntimeError, OSError) as exc:
+                log.warning("ws_bars.ping_send_failed", error=str(exc))
                 break
             # Wait for pong via bar_queue sentinel or timeout
             pong_received = False
@@ -381,8 +423,8 @@ async def ws_bars(ws: WebSocket, canonical_id: str, timeframe: str) -> None:
                 _closed = True
                 try:
                     await ws.close(code=1000, reason="idle_timeout")
-                except Exception:
-                    pass
+                except (RuntimeError, OSError) as exc:
+                    log.warning("ws_bars.ping_close_failed", error=str(exc))
                 break
 
     # Flag to signal pong received from client
@@ -429,8 +471,8 @@ async def ws_bars(ws: WebSocket, canonical_id: str, timeframe: str) -> None:
                     partial=partial,
                 )
                 await ws.send_text(envelope.model_dump_json())
-            except Exception:
-                log.warning("ws_bars.send.error")
+            except (KeyError, ValueError, TypeError, RuntimeError, OSError) as exc:
+                log.warning("ws_bars.send.error", error=str(exc))
 
     send_task: asyncio.Task[Any] = asyncio.create_task(_send_bars())
     background_tasks.add(send_task)
@@ -463,6 +505,13 @@ async def ws_bars(ws: WebSocket, canonical_id: str, timeframe: str) -> None:
                 tf = str(frame.get("timeframe", ""))
                 if not cid or not tf:
                     await ws.send_text(_make_error_frame("missing_field"))
+                    continue
+                # MED-27: validate canonical_id format and timeframe before subscribing
+                if not (1 <= len(cid) <= 64) or not _CANONICAL_ID_RE.fullmatch(cid):
+                    await ws.send_text(_make_error_frame("invalid_canonical_id"))
+                    continue
+                if tf not in _VALID_TIMEFRAMES:
+                    await ws.send_text(_make_error_frame("invalid_timeframe"))
                     continue
                 if len(subscriptions) >= max_subs and (cid, tf) not in subscriptions:
                     _closed = True

@@ -313,3 +313,65 @@ async def test_nonce_redacted_from_logs(
             assert record["nonce"] == "<redacted>", (
                 f"nonce field not redacted to sentinel: {record['nonce']!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: MED-26 — mint with non-UUID order_id returns 422
+# ---------------------------------------------------------------------------
+
+
+async def test_mint_with_non_uuid_order_id_returns_422(
+    authed_client: AsyncClient,
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """POST /api/orders/nonce/modify with order_id='abc' (not UUID4) returns 422."""
+    r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": "abc"})
+    assert r.status_code == 422, (
+        f"Expected 422 for non-UUID order_id, got {r.status_code}: {r.text}"
+    )
+
+
+async def test_mint_with_empty_order_id_returns_422(
+    authed_client: AsyncClient,
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """POST /api/orders/nonce/modify with order_id='' returns 422."""
+    r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": ""})
+    assert r.status_code == 422, f"Expected 422 for empty order_id, got {r.status_code}: {r.text}"
+
+
+async def test_mint_with_valid_uuid4_succeeds(
+    authed_client: AsyncClient,
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """POST /api/orders/nonce/modify with valid UUID4 order_id returns 200."""
+    r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": ORDER_ID})
+    assert r.status_code == 200, (
+        f"Expected 200 for valid UUID4 order_id, got {r.status_code}: {r.text}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 10: MED-28 — token / jwt / authorization keys are redacted
+# ---------------------------------------------------------------------------
+
+
+async def test_token_keys_redacted_from_logs() -> None:
+    """token, jwt, authorization, access_token, refresh_token keys must be redacted."""
+    sensitive_value = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0In0.abc"
+
+    with capture_logs(processors=[_redact_secrets]) as captured_logs:
+        structlog.get_logger("test").info(
+            "auth_event",
+            token=sensitive_value,
+            jwt=sensitive_value,
+            authorization=f"Bearer {sensitive_value}",
+            access_token=sensitive_value,
+            refresh_token=sensitive_value,
+        )
+
+    assert len(captured_logs) == 1
+    record = captured_logs[0]
+    for key in ("token", "jwt", "authorization", "access_token", "refresh_token"):
+        assert key in record, f"key {key!r} missing from log record"
+        assert record[key] == "<redacted>", f"{key!r} not redacted: {record[key]!r}"
