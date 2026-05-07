@@ -147,6 +147,9 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         request: broker_pb2.PlaceOrderRequest,
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.PlaceOrderResponse:
+        cash_amount = request.cash_amount
+        log.debug("place_order_cash_amount_received", cash_amount=cash_amount)
+
         await self._abort_unimplemented(context, "Alpaca PlaceOrder lands in Phase 8")
         return broker_pb2.PlaceOrderResponse()
 

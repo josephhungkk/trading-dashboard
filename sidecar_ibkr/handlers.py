@@ -461,6 +461,8 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         context: object,
     ) -> broker_pb2.PlaceOrderResponse:
         del context
+        cash_amount = request.cash_amount
+        logger.debug("place_order_cash_amount_received", cash_amount=cash_amount)
 
         if self._simulator_only:
             from uuid_utils import uuid7

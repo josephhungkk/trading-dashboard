@@ -275,6 +275,8 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         # POSTs the result via schwabdev REST.  This handler handles SINGLE only.
 
         coid = request.client_order_id
+        cash_amount = request.cash_amount
+        log.debug("place_order_cash_amount_received", cash_amount=cash_amount)
 
         # 1. SIM route: client_order_id starting with "SIM-" never hits live REST.
         if coid.startswith("SIM-") and self._simulator is not None:

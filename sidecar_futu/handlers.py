@@ -162,6 +162,9 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         request: broker_pb2.PlaceOrderRequest,
         context: Any,
     ) -> broker_pb2.PlaceOrderResponse:
+        cash_amount = request.cash_amount
+        log.debug("place_order_cash_amount_received", cash_amount=cash_amount)
+
         if self._sim_mode:
             return await self._sim_place(request)
         if not self._client.gateway_connected:
@@ -450,6 +453,9 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self,
         request: broker_pb2.PlaceOrderRequest,
     ) -> broker_pb2.PlaceOrderResponse:
+        cash_amount = request.cash_amount
+        log.debug("sim_place_cash_amount_received", cash_amount=cash_amount)
+
         sim_id = sim.make_sim_id()
         self._sim_orders[sim_id] = {
             "client_order_id": request.client_order_id,
