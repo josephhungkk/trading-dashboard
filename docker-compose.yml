@@ -13,6 +13,19 @@ services:
       interval: 5s
       retries: 10
 
+  bar_aggregator:
+    build: ./bar_aggregator
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      redis: { condition: service_healthy }
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      DATABASE_URL: ${DATABASE_URL}
+      FLUSH_INTERVAL_MS: "1000"
+      AGGREGATOR_SHARD: "0"
+      AGGREGATOR_SHARD_COUNT: "1"
+    restart: unless-stopped
+
   backend:
     build: ./backend
     env_file: .env

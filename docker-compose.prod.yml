@@ -31,6 +31,36 @@ services:
         max-file: "3"
     networks: [td-net]
 
+  bar_aggregator:
+    build: ./bar_aggregator
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      DATABASE_URL: ${DATABASE_URL}
+      FLUSH_INTERVAL_MS: "1000"
+      AGGREGATOR_SHARD: "0"
+      AGGREGATOR_SHARD_COUNT: "1"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/healthz',timeout=2).getcode()==200 else 1)"]
+      interval: 30s
+      retries: 3
+      start_period: 20s
+    mem_limit: 256m
+    cpus: "0.5"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:size=50m"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [td-net]
+
   backend:
     build: ./backend
     env_file: .env
