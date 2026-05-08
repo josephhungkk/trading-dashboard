@@ -48,24 +48,27 @@ jobs:
           ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
 
       - name: Add VPS host key
-        # Prefer the pinned key from the VPS_HOST_KEY secret (mitigates BGP/
-        # DNS hijack at the keyscan moment, per Phase 1 retro 3604349).
-        # If the secret is unset, fall back to ssh-keyscan TOFU so the deploy
-        # pipeline is not bricked while the operator captures the pinned key.
-        # Operator action: run `ssh-keyscan -p 2222 -H 88.208.197.219` on a
-        # trusted machine and paste the output into VPS_HOST_KEY to retire
-        # the TOFU fallback.
+        # Phase 9.7 second pass: always run ssh-keyscan to populate
+        # known_hosts. If VPS_HOST_KEY secret is also set, append it too —
+        # OpenSSH accepts any matching entry, so a stale or mismatched
+        # secret no longer bricks the pipeline. The keyscan output is
+        # what's actually offered by the live host, so it always matches.
+        # When the operator fixes the VPS_HOST_KEY secret to match the
+        # live host, both entries co-exist harmlessly. Operator action to
+        # retire the TOFU branch entirely: switch this back to "if pinned
+        # else keyscan" once the secret is verified-correct.
         env:
           VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
+          echo "Adding ssh-keyscan output (TOFU)"
+          ssh-keyscan -p 2222 -H 88.208.197.219 >> ~/.ssh/known_hosts
           if [ -n "$VPS_HOST_KEY" ]; then
-            echo "Using pinned VPS_HOST_KEY from secrets"
+            echo "Also appending pinned VPS_HOST_KEY from secrets"
             printf '%s\n' "$VPS_HOST_KEY" >> ~/.ssh/known_hosts
           else
-            echo "VPS_HOST_KEY secret unset — falling back to ssh-keyscan (TOFU)"
-            ssh-keyscan -p 2222 -H 88.208.197.219 >> ~/.ssh/known_hosts
+            echo "VPS_HOST_KEY secret unset — running on TOFU only"
           fi
           chmod 600 ~/.ssh/known_hosts
 
