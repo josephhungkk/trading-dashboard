@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -40,9 +39,7 @@ from app.services.ibkr_maintenance import BrokerMaintenance, compute_broker_main
 from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 from app.services.orders_policy import get_account_policy, is_kill_switch_active
 
-_MODIFY_REPLAY_CACHE: dict[tuple[UUID, str], tuple[float, dict[str, Any]]] = {}
-_MODIFY_REPLAY_TTL_SECONDS = 60.0
-_MODIFY_REPLAY_MAX = 500
+_MODIFY_REPLAY_TTL_SECONDS = 300
 
 log = structlog.get_logger(__name__)
 
@@ -97,7 +94,7 @@ class _CancelOrderClient(Protocol):
     async def cancel_order(self, account_number: str, broker_order_id: str) -> bool: ...
 
 
-TERMINAL_STATUSES = ("filled", "cancelled", "rejected", "expired")
+TERMINAL_STATUSES = ("filled", "cancelled", "rejected", "expired", "inactive")
 
 
 def canonicalize_qty(qty: str | None) -> str:
@@ -330,6 +327,7 @@ async def place_order(
                 {"error": "order_state_inconsistent", "detail": "retry preview"},
             )
         return _order_response_from_mapping(existing, submission_state="idempotent_retry")
+    await db.commit()
 
     order_client = as_order_sidecar_client(client)
     try:
@@ -349,8 +347,21 @@ async def place_order(
             request.expiry_date or "",
         )
     except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
-        await db.commit()
         return _order_response_from_mapping(row, submission_state="pending_unknown")
+    except Exception:
+        await db.execute(
+            text(
+                """
+                UPDATE orders
+                   SET status = 'rejected',
+                       updated_at = now()
+                 WHERE id = :id;
+                """
+            ),
+            {"id": row["id"]},
+        )
+        await db.commit()
+        raise
 
     submitted = await _mark_order_submitted(
         db,
@@ -378,7 +389,7 @@ async def modify_order(
     order_id: UUID,
     request: OrderModifyRequest,
 ) -> dict[str, Any]:
-    cached = _modify_replay_lookup(order_id, request.nonce)
+    cached = await _modify_replay_lookup(redis, order_id, request.nonce)
     if cached is not None:
         return cached
 
@@ -398,7 +409,8 @@ async def modify_order(
                    status::text AS status,
                    filled_qty,
                    parent_order_id,
-                   client_order_id
+                   client_order_id,
+                   notional
               FROM orders
              WHERE id = :id;
             """
@@ -421,7 +433,7 @@ async def modify_order(
                 SELECT 1
                   FROM orders
                  WHERE parent_order_id = :p
-                   AND status NOT IN ('filled', 'cancelled', 'rejected', 'expired')
+                   AND status NOT IN ('filled', 'cancelled', 'rejected', 'expired', 'inactive')
                  LIMIT 1;
                 """
             ),
@@ -491,6 +503,64 @@ async def modify_order(
     if _decode_nonce_payload(consumed_nonce_value)["payload_hash"] != expected_hash:
         raise PreviewUnavailable(409, {"error": "nonce_mismatch"})
 
+    prior_mutable = {
+        "qty": row["qty"],
+        "limit_price": row["limit_price"],
+        "stop_price": row["stop_price"],
+        "tif": row["tif"],
+        "notional": row["notional"],
+    }
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+               SET qty = :qty,
+                   limit_price = :limit_price,
+                   stop_price = :stop_price,
+                   tif = :tif,
+                   notional = :notional
+             WHERE id = :order_id
+            """
+        ),
+        {
+            "order_id": order_id,
+            "qty": qty_text,
+            "limit_price": new_limit_price,
+            "stop_price": request.stop_price,
+            "tif": request.tif,
+            "notional": new_notional,
+        },
+    )
+    await db.commit()
+
+    client = await registry.get_client(account.gateway_label)
+    contract = await client.get_contract(str(row["conid"]))
+    try:
+        modify_result = await as_order_sidecar_client(client).modify_order(
+            broker_order_id=str(row["broker_order_id"] or ""),
+            account_number=account.account_number,
+            contract=contract,
+            side=str(row["side"]),
+            order_type=str(row["order_type"]),
+            tif=request.tif,
+            qty=qty_text,
+            limit_price=request.limit_price or "",
+            stop_price=request.stop_price or "",
+            client_order_id=str(row["client_order_id"]),
+        )
+    except (BrokerSidecarUnavailable, BrokerSidecarTimeout) as exc:
+        await _restore_modify_baseline(db, order_id=order_id, baseline=prior_mutable)
+        await db.commit()
+        raise PreviewUnavailable(
+            503,
+            {"error": "sidecar_unavailable"},
+            headers={"Retry-After": "1"},
+        ) from exc
+    except Exception:
+        await _restore_modify_baseline(db, order_id=order_id, baseline=prior_mutable)
+        await db.commit()
+        raise
+
     raw_payload = {
         "client_order_id": str(row["client_order_id"]),
         "qty": qty_text,
@@ -531,54 +601,7 @@ async def modify_order(
             "raw_payload": json.dumps(raw_payload),
         },
     )
-    # 5c v0.5.5: HIGH-3 audit-only-write split keeps `orders.status` consumer-
-    # owned, but the *mutable* order parameters (qty, limit_price, stop_price,
-    # tif) flip immediately so the UI reflects what the user just submitted.
-    # Without this, the row shows new status=modified but old qty/price.
-    await db.execute(
-        text(
-            """
-            UPDATE orders
-               SET qty = :qty,
-                   limit_price = :limit_price,
-                   stop_price = :stop_price,
-                   tif = :tif,
-                   notional = :notional
-             WHERE id = :order_id
-            """
-        ),
-        {
-            "order_id": order_id,
-            "qty": qty_text,
-            "limit_price": new_limit_price,
-            "stop_price": request.stop_price,
-            "tif": request.tif,
-            "notional": new_notional,
-        },
-    )
     await db.commit()
-
-    client = await registry.get_client(account.gateway_label)
-    contract = await client.get_contract(str(row["conid"]))
-    try:
-        modify_result = await as_order_sidecar_client(client).modify_order(
-            broker_order_id=str(row["broker_order_id"] or ""),
-            account_number=account.account_number,
-            contract=contract,
-            side=str(row["side"]),
-            order_type=str(row["order_type"]),
-            tif=request.tif,
-            qty=qty_text,
-            limit_price=request.limit_price or "",
-            stop_price=request.stop_price or "",
-            client_order_id=str(row["client_order_id"]),
-        )
-    except (BrokerSidecarUnavailable, BrokerSidecarTimeout) as exc:
-        raise PreviewUnavailable(
-            503,
-            {"error": "sidecar_unavailable"},
-            headers={"Retry-After": "1"},
-        ) from exc
 
     current_status_row = await db.execute(
         text("SELECT status::text FROM orders WHERE id = :id"),
@@ -610,7 +633,7 @@ async def modify_order(
         "stop_price": request.stop_price,
         "tif": request.tif,
     }
-    _modify_replay_store(order_id, request.nonce, projected)
+    await _modify_replay_store(redis, order_id, request.nonce, projected)
     return projected
 
 
@@ -623,33 +646,36 @@ async def list_orders(
     to_ts: datetime | None = None,
 ) -> OrderListResponse:
     if status is None:
-        where_clause = "WHERE status NOT IN ('filled', 'cancelled', 'rejected', 'expired')"
-        params: dict[str, object] = {}
-    else:
-        where_clause = "WHERE status = CAST(:status AS order_status_enum)"
-        params = {"status": status}
-
-    # 5c C7: optional date-range filter on created_at.
-    if from_ts is not None:
-        where_clause += " AND created_at >= :from_ts"
-        params["from_ts"] = from_ts
-    if to_ts is not None:
-        where_clause += " AND created_at <= :to_ts"
-        params["to_ts"] = to_ts
-
-    # f-string interpolation used intentionally: where_clause is built entirely
-    # from code constants (never from user input).
-    result = await db.execute(
-        text(
-            f"""
+        query_prefix = """
             SELECT id, account_id, broker_order_id, conid, symbol, side, order_type, tif, qty,
                    limit_price, stop_price, status, filled_qty, avg_fill_price, notional,
                    created_at, updated_at, last_event_at
               FROM orders
-              {where_clause}
-             ORDER BY created_at DESC;
-            """
-        ),
+             WHERE status NOT IN ('filled', 'cancelled', 'rejected', 'expired', 'inactive')
+        """
+        params: dict[str, object] = {}
+    else:
+        query_prefix = """
+            SELECT id, account_id, broker_order_id, conid, symbol, side, order_type, tif, qty,
+                   limit_price, stop_price, status, filled_qty, avg_fill_price, notional,
+                   created_at, updated_at, last_event_at
+              FROM orders
+             WHERE status = CAST(:status AS order_status_enum)
+        """
+        params = {"status": status}
+
+    # 5c C7: optional date-range filter on created_at.
+    where_suffix = ""
+    if from_ts is not None:
+        where_suffix += " AND created_at >= :from_ts"
+        params["from_ts"] = from_ts
+    if to_ts is not None:
+        where_suffix += " AND created_at <= :to_ts"
+        params["to_ts"] = to_ts
+
+    params["limit"] = 500
+    result = await db.execute(
+        text(query_prefix + where_suffix + " ORDER BY created_at DESC LIMIT :limit"),
         params,
     )
     orders = [_order_response_from_mapping(row) for row in result.mappings().all()]
@@ -738,7 +764,7 @@ async def cancel_order(
     now = _utcnow()
     try:
         row = await _locked_order_for_cancel(db, order_id)
-    except (asyncpg.PostgresError, DBAPIError) as exc:
+    except Exception as exc:
         if _is_lock_not_available(exc):
             raise CancelUnavailable(
                 423,
@@ -781,10 +807,27 @@ async def cancel_order(
     # SUCCESSFUL forward").
     client = await registry.get_client(str(row["gateway_label"]))
     try:
-        await _as_cancel_order_client(client).cancel_order(
+        accepted = await _as_cancel_order_client(client).cancel_order(
             str(row["account_number"]),
             str(broker_order_id),
         )
+        if not accepted:
+            await db.execute(
+                text(
+                    """
+                    UPDATE orders
+                       SET cancel_requested_at = NULL,
+                           updated_at = now()
+                     WHERE id = :order_id;
+                    """
+                ),
+                {"order_id": order_id},
+            )
+            await db.commit()
+            raise CancelUnavailable(
+                422,
+                {"error": "broker_cancel_rejected", "detail": "broker rejected cancel"},
+            )
     except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
         await db.execute(
             text(
@@ -1011,20 +1054,24 @@ async def _fx_rate(redis: RedisLike, from_currency: str, to_currency: str) -> De
     return Decimal(_redis_text(cached))
 
 
-async def _notional_filled_today(db: AsyncSession, account_id: object) -> Decimal:
+async def _notional_today(db: AsyncSession, account_id: object) -> Decimal:
     result = await db.execute(
         text(
             """
-            SELECT COALESCE(SUM(notional), 0)
+            SELECT COALESCE(SUM(notional_filled), 0)::numeric
               FROM orders
              WHERE account_id = :account_id
-               AND created_at > date_trunc('day', now())
-               AND status NOT IN ('cancelled', 'rejected');
+               AND status NOT IN ('cancelled', 'rejected', 'expired', 'inactive')
+               AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC');
             """
         ),
         {"account_id": account_id},
     )
     return Decimal(str(result.scalar_one_or_none() or "0")).quantize(Decimal("1e-8"))
+
+
+async def _notional_filled_today(db: AsyncSession, account_id: object) -> Decimal:
+    return await _notional_today(db, account_id)
 
 
 async def _position_qty(db: AsyncSession, account_id: object, conid: str) -> Decimal:
@@ -1045,19 +1092,7 @@ async def _position_qty(db: AsyncSession, account_id: object, conid: str) -> Dec
 
 
 async def _active_notional_today(db: AsyncSession, account_id: UUID) -> Decimal:
-    result = await db.execute(
-        text(
-            """
-            SELECT COALESCE(SUM(notional), 0)
-              FROM orders
-             WHERE account_id = :account_id
-               AND DATE(created_at) = CURRENT_DATE
-               AND status NOT IN ('filled', 'cancelled', 'rejected', 'expired');
-            """
-        ),
-        {"account_id": account_id},
-    )
-    return Decimal(str(result.scalar_one_or_none() or "0")).quantize(Decimal("1e-8"))
+    return await _notional_today(db, account_id)
 
 
 async def _position_count(db: AsyncSession, account_id: UUID) -> int:
@@ -1269,30 +1304,67 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _modify_replay_lookup(order_id: UUID, nonce: str) -> dict[str, Any] | None:
-    now = time.monotonic()
-    expired_keys = [key for key, (deadline, _) in _MODIFY_REPLAY_CACHE.items() if deadline <= now]
-    for key in expired_keys:
-        _MODIFY_REPLAY_CACHE.pop(key, None)
-
-    entry = _MODIFY_REPLAY_CACHE.get((order_id, nonce))
+async def _modify_replay_lookup(
+    redis: RedisLike,
+    order_id: UUID,
+    nonce: str,
+) -> dict[str, Any] | None:
+    entry = await redis.get(_modify_replay_key(order_id, nonce))
     if entry is None:
         return None
-    deadline, response = entry
-    if deadline <= now:
-        _MODIFY_REPLAY_CACHE.pop((order_id, nonce), None)
+    try:
+        decoded = json.loads(_redis_text(entry))
+    except json.JSONDecodeError:
         return None
-    return dict(response)
+    return dict(decoded) if isinstance(decoded, dict) else None
 
 
-def _modify_replay_store(order_id: UUID, nonce: str, response: dict[str, Any]) -> None:
-    _MODIFY_REPLAY_CACHE[(order_id, nonce)] = (
-        time.monotonic() + _MODIFY_REPLAY_TTL_SECONDS,
-        dict(response),
+async def _modify_replay_store(
+    redis: RedisLike,
+    order_id: UUID,
+    nonce: str,
+    response: dict[str, Any],
+) -> None:
+    await redis.set(
+        _modify_replay_key(order_id, nonce),
+        json.dumps(response, default=str, sort_keys=True, separators=(",", ":")),
+        ex=_MODIFY_REPLAY_TTL_SECONDS,
+        nx=True,
     )
-    while len(_MODIFY_REPLAY_CACHE) > _MODIFY_REPLAY_MAX:
-        oldest_key = next(iter(_MODIFY_REPLAY_CACHE))
-        _MODIFY_REPLAY_CACHE.pop(oldest_key, None)
+
+
+def _modify_replay_key(order_id: UUID, nonce: str) -> str:
+    return f"order-modify-replay:{order_id}:{nonce}"
+
+
+async def _restore_modify_baseline(
+    db: AsyncSession,
+    *,
+    order_id: UUID,
+    baseline: dict[str, Any],
+) -> None:
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+               SET qty = :qty,
+                   limit_price = :limit_price,
+                   stop_price = :stop_price,
+                   tif = :tif,
+                   notional = :notional,
+                   updated_at = now()
+             WHERE id = :order_id
+            """
+        ),
+        {
+            "order_id": order_id,
+            "qty": baseline["qty"],
+            "limit_price": baseline["limit_price"],
+            "stop_price": baseline["stop_price"],
+            "tif": baseline["tif"],
+            "notional": baseline["notional"],
+        },
+    )
 
 
 async def _check_trade_policy(

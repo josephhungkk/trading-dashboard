@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,42 +30,11 @@ from app.services.brokers import BrokerRegistry
 
 log = structlog.get_logger(__name__)
 
-TERMINAL_STATUSES = ("filled", "cancelled", "rejected", "expired")
+TERMINAL_STATUSES = ("filled", "cancelled", "rejected", "expired", "inactive")
 MAX_CONSECUTIVE_FAILURES = 50
 
 
-# 5c MED-5: in-memory buffer for commissionReport events that arrive before
-# the matching fill row has been written. 5-min TTL.
-_COMMISSION_BUFFER: dict[str, tuple[float, str, str]] = {}
-_COMMISSION_BUFFER_TTL_SECONDS: float = 300.0
-
-
-def _commission_buffer_set(exec_id: str, commission: str, currency: str) -> None:
-    now = time.monotonic()
-    expired_keys = [
-        key
-        for key, (expires, _commission, _currency) in _COMMISSION_BUFFER.items()
-        if expires <= now
-    ]
-    for key in expired_keys:
-        _COMMISSION_BUFFER.pop(key, None)
-    _COMMISSION_BUFFER[exec_id] = (
-        now + _COMMISSION_BUFFER_TTL_SECONDS,
-        commission,
-        currency,
-    )
-    if len(_COMMISSION_BUFFER) > 1000:
-        metrics.commission_buffer_overflow_total.inc()
-
-
-def _commission_buffer_pop(exec_id: str) -> tuple[str, str] | None:
-    entry = _COMMISSION_BUFFER.pop(exec_id, None)
-    if entry is None:
-        return None
-    expires, commission, currency = entry
-    if time.monotonic() > expires:
-        return None
-    return commission, currency
+_COMMISSION_BUFFER_TTL_SECONDS = 86_400
 
 
 @dataclass(frozen=True)
@@ -99,11 +67,62 @@ class _AccountEventQueue(Protocol):
 class _RedisPublisher(Protocol):
     async def publish(self, channel: str, message: str | bytes) -> object: ...
 
+    async def execute_command(self, *args: object) -> object: ...
+
 
 _stream_context: contextvars.ContextVar[AccountStream | None] = contextvars.ContextVar(
     "order_event_consumer_stream_context",
     default=None,
 )
+
+
+def _commission_buffer_key(exec_id: str) -> str:
+    return f"commission-buffer:{exec_id}"
+
+
+async def _commission_buffer_set(
+    redis: _RedisPublisher,
+    exec_id: str,
+    commission: str,
+    currency: str,
+) -> None:
+    key = _commission_buffer_key(exec_id)
+    await redis.execute_command("HSET", key, "commission", commission, "currency", currency)
+    await redis.execute_command("EXPIRE", key, _COMMISSION_BUFFER_TTL_SECONDS)
+
+
+async def _commission_buffer_pop(
+    redis: _RedisPublisher,
+    exec_id: str,
+) -> tuple[str, str] | None:
+    key = _commission_buffer_key(exec_id)
+    entry = await redis.execute_command("HGETALL", key)
+    await redis.execute_command("DEL", key)
+    if not entry:
+        return None
+    values = _redis_hash_to_dict(entry)
+    commission = values.get("commission")
+    currency = values.get("currency")
+    if commission is None or currency is None:
+        return None
+    return commission, currency
+
+
+def _redis_hash_to_dict(entry: object) -> dict[str, str]:
+    if isinstance(entry, dict):
+        return {_redis_text(k): _redis_text(v) for k, v in entry.items()}
+    if isinstance(entry, (list, tuple)):
+        return {
+            _redis_text(entry[index]): _redis_text(entry[index + 1])
+            for index in range(0, len(entry), 2)
+        }
+    return {}
+
+
+def _redis_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode()
+    return str(value)
 
 
 class OrderEventConsumer:
@@ -359,8 +378,12 @@ class OrderEventConsumer:
                 if db_status == normalised_status:
                     continue  # no change — skip
 
-            # Determine broker_event_at: prefer order.updated_at then submitted_at
-            broker_event_at = order.updated_at or order.submitted_at
+            # Determine broker_event_at: prefer order.updated_at then submitted_at.
+            # If the snapshot has neither, use a stable floor timestamp so resync
+            # idempotency does not advance on every polling pass.
+            broker_event_at = (
+                order.updated_at or order.submitted_at or datetime.min.replace(tzinfo=UTC)
+            )
 
             raw = {
                 "account_id": str(account.account_id),
@@ -400,7 +423,12 @@ class OrderEventConsumer:
                         {"c": commission, "cc": commission_currency, "e": event.exec_id},
                     )
                     if (getattr(result, "rowcount", None) or 0) == 0:
-                        _commission_buffer_set(event.exec_id, commission, commission_currency)
+                        await _commission_buffer_set(
+                            self._redis,
+                            event.exec_id,
+                            commission,
+                            commission_currency,
+                        )
                 async with self._failure_lock:
                     self._consecutive_failures = 0
             except DBAPIError as exc:
@@ -413,7 +441,7 @@ class OrderEventConsumer:
             return
         try:
             account = await self._account_for_event(event)
-            broker_event_at = event.broker_event_at or datetime.now(UTC)
+            broker_event_at = event.broker_event_at or datetime.min.replace(tzinfo=UTC)
             raw_payload = _parse_raw_payload(event.raw_payload)
             status = _normalize_status(event.status)
             filled_qty = _parse_decimal(event.filled_qty, field="filled_qty")
@@ -692,7 +720,9 @@ class OrderEventConsumer:
                 """
                 UPDATE orders
                    SET status = CASE
-                         WHEN orders.status IN ('filled', 'cancelled', 'rejected', 'expired')
+                         WHEN orders.status IN (
+                             'filled', 'cancelled', 'rejected', 'expired', 'inactive'
+                         )
                            THEN orders.status
                          WHEN order_status_rank(orders.status)
                               > order_status_rank(CAST(:new_status AS order_status_enum))
@@ -705,8 +735,11 @@ class OrderEventConsumer:
                            COALESCE(CAST(:filled_qty AS NUMERIC), orders.filled_qty)
                        ),
                        avg_fill_price = CAST(:avg_fill_price AS NUMERIC),
-                       notional_filled = COALESCE(CAST(:filled_qty AS NUMERIC), 0)
-                                         * COALESCE(CAST(:avg_fill_price AS NUMERIC), 0),
+                       notional_filled = CASE
+                         WHEN :avg_fill_price IS NOT NULL
+                           THEN CAST(:filled_qty AS NUMERIC) * CAST(:avg_fill_price AS NUMERIC)
+                         ELSE orders.notional_filled
+                       END,
                        last_event_at = GREATEST(
                            COALESCE(orders.last_event_at, '-infinity'::timestamptz),
                            :broker_event_at
@@ -780,7 +813,7 @@ class OrderEventConsumer:
                         "ts": broker_event_at,
                     },
                 )
-                buffered = _commission_buffer_pop(event.exec_id)
+                buffered = await _commission_buffer_pop(self._redis, event.exec_id)
                 if buffered:
                     buf_commission, buf_currency = buffered
                     await session.execute(

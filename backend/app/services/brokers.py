@@ -1356,7 +1356,7 @@ class BrokerDiscoverer:
         session: AsyncSession,
         account_id: UUID,
         positions: list[base.Position],
-        broker_id: str,
+        broker_id: str = "ibkr",
     ) -> None:
         """Atomic upsert + delta-delete for one account's positions.
 
@@ -1366,6 +1366,10 @@ class BrokerDiscoverer:
         HIGH-db-1: broker_id is now threaded from the call site (already known
         at the discoverer loop) instead of issuing a SELECT per account tick.
         """
+        if not positions:
+            log.debug("upsert_positions.empty_skip", account_id=str(account_id))
+            return
+
         rows: list[dict[str, str | None]] = []
         for p in positions:
             symbol = p.contract.symbol

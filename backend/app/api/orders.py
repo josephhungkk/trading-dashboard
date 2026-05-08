@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
@@ -805,10 +806,72 @@ async def place_oco_order(
     order_id_b = sidecar_b.broker_order_id
 
     # ------------------------------------------------------------------
-    # Step 9: INSERT oco_links row (HIGH-db-2: wrap in try/except)
+    # Step 9: INSERT local order rows + oco_links row (HIGH-code-1/HIGH-db-2)
     # ------------------------------------------------------------------
     oco_link_id = str(uuid4())
+    local_order_id_a = uuid4()
+    local_order_id_b = uuid4()
     try:
+        await db.execute(
+            text(
+                """
+                INSERT INTO orders (
+                    id, account_id, client_order_id, broker_order_id, conid, symbol,
+                    side, order_type, tif, qty, limit_price, stop_price, status, notional
+                )
+                VALUES (
+                    :id, :account_id, :client_order_id, :broker_order_id, :conid, :symbol,
+                    :side, :order_type, :tif, :qty, :limit_price, :stop_price,
+                    'submitted', :notional
+                )
+                """
+            ),
+            {
+                "id": local_order_id_a,
+                "account_id": body.order_a.account_id,
+                "client_order_id": client_order_id_a,
+                "broker_order_id": order_id_a,
+                "conid": body.order_a.conid,
+                "symbol": _oco_symbol(contract_a, body.order_a.conid),
+                "side": body.order_a.side,
+                "order_type": body.order_a.order_type,
+                "tif": body.order_a.tif,
+                "qty": qty_a,
+                "limit_price": body.order_a.limit_price,
+                "stop_price": body.order_a.stop_price,
+                "notional": _oco_notional(qty_a, body.order_a.limit_price, body.order_a.stop_price),
+            },
+        )
+        await db.execute(
+            text(
+                """
+                INSERT INTO orders (
+                    id, account_id, client_order_id, broker_order_id, conid, symbol,
+                    side, order_type, tif, qty, limit_price, stop_price, status, notional
+                )
+                VALUES (
+                    :id, :account_id, :client_order_id, :broker_order_id, :conid, :symbol,
+                    :side, :order_type, :tif, :qty, :limit_price, :stop_price,
+                    'submitted', :notional
+                )
+                """
+            ),
+            {
+                "id": local_order_id_b,
+                "account_id": body.order_b.account_id,
+                "client_order_id": client_order_id_b,
+                "broker_order_id": order_id_b,
+                "conid": body.order_b.conid,
+                "symbol": _oco_symbol(contract_b, body.order_b.conid),
+                "side": body.order_b.side,
+                "order_type": body.order_b.order_type,
+                "tif": body.order_b.tif,
+                "qty": qty_b,
+                "limit_price": body.order_b.limit_price,
+                "stop_price": body.order_b.stop_price,
+                "notional": _oco_notional(qty_b, body.order_b.limit_price, body.order_b.stop_price),
+            },
+        )
         await db.execute(
             text(
                 """
@@ -820,9 +883,9 @@ async def place_oco_order(
             {
                 "id": oco_link_id,
                 "broker_id": broker_a,
-                "account_id": str(body.order_a.account_id),
-                "order_id_a": order_id_a,
-                "order_id_b": order_id_b,
+                "account_id": body.order_a.account_id,
+                "order_id_a": str(local_order_id_a),
+                "order_id_b": str(local_order_id_b),
             },
         )
         await db.commit()
@@ -853,3 +916,18 @@ async def place_oco_order(
         order_id_a=order_id_a,
         order_id_b=order_id_b,
     )
+
+
+def _oco_symbol(contract: object, fallback: str) -> str:
+    parts = [
+        str(getattr(contract, "symbol", "") or ""),
+        str(getattr(contract, "exchange", "") or ""),
+        str(getattr(contract, "currency", "") or ""),
+    ]
+    symbol = " ".join(part for part in parts if part)
+    return symbol or fallback
+
+
+def _oco_notional(qty: str, limit_price: str | None, stop_price: str | None) -> str:
+    price = limit_price or stop_price or "0"
+    return str((Decimal(qty) * Decimal(price)).quantize(Decimal("1e-8")))

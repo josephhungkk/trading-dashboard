@@ -52,6 +52,7 @@ class _OrderRow:
     qty: Decimal = Decimal("1")
     limit_price: Decimal | None = Decimal("100")
     stop_price: Decimal | None = None
+    notional: Decimal = Decimal("100")
     status: str = "submitted"
     filled_qty: Decimal = Decimal("0")
     parent_order_id: UUID | None = None
@@ -118,6 +119,7 @@ class _Session:
                     "filled_qty": self.order.filled_qty,
                     "parent_order_id": self.order.parent_order_id,
                     "client_order_id": self.order.client_order_id,
+                    "notional": self.order.notional,
                 }
             )
         if "FROM orders" in sql and "parent_order_id = :p" in sql:
@@ -300,8 +302,6 @@ async def modify_client() -> AsyncIterator[dict[str, Any]]:
 
     from app.api import orders as orders_api
 
-    orders_service._MODIFY_REPLAY_CACHE.clear()
-
     async def override_db() -> AsyncIterator[_Session]:
         yield session
 
@@ -340,7 +340,6 @@ async def modify_client() -> AsyncIterator[dict[str, Any]]:
         }
 
     app.dependency_overrides.clear()
-    orders_service._MODIFY_REPLAY_CACHE.clear()
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:
