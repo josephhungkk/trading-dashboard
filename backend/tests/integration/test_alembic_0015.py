@@ -29,7 +29,7 @@ async def test_ibkr_trail_day_supported(db_session: AsyncSession) -> None:
             text(
                 "SELECT is_supported FROM broker_order_capability "
                 "WHERE broker_id = 'ibkr' AND order_type = 'TRAIL' "
-                "AND time_in_force = 'DAY'"
+                "AND time_in_force = 'DAY' AND asset_class = 'STOCK'"
             )
         )
     ).scalar_one()

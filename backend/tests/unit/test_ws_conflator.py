@@ -107,4 +107,4 @@ async def test_latest_only_conflation() -> None:
 
     assert len(ws.sent) <= 2
     frames: list[dict[str, Any]] = [msgpack.unpackb(item, raw=False) for item in ws.sent]
-    assert frames[-1]["data"]["last"] == "4"
+    assert frames[-1]["q"]["last"] == "4"

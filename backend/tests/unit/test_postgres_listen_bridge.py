@@ -15,9 +15,9 @@ async def test_notify_republishes_to_redis() -> None:
     redis = AsyncMock()
     bridge = PostgresListenBridge(dsn="postgresql://localhost/test", redis=redis)
 
-    await bridge._on_notify(None, 0, "app_config:invalidate", "some-payload")
+    await bridge._on_notify(None, 0, "app_config:invalidate", "some-key|some-value")
 
-    redis.publish.assert_awaited_once_with("app_config:invalidate", "some-payload")
+    redis.publish.assert_awaited_once_with("app_config:invalidate", "some-key|some-value")
 
 
 def test_connected_health_flag() -> None:

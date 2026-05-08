@@ -129,6 +129,8 @@ async def test_oco_enabled_passes_killswitch(client: AsyncClient) -> None:
         orig_redis = getattr(app.state, "redis", None)
         mock_redis = AsyncMock()
         mock_redis.execute_command = AsyncMock(return_value="nonce-payload")
+        mock_redis.incr = AsyncMock(return_value=1)
+        mock_redis.expire = AsyncMock(return_value=True)
         app.state.redis = mock_redis
 
         try:
