@@ -93,11 +93,12 @@ class SimRegistry:
     ) -> None:
         from sidecar_schwab.order_poller import WireEvent
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # HIGH-8: require a running loop — creating an orphan loop here is wrong.
+        # SimRegistry is always called from async gRPC RPC handlers so a running
+        # loop is guaranteed.  If there is no running loop the caller has a
+        # structural problem that should surface immediately, not be silently
+        # papered over by an unreachable fallback.
+        loop = asyncio.get_running_loop()
         ev = WireEvent(
             broker_order_id=broker_order_id,
             client_order_id=client_order_id,

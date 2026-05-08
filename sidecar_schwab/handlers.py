@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import sys
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -51,6 +53,37 @@ _STREAM_QUEUE_MAX = 2048  # in-flight ticks before drop-oldest kicks in
 _CALL_SUBS_MAX = 500  # canonical_ids tracked per gRPC call
 _SEARCH_CACHE_TTL_S = 300  # 5 min
 _SEARCH_CACHE_MAX_ENTRIES = 1000
+_REPLAY_CACHE_MAX_SIZE = 10_000
+
+
+class _ReplayCache:
+    """HIGH-5: LRU-capped idempotency cache for PlaceOrder.
+
+    Replaces the unbounded ``dict`` that could grow without bound in long-running
+    processes with high order volume.
+    """
+
+    def __init__(self, maxsize: int = _REPLAY_CACHE_MAX_SIZE) -> None:
+        self._cache: OrderedDict[
+            tuple[str, str], broker_pb2.PlaceOrderResponse
+        ] = OrderedDict()
+        self._maxsize = maxsize
+
+    def get(self, key: tuple[str, str]) -> broker_pb2.PlaceOrderResponse | None:
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        self._cache.move_to_end(key)
+        return entry
+
+    def put(self, key: tuple[str, str], value: broker_pb2.PlaceOrderResponse) -> None:
+        self._cache[key] = value
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._maxsize:
+            self._cache.popitem(last=False)
+
+    def __contains__(self, key: tuple[str, str]) -> bool:
+        return key in self._cache
 
 
 class BrokerServicer(broker_pb2_grpc.BrokerServicer):
@@ -65,8 +98,8 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         self._last_meta_fingerprint: str | None = None
         self._configured_at: datetime | None = None
         self._hashes_loaded_once = False
-        # 8a C3 -- trade write-path state
-        self._replay_cache: dict[tuple[str, str], broker_pb2.PlaceOrderResponse] = {}
+        # 8a C3 -- trade write-path state; HIGH-5: capped LRU replaces bare dict.
+        self._replay_cache: _ReplayCache = _ReplayCache()
         self._search_cache: dict[
             tuple[str, int], tuple[list[broker_pb2.Contract], float]
         ] = {}
@@ -308,10 +341,11 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             )
             return broker_pb2.PlaceOrderResponse()
 
-        # 2. Replay cache (idempotency for client retries).
+        # 2. Replay cache (idempotency for client retries). HIGH-5: LRU-capped.
         cache_key = (account_hash, coid)
-        if cache_key in self._replay_cache:
-            return self._replay_cache[cache_key]
+        cached = self._replay_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         # 3. Token pre-warm (HIGH-4).
         await self._client.ensure_fresh_token()
@@ -348,7 +382,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             broker_order_id=result["broker_order_id"],
             status="submitted",
         )
-        self._replay_cache[cache_key] = rsp
+        self._replay_cache.put(cache_key, rsp)
         if self._poller is not None:
             self._poller.activate_fast(account_number=request.account_number)
         return rsp
@@ -528,8 +562,11 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             results = await self._client.search_instruments(query=request.query)
         except (SchwabHTTPError,) as exc:
             await self._abort_for_http(context, exc)
+            # CRIT-2: return after abort to prevent UnboundLocalError on `results`.
+            return broker_pb2.SearchContractsResponse()
         except (OSError, TimeoutError) as exc:
             await context.abort(grpc.StatusCode.UNAVAILABLE, f"schwab transport: {exc}")
+            return broker_pb2.SearchContractsResponse()
 
         contracts = [
             broker_pb2.Contract(
@@ -909,7 +946,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
     @staticmethod
     def _fingerprint(meta: dict[str, str]) -> str:
-        """Hash the 5 metadata keys we care about for idempotency."""
+        """MED-6: return a SHA-256 digest of the config keys — never store raw secrets in heap."""
         keys = (
             "app_key",
             "app_secret",
@@ -917,7 +954,8 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             "refresh_token",
             "access_issued_at",
         )
-        return "|".join(meta.get(k, "") for k in keys)
+        plaintext = "|".join(meta.get(k, "") for k in keys)
+        return hashlib.sha256(plaintext.encode()).hexdigest()
 
     @staticmethod
     def _parse_iso(s: str) -> datetime:

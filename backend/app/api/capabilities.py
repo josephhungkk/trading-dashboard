@@ -12,7 +12,10 @@ from app.core.deps import get_db, get_redis
 from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 
 KNOWN_ASSET_CLASSES: frozenset[str] = frozenset(
-    {"STOCK", "CRYPTO", "OPTION", "FUTURE", "FOREX", "BOND"}
+    # MED-7: ETF added — the service maps ETF→STOCK bucket internally, but the
+    # API must accept ETF as a valid ?asset_class= filter value so callers can
+    # request ETF-specific rows without receiving a 422.
+    {"STOCK", "ETF", "CRYPTO", "OPTION", "FUTURE", "FOREX", "BOND"}
 )
 
 router = APIRouter(prefix="/api/brokers", tags=["brokers"])
@@ -70,4 +73,5 @@ async def get_broker_capabilities(
             detail={"error": "unknown_asset_class", "value": asset_class},
         )
 
-    return await OrderCapabilityService(db, redis).list_capabilities(broker_id, asset_class)
+    svc = OrderCapabilityService(redis=redis, db=db)
+    return await svc.list_capabilities(broker_id, asset_class)

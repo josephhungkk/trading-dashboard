@@ -21,7 +21,11 @@ export function useBrokerCapabilities(brokerId: string | null): BrokerCapabiliti
 
   React.useEffect(() => {
     if (typeof EventSource === 'undefined') return undefined;
-    const eventSource = new EventSource('/api/sse/config_stream');
+    // CRIT-4: correct path is /api/admin/config/stream (not /api/sse/config_stream).
+    // withCredentials so the Cf-Access session cookie is sent for require_admin_jwt.
+    // ns scopes the SSE stream to capability invalidations only.
+    const url = `/api/admin/config/stream?ns=${encodeURIComponent('order_capabilities')}`;
+    const eventSource = new EventSource(url, { withCredentials: true });
     const onMessage = (event: MessageEvent<string>): void => {
       if (!isCapabilityInvalidation(event.data)) return;
       queryClient.invalidateQueries({ queryKey: ['brokerCapabilities'] });

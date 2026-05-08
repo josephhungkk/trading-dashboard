@@ -177,12 +177,24 @@ class OrderPoller:
                 continue
             normalized = schwab_to_wire_order(raw, client_order_id=coid)
             prev = await self._state.get(coid)
+            prev_exec_ids: set[str] = prev.last_exec_ids if prev is not None else set()
+
+            # CRIT-3: accumulate all exec_ids seen this poll into the running set so
+            # that fills 1..N-1 from a multi-fill batch are not re-emitted next poll.
+            new_exec_ids: set[str] = prev_exec_ids | {
+                f.exec_id for f in normalized.fills if f.exec_id
+            }
+            # Cap to _MAX_EXEC_IDS entries to bound memory for very active orders.
+            from sidecar_schwab.order_state_cache import _MAX_EXEC_IDS  # noqa: PLC0415
+            if len(new_exec_ids) > _MAX_EXEC_IDS:
+                new_exec_ids = set(sorted(new_exec_ids)[-_MAX_EXEC_IDS:])
+
             new_state = OrderState(
                 client_order_id=coid,
                 broker_order_id=normalized.broker_order_id,
                 schwab_status=raw["status"],
                 entered_time_iso=normalized.entered_time_iso,
-                last_exec_id=normalized.fills[-1].exec_id if normalized.fills else "",
+                last_exec_ids=new_exec_ids,
             )
             if prev is None:
                 events.append(
@@ -204,7 +216,8 @@ class OrderPoller:
                     )
                 )
             for fill in normalized.fills:
-                if fill.exec_id and (prev is None or fill.exec_id != prev.last_exec_id):
+                # CRIT-3: check against the full prev set, not just the last id.
+                if fill.exec_id and fill.exec_id not in prev_exec_ids:
                     events.append(
                         WireEvent(
                             broker_order_id=normalized.broker_order_id,

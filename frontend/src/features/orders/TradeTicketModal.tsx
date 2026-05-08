@@ -330,7 +330,15 @@ function TradeTicketForm({
   const capabilityError = brokerId !== null && capabilities.isError;
   const limitRequired = (form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT') && form.limitPrice.trim() === '';
   const stopRequired = (form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT') && form.stopPrice.trim() === '';
-  const canPreview = !previewDisabled && !capabilityLoading && isSubmittableOrderType(form.orderType) && !limitRequired && !stopRequired;
+  // MED-4: include !capabilityError so the gate fails closed, not open, on
+  // capability API errors. The backend capability check remains the authoritative
+  // gate; this prevents optimistic placement when the FE has no valid data.
+  const canPreview = !previewDisabled
+    && !capabilityLoading
+    && !capabilityError
+    && isSubmittableOrderType(form.orderType)
+    && !limitRequired
+    && !stopRequired;
   const contractInputId = React.useId();
   const orderTypeId = React.useId();
   const qtyId = React.useId();
@@ -354,6 +362,12 @@ function TradeTicketForm({
         if (canPreview) onPreview();
       }}
     >
+      {/* MED-4: fail-closed warning when capability data is unavailable */}
+      {capabilityError && (
+        <div role="alert" className="rounded-md bg-yellow-50 px-3 py-2 text-sm text-yellow-800">
+          Unable to load order capabilities. Preview is disabled until data is available.
+        </div>
+      )}
       <fieldset className="grid grid-cols-2 gap-2" aria-label="Side">
         {(['BUY', 'SELL'] as const).map((side) => (
           <Button
@@ -469,12 +483,6 @@ function TradeTicketForm({
           }) : null}
         </select>
       </label>
-
-      {capabilityError ? (
-        <div className="rounded-md border border-warning/60 bg-warning/10 p-3 text-sm text-warning">
-          Broker capabilities unavailable. Orders can still be previewed.
-        </div>
-      ) : null}
 
       <Button type="submit" disabled={!canPreview}>Preview</Button>
     </form>

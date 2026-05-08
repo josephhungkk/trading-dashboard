@@ -340,16 +340,12 @@ describe('TradeTicketModal', () => {
     expect(screen.getByLabelText('TIF')).toBeDisabled();
   });
 
-  it('capability_error_shows_warning_and_still_allows_preview', async () => {
-    const user = userEvent.setup();
+  it('capability_error_shows_warning_and_disables_preview', async () => {
+    // MED-4: capability error → warning banner shown + Preview button disabled.
     mockCapabilitiesFetch(Promise.resolve(capabilitiesResponse(schwabCapabilities(), 500)));
     renderOpen('schwab');
 
-    expect(await screen.findByText('Broker capabilities unavailable. Orders can still be previewed.')).toBeInTheDocument();
-    previewMock.mockResolvedValueOnce(makePreview());
-    await fillMarket(user);
-    await user.click(screen.getByRole('button', { name: 'Preview' }));
-
-    expect(await screen.findByRole('button', { name: 'Confirm' })).toBeInTheDocument();
+    expect(await screen.findByText('Unable to load order capabilities. Preview is disabled until data is available.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
   });
 });

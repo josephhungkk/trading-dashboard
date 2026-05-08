@@ -1322,6 +1322,7 @@ async def place_bracket(
     config: ConfigService,
     registry: BrokerRegistry,
     *,
+    capability: OrderCapabilityService,
     request: OrderBracketRequest,
 ) -> dict[str, Any]:
     """POST /api/orders/bracket - HIGH-2 two-phase commit.
@@ -1347,6 +1348,16 @@ async def place_bracket(
     if await is_kill_switch_active(config):
         raise PreviewUnavailable(503, {"error": "kill_switch"})
     account = await resolve_account(db, request.account_id)
+
+    # HIGH-2: capability gate + maintenance window check (was missing entirely).
+    await validate_pre_dispatch(
+        cfg=config,
+        capability=capability,
+        broker_label=account.gateway_label,
+        asset_class="STOCK",
+        order_type=request.order_type,
+        tif=request.tif,
+    )
     parent_qty = canonicalize_qty(request.qty)
     parent_notional = Decimal(parent_qty) * entry
     policy = await get_account_policy(

@@ -1,15 +1,16 @@
 """Admin router: /api/admin/config + /api/admin/secrets + reveal endpoint."""
 
-import logging
 import re
 import secrets
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response, status
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.capabilities import KNOWN_ASSET_CLASSES
 from app.api.schemas import (
     ConfigIn,
     ConfigInUpsert,
@@ -30,7 +31,7 @@ IdentityDep = Annotated[AdminIdentity, Depends(require_admin_jwt)]
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 RedisDep = Annotated[Any, Depends(get_redis)]
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 router = APIRouter(
     prefix="/api/admin",
@@ -38,15 +39,27 @@ router = APIRouter(
     dependencies=[Depends(require_admin_jwt)],
 )
 
-_CONFIRMATION_NONCES: set[str] = set()
+# HIGH-7: nonce storage moved to Redis (SETEX + GETDEL) — multi-worker safe,
+# TTL-bounded, race-free.  The old in-process set is gone.
+_NONCE_TTL_SECONDS = 300
+_NONCE_KEY_PREFIX = "csrf:order-cap:"
 
 
 class OrderCapabilityWrite(BaseModel):
     broker_id: str
+    # HIGH-1: asset_class added to match the 0018-widened PK.
+    asset_class: str
     order_type: str
     time_in_force: str
     is_supported: bool
     notes: str
+
+    @field_validator("asset_class")
+    @classmethod
+    def asset_class_known(cls, v: str) -> str:
+        if v not in KNOWN_ASSET_CLASSES:
+            raise ValueError(f"unknown asset_class; allowed: {sorted(KNOWN_ASSET_CLASSES)}")
+        return v
 
     @field_validator("notes")
     @classmethod
@@ -76,15 +89,22 @@ async def parse_order_capability_write(
                 status_code=400,
                 detail={"error": {"code": "invalid_notes"}},
             ) from exc
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        # Strip non-serializable ctx values (Pydantic v2 puts the original
+        # exception object in ctx["error"] which is not JSON-serializable).
+        errors = [{k: v for k, v in err.items() if k != "ctx"} for err in exc.errors()]
+        raise HTTPException(status_code=422, detail=errors) from exc
 
 
-async def require_confirmation_nonce(
+async def consume_confirmation_nonce(
     x_confirm_nonce: Annotated[str | None, Header(alias="X-Confirm-Nonce")] = None,
+    redis: RedisDep = None,
 ) -> None:
-    if x_confirm_nonce is None or x_confirm_nonce not in _CONFIRMATION_NONCES:
+    """HIGH-7: consume a single-use Redis nonce (GETDEL).  403 if absent/expired."""
+    if x_confirm_nonce is None:
         raise HTTPException(status_code=403, detail={"error": {"code": "missing_csrf"}})
-    _CONFIRMATION_NONCES.discard(x_confirm_nonce)
+    deleted = await redis.delete(f"{_NONCE_KEY_PREFIX}{x_confirm_nonce}")
+    if not deleted:
+        raise HTTPException(status_code=403, detail={"error": {"code": "missing_csrf"}})
 
 
 def _parse_typed_value(raw: str | None, value_type: str) -> Any:
@@ -328,18 +348,20 @@ async def reveal_secret(
 
 
 @router.post("/csrf/issue", status_code=200)
-async def issue_confirmation_nonce() -> dict[str, str]:
+async def issue_confirmation_nonce(redis: RedisDep) -> dict[str, str]:
+    """HIGH-7: mint a Redis-backed single-use nonce (SETEX, TTL 300 s)."""
     nonce = secrets.token_urlsafe(32)
-    _CONFIRMATION_NONCES.add(nonce)
+    await redis.set(f"{_NONCE_KEY_PREFIX}{nonce}", "1", ex=_NONCE_TTL_SECONDS)
     return {"nonce": nonce}
 
 
 @router.post("/order-capabilities", status_code=200)
 async def set_order_capability(
     body: Annotated[OrderCapabilityWrite, Depends(parse_order_capability_write)],
+    identity: IdentityDep,
     db: DbDep,
     redis: RedisDep,
-    _csrf: Annotated[None, Depends(require_confirmation_nonce)],
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
 ) -> dict[str, bool]:
     if body.broker_id not in KNOWN_BROKERS:
         raise HTTPException(400, detail={"error": {"code": "unknown_broker_id"}})
@@ -358,16 +380,37 @@ async def set_order_capability(
     if result.fetchone() is None:
         raise HTTPException(400, detail={"error": {"code": "unknown_time_in_force_code"}})
 
+    # HIGH-6: capture prior state before update for audit log.
+    prior_row = await db.execute(
+        text(
+            """
+            SELECT is_supported, notes FROM broker_order_capability
+             WHERE broker_id = :b AND asset_class = :a
+               AND order_type = :t AND time_in_force = :tif
+            """
+        ),
+        {
+            "b": body.broker_id,
+            "a": body.asset_class,
+            "t": body.order_type,
+            "tif": body.time_in_force,
+        },
+    )
+    prior = prior_row.first()
+
+    # HIGH-1: ON CONFLICT target widened to 4-column PK added in migration 0018.
     await db.execute(
         text(
             """
             INSERT INTO broker_order_capability (
-                broker_id, order_type, time_in_force, is_supported, notes, updated_at
+                broker_id, asset_class, order_type, time_in_force,
+                is_supported, notes, updated_at
             )
             VALUES (
-                :broker_id, :order_type, :time_in_force, :is_supported, :notes, NOW()
+                :broker_id, :asset_class, :order_type, :time_in_force,
+                :is_supported, :notes, NOW()
             )
-            ON CONFLICT (broker_id, order_type, time_in_force)
+            ON CONFLICT (broker_id, asset_class, order_type, time_in_force)
             DO UPDATE SET is_supported = EXCLUDED.is_supported,
                           notes = EXCLUDED.notes,
                           updated_at = NOW()
@@ -375,6 +418,7 @@ async def set_order_capability(
         ),
         {
             "broker_id": body.broker_id,
+            "asset_class": body.asset_class,
             "order_type": body.order_type,
             "time_in_force": body.time_in_force,
             "is_supported": body.is_supported,
@@ -383,8 +427,20 @@ async def set_order_capability(
     )
     await db.commit()
 
+    # HIGH-6: audit log with actor + before/after.
+    log.info(
+        "order_capability.set",
+        actor=identity.email,
+        broker_id=body.broker_id,
+        asset_class=body.asset_class,
+        order_type=body.order_type,
+        time_in_force=body.time_in_force,
+        was_supported=(bool(prior.is_supported) if prior else None),
+        now_supported=body.is_supported,
+    )
+
     metrics.order_capability_admin_writes_total.inc()
-    await OrderCapabilityService(db, redis).publish_invalidation(body.broker_id)
+    await OrderCapabilityService(redis=redis, db=db).publish_invalidation(body.broker_id)
 
     return {"ok": True}
 
@@ -463,6 +519,8 @@ async def list_broker_account_hashes(
             detail={"error": "sidecar_timeout", "label": label, "detail": str(exc)},
         ) from exc
     except BrokerSidecarUnavailable as exc:
+        # HIGH-3: grpc_details stays in the server log; the client only sees a
+        # safe hint so internal gRPC details do not leak to the browser.
         log.warning(
             "admin_list_broker_account_hashes_unavailable label=%s grpc_code=%s details=%s",
             label,
@@ -474,8 +532,6 @@ async def list_broker_account_hashes(
             detail={
                 "error": "sidecar_unavailable",
                 "label": label,
-                "grpc_code": exc.grpc_code,
-                "grpc_details": exc.grpc_details,
                 "hint": (
                     "If grpc_code=FAILED_PRECONDITION, the sidecar needs Configure (token refresh "
                     "or app_key/app_secret seed). If UNAUTHENTICATED, the Schwab refresh_token "
@@ -494,10 +550,11 @@ async def list_broker_account_hashes(
         }
         for acct in response.accounts
     ]
+    # HIGH-3: log every access with actor so account_hash exposure is auditable.
     log.info(
-        "admin_list_broker_account_hashes label=%s actor=%s rows=%d",
-        label,
-        identity.email,
-        len(rows),
+        "admin.account_hashes.fetched",
+        actor=identity.email,
+        label=label,
+        account_count=len(rows),
     )
     return rows

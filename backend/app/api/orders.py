@@ -79,12 +79,17 @@ def get_orders_redis(request: Request) -> RedisLike:
 RedisDep = Annotated[RedisLike, Depends(get_orders_redis)]
 
 
-def get_order_capability_service(db: DbDep, redis: RedisDep) -> OrderCapabilityService:
-    # Both modules declare structurally-identical RedisLike Protocols (only `publish`
-    # is needed). mypy treats them as distinct nominal types, so cast at the boundary.
-    from app.services.order_capability_service import RedisLike as CapabilityRedisLike
+def get_order_capability_service(request: Request) -> OrderCapabilityService:
+    """Return the process-singleton OrderCapabilityService stored on app.state.
 
-    return OrderCapabilityService(db=db, redis=cast(CapabilityRedisLike, redis))
+    CRIT-1: constructing a new instance per-request destroys the 60-second LRU
+    cache effectiveness.  The singleton is created in lifespan and its
+    run_listener() task is kept alive for the process lifetime.
+    """
+    svc = getattr(request.app.state, "capability_svc", None)
+    if svc is None:
+        raise RuntimeError("OrderCapabilityService not initialised — lifespan startup failure")
+    return cast(OrderCapabilityService, svc)
 
 
 CapabilityDep = Annotated[OrderCapabilityService, Depends(get_order_capability_service)]
@@ -306,6 +311,7 @@ async def place_bracket(
     db: DbDep,
     redis: RedisDep,
     registry: RegistryDep,
+    capability: CapabilityDep,
 ) -> OrderBracketResponse | JSONResponse:
     try:
         body = await request.json()
@@ -316,6 +322,7 @@ async def place_bracket(
             redis=redis,
             config=cfg,
             registry=registry,
+            capability=capability,
             request=OrderBracketRequest.model_validate(body),
         )
         return OrderBracketResponse.model_validate(result)

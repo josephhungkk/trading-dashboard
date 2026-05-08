@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from typing import Any, Protocol, cast
 
 import structlog
@@ -28,6 +29,10 @@ _CacheKey = tuple[str, str, str, str]
 # FOREX/BOND and backfills existing rows with 'STOCK').
 _ASSET_CLASS_BUCKET = {"STOCK": "STOCK", "ETF": "STOCK"}
 
+# Type alias for the session factory (async_sessionmaker or any callable returning
+# an async context manager that yields an AsyncSession).
+_SessionFactory = Callable[[], Any]
+
 
 class RedisLike(Protocol):
     async def publish(self, channel: str, message: bytes | str) -> int: ...
@@ -36,21 +41,46 @@ class RedisLike(Protocol):
 
 
 class OrderCapabilityService:
+    """Capability lookup with a per-process LRU cache and Redis pub/sub invalidation.
+
+    Two construction modes:
+    - **Singleton** (lifespan): pass ``db_factory`` (async_sessionmaker).  The
+      service opens a short-lived session for each DB fetch and closes it
+      immediately.  ``run_listener()`` must be started as a background task.
+    - **Per-request** (legacy / admin publish path): pass ``db`` directly.
+      The cache is instance-local so invalidation via ``run_listener`` has no
+      effect; callers must call ``publish_invalidation`` explicitly.
+    """
+
     def __init__(
         self,
-        db: AsyncSession,
         redis: RedisLike,
         *,
+        db: AsyncSession | None = None,
+        db_factory: _SessionFactory | None = None,
         ttl_seconds: float = _CACHE_TTL_SECONDS,
         max_cache_size: int = _CACHE_MAX_SIZE,
         now: Callable[[], float] = time.monotonic,
     ) -> None:
+        if db is None and db_factory is None:
+            raise ValueError("OrderCapabilityService requires either db or db_factory")
         self._db = db
+        self._db_factory = db_factory
         self._redis = redis
         self._ttl_seconds = ttl_seconds
         self._max_cache_size = max_cache_size
         self._now = now
         self._cache: OrderedDict[_CacheKey, tuple[dict[str, Any] | None, float]] = OrderedDict()
+
+    @contextlib.asynccontextmanager
+    async def _session(self) -> AsyncGenerator[AsyncSession]:
+        """Yield a DB session, creating one from factory if in singleton mode."""
+        if self._db is not None:
+            yield self._db
+        else:
+            assert self._db_factory is not None
+            async with self._db_factory() as session:
+                yield session
 
     async def is_supported(
         self, broker_id: str, asset_class: str, order_type: str, time_in_force: str
@@ -96,35 +126,36 @@ class OrderCapabilityService:
     ) -> dict[str, list[dict[str, Any]]] | list[dict[str, Any]]:
         if broker_id not in KNOWN_BROKERS:
             return []
-        if asset_class is not None:
-            result = await self._db.execute(
+        async with self._session() as db:
+            if asset_class is not None:
+                result = await db.execute(
+                    text(
+                        """
+                        SELECT broker_id, asset_class, order_type, time_in_force,
+                               is_supported AS supported, notes
+                        FROM broker_order_capability
+                        WHERE broker_id = :broker_id
+                          AND asset_class = :asset_class
+                        ORDER BY order_type, time_in_force
+                        """
+                    ),
+                    {"broker_id": broker_id, "asset_class": asset_class},
+                )
+                return [dict(row) for row in result.mappings().all()]
+
+            result = await db.execute(
                 text(
                     """
                     SELECT broker_id, asset_class, order_type, time_in_force,
                            is_supported AS supported, notes
                     FROM broker_order_capability
                     WHERE broker_id = :broker_id
-                      AND asset_class = :asset_class
-                    ORDER BY order_type, time_in_force
+                    ORDER BY asset_class, order_type, time_in_force
                     """
                 ),
-                {"broker_id": broker_id, "asset_class": asset_class},
+                {"broker_id": broker_id},
             )
-            return [dict(row) for row in result.mappings().all()]
-
-        result = await self._db.execute(
-            text(
-                """
-                SELECT broker_id, asset_class, order_type, time_in_force,
-                       is_supported AS supported, notes
-                FROM broker_order_capability
-                WHERE broker_id = :broker_id
-                ORDER BY asset_class, order_type, time_in_force
-                """
-            ),
-            {"broker_id": broker_id},
-        )
-        rows = [dict(row) for row in result.mappings().all()]
+            rows = [dict(row) for row in result.mappings().all()]
         supported_asset_classes = {
             str(row["asset_class"]) for row in rows if bool(row.get("supported"))
         }
@@ -202,28 +233,29 @@ class OrderCapabilityService:
     async def _fetch_capability(
         self, broker_id: str, asset_class: str, order_type: str, time_in_force: str
     ) -> dict[str, Any] | None:
-        result = await self._db.execute(
-            text(
-                """
-                SELECT broker_id, asset_class, order_type, time_in_force, is_supported, notes
-                FROM broker_order_capability
-                WHERE broker_id = :broker_id
-                  AND asset_class = :asset_class
-                  AND order_type = :order_type
-                  AND time_in_force = :time_in_force
-                """
-            ),
-            {
-                "broker_id": broker_id,
-                "asset_class": asset_class,
-                "order_type": order_type,
-                "time_in_force": time_in_force,
-            },
-        )
-        row = result.mappings().first()
-        if row is None:
-            return None
-        return dict(cast(Mapping[str, Any], row))
+        async with self._session() as db:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT broker_id, asset_class, order_type, time_in_force, is_supported, notes
+                    FROM broker_order_capability
+                    WHERE broker_id = :broker_id
+                      AND asset_class = :asset_class
+                      AND order_type = :order_type
+                      AND time_in_force = :time_in_force
+                    """
+                ),
+                {
+                    "broker_id": broker_id,
+                    "asset_class": asset_class,
+                    "order_type": order_type,
+                    "time_in_force": time_in_force,
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                return None
+            return dict(cast(Mapping[str, Any], row))
 
     def _get_cached(self, key: _CacheKey) -> dict[str, Any] | None | object:
         entry = self._cache.get(key)

@@ -45,6 +45,7 @@ from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistr
 from app.services.config import ConfigService
 from app.services.config_cache import ConfigCache
 from app.services.oco_orchestrator import OcoOrchestrator, OcoOrchestratorImpl
+from app.services.order_capability_service import OrderCapabilityService
 from app.services.order_event_consumer import OrderEventConsumer
 from app.services.pending_fills_sweeper import PendingFillsSweeper
 from app.services.pending_submit_watchdog import PendingSubmitWatchdog
@@ -91,6 +92,11 @@ async def lifespan(_app: FastAPI) -> Any:
 
     listener_config = asyncio.create_task(config_cache.run_listener())
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
+
+    # CRIT-1: OrderCapabilityService singleton — shared cache + background listener.
+    capability_svc = OrderCapabilityService(redis=redis, db_factory=session_factory)
+    _app.state.capability_svc = capability_svc
+    listener_capability: asyncio.Task[None] = asyncio.create_task(capability_svc.run_listener())
 
     broker_registry: BrokerRegistry | None = None
     broker_discoverer: BrokerDiscoverer | None = None
@@ -229,7 +235,8 @@ async def lifespan(_app: FastAPI) -> Any:
         await asyncio.gather(bridge_task, return_exceptions=True)
         listener_config.cancel()
         listener_secrets.cancel()
-        for t in (listener_config, listener_secrets):
+        listener_capability.cancel()
+        for t in (listener_config, listener_secrets, listener_capability):
             try:
                 await t
             except asyncio.CancelledError:
