@@ -111,7 +111,7 @@ async def test_oco_legs_different_brokers(client: AsyncClient) -> None:
     with (
         patch("app.services.config.ConfigService.get", new=AsyncMock(side_effect=_fake_cfg_get)),
         patch(
-            "app.services.orders_service.resolve_account",
+            "app.api.orders.resolve_account",
             new=AsyncMock(
                 side_effect=[
                     _Account(gateway_label="ibkr-paper", mode="paper", currency_base="USD"),
@@ -248,7 +248,7 @@ async def test_oco_happy_path_with_killswitch_on(client: AsyncClient) -> None:
                 new=AsyncMock(side_effect=_fake_cfg_get),
             ),
             patch(
-                "app.services.orders_service.resolve_account",
+                "app.api.orders.resolve_account",
                 new=AsyncMock(return_value=fake_account),
             ),
             patch(
@@ -343,7 +343,7 @@ async def test_oco_atomicity_rollback(client: AsyncClient) -> None:
                 new=AsyncMock(side_effect=_fake_cfg_get),
             ),
             patch(
-                "app.services.orders_service.resolve_account",
+                "app.api.orders.resolve_account",
                 new=AsyncMock(return_value=fake_account),
             ),
             patch(
@@ -428,7 +428,7 @@ async def test_oco_hash_mismatch_returns_401(client: AsyncClient) -> None:
                 new=AsyncMock(side_effect=_fake_cfg_get),
             ),
             patch(
-                "app.services.orders_service.resolve_account",
+                "app.api.orders.resolve_account",
                 new=AsyncMock(return_value=same_account),
             ),
         ):
@@ -479,7 +479,7 @@ async def test_oco_unknown_nonce_returns_401(client: AsyncClient) -> None:
                 new=AsyncMock(side_effect=_fake_cfg_get),
             ),
             patch(
-                "app.services.orders_service.resolve_account",
+                "app.api.orders.resolve_account",
                 new=AsyncMock(return_value=same_account),
             ),
         ):

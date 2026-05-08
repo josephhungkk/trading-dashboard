@@ -24,7 +24,7 @@ async def test_mint_then_consume_succeeds(redis):
 async def test_consume_replays_reject(redis):
     signed = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
     await consume_state_nonce(redis, signed=signed, app_secret_key=b"K")
-    with pytest.raises(StateNonceError, match=r"not\.found\.or\.consumed"):
+    with pytest.raises(StateNonceError, match=r"not found or consumed"):
         await consume_state_nonce(redis, signed=signed, app_secret_key=b"K")
 
 
@@ -32,7 +32,10 @@ async def test_consume_replays_reject(redis):
 async def test_consume_wrong_hmac_rejects(redis):
     signed = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
     tampered = signed[:-1] + ("A" if signed[-1] != "A" else "B")
-    with pytest.raises(StateNonceError, match=r"invalid\.signature"):
+    # Two paths: signature bytes don't match HMAC ("invalid signature"), or
+    # the tampered character makes the b64 fragment unparseable
+    # ("invalid signature encoding"). Either is acceptable here.
+    with pytest.raises(StateNonceError, match=r"invalid signature"):
         await consume_state_nonce(redis, signed=tampered, app_secret_key=b"K")
 
 
