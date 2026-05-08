@@ -44,23 +44,23 @@ service Broker {
 
 message GetHistoricalBarsRequest {
   string canonical_id = 1;
-  string timeframe    = 2;     // "1m" only — sub-1m has no historical source
+  string timeframe = 2; // "1m" only — sub-1m has no historical source
   google.protobuf.Timestamp range_start = 3;
-  google.protobuf.Timestamp range_end   = 4;
-  int32  limit = 5;            // pacing budget; sidecar may chunk internally
+  google.protobuf.Timestamp range_end = 4;
+  int32 limit = 5; // pacing budget; sidecar may chunk internally
 }
 message GetHistoricalBarsResponse {
   repeated HistoricalBar bars = 1;
-  bool   truncated = 2;        // true if more bars exist past range_end (pacing cap hit)
+  bool truncated = 2; // true if more bars exist past range_end (pacing cap hit)
 }
 message HistoricalBar {
   google.protobuf.Timestamp bucket_start = 1;
-  string  open  = 2;           // string-encoded NUMERIC(20,8) per project convention
-  string  high  = 3;
-  string  low   = 4;
-  string  close = 5;
-  string  volume = 6;
-  int32   trade_count = 7;
+  string open = 2; // string-encoded NUMERIC(20,8) per project convention
+  string high = 3;
+  string low = 4;
+  string close = 5;
+  string volume = 6;
+  int32 trade_count = 7;
 }
 
 enum BrokerId {

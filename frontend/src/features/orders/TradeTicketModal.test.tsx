@@ -346,6 +346,11 @@ describe('TradeTicketModal', () => {
     renderOpen('schwab');
 
     expect(await screen.findByText('Unable to load order capabilities. Preview is disabled until data is available.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
+    // Phase 9.6: capability hook flushes the disabled flag on a separate
+    // microtask from the warning banner; wrap in waitFor so the disabled
+    // assertion doesn't race the React update and trip the act() warning.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
+    });
   });
 });

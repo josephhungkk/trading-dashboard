@@ -16,5 +16,12 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     coverage: { reporter: ['text', 'html'] },
+    // Phase 9.6: Playwright e2e specs live under e2e/ and import
+    // @playwright/test, which is not in the Vitest dep tree. Vitest
+    // would otherwise collect them via its default include glob and
+    // fail with "Failed to resolve import @playwright/test". Exclude
+    // here so only Vitest unit/integration tests run; Playwright
+    // owns the e2e/ directory via its own runner.
+    exclude: ['e2e/**', 'node_modules/**', 'dist/**', '.idea/**', '.git/**', '.cache/**'],
   },
 });
