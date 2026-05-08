@@ -15,7 +15,24 @@ async def test_order_types_seeded(session: AsyncSession) -> None:
         .scalars()
         .all()
     )
-    assert rows == [
+    # 0011 seeded the original 10 order types in the order below; later
+    # migrations append BRACKET (0021) + OCO (0021d) so use ⊇ check on
+    # the original 10 to keep this an "initial-seed" assertion that
+    # survives later additions.
+    assert set(rows) >= {
+        "MARKET",
+        "LIMIT",
+        "STOP",
+        "STOP_LIMIT",
+        "TRAIL",
+        "TRAIL_LIMIT",
+        "MOC",
+        "MOO",
+        "LOC",
+        "LOO",
+    }
+    # Original 10 must still come first (before any later additions).
+    assert rows[:10] == [
         "MARKET",
         "LIMIT",
         "STOP",

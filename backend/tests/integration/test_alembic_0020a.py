@@ -20,6 +20,7 @@ async def test_alpaca_crypto_rows_supported(db_session: AsyncSession) -> None:
             )
         )
     ).scalar_one()
-    # 4 rows: MARKET (DAY/GTC) + LIMIT (DAY/GTC). STOP_LIMIT/IOC/FOK pending
+    # At least 4 rows: MARKET (DAY/GTC) + LIMIT (DAY/GTC). STOP_LIMIT/IOC/FOK pending
     # empirical validation per migration 0020a comment.
-    assert n == 4
+    # Later migrations added more rows; floor-check only.
+    assert n >= 4

@@ -20,6 +20,7 @@ async def test_alpaca_equity_rows_supported(db_session: AsyncSession) -> None:
             )
         )
     ).scalar_one()
-    # 16 rows: MARKET (DAY/GTC) + LIMIT (DAY/GTC/IOC/FOK) + STOP (DAY/GTC) +
+    # At least 16 rows: MARKET (DAY/GTC) + LIMIT (DAY/GTC/IOC/FOK) + STOP (DAY/GTC) +
     # STOP_LIMIT (DAY/GTC) + TRAIL (DAY/GTC) + MOC/MOO/LOC/LOO (DAY each).
-    assert n == 16
+    # Later migrations added more rows; floor-check only.
+    assert n >= 16

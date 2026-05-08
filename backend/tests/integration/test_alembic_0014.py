@@ -6,22 +6,19 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Rows flipped by this migration (0014_futu_capability_flip).
+# Rows flipped by 0014_futu_capability_flip and NOT subsequently reverted by
+# 0014a_futu_revert_unsupported_tif (which un-flips LIMIT IOC/FOK/GTD because
+# the futu-api SDK TimeInForce enum only has DAY/GTC).
 _PHASE_8B_ROWS = frozenset(
     [
         # Trail family
         ("TRAIL", "DAY"),
         ("TRAIL", "GTC"),
-        # IOC / FOK on LIMIT
-        ("LIMIT", "IOC"),
-        ("LIMIT", "FOK"),
         # Stop family
         ("STOP", "DAY"),
         ("STOP", "GTC"),
         ("STOP_LIMIT", "DAY"),
         ("STOP_LIMIT", "GTC"),
-        # GTD on LIMIT
-        ("LIMIT", "GTD"),
     ]
 )
 

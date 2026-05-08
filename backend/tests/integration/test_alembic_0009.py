@@ -24,7 +24,9 @@ async def test_0009_creates_instruments_table(db_session) -> None:
     ).fetchall()
 
     assert table_exists == "instruments"
-    assert {row.column_name for row in columns} == {
+    # 0009 originally created the 9 columns below; later migrations add
+    # tick_size etc. — assert ⊇ on the 0009 baseline.
+    assert {row.column_name for row in columns} >= {
         "id",
         "canonical_id",
         "asset_class",

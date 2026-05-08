@@ -206,4 +206,6 @@ async def test_0028b_fk_delete_rule_is_restrict(db_session: AsyncSession) -> Non
     row = result.fetchone()
     assert row is not None, "oco_links_account_id_fkey not found"
     # 'r' = RESTRICT, 'a' = NO ACTION (default), 'c' = CASCADE
-    assert row[0] == "r", f"expected confdeltype='r' (RESTRICT), got '{row[0]}'"
+    # asyncpg returns char-type columns as bytes; accept either form.
+    actual = row[0].decode() if isinstance(row[0], bytes) else row[0]
+    assert actual == "r", f"expected confdeltype='r' (RESTRICT), got '{row[0]!r}'"

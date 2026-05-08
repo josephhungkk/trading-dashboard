@@ -18,14 +18,17 @@ async def test_schwab_supported_combos_after_flip(db_session: AsyncSession) -> N
             )
         )
     ).all()
-    expected = {
+    # 0011a originally seeded the 16 supported combos below; later migrations
+    # (TRAIL/MOC/MOO/LOC/LOO + extra TIFs + asset_class PK widening) add more
+    # supported rows. Assert ⊇ on the 0011a baseline so this stays a
+    # post-0011a-state check that survives later flips.
+    baseline_supported = {
         (o, t)
         for o in ("MARKET", "LIMIT", "STOP", "STOP_LIMIT")
         for t in ("DAY", "GTC", "IOC", "FOK")
     }
     actual = {(r.order_type, r.time_in_force) for r in rows}
-    assert actual == expected, f"unexpected supported set: {actual ^ expected}"
-    assert len(rows) == 16
+    assert actual >= baseline_supported, f"missing baseline rows: {baseline_supported - actual}"
 
 
 @pytest.mark.asyncio
@@ -38,7 +41,6 @@ async def test_schwab_unsupported_rows_unchanged(db_session: AsyncSession) -> No
             )
         )
     ).scalar_one()
-    # Schwab has 10 order_types x 5 TIFs = 50 rows total; 16 flipped supported,
-    # 34 remain unsupported (TRAIL/TRAIL_LIMIT/MOC/MOO/LOC/LOO across all TIFs +
-    # the GTD combos for the supported types).
-    assert n == 50 - 16
+    # 0011a left 34 unsupported rows; subsequent migrations widened the PK
+    # with asset_class (0018) so the row count grows. Floor-check only.
+    assert n >= 34, f"expected >= 34 unsupported rows, got {n}"
