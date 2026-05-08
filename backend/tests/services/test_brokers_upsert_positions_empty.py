@@ -32,7 +32,13 @@ async def _seed_account(conn: AsyncConnection, account_number: str) -> UUID:
 
 
 @pytest.mark.asyncio
-async def test_upsert_positions_empty_payload_preserves_existing_rows() -> None:
+async def test_upsert_positions_empty_payload_deletes_existing_rows() -> None:
+    """Empty broker response = liquidated account; soft-delete stale rows.
+
+    51860c7 removed the `if not positions: return` early-return in
+    _upsert_positions. The CTE upsert+delete pattern now correctly deletes
+    every row for the account when the incoming list is empty.
+    """
     engine = create_async_engine(
         settings.database_url,
         connect_args={"timeout": 2},
@@ -71,7 +77,7 @@ async def test_upsert_positions_empty_payload_preserves_existing_rows() -> None:
                             {"account_id": account_id},
                         )
                     ).scalar_one()
-                assert count == 3
+                assert count == 0
             finally:
                 await tx.rollback()
     except (SQLAlchemyError, TimeoutError, OSError) as exc:

@@ -83,7 +83,9 @@ async def test_order_status_rank_function(session: AsyncSession) -> None:
         )
     )
     ranks = result.one()
-    assert ranks == (0, 1, 2, 3, 4, 5)
+    # 0032 collapsed modified=2 -> modified=1 so a "modified" event after a
+    # "submitted" event no longer regresses rank (5c follow-up semantic).
+    assert ranks == (0, 1, 1, 3, 4, 5)
 
 
 @pytest.mark.asyncio

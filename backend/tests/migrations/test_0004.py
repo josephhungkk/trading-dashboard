@@ -333,6 +333,8 @@ def test_0004_downgrade_then_upgrade_round_trips_twice() -> None:
     # Cycle 2 — would fail with `duplicate_object` if ENUM cleanup is missing
     alembic("downgrade -1")
     alembic("upgrade head")
-    # Confirm we are back at 0004
+    # Confirm we landed on the alembic head (whatever the latest revision is —
+    # 0004 was head when this test was written; many migrations have shipped
+    # since). The (head) marker in `alembic current` output is the invariant.
     out = alembic("current")
-    assert "0004" in out, f"Expected at head 0004, got: {out}"
+    assert "(head)" in out, f"Expected to be at head, got: {out}"
