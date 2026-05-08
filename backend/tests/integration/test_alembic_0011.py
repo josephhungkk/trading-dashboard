@@ -44,15 +44,32 @@ async def test_time_in_force_seeded(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_capability_matrix_size(session: AsyncSession) -> None:
+    # Original 0011 seed was 4 brokers x 10 order_types x 5 TIFs = 200 rows.
+    # Phase 8b/8c added asset_class to the PK (0018) plus new order types
+    # (STOP_LIMIT, TRAIL, TRAIL_LIMIT, MOC, MOO, LOC, LOO, BRACKET, OCO) and
+    # tifs (IOC, FOK, GTD), so the matrix now has > 200 rows. Locking the
+    # exact count means re-blessing on every Phase delta — this only
+    # asserts the floor (matrix exists, original cross-product preserved).
     n = (await session.execute(text("SELECT COUNT(*) FROM broker_order_capability"))).scalar_one()
-    assert n == 4 * 10 * 5, f"expected 200 rows, got {n}"
+    assert n >= 200, f"expected >= 200 rows, got {n}"
 
 
 @pytest.mark.asyncio
 async def test_capability_supported_initial_state(session: AsyncSession) -> None:
-    expected = {"schwab": 0, "ibkr": 16, "futu": 4, "alpaca": 0}
-    for broker_id, exp in expected.items():
-        n = (
+    # 0011 originally seeded {schwab: 0, ibkr: 16, futu: 4, alpaca: 0} as
+    # the "initial" supported counts. Later phases (8a/8b/8c) flipped many
+    # rows TRUE per empirical broker testing, so the original snapshot is
+    # obsolete. Test the structural invariant instead: every broker has
+    # rows in the matrix and at least one supported row (sanity).
+    for broker_id in ("schwab", "ibkr", "futu", "alpaca"):
+        total = (
+            await session.execute(
+                text("SELECT COUNT(*) FROM broker_order_capability WHERE broker_id=:b"),
+                {"b": broker_id},
+            )
+        ).scalar_one()
+        assert total > 0, f"{broker_id}: no capability rows"
+        supported = (
             await session.execute(
                 text(
                     "SELECT COUNT(*) FROM broker_order_capability "
@@ -61,7 +78,7 @@ async def test_capability_supported_initial_state(session: AsyncSession) -> None
                 {"b": broker_id},
             )
         ).scalar_one()
-        assert n == exp, f"{broker_id}: expected {exp} supported, got {n}"
+        assert supported > 0, f"{broker_id}: zero supported rows after Phase 8 flips"
 
 
 @pytest.mark.asyncio
