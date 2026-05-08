@@ -108,16 +108,20 @@ async def test_watchlist_entries_rejects_duplicate() -> None:
                 ),
                 {"broker_id": broker_id, "symbol": symbol},
             )
+            # Wrap the intentionally-failing INSERT in a savepoint so that
+            # asyncpg/PG rolls back only the savepoint on IntegrityError,
+            # leaving the outer transaction alive for the finally-block DELETE.
             with pytest.raises(sqlalchemy.exc.IntegrityError):
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO watchlist_entries (broker_id, symbol, exchange, currency)
-                        VALUES (:broker_id, :symbol, 'XLON', 'GBP')
-                        """
-                    ),
-                    {"broker_id": broker_id, "symbol": symbol},
-                )
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO watchlist_entries (broker_id, symbol, exchange, currency)
+                            VALUES (:broker_id, :symbol, 'XLON', 'GBP')
+                            """
+                        ),
+                        {"broker_id": broker_id, "symbol": symbol},
+                    )
         finally:
             await conn.execute(
                 text(

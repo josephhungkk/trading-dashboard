@@ -202,7 +202,7 @@ async def test_resurrected_account_clears_stale_positions(
     # 3. Build a fake registry that re-reports the same account (triggers resurrection).
     fake_account = base.Account(
         account_number=_ACCOUNT_NUMBER,
-        mode="paper",
+        mode="PAPER",
         gateway_label="isa-paper",
         currency_base="USD",
     )

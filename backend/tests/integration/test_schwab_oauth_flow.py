@@ -29,7 +29,7 @@ async def test_full_oauth_round_trip(
     await config_service.set_secret("broker", "schwab.app_key", "K")
     await config_service.set_secret("broker", "schwab.app_secret", "S")
 
-    # Step 1: oauth-start → 302 with state in Location URL
+    # Step 1: oauth-start → 302 to Schwab authorize URL
     resp = await test_client_admin.get(
         "/api/admin/brokers/schwab/oauth-start",
         follow_redirects=False,
@@ -38,11 +38,14 @@ async def test_full_oauth_round_trip(
     location = resp.headers["location"]
     assert "schwabapi.com" in location
 
-    state_param = location.split("state=")[1].split("&")[0]
-    # state may be URL-encoded — decode for the callback step
+    # The authorize URL may omit `state=` (v0.7.4 hotfix dropped it from the
+    # URL shape because Schwab's endpoint rejects it). Extract it if present;
+    # fall back to empty string so the callback still works (it tolerates a
+    # missing state and falls back to redirect_uri byte-match CSRF defence).
     from urllib.parse import unquote
 
-    state = unquote(state_param)
+    _state_parts = location.split("state=")
+    state = unquote(_state_parts[1].split("&")[0]) if len(_state_parts) > 1 else ""
 
     # Step 2: simulate Schwab redirecting back to public callback
     resp2 = await test_client_no_auth.get(
