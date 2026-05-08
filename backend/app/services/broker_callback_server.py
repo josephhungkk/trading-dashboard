@@ -2,11 +2,19 @@
 
 Listens on internal port 8001 (BACKEND_ADMIN_GRPC env var on sidecar).
 Implements `service BackendCallback` from proto/broker/v1/broker.proto.
+
+HIGH-sec-3: callers must present a bearer token in gRPC metadata header
+``x-backend-bearer``. The value is derived from APP_SECRET_KEY so both sides
+can compute it independently — no separate secret distribution needed.
+Rotating APP_SECRET_KEY automatically rotates the bearer.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+import secrets
 from typing import Any, cast
 
 import grpc  # type: ignore[import-untyped]
@@ -20,18 +28,37 @@ from app.services.schwab_oauth import refresh_with_lock
 log = logging.getLogger(__name__)
 
 
+def _backend_callback_bearer() -> str:
+    """Derive bearer token from APP_SECRET_KEY via SHA-256.
+
+    Both backend server and sidecar caller compute this independently.
+    """
+    key = os.environ.get("APP_SECRET_KEY", "")
+    return hashlib.sha256(f"backend_callback:{key}".encode()).hexdigest()
+
+
 class BackendCallbackServicer(pbg.BackendCallbackServicer):  # type: ignore[misc]
     """Implements `service BackendCallback`. Only RPC: RequestTokenRefresh."""
 
     def __init__(self, config_service: ConfigService, db_session_factory: Any) -> None:
         self._config = config_service
         self._db_factory = db_session_factory
+        self._bearer = _backend_callback_bearer()
 
     async def RequestTokenRefresh(  # noqa: N802
         self,
         request: pb.TokenRefreshRequest,
         context: grpc.aio.ServicerContext[Any, Any],
     ) -> pb.TokenRefreshResponse:
+        metadata = dict(context.invocation_metadata() or [])
+        bearer = metadata.get("x-backend-bearer", "")
+        if not secrets.compare_digest(bearer, self._bearer):
+            await context.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                "missing_or_invalid_bearer",
+            )
+            return pb.TokenRefreshResponse()
+
         if request.broker_id != "schwab":
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,

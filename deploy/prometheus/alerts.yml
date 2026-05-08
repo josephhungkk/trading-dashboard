@@ -184,13 +184,23 @@ groups:
           description: "Sustained Schwab API errors. 429 = rate limit (sidecar should back off). 5xx = upstream incident. Check sidecar logs + Schwab status page."
 
       - alert: SchwabTier2Stalled
-        expr: time() - schwab_tier2_last_run_timestamp_seconds > 1800
+        # 72h schedule + 1h tolerance = 72*3600 + 3600 = 262800s
+        expr: time() - schwab_tier2_last_run_timestamp_seconds > 262800
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Tier-2 Schwab refresher hasn't run in > 30 min"
-          description: "Last Tier-2 attempt {{ $value }}s ago. Refresher cron should fire every 25 min. Check schwab-refresher container + selector-health probe (auto-disabled after 3 consecutive failures — H2)."
+          summary: "Tier-2 Schwab refresher hasn't run in > 73 h"
+          description: "Last Tier-2 attempt {{ $value }}s ago. Refresher cron fires every 72h (3 days). Check schwab-refresher container + selector-health probe (auto-disabled after 3 consecutive failures — H2)."
+
+      - alert: SchwabOAuthNoStateCallbackUnexpected
+        expr: rate(schwab_oauth_no_state_total[1h]) > 0.001
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Schwab OAuth callback received without state parameter"
+          description: "schwab_oauth_no_state_total is incrementing — a callback arrived without HMAC-signed state. CSRF defense falls back to redirect_uri match only. Investigate source IP; per-IP rate limit (1/5min) is active."
 
       - alert: SchwabTier2FailureRateHigh
         expr: |

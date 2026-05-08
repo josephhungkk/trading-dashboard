@@ -13,7 +13,7 @@ from typing import Annotated, Any, cast
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,7 @@ from app.core.config import Settings
 from app.core.deps import get_config, get_db, get_redis, get_settings
 from app.core.metrics import (
     SCHWAB_OAUTH_CALLBACK_TOTAL,
+    SCHWAB_OAUTH_NO_STATE_TOTAL,
     SCHWAB_SIDECAR_TOKEN_DRIFT_SECONDS,
 )
 from app.services.config import ConfigService
@@ -35,6 +36,8 @@ log = structlog.get_logger(module="api.oauth")
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 
+_NO_STATE_RATE_KEY_TTL = 300  # seconds; 1 no-state callback per IP per 5 min
+
 ConfigDep = Annotated[ConfigService, Depends(get_config)]
 RedisDep = Annotated[Redis, Depends(get_redis)]
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -43,6 +46,7 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 @router.get("/schwab/callback")
 async def schwab_oauth_callback_public(
+    request: Request,
     code: Annotated[str, Query(...)],
     config_service: ConfigDep,
     redis: RedisDep,
@@ -66,12 +70,20 @@ async def schwab_oauth_callback_public(
             )
         except StateNonceError as e:
             SCHWAB_OAUTH_CALLBACK_TOTAL.labels(path="public", result="state_mismatch").inc()
-            raise HTTPException(403, f"state nonce: {e}") from e
+            raise HTTPException(403, "state_nonce_invalid") from e
     else:
         log.warning(
             "schwab.oauth_callback.no_state_csrf_unverified",
             note="manual-flow URL without state; CSRF defense = redirect_uri match only",
         )
+        SCHWAB_OAUTH_NO_STATE_TOTAL.inc()
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"oauth:noState:{client_ip}"
+        cnt = await redis.incr(rate_key)
+        if cnt == 1:
+            await redis.expire(rate_key, _NO_STATE_RATE_KEY_TTL)
+        if cnt > 1:
+            raise HTTPException(status_code=429, detail="no_state_callback_rate_limited")
 
     log.info("schwab_oauth_callback_public", user=user_email)
 
@@ -88,7 +100,8 @@ async def schwab_oauth_callback_public(
         )
     except Exception as e:
         SCHWAB_OAUTH_CALLBACK_TOTAL.labels(path="public", result="token_exchange_fail").inc()
-        raise HTTPException(502, f"schwab token exchange failed: {e}") from e
+        log.error("schwab_oauth.token_exchange_failed", error=str(e))
+        raise HTTPException(502, "schwab_token_exchange_failed") from e
 
     # C3 — synchronous Configure to sidecar before HTTP response returns.
     # Best-effort: tokens are already persisted at this point. If the sidecar

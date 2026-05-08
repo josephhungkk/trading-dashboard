@@ -57,6 +57,11 @@ async def serve() -> None:
 
     log.info("sidecar_schwab_stopping")
     await server.stop(grace=10.0)
+    # HIGH-code-3: close the backend gRPC channel on clean shutdown to prevent fd leaks.
+    if servicer._backend_channel is not None:
+        import contextlib as _cl
+        with _cl.suppress(Exception):
+            await servicer._backend_channel.close()
 
 
 def main() -> None:

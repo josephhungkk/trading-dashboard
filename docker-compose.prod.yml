@@ -190,6 +190,7 @@ services:
       BACKEND_ADMIN_URL: "https://dashboard.kiusinghung.com"
       REFRESH_INTERVAL_HOURS: "72"
       DRY_RUN: "false"
+      PLAYWRIGHT_HEADLESS: "true"
       CF_ACCESS_CLIENT_ID: "${CF_ACCESS_CLIENT_ID}"
       CF_ACCESS_CLIENT_SECRET: "${CF_ACCESS_CLIENT_SECRET}"
     networks: [td-net]

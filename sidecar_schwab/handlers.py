@@ -95,6 +95,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         self._configure_count = 0
         self._client: SchwabClient | None = None
         self._token_cache: TokenCache | None = None
+        self._backend_channel: grpc.aio.Channel | None = None  # HIGH-code-3: track for cleanup
         self._last_meta_fingerprint: str | None = None
         self._configured_at: datetime | None = None
         self._hashes_loaded_once = False
@@ -171,8 +172,13 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 access_issued_at = now - _FRESH_WINDOW * 2  # mark "definitely stale"
 
             backend_addr = os.environ.get("BACKEND_ADMIN_GRPC", "backend:8001")
-            channel = grpc.aio.insecure_channel(backend_addr)
-            refresh_client = broker_pb2_grpc.BackendCallbackStub(channel)
+            # HIGH-code-3: close the previous channel before creating a new one
+            # to prevent connection-descriptor leaks on repeated Configure calls.
+            if self._backend_channel is not None:
+                with contextlib.suppress(Exception):
+                    await self._backend_channel.close()
+            self._backend_channel = grpc.aio.insecure_channel(backend_addr)
+            refresh_client = broker_pb2_grpc.BackendCallbackStub(self._backend_channel)
 
             self._token_cache = TokenCache(refresh_client=refresh_client)
             self._token_cache.set_tokens(

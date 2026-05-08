@@ -38,6 +38,7 @@ from app.core.crypto import get_fernet
 from app.core.db import SessionLocal, engine
 from app.core.deps import set_account_service, set_broker_registry, set_config_service
 from app.core.logging import configure_logging
+from app.core.metrics import SCHWAB_REFRESH_TOKEN_AGE_HOURS, SCHWAB_REFRESH_TOKEN_USES_PER_24H
 from app.services.bar_service import BarService
 from app.services.broker_callback_server import start_backend_callback_server
 from app.services.broker_registry_factory import MissingBrokerSecrets, build_broker_registry
@@ -58,6 +59,34 @@ log = structlog.get_logger(__name__)
 
 
 _bar_service: BarService | None = None  # Set in lifespan; read by _run_pre_warm.
+
+
+async def _update_schwab_token_metrics(redis: Any, db_factory: Any) -> None:
+    """HIGH-code-2: populate SCHWAB_REFRESH_TOKEN_AGE_HOURS + USES_PER_24H every 5 min."""
+    import json
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text as _text
+
+    while True:
+        try:
+            async with db_factory() as s:
+                row = await s.execute(
+                    _text(
+                        "SELECT value_json FROM app_config"
+                        " WHERE namespace='broker' AND key='schwab.refresh_token_issued_at'"
+                    )
+                )
+                issued_raw = row.scalar_one_or_none()
+            if issued_raw:
+                issued = datetime.fromisoformat(json.loads(issued_raw)).replace(tzinfo=UTC)
+                age_hours = (datetime.now(UTC) - issued).total_seconds() / 3600
+                SCHWAB_REFRESH_TOKEN_AGE_HOURS.set(age_hours)
+            uses = await redis.get("schwab:refresh_uses_24h_count")
+            SCHWAB_REFRESH_TOKEN_USES_PER_24H.set(int(uses or 0))
+        except Exception as exc:
+            log.warning("schwab_token_metrics.update_failed", exc=str(exc))
+        await asyncio.sleep(300)
 
 
 async def _run_pre_warm() -> None:
@@ -212,6 +241,11 @@ async def lifespan(_app: FastAPI) -> Any:
     # Run once immediately on startup (non-blocking).
     pre_warm_task: asyncio.Task[None] = asyncio.create_task(_run_pre_warm())
 
+    # HIGH-code-2: populate Schwab token-age + uses-per-24h gauges every 5 min.
+    schwab_metrics_task: asyncio.Task[None] = asyncio.create_task(
+        _update_schwab_token_metrics(redis, session_factory)
+    )
+
     log.info("startup_ok", env=settings.env)
     try:
         yield
@@ -220,6 +254,9 @@ async def lifespan(_app: FastAPI) -> Any:
         pre_warm_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await pre_warm_task
+        schwab_metrics_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await schwab_metrics_task
         scheduler.shutdown(wait=False)
         # ── CRIT-1: stop QuoteEngine before broker/redis shutdown ─────────────
         if quote_engine is not None:

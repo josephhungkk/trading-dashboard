@@ -19,6 +19,8 @@ _SECRET_PATTERNS = [
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}"),
     re.compile(r"api_key=[^&\s]+"),
     re.compile(r"schwab[._-]?(password|totp_secret|app_secret|refresh_token|access_token)", re.I),
+    # MED-redaction: scrub OAuth authorization_code from URLs / log lines.
+    re.compile(r"\bcode=[A-Za-z0-9\-._~+/%]{20,}"),
 ]
 _ACCOUNT_KEYS = frozenset(
     {

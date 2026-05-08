@@ -281,6 +281,12 @@ SCHWAB_OAUTH_CALLBACK_TOTAL = Counter(
     registry=registry,
 )
 
+SCHWAB_OAUTH_NO_STATE_TOTAL = Counter(
+    "schwab_oauth_no_state_total",
+    "Schwab OAuth callbacks received without a state parameter (CSRF-unverified path).",
+    registry=registry,
+)
+
 SCHWAB_ACCESS_TOKEN_AGE_SECONDS = Gauge(
     "schwab_access_token_age_seconds",
     "Age of the current access_token in seconds.",

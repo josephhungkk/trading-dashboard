@@ -552,6 +552,7 @@ def _account_from_proto(account: broker_pb2.Account) -> base.Account:
         mode=cast("base.TradingMode", broker_pb2.TradingMode.Name(account.mode)),
         gateway_label=account.gateway_label,
         currency_base=account.currency_base,
+        account_hash=account.account_hash,  # HIGH-db-1: preserve Schwab hash through discoverer
     )
 
 
@@ -1009,6 +1010,7 @@ class BrokerDiscoverer:
                 mode,
                 gateway_label,
                 currency_base,
+                account_hash,
                 last_seen_via,
                 last_seen_at,
                 deleted_at,
@@ -1020,6 +1022,7 @@ class BrokerDiscoverer:
                 CAST(:mode AS trading_mode_enum),
                 :gateway_label,
                 :currency_base,
+                NULLIF(:account_hash, ''),
                 :last_seen_via,
                 now(),
                 NULL,
@@ -1029,6 +1032,7 @@ class BrokerDiscoverer:
                SET mode = EXCLUDED.mode,
                    gateway_label = EXCLUDED.gateway_label,
                    currency_base = EXCLUDED.currency_base,
+                   account_hash = COALESCE(EXCLUDED.account_hash, broker_accounts.account_hash),
                    last_seen_via = EXCLUDED.last_seen_via,
                    last_seen_at = EXCLUDED.last_seen_at,
                    deleted_at = NULL,
@@ -1082,6 +1086,7 @@ class BrokerDiscoverer:
                         "mode": self._mode_value(account.mode),
                         "gateway_label": label,
                         "currency_base": account.currency_base,
+                        "account_hash": account.account_hash,  # HIGH-db-1
                         "last_seen_via": label,
                     },
                 )

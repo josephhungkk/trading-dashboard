@@ -592,7 +592,7 @@ state has a named release.
 
 ### Phase 7a — Schwab broker connect (read-only OAuth + two-tier auth)
 
-- New `sidecar_schwab/` Python package (PyInstaller-frozen) at `10.10.0.2:18006`,
+- New `sidecar_schwab/` Python package (in-cluster Docker, no mTLS; port 9090 on td-net),
   label `"schwab"`, broker_id `"schwab"`. Reuses the gRPC `Broker` contract;
   `Configure` RPC ships `app_key`/`app_secret`/`access_token`/`refresh_token` from
   `app_secrets`. Read-only surfaces this phase: ListManagedAccounts,
@@ -608,7 +608,7 @@ state has a named release.
     `/api/oauth/schwab/callback` verifies signature, atomic-consumes nonce via Redis
     `GETDEL` (H1 — replay defense), exchanges code → tokens under advisory lock.
   - **Tier-2 (auto-refresh)**: separate `sidecar_schwab_refresher/` Playwright cron
-    container (25-min interval), TOTP-driven login, redirect interception via
+    container (72-hour / 3-day interval), TOTP-driven login, redirect interception via
     page.route() (C1 — never follows the redirect), selector-health probe (H2),
     auto-disable after 3 consecutive failures.
 - New `POST /api/admin/brokers/schwab/disconnect` admin endpoint deletes both tokens;

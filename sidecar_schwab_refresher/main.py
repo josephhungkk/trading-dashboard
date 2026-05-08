@@ -30,6 +30,8 @@ log = structlog.get_logger(module="sidecar_schwab_refresher.main")
 BACKEND_URL = os.environ.get("BACKEND_ADMIN_URL", "https://dashboard.kiusinghung.com")
 REFRESH_INTERVAL_HOURS = int(os.environ.get("REFRESH_INTERVAL_HOURS", "72"))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+# MED-headless: default True for production; set PLAYWRIGHT_HEADLESS=false to override.
+_HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
 
 AUTO_DISABLE_THRESHOLD = 3
 
@@ -105,7 +107,7 @@ async def run_once() -> None:
             return
 
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=False)
+            browser = await pw.chromium.launch(headless=_HEADLESS)
             try:
                 context = await browser.new_context()
                 await apply_stealth(context)

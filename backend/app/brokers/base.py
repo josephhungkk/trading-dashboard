@@ -69,6 +69,9 @@ class Account(BaseModel):
     # it as "" and the frontend renders a placeholder. Once the sidecar's
     # ib_async cache catches the BASE tag, subsequent ticks overwrite.
     currency_base: str = Field(default="", max_length=3)
+    # Schwab account_hash (PII-equivalent). Empty for non-Schwab brokers.
+    # Boundary-stripped in AccountService — never surfaces to the frontend.
+    account_hash: str = Field(default="")
 
 
 class Money(BaseModel):

@@ -77,8 +77,10 @@ async def perform_refresh(
             f"Tier-2 refresh: redirect not observed within {REDIRECT_TIMEOUT_SEC}s"
         ) from e
 
-    if not captured.get("code") or not captured.get("state"):
-        raise RuntimeError(f"Tier-2 refresh: incomplete capture {captured}")
+    # HIGH-sec-1: state is optional — v0.7.4 hotfix dropped state from authorize URL;
+    # Schwab may not echo it back. Only code is required.
+    if not captured.get("code"):
+        raise RuntimeError(f"Tier-2 refresh: missing code in capture {captured}")
 
     return captured["code"], captured["state"]
 

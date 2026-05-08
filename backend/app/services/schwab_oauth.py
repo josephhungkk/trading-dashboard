@@ -17,7 +17,7 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import structlog
@@ -177,30 +177,58 @@ async def refresh_with_lock(
     app_secret: str,
     refresh_token: str,
     timeout_sec: int = 5,
+    redis: Any = None,
 ) -> tuple[str, str, datetime]:
     """Mint new tokens under PG advisory lock; write to app_secrets atomically.
 
     Returns (new_access_token, new_refresh_token, access_issued_at).
     Schwab rotates the refresh_token on every refresh - both must be persisted.
+
+    HIGH-db-2: HTTP call is made OUTSIDE the advisory lock (read-lock-release /
+    HTTP / write-lock pattern). This prevents holding the PG lock across a
+    15-second network call and blocking concurrent callers.
     """
+    # Step 1: brief lock to read current issued_at for compare-and-swap.
     async with schwab_refresh_lock(db_session, timeout_sec=timeout_sec):
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            resp = await http.post(
-                "https://api.schwabapi.com/v1/oauth/token",
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh_token,
-                },
-                auth=(app_key, app_secret),
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+        current_issued_at = await config_service.get("broker", "schwab.refresh_token_issued_at")
+
+    # Step 2: HTTP call without lock.
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        resp = await http.post(
+            "https://api.schwabapi.com/v1/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+            auth=(app_key, app_secret),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"schwab token endpoint {resp.status_code}: {resp.text[:300]}")
+    data = resp.json()
+    new_access = data["access_token"]
+    new_refresh = data.get("refresh_token") or refresh_token
+    rotated = new_refresh != refresh_token
+    issued_at = datetime.now(timezone.utc)  # noqa: UP017
+
+    # Step 3: re-acquire lock + compare-and-swap to avoid double-writing.
+    async with schwab_refresh_lock(db_session, timeout_sec=timeout_sec):
+        check_issued_at = await config_service.get("broker", "schwab.refresh_token_issued_at")
+        if check_issued_at != current_issued_at:
+            # Another writer already refreshed; return freshly-read tokens.
+            log.info(
+                "schwab_oauth.refresh_raced",
+                existing_issued_at=check_issued_at,
             )
-        if resp.status_code != 200:
-            raise RuntimeError(f"schwab token endpoint {resp.status_code}: {resp.text[:300]}")
-        data = resp.json()
-        new_access = data["access_token"]
-        new_refresh = data.get("refresh_token") or refresh_token
-        rotated = new_refresh != refresh_token
-        issued_at = datetime.now(timezone.utc)  # noqa: UP017
+            existing_access = await config_service.reveal_secret("broker", "schwab.access_token")
+            existing_refresh = await config_service.reveal_secret("broker", "schwab.refresh_token")
+            existing_issued = (
+                datetime.fromisoformat(cast(str, check_issued_at)).replace(tzinfo=timezone.utc)  # noqa: UP017
+                if check_issued_at
+                else issued_at
+            )
+            return cast(str, existing_access), cast(str, existing_refresh), existing_issued
+
         await _persist_tokens_under_lock(
             config_service=config_service,
             access_token=new_access,
@@ -208,4 +236,12 @@ async def refresh_with_lock(
             issued_at=issued_at,
             rotate_refresh_issued_at=rotated,
         )
-        return new_access, new_refresh, issued_at
+        # HIGH-code-2: bump rolling 24h refresh counter for metrics.
+        if redis is not None:
+            try:
+                await redis.incr("schwab:refresh_uses_24h_count")
+                await redis.expire("schwab:refresh_uses_24h_count", 86400)
+            except Exception:
+                log.warning("schwab_oauth.redis_counter_failed")
+
+    return new_access, new_refresh, issued_at

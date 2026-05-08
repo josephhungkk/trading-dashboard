@@ -104,21 +104,28 @@ async def schwab_oauth_start(
 @router.post("/schwab/oauth-callback")
 async def schwab_oauth_callback_admin(
     code: Annotated[str, Query(...)],
-    state: Annotated[str, Query(...)],
     config_service: ConfigDep,
     redis: RedisDep,
     db: DbDep,
     settings: SettingsDep,
+    # optional — v0.7.4 hotfix dropped state from authorize URL
+    state: Annotated[str, Query()] = "",
 ) -> dict[str, str]:
-    try:
-        user_email = await consume_state_nonce(
-            redis,
-            signed=state,
-            app_secret_key=settings.secret_key.encode(),
-        )
-    except StateNonceError as e:
-        SCHWAB_OAUTH_CALLBACK_TOTAL.labels(path="admin", result="state_mismatch").inc()
-        raise HTTPException(403, f"state nonce: {e}") from e
+    user_email = "tier2-refresher"
+    if state:
+        try:
+            user_email = await consume_state_nonce(
+                redis,
+                signed=state,
+                app_secret_key=settings.secret_key.encode(),
+            )
+        except StateNonceError as e:
+            SCHWAB_OAUTH_CALLBACK_TOTAL.labels(path="admin", result="state_mismatch").inc()
+            raise HTTPException(403, "state_nonce_invalid") from e
+    else:
+        log.warning("schwab_oauth.no_state_csrf_unverified", path="admin")
+
+    log.info("schwab.oauth_start", user=user_email)
 
     from app.api.oauth import _exchange_code
 
@@ -134,7 +141,8 @@ async def schwab_oauth_callback_admin(
         )
     except Exception as e:
         SCHWAB_OAUTH_CALLBACK_TOTAL.labels(path="admin", result="token_exchange_fail").inc()
-        raise HTTPException(502, f"schwab token exchange failed: {e}") from e
+        log.error("schwab_oauth.token_exchange_failed", error=str(e))
+        raise HTTPException(502, "schwab_token_exchange_failed") from e
 
     from app.services.broker_registry_factory import reconfigure_schwab
 
