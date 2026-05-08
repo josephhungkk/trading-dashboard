@@ -1,6 +1,7 @@
 """Chart layouts CRUD router (spec §4 lines 600-602).
 
 Endpoints:
+  GET    /api/chart/layouts/resolve?canonical_id=  — resolve canonical_id → instrument_id
   GET    /api/chart/layouts/{instrument_id}  — 200 w/ translated payload + ETag
   PUT    /api/chart/layouts/{instrument_id}  — If-Match required; 412 on mismatch
   DELETE /api/chart/layouts/{instrument_id}  — 204 on success, 404 if missing
@@ -13,7 +14,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,6 +62,12 @@ class ChartLayoutResponse(BaseModel):
     updated_at: datetime
 
 
+class InstrumentIdResponse(BaseModel):
+    """Response body for GET /api/chart/layouts/resolve."""
+
+    instrument_id: int
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -85,6 +92,40 @@ def _add_etag(response: Response, updated_at: datetime) -> None:
 async def _latest_version(cfg: ConfigService) -> int:
     v = await cfg.get_int("charts", "chart_layout_schema_version", _LATEST_SCHEMA_VERSION_DEFAULT)
     return v if v is not None else _LATEST_SCHEMA_VERSION_DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# RESOLVE — canonical_id → instrument_id
+# ---------------------------------------------------------------------------
+
+
+@router.get("/resolve", response_model=InstrumentIdResponse)
+async def resolve_instrument_id(
+    canonical_id: Annotated[str, Query(min_length=1, max_length=256)],
+    db: DbDep,
+    _identity: IdentityDep,
+) -> InstrumentIdResponse:
+    """Return the numeric instrument_id for a given canonical_id.
+
+    Used by the FE to convert ``canonicalId`` (route param) to the integer
+    key required by the chart_layouts CRUD endpoints (Task 37).
+
+    Returns 404 if the canonical_id is not in the instruments table.
+    """
+    row = (
+        await db.execute(
+            text("SELECT id FROM instruments WHERE canonical_id = :cid"),
+            {"cid": canonical_id},
+        )
+    ).one_or_none()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"instrument not found: {canonical_id}",
+        )
+
+    return InstrumentIdResponse(instrument_id=int(row.id))
 
 
 # ---------------------------------------------------------------------------

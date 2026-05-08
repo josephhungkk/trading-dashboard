@@ -15,7 +15,7 @@ import { useChartStore } from './stores/chartStore';
 // not exist yet; opening it leaks the JWT via Sec-WebSocket-Protocol on every confirm.
 // TODO(Phase 10): re-enable when /ws/orders is wired on the backend.
 import { getOrderState } from './services/orders';
-// getChartLayout import deferred until instrument_id resolution lands (Task 37).
+import { resolveInstrumentId, getChartLayout } from './services/chartLayouts';
 
 interface ChartPageProps {
   canonicalId: string;
@@ -34,7 +34,13 @@ export function ChartPage({ canonicalId }: ChartPageProps): React.JSX.Element {
   const tickSize = useInstrumentTickSize(canonicalId) ?? 0.01;
   const setPendingModify = useChartStore((s) => s.setPendingModify);
   const { toast } = useToast();
-  const instrumentId: number | null = null; // TODO(Task 37): resolve from canonicalId.
+  // Task 37: resolve canonical_id → instrument_id via GET /api/chart/layouts/resolve.
+  const { data: resolvedId } = useQuery({
+    queryKey: ['instrument-id', canonicalId],
+    queryFn: () => resolveInstrumentId(canonicalId),
+    staleTime: Infinity, // instrument_id never changes for a given canonical_id
+  });
+  const instrumentId: number | null = resolvedId ?? null;
 
   // HIGH-2: track all in-flight settle callbacks so unmount can drain them.
   const inflightSettlersRef = useRef<Set<() => void>>(new Set());
@@ -49,14 +55,11 @@ export function ChartPage({ canonicalId }: ChartPageProps): React.JSX.Element {
     };
   }, []);
 
-  // TODO(Task 37): resolve instrument_id from canonicalId via API.
-  // For now pass 0 as a placeholder; getChartLayout returns null for unknown ids.
+  // Task 37: load chart layout once instrument_id is resolved.
   const { isLoading, error } = useQuery({
     queryKey: ['chart-layouts', canonicalId],
-    // MED-E: disabled until instrument_id resolution lands; avoids spurious 404s.
-    // TODO(Task 37): enable when instrument_id resolution is wired.
-    queryFn: async () => null,
-    enabled: false,
+    queryFn: () => getChartLayout(instrumentId as number),
+    enabled: instrumentId !== null,
   });
 
   const handleModifyRequest = React.useCallback((req: ModifyRequest) => {

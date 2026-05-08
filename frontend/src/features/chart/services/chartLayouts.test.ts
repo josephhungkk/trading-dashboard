@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getChartLayout, putChartLayout, EtagMismatchError } from './chartLayouts';
+import { getChartLayout, putChartLayout, EtagMismatchError, resolveInstrumentId } from './chartLayouts';
 import type { ChartLayout } from './chartLayouts';
 
 const SAMPLE_LAYOUT: ChartLayout = {
@@ -178,5 +178,54 @@ describe('putChartLayout', () => {
 
     const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
     expect(init.signal).toBeUndefined();
+  });
+});
+
+describe('resolveInstrumentId', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns instrument_id on success', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ instrument_id: 42 }),
+    } as Response);
+
+    const result = await resolveInstrumentId('stock:AAPL:US');
+    expect(result).toBe(42);
+  });
+
+  it('returns null for 404 (instrument not seeded)', async () => {
+    vi.mocked(fetch).mockResolvedValue({ ok: false, status: 404 } as Response);
+
+    const result = await resolveInstrumentId('stock:UNKNOWN:XX');
+    expect(result).toBeNull();
+  });
+
+  it('throws on non-404 error', async () => {
+    vi.mocked(fetch).mockResolvedValue({ ok: false, status: 500 } as Response);
+
+    await expect(resolveInstrumentId('stock:AAPL:US')).rejects.toThrow(
+      'instrument resolve failed: 500',
+    );
+  });
+
+  it('calls the resolve endpoint with URL-encoded canonical_id', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ instrument_id: 7 }),
+    } as Response);
+
+    await resolveInstrumentId('stock:AAPL:US');
+
+    const [url] = vi.mocked(fetch).mock.calls[0] ?? [];
+    expect(url).toBe('/api/chart/layouts/resolve?canonical_id=stock%3AAAPL%3AUS');
   });
 });

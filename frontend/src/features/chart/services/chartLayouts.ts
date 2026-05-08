@@ -4,6 +4,22 @@ export interface ChartLayout {
   updated_at: string; // ISO8601, also serves as etag
 }
 
+/**
+ * Resolve a canonical_id string (e.g. "stock:AAPL:US") to the numeric
+ * instrument_id required by the chart_layouts CRUD endpoints (Task 37).
+ *
+ * Returns null if the canonical_id is not found in the instruments table (404).
+ * Throws on other non-ok responses.
+ */
+export async function resolveInstrumentId(canonicalId: string): Promise<number | null> {
+  const url = `/api/chart/layouts/resolve?canonical_id=${encodeURIComponent(canonicalId)}`;
+  const res = await fetch(url, { credentials: 'same-origin' });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`instrument resolve failed: ${res.status}`);
+  const body = (await res.json()) as { instrument_id: number };
+  return body.instrument_id;
+}
+
 /** MED-4: typed error so callers can `instanceof`-check instead of matching `.message`. */
 export class EtagMismatchError extends Error {
   constructor() {

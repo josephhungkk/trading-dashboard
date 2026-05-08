@@ -87,7 +87,7 @@ describe('ChartPage', () => {
     expect(screen.getByRole('alert')).toBeInTheDocument();
   });
 
-  it('chart_layouts query keyed by canonicalId', () => {
+  it('registers instrument-id resolution query then chart-layouts query', () => {
     const capturedKeys: unknown[] = [];
     vi.spyOn(ReactQuery, 'useQuery').mockImplementation(
       (opts: Parameters<typeof ReactQuery.useQuery>[0]) => {
@@ -99,7 +99,29 @@ describe('ChartPage', () => {
     );
 
     renderWithQuery(<ChartPage canonicalId="AAPL.US" />);
-    expect(capturedKeys[0]).toEqual(['chart-layouts', 'AAPL.US']);
+    // Task 37: first query resolves canonical_id → instrument_id; second loads the layout.
+    expect(capturedKeys[0]).toEqual(['instrument-id', 'AAPL.US']);
+    expect(capturedKeys[1]).toEqual(['chart-layouts', 'AAPL.US']);
+  });
+
+  it('chart-layouts query is disabled when instrument_id not yet resolved', () => {
+    const capturedOpts: Parameters<typeof ReactQuery.useQuery>[0][] = [];
+    vi.spyOn(ReactQuery, 'useQuery').mockImplementation(
+      (opts: Parameters<typeof ReactQuery.useQuery>[0]) => {
+        capturedOpts.push(opts);
+        return { isLoading: false, error: null, data: null } as unknown as ReturnType<
+          typeof ReactQuery.useQuery
+        >;
+      },
+    );
+
+    renderWithQuery(<ChartPage canonicalId="AAPL.US" />);
+    const layoutQuery = capturedOpts.find(
+      (o) => Array.isArray(o.queryKey) && o.queryKey[0] === 'chart-layouts',
+    );
+    // Task 37: instrument_id is null on first render (resolve query returns null data),
+    // so chart-layouts query must have enabled=false to avoid a spurious request.
+    expect(layoutQuery?.enabled).toBe(false);
   });
 
   // HIGH-2: on unmount all in-flight settlers must fire, clearing pending_modify_id.

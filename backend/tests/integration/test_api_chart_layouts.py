@@ -42,6 +42,19 @@ async def _get_test_instrument_id(session: AsyncSession) -> int:
     return int(row.id)
 
 
+async def _get_test_canonical_id(session: AsyncSession, instrument_id: int) -> str:
+    """Return the canonical_id for a known instrument_id."""
+    row = (
+        await session.execute(
+            text("SELECT canonical_id FROM instruments WHERE id = :iid"),
+            {"iid": instrument_id},
+        )
+    ).one_or_none()
+    if row is None:
+        pytest.skip("instrument row missing from DB")
+    return str(row.canonical_id)
+
+
 async def _cleanup(session: AsyncSession, instrument_id: int) -> None:
     """Remove any chart_layout row left by previous test."""
     await session.execute(
@@ -692,3 +705,42 @@ async def test_if_match_wildcard_accepted_on_existing_row(
     assert r2.status_code == 200, (
         f"MED-3: If-Match: * should match existing row, got {r2.status_code}: {r2.text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 18: Task 37 — GET /api/chart/layouts/resolve resolves canonical_id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_instrument_id_by_canonical(
+    client: AsyncClient, instrument_id: int, db: AsyncSession
+) -> None:
+    """Task 37: GET /api/chart/layouts/resolve?canonical_id= returns {instrument_id}."""
+    canonical_id = await _get_test_canonical_id(db, instrument_id)
+
+    r = await client.get(
+        "/api/chart/layouts/resolve",
+        params={"canonical_id": canonical_id},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["instrument_id"] == instrument_id, (
+        f"resolve returned {body['instrument_id']}, expected {instrument_id}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 19: Task 37 — resolve unknown canonical_id returns 404
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_unknown_canonical_id_returns_404(client: AsyncClient) -> None:
+    """Task 37: GET /api/chart/layouts/resolve with unknown canonical_id returns 404."""
+    r = await client.get(
+        "/api/chart/layouts/resolve",
+        params={"canonical_id": "stock:DOES_NOT_EXIST:XX"},
+    )
+    assert r.status_code == 404, r.text
+    assert "instrument not found" in r.text
