@@ -53,4 +53,17 @@ describe('TimeframeBar', () => {
     render(<TimeframeBar />);
     expect(screen.getByRole('group', { name: 'Timeframe controls' })).toBeInTheDocument();
   });
+
+  it('keeps range row desktop-only while interval row remains ungated', () => {
+    render(<TimeframeBar />);
+    expect(screen.getByTestId('timeframe-range-row')).toHaveClass('hidden', 'md:flex');
+    expect(screen.getByTestId('timeframe-interval-row')).not.toHaveClass('hidden');
+    expect(screen.getByTestId('timeframe-interval-row')).not.toHaveClass('md:hidden');
+    expect(screen.getByTestId('timeframe-interval-row')).not.toHaveClass('md:flex');
+  });
+
+  it('renders mobile Range trigger as mobile-only', () => {
+    render(<TimeframeBar />);
+    expect(screen.getByRole('button', { name: 'Range' })).toHaveClass('md:hidden');
+  });
 });

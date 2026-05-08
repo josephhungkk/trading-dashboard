@@ -29,3 +29,12 @@ export const DualRow: Story = {
     viewport: { defaultViewport: 'desktop' },
   },
 };
+
+/** Mobile collapse target — intervals remain visible and ranges move behind overflow. */
+export const MobileIntervals: Story = {
+  parameters: {
+    viewport: {
+      defaultViewport: 'mobile1',
+    },
+  },
+};

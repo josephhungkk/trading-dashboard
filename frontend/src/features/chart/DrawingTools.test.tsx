@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { DrawingTools, DRAWING_TOOLS } from './DrawingTools';
+import { DrawingTools, DRAWING_TOOLS, MOBILE_PRIORITY } from './DrawingTools';
 import { useChartStore } from './stores/chartStore';
 
 function resetStore(): void {
@@ -70,5 +70,20 @@ describe('DrawingTools', () => {
     expect(btnA).toHaveAttribute('aria-pressed', 'false');
     expect(btnB).toHaveAttribute('aria-pressed', 'true');
     expect(useChartStore.getState().activeDrawingTool).toBe('circle');
+  });
+
+  it('renders mobile-priority tools and wraps the remaining tools for desktop', () => {
+    render(<DrawingTools />);
+
+    expect(MOBILE_PRIORITY).toHaveLength(7);
+    for (const name of MOBILE_PRIORITY) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument();
+    }
+    expect(screen.getByTestId('drawing-tools-desktop-rest')).toHaveClass('hidden', 'md:contents');
+  });
+
+  it('renders mobile More drawings trigger as mobile-only', () => {
+    render(<DrawingTools />);
+    expect(screen.getByRole('button', { name: 'More drawings' })).toHaveClass('md:hidden');
   });
 });

@@ -10,7 +10,7 @@ const meta = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ height: '32rem', display: 'flex' }}>
+      <div className="flex h-[32rem]">
         <Story />
       </div>
     ),
@@ -45,4 +45,14 @@ export const Default: Story = {
 /** Active variant — 'priceLine' pre-selected to show highlight style. */
 export const ActiveTool: Story = {
   render: () => <ActiveToolStory />,
+};
+
+/** Mobile collapse target — priority tools plus More drawings trigger. */
+export const MobilePriority: Story = {
+  render: () => <DefaultStory />,
+  parameters: {
+    viewport: {
+      defaultViewport: 'mobile1',
+    },
+  },
 };

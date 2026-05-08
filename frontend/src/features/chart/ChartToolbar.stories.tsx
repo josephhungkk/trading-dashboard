@@ -26,6 +26,15 @@ export const DrawingsOpen: Story = {
   args: { drawingsOpen: true },
 };
 
+/** Compact toolbar at the mobile collapse target. */
+export const MobileCompact: Story = {
+  parameters: {
+    viewport: {
+      defaultViewport: 'mobile1',
+    },
+  },
+};
+
 /** Toolbar with screenshot button visually disabled (always-on placeholder). */
 export const ScreenshotDisabled: Story = {
   parameters: {

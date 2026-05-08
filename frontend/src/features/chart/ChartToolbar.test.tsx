@@ -36,9 +36,9 @@ describe('ChartToolbar', () => {
   it('renders toolbar landmark with all action buttons', () => {
     render(<ChartToolbar {...makeToolbarProps()} />);
     expect(screen.getByRole('toolbar', { name: 'Chart controls' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Indicators/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Drawings/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Save layout/i })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Indicators' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Drawings' })).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Save Layout' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Toggle fullscreen/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Screenshot/i })).toBeInTheDocument();
   });
@@ -51,7 +51,9 @@ describe('ChartToolbar', () => {
   it('clicking Indicators button opens IndicatorPicker', () => {
     render(<ChartToolbar {...makeToolbarProps()} />);
     expect(screen.queryByTestId('indicator-picker-mock')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Indicators/i }));
+    const [indicatorsButton] = screen.getAllByRole('button', { name: 'Indicators' });
+    if (!indicatorsButton) throw new Error('Expected Indicators button');
+    fireEvent.click(indicatorsButton);
     expect(screen.getByTestId('indicator-picker-mock')).toBeInTheDocument();
   });
 
@@ -69,14 +71,34 @@ describe('ChartToolbar', () => {
 
   it('drawings button reflects drawingsOpen via aria-pressed', () => {
     render(<ChartToolbar {...makeToolbarProps({ drawingsOpen: true })} />);
-    const btn = screen.getByRole('button', { name: /Drawings/i });
-    expect(btn).toHaveAttribute('aria-pressed', 'true');
+    for (const btn of screen.getAllByRole('button', { name: 'Drawings' })) {
+      expect(btn).toHaveAttribute('aria-pressed', 'true');
+    }
   });
 
   it('drawings button calls onToggleDrawings when clicked', () => {
     const onToggleDrawings = vi.fn();
     render(<ChartToolbar {...makeToolbarProps({ drawingsOpen: false, onToggleDrawings })} />);
-    fireEvent.click(screen.getByRole('button', { name: /Drawings/i }));
+    const [drawingsButton] = screen.getAllByRole('button', { name: 'Drawings' });
+    if (!drawingsButton) throw new Error('Expected Drawings button');
+    fireEvent.click(drawingsButton);
     expect(onToggleDrawings).toHaveBeenCalledTimes(1);
+  });
+
+  it('compact toolbar wrapper is mobile-only', () => {
+    render(<ChartToolbar {...makeToolbarProps()} />);
+    expect(screen.getByTestId('chart-toolbar-compact')).toHaveClass('md:hidden');
+  });
+
+  it('full toolbar wrapper is desktop-only', () => {
+    render(<ChartToolbar {...makeToolbarProps()} />);
+    expect(screen.getByTestId('chart-toolbar-full')).toHaveClass('hidden', 'md:flex');
+  });
+
+  it('clicking More options opens the overflow modal', () => {
+    render(<ChartToolbar {...makeToolbarProps()} />);
+    expect(screen.queryByRole('dialog', { name: 'More chart options' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'More options' }));
+    expect(screen.getByRole('dialog', { name: 'More chart options' })).toBeInTheDocument();
   });
 });

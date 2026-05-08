@@ -13,6 +13,7 @@
  * the selection state; the actual klinecharts integration is a separate wiring step.
  */
 import * as React from 'react';
+import { useState } from 'react';
 import { useChartStore } from './stores/chartStore';
 
 /**
@@ -44,9 +45,23 @@ export const DRAWING_TOOLS = [
 
 export type DrawingToolName = (typeof DRAWING_TOOLS)[number];
 
+export const MOBILE_PRIORITY = [
+  'horizontalStraightLine',
+  'straightLine',
+  'segment',
+  'rect',
+  'fibonacciLine',
+  'priceLine',
+  'simpleAnnotation',
+] as const satisfies readonly DrawingToolName[];
+
 /** Derive a compact 3-letter label for display in the icon button. */
 function toolLabel(name: string): string {
   return name.replace(/([A-Z])/g, ' $1').trim().slice(0, 3).toUpperCase();
+}
+
+function isMobilePriority(name: DrawingToolName): boolean {
+  return (MOBILE_PRIORITY as readonly DrawingToolName[]).includes(name);
 }
 
 /**
@@ -57,38 +72,83 @@ function toolLabel(name: string): string {
 export function DrawingTools(): React.JSX.Element {
   const activeTool = useChartStore((s) => s.activeDrawingTool);
   const setActiveTool = useChartStore((s) => s.setActiveDrawingTool);
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  const renderToolButton = (name: DrawingToolName): React.JSX.Element => {
+    const isActive = name === activeTool;
+    return (
+      <button
+        type="button"
+        key={name}
+        aria-label={name}
+        aria-pressed={isActive}
+        title={name}
+        onClick={() => setActiveTool(isActive ? null : name)}
+        className={[
+          'flex items-center justify-center',
+          'min-h-[2.75rem] min-w-[2.75rem]',
+          'rounded text-xs font-mono leading-none',
+          'transition-colors',
+          isActive
+            ? 'bg-primary text-primary-foreground'
+            : 'hover:bg-muted text-foreground',
+        ].join(' ')}
+      >
+        {toolLabel(name)}
+      </button>
+    );
+  };
 
   return (
     <div
-      className="flex flex-col gap-1 p-1 bg-background border-r border-border overflow-y-auto"
+      className="relative flex flex-col gap-1 overflow-y-auto border-r border-border bg-background p-1"
       role="toolbar"
       aria-label="Drawing tools"
       aria-orientation="vertical"
     >
-      {DRAWING_TOOLS.map((name) => {
-        const isActive = name === activeTool;
-        return (
+      {MOBILE_PRIORITY.map((name) => renderToolButton(name))}
+
+      <div className="hidden md:contents" data-testid="drawing-tools-desktop-rest">
+        {DRAWING_TOOLS.filter((name) => !isMobilePriority(name)).map((name) => renderToolButton(name))}
+      </div>
+
+      <button
+        type="button"
+        className={[
+          'flex items-center justify-center md:hidden',
+          'min-h-[2.75rem] min-w-[2.75rem]',
+          'rounded text-xs font-mono leading-none',
+          'hover:bg-muted text-foreground',
+        ].join(' ')}
+        aria-label="More drawings"
+        onClick={() => setMoreOpen(true)}
+      >
+        ...
+      </button>
+
+      {moreOpen ? (
+        <div
+          className="absolute left-full top-0 z-20 flex max-h-[100vh] flex-col gap-1 overflow-y-auto border border-border bg-background p-1 shadow-lg md:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="More drawing tools"
+        >
+          {DRAWING_TOOLS.filter((name) => !isMobilePriority(name)).map((name) => renderToolButton(name))}
           <button
             type="button"
-            key={name}
-            aria-label={name}
-            aria-pressed={isActive}
-            title={name}
-            onClick={() => setActiveTool(isActive ? null : name)}
+            aria-label="Close more drawings"
+            onClick={() => setMoreOpen(false)}
             className={[
               'flex items-center justify-center',
               'min-h-[2.75rem] min-w-[2.75rem]',
               'rounded text-xs font-mono leading-none',
-              'transition-colors',
-              isActive
-                ? 'bg-primary text-primary-foreground'
-                : 'hover:bg-muted text-foreground',
+              'hover:bg-muted text-foreground',
             ].join(' ')}
           >
-            {toolLabel(name)}
+            X
           </button>
-        );
-      })}
+        </div>
+      ) : null}
     </div>
   );
 }
