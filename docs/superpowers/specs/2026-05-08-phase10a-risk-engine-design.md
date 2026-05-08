@@ -1,6 +1,6 @@
 # Phase 10a — Risk engine + pre-trade gate (mandatory chokepoint)
 
-**Status:** brainstorm complete — ARCHITECT-REVIEW pending
+**Status:** brainstorm + architect-review applied (3 CRIT + 4 HIGH + 10 MED inline; 4 LOW per §13) — awaiting user spec approval
 **Target version:** v0.12.0
 **Date:** 2026-05-08
 **Predecessor:** v0.11.0.1 (Phase 9.6 CI-debt close-out · `677dab9`)
@@ -43,12 +43,28 @@ This spec covers **10a only**.
   `account_kill_switches_history` (Alembic 0026).
 - `RiskService` — pure-logic evaluator that returns `GateVerdict` for an
   `EvaluationContext`.
-- Seven checks: account-level kill switch (NEW) + broker-level kill switch (composes Phase
-  5b H0) + max-daily-loss (realized + unrealized intraday P&L vs cap, in account base
-  currency) + PDT (broker-reported `dayTradesRemaining` from Schwab / IBKR / Alpaca
-  account fields) + position-concentration-pct (post-trade notional ÷ NLV; aggregates
-  same-instrument across accounts of the same broker) + buying-power-buffer (require
-  ≥ X% headroom of cached BP after the order's notional commit) + sidecar margin preview.
+- Seven checks:
+  1. **Account-level kill switch** (NEW) — read from `account_kill_switches`.
+  2. **Broker-level kill switch** — composes Phase 5b H0 (`app_config.broker.kill_switch_enabled`).
+  3. **Max-daily-loss** (realized + unrealized intraday P&L vs cap, in account base
+     currency). **Day boundary** = 00:00 in the broker's primary-exchange timezone (read
+     from `app/services/market_calendar.py::market_close_tz` per account's broker; falls
+     back to UTC when the account spans markets — documented per-broker default in
+     `risk_limits.notes`). [M2]
+  4. **PDT** — broker-reported `dayTradesRemaining` from Schwab / IBKR / Alpaca account
+     fields, **plus an in-flight optimistic counter** in Redis (`risk:pdt:{account_id}`)
+     that decrements at place_order time and reconciles to the broker-reported value at
+     each discoverer poll. Closes the staleness window between polls. [H1]
+  5. **Position-concentration-pct** (post-trade notional ÷ NLV) **aggregating same
+     `instrument_id` across all accounts under the operator** (single-user dashboard;
+     not just same broker). Cross-broker AAPL exposure caps as one. [H2]
+  6. **Buying-power-buffer** — require ≥ X% headroom of `(cached BP − sum of in-flight
+     LMT/STOP order commitments)`. The `orders` table is queried for OPEN/PENDING orders
+     and their notional is subtracted from cached BP before the buffer check. [H3]
+  7. **Sidecar margin preview** — `PreviewOrder` RPC (IBKR + Schwab) with **asymmetric
+     fail-mode policy**: preview path fails OPEN with WARN (UX-friendly); place_order
+     path fails CLOSED with `503 + Retry-After` so a broker hiccup never lets a
+     possibly-margin-violating order through. [H4]
 - Verdict shape: ALLOW / WARN / BLOCK per check; gate aggregates to `{final_verdict,
   blockers, warnings, lat_ms}`. WARN surfaces in `/api/orders/preview` as a yellow banner;
   BLOCK rejects `/api/orders` with HTTP 422.
@@ -130,6 +146,7 @@ This spec covers **10a only**.
 
 | Station | Check | Failure |
 |---|---|---|
+| **0** | **CF Access JWT verify + CSRF nonce consume** (existing Phase 2 + 5b infrastructure; explicit in the table to forbid leaking broker state to unauthenticated requests) [M1] | 401 / 403 |
 | 1 | `broker.kill_switch_enabled` (Phase 5b, `app_config`) | 503 |
 | 2 | `compute_broker_maintenance(label).active` (Phase 5b daily-window guard) | 503 + `Retry-After` |
 | 3 | `capability.is_supported(broker_id, asset_class, order_type, tif)` (Phase 8a) | 422 capability_not_supported |
@@ -139,9 +156,10 @@ This spec covers **10a only**.
 **Key invariants:**
 
 - The risk gate is a **fourth station**, not a replacement for any prior check.
-- `RiskService` is pure — takes `EvaluationContext` + injected dependencies (db session,
-  NLV cache, sidecar client). No global singletons. Unit-testable without HTTP / broker
-  RPCs.
+- `RiskService` is **deterministic given its inputs** (not pure in the FP sense — it does
+  I/O via injected dependencies: db session, NLV cache, sidecar client, Redis counter).
+  No global singletons. Unit-testable with mocked dependencies; integration-testable
+  against real DB / Redis. [L1]
 - One sidecar RPC added per broker that supports it. Alpaca falls back to cached BP +
   WARN.
 - Audit asymmetry: preview → structlog only; `place_order` / `modify_order` → DB row +
@@ -179,9 +197,15 @@ CREATE TABLE risk_limits (
 
   CHECK ( (scope_type = 'global') = (scope_id IS NULL) ),
   CHECK ( warn_at_pct IS NULL OR (warn_at_pct >= 0 AND warn_at_pct <= 100) ),
-  CHECK ( length(notes) <= 1000 ),
-  UNIQUE (scope_type, scope_id, limit_kind)
+  CHECK ( length(notes) <= 1000 )
 );
+
+-- Two partial unique indexes — Postgres treats NULLs as distinct in plain UNIQUE,
+-- which would let two `(global, NULL, max_daily_loss)` rows coexist. [C1]
+CREATE UNIQUE INDEX uq_risk_limits_global_kind ON risk_limits (limit_kind)
+  WHERE scope_type = 'global' AND scope_id IS NULL;
+CREATE UNIQUE INDEX uq_risk_limits_scoped ON risk_limits (scope_type, scope_id, limit_kind)
+  WHERE scope_id IS NOT NULL;
 
 CREATE INDEX idx_risk_limits_lookup ON risk_limits (scope_type, scope_id, limit_kind)
   WHERE is_active;
@@ -199,6 +223,25 @@ CREATE TABLE risk_limits_history (
   changed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   changed_by    TEXT NOT NULL
 );
+
+-- UPDATE trigger snapshots the OLD row into history on every change. [M3]
+CREATE OR REPLACE FUNCTION fn_risk_limits_history() RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO risk_limits_history
+    (limit_id, scope_type, scope_id, limit_kind, limit_value, warn_at_pct,
+     is_active, notes, changed_at, changed_by)
+  VALUES
+    (OLD.id, OLD.scope_type, OLD.scope_id, OLD.limit_kind, OLD.limit_value,
+     OLD.warn_at_pct, OLD.is_active, OLD.notes, now(), NEW.updated_by);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_risk_limits_history
+  BEFORE UPDATE ON risk_limits
+  FOR EACH ROW
+  WHEN (OLD.* IS DISTINCT FROM NEW.*)
+  EXECUTE FUNCTION fn_risk_limits_history();
 ```
 
 **Lookup walk** (`RiskService._resolve_limit`): `(account, kind)` → `(broker, kind)` →
@@ -228,6 +271,24 @@ CREATE TABLE account_kill_switches_history (
   changed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   changed_by    TEXT NOT NULL
 );
+
+-- Symmetric UPDATE trigger for account_kill_switches. [M3]
+CREATE OR REPLACE FUNCTION fn_account_kill_switches_history() RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO account_kill_switches_history
+    (account_id, is_enabled, reason, changed_at, changed_by)
+  VALUES
+    (OLD.account_id, OLD.is_enabled, OLD.reason, now(),
+     COALESCE(NEW.enabled_by, OLD.enabled_by, 'system'));
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_account_kill_switches_history
+  BEFORE UPDATE ON account_kill_switches
+  FOR EACH ROW
+  WHEN (OLD.* IS DISTINCT FROM NEW.*)
+  EXECUTE FUNCTION fn_account_kill_switches_history();
 ```
 
 Phase 5b's broker-level `app_config.broker.kill_switch_enabled` stays put — Phase 10a does
@@ -252,9 +313,10 @@ CREATE TABLE risk_decisions (
   blockers        JSONB NOT NULL DEFAULT '[]'::jsonb,
   warnings        JSONB NOT NULL DEFAULT '[]'::jsonb,
   evaluated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  latency_ms      INT NOT NULL,
+  latency_ms      INT NOT NULL CHECK (latency_ms >= 0),  -- [L2]
   attempt_kind    TEXT NOT NULL CHECK (attempt_kind IN ('place_order', 'modify_order')),
-  request_id      TEXT NOT NULL
+  request_id      TEXT NOT NULL,
+  order_id        BIGINT REFERENCES orders(id) ON DELETE SET NULL  -- [M5] populated post-dispatch
 );
 
 CREATE INDEX idx_risk_decisions_account_time ON risk_decisions (account_id, evaluated_at DESC);
@@ -262,8 +324,35 @@ CREATE INDEX idx_risk_decisions_blocked ON risk_decisions (evaluated_at DESC)
   WHERE verdict = 'block';
 ```
 
-`pg_notify('risk_decision', json_build_object(...))` fires via INSERT trigger on
-`verdict='block'`. Retention: plain table; monthly cleanup cron deferred to Phase 24.
+**Minimal `pg_notify` payload** [M4] — Postgres NOTIFY has an 8KB payload cap; large
+`blockers` JSONB could blow it. The trigger emits only
+`{"id": <bigint>, "verdict": "block", "account_id": "<uuid>"}`; subscribers fetch the
+full row by id when they need the detail.
+
+```sql
+CREATE OR REPLACE FUNCTION fn_risk_decisions_notify() RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.verdict = 'block' THEN
+    PERFORM pg_notify('risk_decision', json_build_object(
+      'id', NEW.id, 'verdict', NEW.verdict, 'account_id', NEW.account_id::text
+    )::text);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_risk_decisions_notify
+  AFTER INSERT ON risk_decisions
+  FOR EACH ROW EXECUTE FUNCTION fn_risk_decisions_notify();
+```
+
+**Orphan-row policy** [M5] — `order_id` is nullable; INSERT into `risk_decisions`
+happens **after** broker dispatch returns (so `order_id` is set on dispatch success;
+left NULL on dispatch failure with `verdict` reflecting the gate's verdict).
+Audit reflects "what the gate decided"; `order_id IS NULL` means "gate allowed but
+broker rejected" — operator can join with order-attempt logs to forensicate.
+
+Retention: plain table; monthly cleanup cron deferred to Phase 24.
 
 ---
 
@@ -271,20 +360,29 @@ CREATE INDEX idx_risk_decisions_blocked ON risk_decisions (evaluated_at DESC)
 
 ### Preview path (high-frequency, low-stakes)
 
+[C3] The preview path runs the six fast checks synchronously; the **margin RPC runs in
+parallel with a 500ms soft-deadline**. If the RPC hasn't returned by then, the response
+includes a "margin check pending" WARN (not a blocker) and the preview returns. A
+short-lived in-process LRU (60s, key = `(account_id, symbol, qty_bucket, side)`) absorbs
+keystroke spam so a typing user issues at most one RPC per qty bucket.
+
 ```
 FE TradeTicket.tsx
   └─ debounced 200ms
 POST /api/orders/preview {account_id, side, qty, price, order_type, tif}
-  └─ orders_service.preview_order  (stations 1-3 unchanged)
+  └─ orders_service.preview_order  (station 0: JWT+CSRF; stations 1-3 unchanged)
         └─ NEW station 4: RiskService.evaluate(ctx, mode='preview')
-              ├─ load_caps(account_id, broker_id)  ← cached 60s
-              ├─ check_account_kill_switch         → BLOCK if on
-              ├─ check_broker_kill_switch          → BLOCK if on (composes Phase 5b)
-              ├─ check_max_daily_loss              → BLOCK if exceeded; WARN @ warn_at_pct
-              ├─ check_pdt                         → broker-reported counter
-              ├─ check_position_concentration      → reads positions snapshot
-              ├─ check_buying_power                → cached BP from Phase 5a
-              └─ check_margin                      → sidecar PreviewOrder RPC
+              ├─ asyncio.gather() the 6 fast checks below:
+              │   ├─ check_account_kill_switch         → BLOCK if on
+              │   ├─ check_broker_kill_switch          → BLOCK if on (composes Phase 5b)
+              │   ├─ check_max_daily_loss              → BLOCK if exceeded; WARN @ warn_at_pct
+              │   ├─ check_pdt                         → broker-reported + in-flight Redis counter [H1]
+              │   ├─ check_position_concentration      → cross-broker aggregate by instrument_id [H2]
+              │   └─ check_buying_power                → (cached BP − in-flight commitments) [H3]
+              └─ check_margin (parallel, 500ms soft-deadline)
+                    ├─ on cache hit (60s LRU)          → use cached value
+                    ├─ on RPC return ≤ 500ms           → fold result into verdict
+                    └─ on RPC pending > 500ms          → WARN "margin check pending"; abandon RPC waiter
               ↓
               GateVerdict {final, blockers, warnings, lat_ms}
               ↓
@@ -296,23 +394,45 @@ PreviewResponse {ok, warnings, blockers, …}  → FE banner
 
 ### `place_order` / `modify_order` path (low-frequency, high-stakes)
 
+[H4] place_order runs the **full margin RPC synchronously, fail-CLOSED**. A timeout or
+sidecar `UNAVAILABLE` returns `503 + Retry-After` to the client; only IBKR/Schwab
+`UNIMPLEMENTED` (Alpaca) takes the documented WARN-and-continue branch. The
+`risk_decisions` row is written **after** broker dispatch settles so `order_id` is
+populated on success. [M5]
+
 ```
 FE confirms (CSRF nonce)
   └─ POST /api/orders {nonce, …}
-        └─ orders_service.place_order  (stations 1-3 unchanged)
+        └─ orders_service.place_order  (station 0: JWT+CSRF; stations 1-3 unchanged)
               └─ station 4: RiskService.evaluate(ctx, mode='place_order')
+                    ├─ 6 fast checks (same as preview)
+                    └─ margin RPC FULLY AWAITED (3s timeout)
+                          ├─ timeout / sidecar UNAVAILABLE → 503 + Retry-After [H4]
+                          ├─ Alpaca UNIMPLEMENTED          → WARN + cached BP only
+                          └─ accepted / reject_reason      → fold into verdict
                     ↓ on ALLOW + WARN: continue
-                    ↓ on BLOCK: raise RiskGateBlocked
+                    ↓ on BLOCK: raise RiskGateBlocked → 422 (NO broker dispatch)
+                    ↓ optimistic Redis decrement: risk:pdt:{account_id}, risk:bp:{account_id}
                     ↓
-              INSERT INTO risk_decisions (…)   ← in same DB transaction as the gate eval
-                    ↓ trigger
-              pg_notify('risk_decision', json) WHERE verdict='block'
+              dispatch to broker (existing Phase 5b path) → returns order_id OR error
+                    ↓
+              INSERT INTO risk_decisions (…, order_id = <broker order_id or NULL>)  [M5]
+                    ↓ AFTER INSERT trigger (verdict='block' only — won't fire here on dispatch failure
+                      because verdict was 'allow'; still fires for gate-blocked rows written from
+                      the BLOCK branch above)
+              pg_notify('risk_decision', {id, verdict, account_id})  [M4 minimal payload]
                     ↓ on BLOCK
               HTTPException(422, {"error": {"code": "risk_gate_blocked",
                                             "blockers": […]}})
-                    ↓ on ALLOW / WARN
-              dispatch to broker (existing Phase 5b path)
+                    ↓ on dispatch failure
+              optimistic Redis decrement reverted; HTTPException propagates broker error
 ```
+
+**In-flight Redis counters** [H1, H3] — `risk:pdt:{account_id}` (PDT remaining) and
+`risk:bp_committed:{account_id}` (sum of in-flight LMT/STOP order notional) are
+optimistically decremented at place_order time and **reconciled at every discoverer
+poll** (~30s) against broker-reported truth. On dispatch failure or order cancel, the
+counters revert. Single-replica today (Phase 24 multi-worker concern).
 
 ### Cap-edit / kill-switch invalidation path
 
@@ -327,17 +447,18 @@ PUT /api/admin/risk-limits/{id}  (CSRF nonce required)
 Same pattern for `account_kill_switches`. Reuses existing `app_config_cache` infrastructure
 from Phase 2.
 
-### Failure-mode policy
+### Failure-mode policy [H4 asymmetric preview vs place_order]
 
-| Failure | Policy | Reasoning |
-|---|---|---|
-| `risk_limits` DB unreachable | **fail-CLOSED → BLOCK** | Gate is the chokepoint; degraded gate ≠ open gate. |
-| Sidecar `PreviewOrder` RPC timeout (3s) | **fail-OPEN with WARN** | Margin is one of seven checks; remaining six already evaluated; surfacing a blocker on broker hiccup would over-block. |
-| Sidecar RPC returns "insufficient margin" | **BLOCK** | Authoritative broker answer. |
-| Sidecar returns `UNIMPLEMENTED` (Alpaca) | **WARN** + use cached BP | Documented per-broker fallback. |
-| NLV cache stale (> 60s per Phase 5a invariant) | **WARN** + use stale value | Don't block on cache freshness alone. |
-| Positions snapshot stale (> last discoverer tick) | **WARN** | Concentration on stale snapshot still useful as sanity check. |
-| `risk_decisions` INSERT fails | **fail-OPEN** for the order, raise alert | Audit failure must not block trades; metric `risk_audit_insert_failures_total` triggers alert. |
+| Failure | Preview | place_order / modify | Reasoning |
+|---|---|---|---|
+| `risk_limits` DB unreachable | **fail-CLOSED → BLOCK** | **fail-CLOSED → BLOCK** | Gate is the chokepoint; degraded gate ≠ open gate. |
+| Sidecar `PreviewOrder` RPC timeout (3s) | **WARN** "margin check pending" (500ms soft-deadline) | **503 + Retry-After** (fail-CLOSED) [H4] | Preview UX must not block on broker hiccup; place_order must not let margin-violating order through. |
+| Sidecar RPC returns reject_reason | **BLOCK** | **BLOCK** | Authoritative broker answer. |
+| Sidecar returns `UNIMPLEMENTED` (Alpaca) | **WARN** + cached BP | **WARN** + cached BP | Documented per-broker fallback. |
+| NLV cache stale (> 60s per Phase 5a invariant) | **WARN** + stale value | **WARN** + stale value | Don't block on cache freshness alone. |
+| Positions snapshot stale (> last discoverer tick) | **WARN** | **WARN** | Concentration on stale snapshot still useful as sanity check. |
+| `risk_decisions` INSERT fails | n/a (no DB write) | **fail-OPEN** for the order, alert | Audit failure must not block trades; metric `risk_audit_insert_failures_total`. |
+| Redis in-flight counter unreachable | **WARN** "PDT/BP in-flight tracking degraded" | **WARN** + use broker-reported only | Redis is best-effort; broker truth is authoritative. |
 
 ---
 
@@ -345,6 +466,11 @@ from Phase 2.
 
 `proto/broker.proto` — extend the existing service. `sidecar_ibkr` and `sidecar_schwab`
 implement; `sidecar_alpaca` returns `UNIMPLEMENTED`.
+
+[C2] Money fields use **`string`** carrying a Decimal-stringified value (matches the
+project-wide `NUMERIC(20, 8)` convention from `docs/CONVENTIONS.md`; protobuf `double`
+loses precision at 8 decimals × 12-digit notional). The sidecar handlers parse with
+`Decimal(str)`; backend serializes via the existing Phase 5a `_format_nlv` helper.
 
 ```proto
 message PreviewOrderRequest {
@@ -354,20 +480,20 @@ message PreviewOrderRequest {
   string asset_class     = 4;
   string order_type      = 5;
   string time_in_force   = 6;
-  double qty             = 7;
-  optional double limit_price = 8;
-  optional double stop_price  = 9;
+  string qty             = 7;   // Decimal-string [C2]
+  optional string limit_price = 8;  // Decimal-string [C2]
+  optional string stop_price  = 9;  // Decimal-string [C2]
   string idempotency_key = 10;
 }
 
 message PreviewOrderResponse {
   bool   accepted               = 1;
   string reject_reason          = 2;
-  optional double initial_margin     = 3;
-  optional double maintenance_margin = 4;
-  optional double commission         = 5;
-  optional double available_funds_after = 6;
-  optional double buying_power_after = 7;
+  optional string initial_margin     = 3;  // Decimal-string [C2]
+  optional string maintenance_margin = 4;  // Decimal-string [C2]
+  optional string commission         = 5;  // Decimal-string [C2]
+  optional string available_funds_after = 6;  // Decimal-string [C2]
+  optional string buying_power_after = 7;  // Decimal-string [C2]
   repeated string warnings           = 8;
   string raw_provider_payload        = 9;
 }
@@ -379,13 +505,37 @@ rpc PreviewOrder(PreviewOrderRequest) returns (PreviewOrderResponse);
 
 - **IBKR** — `ib_async.placeOrder(whatIf=True)`; existing connection pool (Phase 4); 3s
   timeout; per-client token bucket from Phase 9.
+  - **Async-to-sync wait pattern** [M7]: `whatIf=True` returns a `Trade` object that
+    fills via the `ib.client.orderStatusEvent` callback. Sidecar handler awaits the
+    callback with `await asyncio.wait_for(trade.filledEvent.wait(), timeout=2.5)`
+    (leaving 500ms budget for serialization back to caller). On timeout, the sidecar
+    returns `gRPC DEADLINE_EXCEEDED`; the gate translates per the failure-mode table.
 - **Schwab** — REST `POST /trader/v1/accounts/{accountHash}/previewOrder`; existing OAuth
   pool (Phase 7a); 3s timeout; 401-retry-once (Phase 9 pattern).
+  - **Rate-limit budget** [M8]: Schwab's documented limit is 120 req/min/app shared
+    across trade endpoints. Phase 10a reserves a separate token bucket for `previewOrder`
+    (`schwab_preview_token_bucket`, 60 req/min — half budget) so preview spam can never
+    starve actual `placeOrder` capacity. Counter exposed as
+    `schwab_preview_rate_limited_total` metric; alert at 5/min.
 - **Alpaca** — handler returns `UNIMPLEMENTED`; gate code path catches and translates to
   WARN ("alpaca preview unavailable, BP cache only").
 
-**Idempotency key**: `f"preview:{request_id}:{account_id}:{symbol}:{qty}:{side}"` — 5xx +
-retry doesn't double-charge provider rate-limit budget.
+**Idempotency key** [M6] — content-hash, not request-id-based. The hash is over the
+canonical request payload **excluding** `idempotency_key` itself:
+
+```python
+import hashlib, json
+canonical = json.dumps({
+    "account_hash": req.account_hash,
+    "side": req.side, "symbol": req.symbol, "asset_class": req.asset_class,
+    "order_type": req.order_type, "time_in_force": req.time_in_force,
+    "qty": req.qty, "limit_price": req.limit_price, "stop_price": req.stop_price,
+}, sort_keys=True, separators=(",", ":"))
+idempotency_key = "preview:" + hashlib.blake2b(canonical.encode(), digest_size=16).hexdigest()
+```
+
+Same input across two retries → same key → sidecar in-process LRU (60s) returns the
+cached response without re-hitting the broker. Protects provider rate-limit budgets.
 
 ---
 
@@ -425,8 +575,13 @@ type PreviewResponse = {
   using Phase 3 `Switch` primitive.
 - **`/admin/risk/decisions`** (NEW) — recent decisions feed (last 50, filterable by
   account + verdict). Pure read-only.
-- **`useRiskLimits`** hook — TanStack Query, 30s stale time, invalidates on admin write.
-- **`useAccountKillSwitch(account_id)`** — same shape; mutates via POST.
+- **`useRiskLimits`** hook — TanStack Query, 30s stale time. After every admin
+  write (POST/PUT/DELETE), the mutation's `onSuccess` calls
+  `queryClient.invalidateQueries({queryKey: ['risk-limits']})` to bust the FE cache —
+  the backend's Redis pubsub only invalidates server-side caches; the FE has its own. [M9]
+- **`useAccountKillSwitch(account_id)`** — same shape; mutates via POST. Also calls
+  `queryClient.invalidateQueries({queryKey: ['account-kill-switches', account_id]})` on
+  success. [M9]
 - **`useBrokerCapabilities` / `BrokerCapabilitiesResponse` shape reconciliation** —
   fix the runtime mismatch documented in
   `frontend/src/services/capabilities/types.ts`. Backend returns flat list / asset-class
@@ -480,6 +635,26 @@ Parameterized per check. ≥ 30 unit tests on `RiskService` alone:
 - `phase10-admin-risk.spec.ts` — operator creates a limit, edits a limit, toggles a kill
   switch; gate honors the change.
 
+### Chaos / failure-mode tests [M10] — `backend/tests/chaos/test_risk_chaos.py`
+
+- **Sidecar timeout mid-flight on preview** — RPC takes 600ms (just over soft-deadline);
+  preview returns within budget with WARN "margin check pending". Asserts no
+  user-visible delay > 500ms.
+- **Sidecar timeout on place_order** — RPC times out after 3s; assert `503 + Retry-After`
+  with `RuntimeError` not raised; assert no `risk_decisions` row written; assert
+  optimistic Redis counters NOT decremented.
+- **DB connection lost mid-evaluation** — drop pool connection during `_resolve_limit`;
+  assert fail-CLOSED → BLOCK on both preview and place_order paths.
+- **Redis pubsub message dropped** — admin writes a new cap; one of two backend workers
+  misses the invalidation; assert worker's stale cache TTL bounded at 60s (no infinite
+  staleness).
+- **History trigger failure** — set `risk_limits_history` to read-only; assert UPDATE on
+  `risk_limits` raises and the original UPDATE is rolled back (history is part of the
+  transaction).
+- **Optimistic counter revert on dispatch failure** — gate ALLOWs, broker rejects; assert
+  `risk:bp_committed:{account_id}` decremented back; assert `risk_decisions` row written
+  with `order_id IS NULL`.
+
 ### Coverage target
 
 ≥ 80% per CLAUDE.md. RiskService is pure logic → expect 95%+. Integration uses
@@ -527,8 +702,11 @@ with main-thread implementation (Codex would compress).
 - All admin endpoints require CF Access JWT + CSRF nonce (Phase 8a MED-7 pattern).
   `updated_by` / `enabled_by` / `changed_by` populated server-side from JWT email claim,
   never from request body.
-- structlog continues to redact secrets. `risk_decisions.blockers` / `warnings` JSONB are
-  schema-typed (no free-text user input).
+- structlog continues to redact secrets **at log-emit time** (the redactor processes log
+  events; it does not act on DB inserts). `risk_decisions.blockers` / `warnings` JSONB
+  are **schema-typed** — every entry is `{check, reason, value?, threshold?}` populated
+  from server-side check logic, never from user input — so there is no operator free-text
+  surface that needs redaction at insert time. [L4]
 - `risk_limits.notes` and `account_kill_switches.reason` are `TEXT NOT NULL CHECK
   length(notes) <= 1000` — bounded operator free-text; FE escapes via React text-node
   rendering (no `dangerouslySetInnerHTML`).
@@ -556,8 +734,32 @@ with main-thread implementation (Codex would compress).
 
 ---
 
-## 13. Architect review — applied
+## 13. Architect review — applied (2026-05-08)
 
-*To be populated after `ARCHITECT-REVIEW` skill (opus, user-scope) runs against this
-spec. Per `feedback_architect_findings_apply_through_medium.md`, all CRIT + HIGH + MED
-findings get applied inline before Chunk A; only LOWs may defer.*
+Run via `ARCHITECT-REVIEW` skill (opus, user-scope) on the committed spec. **3 CRIT + 4
+HIGH + 10 MED applied inline; 4 LOW documented (3 applied, 1 deferred).** Tags marked in
+the body of each section.
+
+| Tag | Severity | Title | Applied where |
+|---|---|---|---|
+| C1 | CRIT | `risk_limits` UNIQUE breaks under NULL `scope_id` (Postgres treats NULLs as distinct → non-deterministic `_resolve_limit`) | §3 — replaced single UNIQUE with two partial unique indexes (`uq_risk_limits_global_kind` + `uq_risk_limits_scoped`) |
+| C2 | CRIT | `double` for money in protobuf RPC violates `CONVENTIONS.md` and breaks 8-decimal crypto/forex precision | §5 — all money fields changed to Decimal-string; `_format_nlv` helper for serialization |
+| C3 | CRIT | Margin RPC on every 200ms-debounced preview keystroke destroys UX and burns broker rate-limit | §4 — margin runs in parallel with 500ms soft-deadline; cached in 60s LRU keyed by `(account, symbol, qty_bucket, side)`; preview returns "margin check pending" WARN if RPC late |
+| H1 | HIGH | PDT counter staleness window between discoverer polls allows fast-double-trade gate-bypass | §1, §4 — Redis in-flight counter `risk:pdt:{account_id}` decrements optimistically; reconciles to broker-reported on each poll |
+| H2 | HIGH | Concentration aggregation only within same broker | §1, §4 — aggregates by `instrument_id` across **all accounts under the operator** (single-user dashboard) |
+| H3 | HIGH | Pending-order BP commitment not subtracted | §1, §4 — `(cached BP − sum of in-flight LMT/STOP commitments)` from `orders` table OPEN/PENDING; Redis counter `risk:bp_committed:{account_id}` for cross-evaluation consistency |
+| H4 | HIGH | Fail-OPEN on `place_order` margin RPC too permissive | §1, §4 — asymmetric policy: preview fail-OPEN with WARN; place_order fail-CLOSED with `503 + Retry-After`; failure-mode table now has separate columns |
+| M1 | MED | CSRF nonce + JWT verification ordering not in gate-ordering table | §2 — added station 0 explicitly |
+| M2 | MED | `max_daily_loss` "intraday" timezone underspecified | §1 — pinned to broker's primary-exchange timezone via `market_calendar.market_close_tz`; UTC fallback; per-broker default in `notes` |
+| M3 | MED | `risk_limits_history` UPDATE trigger DDL missing | §3 — added `fn_risk_limits_history` + `fn_account_kill_switches_history` triggers verbatim |
+| M4 | MED | `pg_notify` payload size cap (8KB) | §3 — minimal payload `{id, verdict, account_id}`; consumer fetches by id |
+| M5 | MED | `risk_decisions` orphan rows on broker-dispatch failure | §3, §4 — added `order_id BIGINT REFERENCES orders(id)`; INSERT happens **after** broker dispatch settles; documented `order_id IS NULL` semantics |
+| M6 | MED | Idempotency key includes per-request UUID (defeats idempotency) | §5 — replaced with content-hash via `blake2b` over canonical request payload |
+| M7 | MED | IBKR `WhatIfOrder` async-to-sync wait pattern unspecified | §5 — `await asyncio.wait_for(trade.filledEvent.wait(), timeout=2.5)` documented |
+| M8 | MED | Schwab `previewOrder` rate-limit budget unaddressed | §5 — separate token bucket (60 req/min, half of 120 shared budget); `schwab_preview_rate_limited_total` metric |
+| M9 | MED | FE TanStack Query invalidation post-admin-write missing | §7 — `queryClient.invalidateQueries(...)` in `onSuccess` for both `useRiskLimits` and `useAccountKillSwitch` |
+| M10 | MED | Chaos / failure-mode tests not explicit | §8 — added `backend/tests/chaos/test_risk_chaos.py` with 6 scenarios (sidecar timeout × 2, DB drop, pubsub miss, trigger failure, counter revert) |
+| L1 | LOW | "RiskService is pure" terminology inaccurate | §2 — softened to "deterministic given inputs"; documented I/O dependencies |
+| L2 | LOW | `risk_decisions.latency_ms >= 0` CHECK missing | §3 — added |
+| L3 | LOW | TradeTicket WARN-acknowledge UX flow not specified | **deferred** — UX detail for the `frontend-design` skill during Chunk E; default behavior is "click to confirm" pattern from existing CSRF nonce flow |
+| L4 | LOW | structlog redaction scope vs `risk_decisions` JSONB persistence | §11 — clarified: structlog redacts log events; `risk_decisions.blockers/warnings` JSONB is schema-typed (no free text) so no redaction needed at insert time |
