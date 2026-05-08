@@ -80,6 +80,13 @@ testpaths = ["tests"]
 # the runner. Override per-test with @pytest.mark.timeout(N) when needed.
 timeout = 60
 timeout_method = "thread"
+# Single shared event loop for the whole session so the module-scope
+# AsyncEngine in app.core.db (created at import time) and all async tests
+# share the same loop. Mismatched loops produced "Future attached to a
+# different loop" failures across ~10 alembic/db tests under
+# pytest-asyncio 1.x's default function-scoped loop behavior.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 markers = [
     "real_broker: live broker E2E tests requiring external credentials",
     "real_schwab: requires SCHWAB_APP_KEY/SCHWAB_APP_SECRET/SCHWAB_PAPER_ACCOUNT_HASH env vars; live API calls",
