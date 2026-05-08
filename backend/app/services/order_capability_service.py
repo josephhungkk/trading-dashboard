@@ -98,6 +98,13 @@ class OrderCapabilityService:
             broker=broker_id,
             result="supported" if supported else "unsupported",
         ).inc()
+        # Phase 9.7 G1: row exists but is_supported=False is a "capability
+        # mismatch" — operator submitted an order against a combo we
+        # explicitly track as unsupported. Sustained increments indicate
+        # broker-capability table drift vs reality and feed
+        # BrokerCapabilityMismatchSustained alert.
+        if row is not None and not supported:
+            metrics.broker_capability_mismatch_total.labels(broker=broker_id).inc()
         return supported
 
     async def is_supported_3tuple_deprecated(
