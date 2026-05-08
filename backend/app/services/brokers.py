@@ -980,6 +980,10 @@ class BrokerDiscoverer:
         self._interval = interval_seconds
         self._stop_event = asyncio.Event()
         self._tick_lock = asyncio.Lock()
+        # Phase 9.7: track (broker_id, account_number) pairs seen since process
+        # start so we can trigger a one-shot BASE-tag refresh when a mid-run
+        # account appears for the first time.
+        self._known_accounts: set[tuple[str, str]] = set()
 
     async def discover_loop(self) -> None:
         # Single-consumer invariant: only this method calls _discover_once,
@@ -1174,6 +1178,58 @@ class BrokerDiscoverer:
                 # RETURNING id + len(rows) is portable and exact.
                 soft_delete_result = await session.execute(soft_delete_stmt, soft_delete_params)
                 soft_delete_count = len(soft_delete_result.all())
+
+        # Phase 9.7: one-shot BASE-tag refresh for mid-run new accounts.
+        # When a (broker_id, account_number) pair appears for the first time
+        # this process lifetime, call list_managed_accounts() + get_account_summary()
+        # with a 15 s timeout so the sidecar's BASE-tag round has time to
+        # complete before the NLV fan-out below reads from it.
+        #
+        # Rationale: at startup the sidecar runs reqAccountUpdates(True/False, acct)
+        # for every known account (ibkr_sidecar.py C2 round, ~2.3 s/account).
+        # A mid-run account added AFTER the sidecar started never gets that
+        # round, so currency_base stays empty until sidecar restart.  Triggering
+        # a summary fetch here forces the sidecar's ib_async subscription to
+        # refresh its account-value cache.  We call list_managed_accounts() first
+        # as a lightweight ping; the summary call is the one that matters.
+        from app.services.broker_registry_factory import SIDECAR_BROKERS as _SB97
+
+        _newly_seen: list[tuple[str, str, str]] = []  # (label, broker_id, account_number)
+        for label, account in rows_seen:
+            broker_id_97 = _SB97.get(label, "ibkr")
+            pair = (broker_id_97, account.account_number)
+            if pair not in self._known_accounts:
+                _newly_seen.append((label, broker_id_97, account.account_number))
+
+        if _newly_seen:
+
+            async def _base_refresh(label97: str, acct_num97: str) -> None:
+                try:
+                    client97 = await self._registry.get_client(label97)
+                    # list_managed_accounts() is a lightweight ping that helps
+                    # the sidecar confirm the account is live before the heavier
+                    # summary call.
+                    await asyncio.wait_for(client97.list_managed_accounts(), timeout=5.0)
+                    await asyncio.wait_for(
+                        client97.get_account_summary(acct_num97),
+                        timeout=15.0,
+                    )
+                except TimeoutError, BrokerSidecarUnavailable, BrokerSidecarTimeout, KeyError:
+                    pass
+
+            await asyncio.gather(
+                *(_base_refresh(lbl, acct) for lbl, _bid, acct in _newly_seen),
+                return_exceptions=True,
+            )
+
+            for lbl97, bid97, acct97 in _newly_seen:
+                log.info(
+                    "broker_account_first_seen",
+                    label=lbl97,
+                    broker_id=bid97,
+                    account_number_len=len(acct97),
+                )
+                self._known_accounts.add((bid97, acct97))
 
         # Phase 5a (spec section 5): GetAccountSummary fan-out for per-account NLV cache.
         # Each call is bounded by wait_for(timeout=10.0); gather collects results

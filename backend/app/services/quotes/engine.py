@@ -388,6 +388,56 @@ class QuoteEngine:
     def streams(self) -> dict[str, SidecarStream]:
         return self._streams
 
+    # ── one-shot subscribe (Phase 9.7) ────────────────────────────────────
+
+    async def subscribe_one_shot(
+        self,
+        canonical_id: str,
+        *,
+        timeout_sec: float = 3.0,
+    ) -> pb.QuoteMessage | None:
+        """Subscribe to ``canonical_id``, await the first tick, then
+        unsubscribe.  Returns the :class:`pb.QuoteMessage` on success, or
+        ``None`` if no tick arrives within ``timeout_sec`` seconds.
+
+        Fast path: if the engine's in-process cache already holds a fresh
+        quote, return it immediately without touching the registry.
+
+        Safe against concurrent calls on the same symbol — each call owns an
+        independent fake ``WSConnId`` so registry refcounts are isolated.
+        Cleanup (disconnect_ws + unregister_conflator) runs in a ``finally``
+        block so the subscription is always released.
+        """
+        cached = self.get_cached(canonical_id)
+        if cached is not None:
+            return cached
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[pb.QuoteMessage] = loop.create_future()
+        # WSConnId is UUID — allocate a fresh one so this one-shot sub is
+        # isolated from every other WS connection in the registry.
+        fake_ws: WSConnId = uuid4()
+
+        def _on_tick(q: pb.QuoteMessage) -> None:
+            if not fut.done():
+                fut.set_result(q)
+
+        self.register_conflator(fake_ws, _on_tick)
+        try:
+            await self.subscribe(fake_ws, [canonical_id])
+            try:
+                return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout_sec)
+            except TimeoutError:
+                _log.warning(
+                    "quote_engine.one_shot.timeout",
+                    canonical_id=canonical_id,
+                    timeout_sec=timeout_sec,
+                )
+                return None
+        finally:
+            await self.disconnect_ws(fake_ws)
+            self.unregister_conflator(fake_ws)
+
     # ── operator hooks ────────────────────────────────────────────────────
 
     def request_token_rotation(self, source: str) -> None:

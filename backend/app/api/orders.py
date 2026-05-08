@@ -231,6 +231,7 @@ async def preview_order(
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse(status_code=422, content={"detail": "JSON object required"})
+        quote_engine = getattr(request.app.state, "quote_engine", None)
         return await orders_service.preview_order(
             cfg=cfg,
             db=db,
@@ -239,6 +240,7 @@ async def preview_order(
             capability=capability,
             request_data=body,
             user_key=identity.email,
+            quote_engine=quote_engine,
         )
     except ValidationError as exc:
         return JSONResponse(status_code=422, content={"detail": exc.errors()})

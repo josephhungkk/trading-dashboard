@@ -186,6 +186,7 @@ async def preview_order(
     capability: OrderCapabilityService,
     request_data: dict[str, Any],
     user_key: str,
+    quote_engine: object | None = None,
 ) -> PreviewResponse:
     await _check_kill_switch(cfg)
 
@@ -219,7 +220,9 @@ async def preview_order(
     client = await registry.get_client(account.gateway_label)
     contract = await _resolve_contract(client, request.conid)
     qty = Decimal(canonical_qty)
-    notional_native = await _native_notional(redis, request, contract, qty)
+    notional_native = await _native_notional(
+        redis, request, contract, qty, quote_engine=quote_engine
+    )
     fx_rate = await _fx_rate(redis, contract.currency, account.currency_base)
     notional = (notional_native * fx_rate).quantize(Decimal("1e-8"))
 
@@ -1026,22 +1029,119 @@ async def _native_notional(
     request: PreviewRequest,
     contract: base.Contract,
     qty: Decimal,
+    *,
+    quote_engine: object | None = None,
 ) -> Decimal:
     if request.order_type == "LIMIT" and request.limit_price is not None:
         return qty * Decimal(request.limit_price)
     if request.order_type == "STOP" and request.stop_price is not None:
         return qty * Decimal(request.stop_price)
-    mid = await _get_market_mid(redis, request.conid)
+    mid = await _get_market_mid(redis, request.conid, contract=contract, quote_engine=quote_engine)
     return qty * mid * Decimal("1.05")
 
 
-async def _get_market_mid(redis: RedisLike, conid: str) -> Decimal:
+async def _get_market_mid(
+    redis: RedisLike,
+    conid: str,
+    *,
+    contract: base.Contract | None = None,
+    quote_engine: object | None = None,
+) -> Decimal:
     # Namespace mkt:mid:<conid> distinct from FX-pair fx:mid:<from>:<to> below
     # (architect-review aa2071a6 — collision risk if both used fx:mid:).
     cached = await redis.get(f"mkt:mid:{conid}")
-    if cached is None:
-        raise PreviewUnavailable(503, {"error": "market_mid_unavailable", "conid": conid})
-    return Decimal(_redis_text(cached))
+    if cached is not None:
+        return Decimal(_redis_text(cached))
+
+    # Phase 9.7: on-demand subscribe — trigger a one-shot quote subscription
+    # for the ticker so unheld symbols don't unconditionally return 503.
+    if quote_engine is not None and contract is not None:
+        mid = await _one_shot_market_mid(redis, conid, contract, quote_engine)
+        if mid is not None:
+            return mid
+
+    raise PreviewUnavailable(503, {"error": "market_mid_unavailable", "conid": conid})
+
+
+async def _one_shot_market_mid(
+    redis: RedisLike,
+    conid: str,
+    contract: base.Contract,
+    quote_engine: object,
+) -> Decimal | None:
+    """Derive a canonical_id from ``contract``, call
+    :meth:`QuoteEngine.subscribe_one_shot`, compute (bid+ask)/2 from the
+    first tick, populate ``mkt:mid:<conid>`` in Redis, and return the mid.
+
+    Returns ``None`` on timeout or if price fields are absent/zero.
+    """
+    from app.services.quotes.base import canonical_key, country_for_exchange
+    from app.services.quotes.engine import QuoteEngine
+
+    if not isinstance(quote_engine, QuoteEngine):
+        return None
+
+    country = country_for_exchange(contract.exchange)
+    if country is None:
+        log.warning(
+            "preview.one_shot.unknown_exchange",
+            exchange=contract.exchange,
+            conid=conid,
+        )
+        return None
+
+    canonical_id = canonical_key(
+        asset_class=contract.asset_class,
+        symbol=contract.symbol,
+        country=country,
+    )
+
+    tick = await quote_engine.subscribe_one_shot(canonical_id, timeout_sec=3.0)
+    if tick is None:
+        return None
+
+    mid = _mid_from_tick(tick)
+    if mid is None or mid <= Decimal("0"):
+        return None
+
+    # Cache the mid under the broker conid key so subsequent preview calls
+    # for the same symbol in the same session hit the Redis fast path.
+    await redis.set(f"mkt:mid:{conid}", str(mid), ex=60)
+    log.info(
+        "preview.one_shot.ok",
+        conid=conid,
+        canonical_id=canonical_id,
+        mid=str(mid),
+    )
+    return mid
+
+
+def _mid_from_tick(tick: object) -> Decimal | None:
+    """Compute mid price from a QuoteMessage.
+
+    Prefers (bid + ask) / 2 when both are present and positive.  Falls back
+    to ``last`` if only one side is available.  Returns ``None`` when no
+    usable price field is present.
+    """
+    bid_raw = getattr(tick, "bid", None)
+    ask_raw = getattr(tick, "ask", None)
+    last_raw = getattr(tick, "last", None)
+
+    def _to_dec(v: object) -> Decimal | None:
+        if not v:
+            return None
+        try:
+            d = Decimal(str(v))
+            return d if d > Decimal("0") else None
+        except Exception:
+            return None
+
+    bid = _to_dec(bid_raw)
+    ask = _to_dec(ask_raw)
+    if bid is not None and ask is not None:
+        return (bid + ask) / Decimal("2")
+    last = _to_dec(last_raw)
+    return bid or ask or last
 
 
 async def _fx_rate(redis: RedisLike, from_currency: str, to_currency: str) -> Decimal:
