@@ -13,7 +13,7 @@ import pytest
 def app_secret_key_pin(monkeypatch):
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "app_secret_key", "K", raising=False)
+    monkeypatch.setattr(settings, "secret_key", "K", raising=False)
 
 
 @pytest.mark.asyncio
