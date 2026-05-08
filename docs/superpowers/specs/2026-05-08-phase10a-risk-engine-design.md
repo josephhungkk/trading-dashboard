@@ -40,7 +40,7 @@ This spec covers **10a only**.
 ### In scope (10a)
 
 - New tables `risk_limits` + `risk_limits_history` + `account_kill_switches` +
-  `account_kill_switches_history` (Alembic 0026).
+  `account_kill_switches_history` (Alembic 0036).
 - `RiskService` — pure-logic evaluator that returns `GateVerdict` for an
   `EvaluationContext`.
 - Seven checks:
@@ -169,7 +169,7 @@ This spec covers **10a only**.
 
 ---
 
-## 3. Data model (Alembic 0026)
+## 3. Data model (Alembic 0036)
 
 ### `risk_limits` — hybrid-scope cap config
 
@@ -614,7 +614,7 @@ Parameterized per check. ≥ 30 unit tests on `RiskService` alone:
 - `test_risk_decisions_audit.py` — places blocked order; asserts row + `pg_notify`
   envelope shape. Outer-transaction fixture per
   `feedback_pytest_session_begin_commits.md` to avoid prod-DB leak.
-- `test_alembic_0026.py` — migration up/down on real PG; asserts CHECK constraints + enum
+- `test_alembic_0036.py` — migration up/down on real PG; asserts CHECK constraints + enum
   membership. Outer-transaction wrap.
 - `test_risk_limits_admin.py` — CRUD round-trip; CSRF nonce required; history table
   populated; Redis invalidation pubsub fires.
@@ -683,7 +683,7 @@ user 2026-05-08 mid-brainstorm — explicitly NOT per-commit.
 
 | Chunk | Est. commits | Test scope | Notes |
 |---|---|---|---|
-| A — Alembic 0026 + models | 3-4 | migration test + model tests | history triggers; pubsub channel |
+| A — Alembic 0036 + models | 3-4 | migration test + model tests | history triggers; pubsub channel |
 | B — RiskService + 7 checks | 5-7 | 30 unit tests | pure logic; main-thread-friendly while Codex out |
 | C — Sidecar PreviewOrder RPCs | 5-6 | sidecar tests + fake-server | proto regen + two sidecar diffs |
 | D — orders_service extract + gate insert | 6-8 | integration tests | **highest risk**; pre-flight gate-ordering test mandatory; FE/BE capability shape reconciled here |
