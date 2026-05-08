@@ -298,6 +298,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "schwab sidecar not configured",
             )
+            return broker_pb2.PlaceOrderResponse()
 
         account_hash = self._client.hash_for(request.account_number)
         if not account_hash:
@@ -305,6 +306,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.NOT_FOUND,
                 f"unknown account_number: {request.account_number}",
             )
+            return broker_pb2.PlaceOrderResponse()
 
         # 2. Replay cache (idempotency for client retries).
         cache_key = (account_hash, coid)
@@ -323,6 +325,10 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             symbol=request.conid,
             limit_price=request.limit_price,
             stop_price=request.stop_price,
+            trail_offset=request.trail_offset,
+            trail_offset_type=request.trail_offset_type,
+            trail_limit_offset=request.trail_limit_offset,
+            expiry_date=request.expiry_date or None,
         )
         t0 = _time.monotonic()
         try:
@@ -379,6 +385,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "schwab sidecar not configured",
             )
+            return broker_pb2.CancelOrderResponse()
 
         account_hash = self._client.hash_for(request.account_number)
         if not account_hash:
@@ -386,6 +393,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.NOT_FOUND,
                 f"unknown account_number: {request.account_number}",
             )
+            return broker_pb2.CancelOrderResponse()
 
         await self._client.ensure_fresh_token()
 
@@ -427,6 +435,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "schwab sidecar not configured",
             )
+            return broker_pb2.ModifyOrderResponse()
 
         account_hash = self._client.hash_for(request.account_number)
         if not account_hash:
@@ -434,6 +443,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.NOT_FOUND,
                 f"unknown account_number: {request.account_number}",
             )
+            return broker_pb2.ModifyOrderResponse()
 
         await self._client.ensure_fresh_token()
 
@@ -450,6 +460,10 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             symbol=request.contract.symbol or request.contract.conid,
             limit_price=request.limit_price.value,
             stop_price=request.stop_price.value,
+            trail_offset=request.trail_offset,
+            trail_offset_type=request.trail_offset_type,
+            trail_limit_offset=request.trail_limit_offset,
+            expiry_date=request.expiry_date or None,
         )
 
         t0 = _time.monotonic()
@@ -495,11 +509,13 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT, "query must not be empty"
             )
+            return broker_pb2.SearchContractsResponse()
         if self._client is None:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "schwab sidecar not configured",
             )
+            return broker_pb2.SearchContractsResponse()
 
         cache_key = (request.query.upper(), request.asset_class)
         now = _time.monotonic()

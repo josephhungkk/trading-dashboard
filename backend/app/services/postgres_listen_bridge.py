@@ -7,6 +7,7 @@ that in-process caches (ConfigCache etc.) can be invalidated cluster-wide.
 from __future__ import annotations
 
 import asyncio
+import re
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +19,11 @@ log = structlog.get_logger(__name__)
 
 _CHANNEL = "app_config:invalidate"
 _BACKOFF_MAX = 30.0
+
+# MED-sec-2: accept only "word|word" shaped payloads so a rogue NOTIFY cannot
+# inject arbitrary data into Redis publish. Format: two dot/dash-separated
+# alphanumeric segments separated by a pipe character.
+_VALID_PAYLOAD = re.compile(r"^[A-Za-z0-9_.-]+\|[A-Za-z0-9_.-]+$")
 
 
 def _sanitize_dsn(dsn: str) -> str:
@@ -57,9 +63,20 @@ class PostgresListenBridge:
     ) -> None:
         """Republish a Postgres notification to Redis.
 
+        MED-sec-2: payload must match `_VALID_PAYLOAD` (two alphanumeric
+        segments separated by `|`). Invalid payloads are dropped with a warning
+        so a rogue NOTIFY cannot inject arbitrary data into Redis.
+
         Failures are logged and swallowed so the listener is never crashed by
         a transient Redis error (Pattern C — per-callback isolation).
         """
+        if not _VALID_PAYLOAD.match(payload):
+            log.warning(
+                "postgres_listen_bridge.invalid_payload",
+                channel=channel,
+                payload=payload[:200],
+            )
+            return
         try:
             await self.redis.publish(_CHANNEL, payload)
             log.debug(

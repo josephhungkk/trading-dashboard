@@ -374,3 +374,162 @@ async def test_oco_atomicity_rollback(client: AsyncClient) -> None:
     # Leg A cancel must have been attempted
     assert len(cancel_calls) == 1, f"expected exactly 1 cancel call, got {cancel_calls}"
     assert cancel_calls[0][1] == "SIM-A-001", f"cancel for wrong order id: {cancel_calls[0]}"
+
+
+# ---------------------------------------------------------------------------
+# HIGH-sec-1: nonce payload-hash validation
+# ---------------------------------------------------------------------------
+
+
+def _make_redis_with_nonce(payload: str | None) -> AsyncMock:
+    """Return a mock Redis whose GETDEL returns *payload*."""
+    mock_redis = AsyncMock()
+    mock_redis.execute_command = AsyncMock(return_value=payload)
+    return mock_redis
+
+
+@pytest.mark.asyncio
+async def test_oco_hash_mismatch_returns_401(client: AsyncClient) -> None:
+    """Stored payload_hash doesn't match submitted legs → 401 payload_hash_mismatch
+    (HIGH-sec-1: tamper detection).
+    """
+    import json
+
+    from app.services.orders_service import _Account
+
+    async def _fake_cfg_get(ns: str, key: str, default: Any = None) -> Any:
+        if ns == "broker" and key == "oco.enabled":
+            return "true"
+        return default
+
+    same_account = _Account(gateway_label="ibkr-paper", mode="paper", currency_base="USD")
+
+    # Store a hash that will NOT match the submitted legs
+    wrong_hash_payload = json.dumps({"payload_hash": "deadbeef" * 8})
+    mock_redis = _make_redis_with_nonce(wrong_hash_payload)
+
+    orig_redis = getattr(app.state, "redis", None)
+    app.state.redis = mock_redis
+
+    try:
+        with (
+            patch(
+                "app.services.config.ConfigService.get",
+                new=AsyncMock(side_effect=_fake_cfg_get),
+            ),
+            patch(
+                "app.services.orders_service.resolve_account",
+                new=AsyncMock(return_value=same_account),
+            ),
+        ):
+            r = await client.post(
+                "/api/orders/oco",
+                json={
+                    "order_a": LEG_A,
+                    "order_b": LEG_B,
+                    "nonce": OCO_NONCE,
+                },
+            )
+    finally:
+        if orig_redis is None:
+            del app.state.redis
+        else:
+            app.state.redis = orig_redis
+
+    assert r.status_code == 401, r.text
+    detail = r.json().get("detail", r.json())
+    error_code = detail.get("error") if isinstance(detail, dict) else None
+    assert error_code == "payload_hash_mismatch", f"unexpected detail: {detail}"
+
+
+@pytest.mark.asyncio
+async def test_oco_unknown_nonce_returns_401(client: AsyncClient) -> None:
+    """GETDEL returns None (nonce absent or already consumed) → 401 unknown_nonce
+    (HIGH-sec-1: single-use nonce enforcement / reuse prevention).
+    """
+    from app.services.orders_service import _Account
+
+    async def _fake_cfg_get(ns: str, key: str, default: Any = None) -> Any:
+        if ns == "broker" and key == "oco.enabled":
+            return "true"
+        return default
+
+    same_account = _Account(gateway_label="ibkr-paper", mode="paper", currency_base="USD")
+
+    # GETDEL returns None → nonce not present in Redis
+    mock_redis = _make_redis_with_nonce(None)
+
+    orig_redis = getattr(app.state, "redis", None)
+    app.state.redis = mock_redis
+
+    try:
+        with (
+            patch(
+                "app.services.config.ConfigService.get",
+                new=AsyncMock(side_effect=_fake_cfg_get),
+            ),
+            patch(
+                "app.services.orders_service.resolve_account",
+                new=AsyncMock(return_value=same_account),
+            ),
+        ):
+            r = await client.post(
+                "/api/orders/oco",
+                json={
+                    "order_a": LEG_A,
+                    "order_b": LEG_B,
+                    "nonce": "expired-or-already-consumed-nonce",
+                },
+            )
+    finally:
+        if orig_redis is None:
+            del app.state.redis
+        else:
+            app.state.redis = orig_redis
+
+    assert r.status_code == 401, r.text
+    detail = r.json().get("detail", r.json())
+    error_code = detail.get("error") if isinstance(detail, dict) else None
+    assert error_code == "unknown_nonce", f"unexpected detail: {detail}"
+
+
+# ---------------------------------------------------------------------------
+# HIGH-sec-2: rate limit on OCO nonce minting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_oco_nonce_mint_rate_limit_returns_429(client: AsyncClient) -> None:
+    """When the rate-limit bucket is exhausted, POST /api/orders/nonce/oco
+    must return 429 (HIGH-sec-2).
+    """
+    from fastapi import HTTPException as _HTTPException
+
+    mock_redis = AsyncMock()
+    orig_redis = getattr(app.state, "redis", None)
+    app.state.redis = mock_redis
+
+    try:
+        with patch(
+            "app.api.orders._check_modify_nonce_rate_limit",
+            new=AsyncMock(
+                side_effect=_HTTPException(
+                    status_code=429,
+                    detail={"error": "rate_limit_exceeded"},
+                )
+            ),
+        ):
+            r = await client.post(
+                "/api/orders/nonce/oco",
+                json={
+                    "leg_a": LEG_A,
+                    "leg_b": LEG_B,
+                },
+            )
+    finally:
+        if orig_redis is None:
+            del app.state.redis
+        else:
+            app.state.redis = orig_redis
+
+    assert r.status_code == 429, r.text

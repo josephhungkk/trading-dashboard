@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import datetime
+import logging
 import warnings
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any
 
 from sidecar_schwab._generated.broker.v1 import broker_pb2
 from sidecar_schwab.metrics import SCHWAB_NORMALIZE_UNKNOWN_TOTAL
+
+_log = logging.getLogger(__name__)
 
 
 def _install_proto_compat_aliases() -> None:
@@ -98,7 +103,7 @@ _ORDER_TYPE_MAP = {
     "STOP_LIMIT": broker_pb2.OrderType.ORDER_TYPE_STOP_LIMIT,
     "TRAILING_STOP": broker_pb2.OrderType.ORDER_TYPE_TRAIL,
     "TRAILING_STOP_LIMIT": broker_pb2.OrderType.ORDER_TYPE_TRAIL,
-    "MARKET_ON_CLOSE": broker_pb2.OrderType.ORDER_TYPE_MARKET,
+    "MARKET_ON_CLOSE": broker_pb2.OrderType.ORDER_TYPE_MOC,  # LOW-code-4: proto has ORDER_TYPE_MOC (value 7)
     "EXERCISE": broker_pb2.OrderType.ORDER_TYPE_MARKET,
     "CABINET": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
     "NET_DEBIT": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
@@ -127,10 +132,17 @@ _EXCHANGE_MIC: dict[str, str] = {
 }
 
 
-def _exchange_eod(exchange: str, expiry_date: str) -> str:
+@lru_cache(maxsize=32)
+def _get_cal(mic: str) -> Any:
+    """Return an exchange_calendars calendar by MIC code, LRU-cached (MED-code-6)."""
     import exchange_calendars as ecals  # noqa: PLC0415
 
-    cal = ecals.get_calendar(_EXCHANGE_MIC.get(exchange.upper(), "XNYS"))
+    return ecals.get_calendar(mic)
+
+
+def _exchange_eod(exchange: str, expiry_date: str) -> str:
+    mic = _EXCHANGE_MIC.get(exchange.upper(), "XNYS")
+    cal = _get_cal(mic)
     if not cal.is_session(expiry_date):
         raise ValueError(f"gtd_expiry_not_trading_day: exchange={exchange} date={expiry_date}")
     close = cal.session_close(expiry_date).tz_convert("UTC")
@@ -165,6 +177,9 @@ def map_tif(raw: str) -> int:
     return _TIF_MAP.get(raw, broker_pb2.TimeInForce.TIF_DAY)
 
 
+_EXCHANGE_SENTINEL = object()  # used to detect when exchange= was not supplied by caller
+
+
 def to_schwab_order_payload(
     *,
     side: str,
@@ -177,13 +192,20 @@ def to_schwab_order_payload(
     trail_offset: str = "",
     trail_offset_type: str = "PERCENT",
     trail_limit_offset: str = "",
-    exchange: str = "NYSE",
-    expiry_date: "str | datetime.date | None" = None,
+    exchange: Any = _EXCHANGE_SENTINEL,
+    expiry_date: str | datetime.date | None = None,
 ) -> dict[str, Any]:
     """Translate flat PlaceOrderRequest fields to Schwab JSON payload.
 
     Phase 8b extends Phase 8a with trailing stops, MOC/MOO/LOC/LOO, and GTD.
     """
+    if exchange is _EXCHANGE_SENTINEL:
+        exchange = "NYSE"
+        _log.warning(
+            "to_schwab_order_payload.exchange_defaulted symbol=%s order_type=%s",
+            symbol,
+            order_type,
+        )
     # --- order type → (schwab_order_type, session_override) ---
     _OT_SESSION: dict[str, tuple[str, str]] = {
         "MOC": ("MARKET_ON_CLOSE", "NORMAL"),

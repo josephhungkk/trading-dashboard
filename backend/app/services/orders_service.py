@@ -339,6 +339,10 @@ async def place_order(
             canonical_qty,
             request.limit_price or "",
             request.stop_price or "",
+            request.trail_offset or "",
+            request.trail_offset_type or "",
+            request.trail_limit_offset or "",
+            request.expiry_date or "",
         )
     except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
         await db.commit()
@@ -902,6 +906,10 @@ class _OrderSidecarClient(_ContractSearchClient, Protocol):
         qty: str,
         limit_price: str = "",
         stop_price: str = "",
+        trail_offset: str = "",
+        trail_offset_type: str = "",
+        trail_limit_offset: str = "",
+        expiry_date: str = "",
     ) -> base.PlaceOrderResult: ...
 
     async def cancel_order(self, account_number: str, broker_order_id: str) -> bool: ...

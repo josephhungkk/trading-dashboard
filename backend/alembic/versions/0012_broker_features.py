@@ -1,4 +1,11 @@
-"""Phase 8b T-0.4 -- broker_features table + initial seed (spec sec 7 MED-2)."""
+"""Phase 8b T-0.4 -- broker_features table + initial seed (spec sec 7 MED-2).
+
+Cross-references:
+- 0013_schwab_capability_flip.py  — flips schwab rows in broker_order_capability
+- 0014_futu_capability_flip.py    — flips futu rows in broker_order_capability
+- 0014a_futu_revert_unsupported_tif.py — reverts futu IOC/FOK/GTD to FALSE
+- 0015_ibkr_capability_flip.py    — flips ibkr rows in broker_order_capability
+"""
 
 from __future__ import annotations
 

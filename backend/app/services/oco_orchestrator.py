@@ -158,6 +158,7 @@ class OcoOrchestrator:
     _active: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     _streams: dict[tuple[str, str], asyncio.Task[None]] = field(default_factory=dict, init=False)
     _stream_last_pending: dict[tuple[str, str], float] = field(default_factory=dict, init=False)
+    _link_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
     _leader: bool = field(default=False, init=False)
     _renewal_task: asyncio.Task[None] | None = field(default=None, init=False)
     _stopped: bool = field(default=False, init=False)
@@ -166,6 +167,14 @@ class OcoOrchestrator:
     def __post_init__(self) -> None:
         if self._clock is None:
             self._clock = time.monotonic
+
+    def _link_lock(self, link_id: str) -> asyncio.Lock:
+        """Return (creating if absent) the per-link asyncio.Lock for fill serialisation."""
+        lock = self._link_locks.get(link_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._link_locks[link_id] = lock
+        return lock
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -251,46 +260,78 @@ class OcoOrchestrator:
     async def process_fill_event(
         self, broker_id: str, order_id: str, fill_data: dict[str, Any]
     ) -> None:
-        """Handle an order fill: transition state and cancel the sibling leg."""
+        """Handle an order fill: transition state and cancel the sibling leg.
+
+        HIGH-code-3: per-link asyncio.Lock prevents concurrent fills on the same
+        OCO link from racing through the guard check simultaneously.
+        """
         if not self._leader:
             return  # follower; leader will pick this up via DB
         link = self._find_link(broker_id, order_id)
         if link is None or link["status"] in TERMINAL_STATUSES:
             return
-        survivor_order_id = (
-            link["order_id_b"] if order_id == link["order_id_a"] else link["order_id_a"]
-        )
-        fill_status = "LEG_A_FILLED" if order_id == link["order_id_a"] else "LEG_B_FILLED"
-        await self._transition(link, fill_status)
-        cancel_ok = await self._cancel(
-            link["broker_id"], str(link["account_id"]), survivor_order_id
-        )
-        if cancel_ok:
-            await self._transition(link, "COMPLETED")
-        else:
-            await self._transition(
-                link,
-                "CANCEL_FAILED",
-                failure_reason="cancel_rejected: broker rejected sibling cancel",
+        async with self._link_lock(str(link["id"])):
+            # Re-check status inside the lock — a concurrent fill may have already
+            # transitioned to a terminal state while we were waiting.
+            if link["status"] in TERMINAL_STATUSES:
+                return
+            survivor_order_id = (
+                link["order_id_b"] if order_id == link["order_id_a"] else link["order_id_a"]
             )
+            fill_status = "LEG_A_FILLED" if order_id == link["order_id_a"] else "LEG_B_FILLED"
+            await self._transition(link, fill_status)
+            cancel_ok = await self._cancel(
+                link["broker_id"], str(link["account_id"]), survivor_order_id
+            )
+            if cancel_ok:
+                await self._transition(link, "COMPLETED")
+            else:
+                await self._transition(
+                    link,
+                    "CANCEL_FAILED",
+                    failure_reason="cancel_rejected: broker rejected sibling cancel",
+                )
+            # Clean up the lock entry once the link reaches a terminal state.
+            if link["status"] in TERMINAL_STATUSES:
+                self._link_locks.pop(str(link["id"]), None)
 
     async def _transition(
         self, link: dict[str, Any], new_status: str, failure_reason: str | None = None
     ) -> None:
-        """Persist a status transition for an oco_link row."""
+        """Persist a status transition for an oco_link row.
+
+        HIGH-code-3: optimistic in-memory update applied BEFORE the async DB
+        write so concurrent coroutines see the new status immediately during
+        their guard checks, even before the DB round-trip completes.
+
+        HIGH-db-3: DB UPDATE guards on NOT IN terminal statuses — if a second
+        concurrent writer already transitioned the row the UPDATE affects 0 rows
+        and we log a warning instead of double-applying.
+        """
         if link["status"] in TERMINAL_STATUSES:
             raise ValueError(f"invalid transition from terminal {link['status']} to {new_status}")
+        # Optimistic in-memory update before the await (HIGH-code-3).
+        prev_status = link["status"]
+        link["status"] = new_status
+        link["failure_reason"] = failure_reason
         async with self.db() as session:
-            await session.execute(
+            result = await session.execute(
                 text(
                     "UPDATE oco_links SET status=:s, failure_reason=:fr, "
-                    "updated_at=NOW() WHERE id=:id"
+                    "updated_at=NOW() WHERE id=:id "
+                    "AND status NOT IN ('COMPLETED','CANCELED','ERROR','CANCEL_FAILED')"
                 ),
                 {"s": new_status, "fr": failure_reason, "id": link["id"]},
             )
+            if result.rowcount == 0:  # type: ignore[attr-defined]
+                log.warning(
+                    "oco_orchestrator.transition_lost_race",
+                    link_id=str(link["id"]),
+                    attempted_status=new_status,
+                    prev_status=prev_status,
+                )
+                return
             await session.commit()
-        link["status"] = new_status
-        link["failure_reason"] = failure_reason
         log.info("oco_orchestrator.transition", link_id=str(link["id"]), status=new_status)
 
     def _find_link(self, broker_id: str, order_id: str) -> dict[str, Any] | None:
@@ -337,3 +378,35 @@ class OcoOrchestrator:
     async def _stream_order_events(self, broker_id: str, account_id: str) -> None:
         """Hook -- subscribe to broker OrderEvent stream and route to process_fill_event."""
         raise NotImplementedError("subclass or inject _stream_order_events for production wiring")
+
+
+class OcoOrchestratorImpl(OcoOrchestrator):
+    """Production subclass that wires _cancel to the broker registry cancel path.
+
+    ``cancel_callable`` must be an async callable with signature:
+        (broker_id: str, account_id: str, order_id: str) -> bool
+
+    Instantiated in main.py lifespan to replace the base NotImplementedError stub.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        cancel_callable: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._cancel_callable = cancel_callable
+
+    async def _cancel(self, broker_id: str, account_id: str, order_id: str) -> bool:
+        try:
+            return bool(await self._cancel_callable(broker_id, account_id, order_id))
+        except Exception as exc:
+            log.warning(
+                "oco_orchestrator.cancel_failed",
+                broker_id=broker_id,
+                account_id=account_id,
+                order_id=order_id,
+                exc=str(exc),
+            )
+            return False

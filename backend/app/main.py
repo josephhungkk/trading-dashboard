@@ -44,7 +44,7 @@ from app.services.broker_registry_factory import MissingBrokerSecrets, build_bro
 from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistry
 from app.services.config import ConfigService
 from app.services.config_cache import ConfigCache
-from app.services.oco_orchestrator import OcoOrchestrator
+from app.services.oco_orchestrator import OcoOrchestrator, OcoOrchestratorImpl
 from app.services.order_event_consumer import OrderEventConsumer
 from app.services.pending_fills_sweeper import PendingFillsSweeper
 from app.services.pending_submit_watchdog import PendingSubmitWatchdog
@@ -127,8 +127,36 @@ async def lifespan(_app: FastAPI) -> Any:
         await order_consumer.start()
         await pending_watchdog.start()
         pending_fills_task = asyncio.create_task(pending_fills_sweeper.run())
-        oco_orchestrator = OcoOrchestrator(db=session_factory, redis=redis)  # type: ignore[arg-type]  # redis-py Redis satisfies _RedisLike at runtime; Protocol excludes optional kwargs
-        oco_orchestrator_task = asyncio.create_task(oco_orchestrator.start())
+
+        async def _oco_cancel_callable(broker_id: str, account_id: str, order_id: str) -> bool:
+            """Cancel a broker order for an OCO sibling via the registry cancel path.
+
+            Resolves account_id → (gateway_label, account_number) from the DB,
+            then calls BrokerSidecarClient.cancel_order.
+            """
+            from sqlalchemy import text as _text
+
+            async with session_factory() as _session:
+                _result = await _session.execute(
+                    _text(
+                        "SELECT gateway_label, account_number FROM broker_accounts"
+                        " WHERE id = :aid AND deleted_at IS NULL"
+                    ),
+                    {"aid": account_id},
+                )
+                _row = _result.mappings().one_or_none()
+            if _row is None:
+                log.warning("oco_cancel.account_not_found", account_id=account_id)
+                return False
+            _client = await broker_registry.get_client(str(_row["gateway_label"]))
+            return await _client.cancel_order(str(_row["account_number"]), order_id)
+
+        oco_orchestrator = OcoOrchestratorImpl(  # type: ignore[arg-type]  # redis-py Redis satisfies _RedisLike at runtime
+            db=session_factory,
+            redis=redis,
+            cancel_callable=_oco_cancel_callable,
+        )
+        await oco_orchestrator.start()
         log.info("broker_lifespan_started")
     except MissingBrokerSecrets as exc:
         log.warning("broker_lifespan_skipped", reason=str(exc))

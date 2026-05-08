@@ -256,11 +256,18 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             return await self._sim_place(request)
         if not self._client.gateway_connected:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
+            return broker_pb2.PlaceOrderResponse()
 
         try:
             broker_order_id, status = await self._client.place_order(request)
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            # MED-code-3: transport-level errors → UNAVAILABLE (retriable)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+            return broker_pb2.PlaceOrderResponse()
         except Exception as exc:
+            # Broker rejection / validation errors → INVALID_ARGUMENT (non-retriable)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            return broker_pb2.PlaceOrderResponse()
         return broker_pb2.PlaceOrderResponse(broker_order_id=broker_order_id, status=status)
 
     async def CancelOrder(  # noqa: N802

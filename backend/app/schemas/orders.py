@@ -340,8 +340,9 @@ def _validate_order_shape(
     elif order_type == "STOP_LIMIT":
         if stop_price is None or limit_price is None:
             raise ValueError("STOP_LIMIT orders require stop_price and limit_price")
-        if trail_fields_present or expiry_date is not None:
-            raise ValueError("STOP_LIMIT orders cannot include trail fields or expiry_date")
+        if trail_fields_present:
+            raise ValueError("STOP_LIMIT orders cannot include trail fields")
+        # expiry_date is allowed when tif='GTD' — handled by the tif-side validator above
     elif order_type == "TRAIL":
         if trail_offset is None or trail_offset_type is None:
             raise ValueError("TRAIL orders require trail_offset and trail_offset_type")

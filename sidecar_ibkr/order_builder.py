@@ -10,7 +10,31 @@ from collections.abc import Callable
 from typing import Protocol
 
 
+# MED-sec-4: exchange-aware GTD timezone map.
+# Fallback is US/Eastern to preserve prior behaviour for unrecognised exchanges.
+_EXCHANGE_TZ = {
+    "NYSE": "US/Eastern",
+    "NASDAQ": "US/Eastern",
+    "ARCA": "US/Eastern",
+    "AMEX": "US/Eastern",
+    "HKEX": "Asia/Hong_Kong",
+    "SEHK": "Asia/Hong_Kong",
+    "LSE": "Europe/London",
+}
+
+# Legacy constant retained for backward-compat with callers that use it directly.
 _IBKR_GTD_EOD_TIME = "23:59:59 US/Eastern"
+
+
+def _gtd_string(expiry_date: str, exchange: str = "NYSE") -> str:
+    """Return the IBKR goodTillDate string for expiry_date on exchange.
+
+    Format: "YYYYMMDD HH:MM:SS TZ"  (TWS API §5.8.3 goodTillDate field).
+    Timezone is derived from exchange; falls back to US/Eastern for unknown codes.
+    """
+    tz = _EXCHANGE_TZ.get(exchange.upper(), "US/Eastern")
+    yyyymmdd = expiry_date.replace("-", "")
+    return f"{yyyymmdd} 23:59:59 {tz}"
 
 
 class PlaceOrderRequestLike(Protocol):
@@ -79,6 +103,10 @@ def _set_moc(order: OrderLike, request: PlaceOrderRequestLike) -> None:
 
 
 def _set_moo(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    # MED-code-5: TWS API docs confirm MOO is submitted as MKT + tif=OPG
+    # (not orderType="MOO" directly). "OPG" is the canonical TWS market-on-open
+    # form per https://www.interactivebrokers.com/campus/ibkr-api-page/twsapi-doc/.
+    # TODO: empirically verify on paper account; update if TWS rejects OPG form.
     order.orderType = "MKT"
     order.tif = "OPG"
 
@@ -89,6 +117,8 @@ def _set_loc(order: OrderLike, request: PlaceOrderRequestLike) -> None:
 
 
 def _set_loo(order: OrderLike, request: PlaceOrderRequestLike) -> None:
+    # MED-code-5: same OPG pattern as MOO but with LMT instead of MKT.
+    # TODO: empirically verify on paper account; update if TWS rejects OPG form.
     order.orderType = "LMT"
     order.lmtPrice = float(request.limit_price)
     order.tif = "OPG"

@@ -33,8 +33,18 @@ _EXCHANGE_CODE_MAP = {
 
 @lru_cache(maxsize=32)
 def _calendar(exchange: str) -> Any:
+    """Return the exchange_calendars calendar for exchange.
+
+    Supported exchanges: NYSE, NASDAQ, AMEX, ARCA (→ XNYS), HKEX/SEHK (→ XHKG),
+    LSE (→ XLON). Unknown exchange codes are passed through verbatim to
+    exchange_calendars; if unrecognised a ValueError is raised with a descriptive
+    message rather than leaking the raw library exception.
+    """
     code = _EXCHANGE_CODE_MAP.get(exchange.upper(), exchange.upper())
-    return ecals.get_calendar(code)
+    try:
+        return ecals.get_calendar(code)
+    except Exception as exc:
+        raise ValueError(f"unsupported_exchange: {exchange}") from exc
 
 
 def today_in_exchange_tz(exchange: str) -> date:

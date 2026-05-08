@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -101,4 +102,40 @@ async def test_follower_ignores_fill_event() -> None:
     db.reset_mock()
     await orch.process_fill_event("futu", "A1", {})
     db.assert_not_called()
+    await orch.stop()
+
+
+@pytest.mark.asyncio
+async def test_double_fill_race_serialized_by_per_link_lock() -> None:
+    """Two concurrent fill events for the same OCO link must not both proceed
+    through the cancel path. The per-link asyncio.Lock (CRIT-code-2 / HIGH-code-3)
+    and in-lock re-check of terminal status must cause the second coroutine to
+    exit early after seeing the link already in a terminal state.
+    """
+    orch = await _leader_orch()
+    link = _make_link()
+    orch._active[str(link["id"])] = link
+
+    cancel_call_count = 0
+
+    async def _slow_cancel(broker_id: str, account_id: str, order_id: str) -> bool:
+        nonlocal cancel_call_count
+        cancel_call_count += 1
+        await asyncio.sleep(0)  # yield so the second coroutine gets a chance to run
+        return True
+
+    orch._cancel = _slow_cancel  # type: ignore[method-assign]
+
+    # Fire two concurrent fill events for the same leg — only the first should win.
+    await asyncio.gather(
+        orch.process_fill_event("futu", "A1", {"qty": "100"}),
+        orch.process_fill_event("futu", "A1", {"qty": "100"}),
+    )
+
+    # Cancel must be called exactly once — the second fill sees terminal status
+    # inside the lock and exits without calling _cancel again.
+    assert cancel_call_count == 1, (
+        f"expected 1 cancel call (second fill should be dropped), got {cancel_call_count}"
+    )
+    assert link["status"] == "COMPLETED"
     await orch.stop()

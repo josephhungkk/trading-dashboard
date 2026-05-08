@@ -147,6 +147,38 @@ def test_stop_limit_requires_both_prices() -> None:
         PreviewRequest.model_validate(_base_preview(order_type="STOP_LIMIT", stop_price="0.90"))
 
 
+def test_stop_limit_gtd_with_expiry_accepted() -> None:
+    """STOP_LIMIT + GTD + expiry_date must be accepted (CRIT-spec-1).
+
+    The Phase 8b validator incorrectly rejected expiry_date on STOP_LIMIT orders
+    because the trail-fields guard also checked `expiry_date is not None`.
+    After the fix the guard only fires when trail_fields are present.
+    """
+    PreviewRequest.model_validate(
+        _base_preview(
+            order_type="STOP_LIMIT",
+            tif="GTD",
+            limit_price="1.00",
+            stop_price="0.90",
+            expiry_date="2026-05-09",
+        )
+    )
+
+
+def test_stop_limit_gtd_without_expiry_rejects() -> None:
+    """STOP_LIMIT + GTD without expiry_date must still be rejected (GTD invariant)."""
+    with pytest.raises(ValidationError):
+        PreviewRequest.model_validate(
+            _base_preview(
+                order_type="STOP_LIMIT",
+                tif="GTD",
+                limit_price="1.00",
+                stop_price="0.90",
+                # expiry_date intentionally omitted
+            )
+        )
+
+
 def test_loc_without_limit_price_rejects() -> None:
     with pytest.raises(ValidationError):
         PreviewRequest.model_validate(_base_preview(order_type="LOC", tif="DAY"))

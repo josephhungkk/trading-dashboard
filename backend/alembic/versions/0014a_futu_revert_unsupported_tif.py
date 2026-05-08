@@ -51,14 +51,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # MED-db-4: keep is_supported=FALSE unconditionally — Futu never supported
+    # IOC/FOK/GTD (only DAY/GTC in ft.TimeInForce); restoring TRUE would
+    # re-introduce a capability gate bypass. Downgrade only undoes the note text.
     bind = op.get_bind()
     for broker_id, order_type, tif in REVERT_ROWS:
         bind.execute(
             sa.text(
                 """
                 UPDATE broker_order_capability
-                   SET is_supported = TRUE,
-                       notes = 'Restored by 0014a downgrade',
+                   SET is_supported = FALSE,
+                       notes = 'futu SDK TimeInForce enum only has DAY/GTC',
                        updated_at = NOW()
                  WHERE broker_id = :b AND order_type = :o AND time_in_force = :t
                 """

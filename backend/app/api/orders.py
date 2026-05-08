@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
@@ -541,6 +543,55 @@ async def post_modify_order(
         metrics.broker_order_modify_duration_ms.observe((time.perf_counter() - started) * 1000)
 
 
+_OCO_NONCE_TTL = 60  # seconds
+
+
+class OcoNonceMintRequest(BaseModel):
+    """Body for POST /api/orders/nonce/oco."""
+
+    model_config = {"extra": "forbid"}
+
+    leg_a: dict[str, Any]
+    leg_b: dict[str, Any]
+
+
+class OcoNonceMintResponse(BaseModel):
+    """Response for POST /api/orders/nonce/oco."""
+
+    nonce: str
+    expires_at: datetime
+
+
+def _oco_payload_hash(leg_a: dict[str, Any], leg_b: dict[str, Any]) -> str:
+    """SHA-256 of the canonical JSON of both OCO leg payloads."""
+    canonical = json.dumps([leg_a, leg_b], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+@router.post("/nonce/oco", response_model=OcoNonceMintResponse)
+async def mint_oco_nonce(
+    body: OcoNonceMintRequest,
+    redis: RedisDep,
+    identity: IdentityDep,
+) -> OcoNonceMintResponse:
+    """Mint a single-use 60-second nonce for POST /api/orders/oco.
+
+    Stores ``nonce:oco:{account_id}:{nonce}`` in Redis with a SHA-256 hash
+    of both leg payloads so the placement endpoint can reject tampered requests.
+    Rate-limited via the shared modify-nonce rate limiter (10 req / 30 s).
+    """
+    await _check_modify_nonce_rate_limit(redis, identity.email)
+    nonce = uuid4().hex
+    account_id = body.leg_a.get("account_id", "")
+    key = f"nonce:oco:{account_id}:{nonce}"
+    payload_hash = _oco_payload_hash(body.leg_a, body.leg_b)
+    stored = json.dumps({"payload_hash": payload_hash})
+    await redis.set(key, stored, ex=_OCO_NONCE_TTL)
+    expires_at = datetime.now(UTC) + timedelta(seconds=_OCO_NONCE_TTL)
+    _log.info("oco_nonce_minted", account_id=account_id)
+    return OcoNonceMintResponse(nonce=nonce, expires_at=expires_at)
+
+
 @router.post("/oco", response_model=OcoOrderResponse)
 async def place_oco_order(
     body: OcoOrderRequest,
@@ -549,17 +600,25 @@ async def place_oco_order(
     redis: RedisDep,
     registry: RegistryDep,
     capability: CapabilityDep,
+    identity: IdentityDep,
 ) -> OcoOrderResponse | JSONResponse:
     """Place two OCO legs atomically.
 
     Invariants enforced here (T-O.6):
+    - Rate limit gate: 10 OCO mints per 30 s per user (HIGH-sec-2).
     - Kill-switch gate: broker.oco.enabled must be "true" in app_config.
     - Both legs must reference the same broker (by gateway prefix).
     - Both legs must reference the same account_id.
-    - Capability gate is checked individually for each leg.
+    - Nonce namespace: nonce:oco:{account_id}:{nonce} with payload-hash validation (HIGH-sec-1).
+    - Capability gate is checked individually for each leg using resolved asset_class (HIGH-code-2).
     - Atomicity: leg B failure triggers best-effort cancel of leg A.
-    - oco_links row is INSERTed (status='PENDING_BOTH') after both legs succeed.
+    - oco_links INSERT wrapped in try/except; INSERT failure cancels both legs (HIGH-db-2).
     """
+    # ------------------------------------------------------------------
+    # Step 0: Rate limit (HIGH-sec-2)
+    # ------------------------------------------------------------------
+    await _check_modify_nonce_rate_limit(redis, identity.email)
+
     # ------------------------------------------------------------------
     # Step 1: Kill-switch gate
     # ------------------------------------------------------------------
@@ -579,7 +638,6 @@ async def place_oco_order(
     # ------------------------------------------------------------------
     # Step 3: Same-broker validation
     # ------------------------------------------------------------------
-    # Resolve both accounts to compare broker prefixes
     try:
         account_a = await resolve_account(db, body.order_a.account_id)
         account_b = await resolve_account(db, body.order_b.account_id)
@@ -592,22 +650,49 @@ async def place_oco_order(
         raise HTTPException(status_code=422, detail={"error": "oco_legs_different_brokers"})
 
     # ------------------------------------------------------------------
-    # Step 4: Consume nonce (reject replay via GETDEL)
+    # Step 4: Consume OCO nonce + validate payload hash (HIGH-sec-1)
     # ------------------------------------------------------------------
-    nonce_key = f"nonce:order:{body.order_a.account_id}:{body.nonce}"
-    consumed = await redis.execute_command("GETDEL", nonce_key)
-    if consumed is None:
-        raise HTTPException(status_code=422, detail={"error": "unknown_nonce"})
+    nonce_key = f"nonce:oco:{body.order_a.account_id}:{body.nonce}"
+    consumed_raw = await redis.execute_command("GETDEL", nonce_key)
+    if consumed_raw is None:
+        raise HTTPException(status_code=401, detail={"error": "unknown_nonce"})
+    try:
+        consumed = json.loads(consumed_raw)
+        stored_hash = consumed.get("payload_hash", "")
+    except (json.JSONDecodeError, AttributeError) as exc:
+        raise HTTPException(status_code=401, detail={"error": "nonce_corrupt"}) from exc
+
+    # Recompute hash from the submitted leg bodies to detect tampering.
+    leg_a_dict = body.order_a.model_dump(mode="json")
+    leg_b_dict = body.order_b.model_dump(mode="json")
+    actual_hash = _oco_payload_hash(leg_a_dict, leg_b_dict)
+    if actual_hash != stored_hash:
+        raise HTTPException(status_code=401, detail={"error": "payload_hash_mismatch"})
 
     # ------------------------------------------------------------------
-    # Step 5: Capability gate — both legs individually
+    # Step 5: Resolve contracts to get asset_class (HIGH-code-2)
+    # ------------------------------------------------------------------
+    client_a = await registry.get_client(account_a.gateway_label)
+    order_client_a = as_order_sidecar_client(client_a)
+    try:
+        contract_a = await client_a.get_contract(body.order_a.conid)
+        contract_b = await client_a.get_contract(body.order_b.conid)
+    except Exception:
+        contract_a = None  # type: ignore[assignment]
+        contract_b = None  # type: ignore[assignment]
+
+    asset_class_a = getattr(contract_a, "asset_class", "STOCK") or "STOCK"
+    asset_class_b = getattr(contract_b, "asset_class", "STOCK") or "STOCK"
+
+    # ------------------------------------------------------------------
+    # Step 6: Capability gate — both legs with resolved asset_class
     # ------------------------------------------------------------------
     try:
         await validate_pre_dispatch(
             cfg=cfg,
             capability=capability,
             broker_label=account_a.gateway_label,
-            asset_class="STOCK",
+            asset_class=str(asset_class_a),
             order_type=body.order_a.order_type,
             tif=body.order_a.tif,
             skip_operational_checks=True,
@@ -616,7 +701,7 @@ async def place_oco_order(
             cfg=cfg,
             capability=capability,
             broker_label=account_b.gateway_label,
-            asset_class="STOCK",
+            asset_class=str(asset_class_b),
             order_type=body.order_b.order_type,
             tif=body.order_b.tif,
             skip_operational_checks=True,
@@ -625,10 +710,8 @@ async def place_oco_order(
         return JSONResponse(status_code=exc.status_code, content=exc.payload, headers=exc.headers)
 
     # ------------------------------------------------------------------
-    # Step 6: Place leg A
+    # Step 7: Place leg A
     # ------------------------------------------------------------------
-    client_a = await registry.get_client(account_a.gateway_label)
-    order_client_a = as_order_sidecar_client(client_a)
     try:
         qty_a = canonicalize_qty(body.order_a.qty)
     except NotImplementedError as exc:
@@ -665,7 +748,7 @@ async def place_oco_order(
     order_id_a = sidecar_a.broker_order_id
 
     # ------------------------------------------------------------------
-    # Step 7: Place leg B; on failure cancel leg A (best-effort)
+    # Step 8: Place leg B; on failure cancel leg A (best-effort)
     # ------------------------------------------------------------------
     try:
         qty_b = canonicalize_qty(body.order_b.qty)
@@ -711,26 +794,48 @@ async def place_oco_order(
     order_id_b = sidecar_b.broker_order_id
 
     # ------------------------------------------------------------------
-    # Step 8: INSERT oco_links row (server-generated id — Pattern E)
+    # Step 9: INSERT oco_links row (HIGH-db-2: wrap in try/except)
     # ------------------------------------------------------------------
     oco_link_id = str(uuid4())
-    await db.execute(
-        text(
-            """
-            INSERT INTO oco_links
-                (id, broker_id, account_id, order_id_a, order_id_b, status)
-            VALUES (:id, :broker_id, :account_id, :order_id_a, :order_id_b, 'PENDING_BOTH')
-            """
-        ),
-        {
-            "id": oco_link_id,
-            "broker_id": broker_a,
-            "account_id": str(body.order_a.account_id),
-            "order_id_a": order_id_a,
-            "order_id_b": order_id_b,
-        },
-    )
-    await db.commit()
+    try:
+        await db.execute(
+            text(
+                """
+                INSERT INTO oco_links
+                    (id, broker_id, account_id, order_id_a, order_id_b, status)
+                VALUES (:id, :broker_id, :account_id, :order_id_a, :order_id_b, 'PENDING_BOTH')
+                """
+            ),
+            {
+                "id": oco_link_id,
+                "broker_id": broker_a,
+                "account_id": str(body.order_a.account_id),
+                "order_id_a": order_id_a,
+                "order_id_b": order_id_b,
+            },
+        )
+        await db.commit()
+    except Exception as insert_exc:
+        _log.error(
+            "oco_links.insert_failed",
+            broker_order_id_a=order_id_a,
+            broker_order_id_b=order_id_b,
+            exc=str(insert_exc),
+        )
+        # Best-effort cancel both legs to avoid orphaned broker orders.
+        for _oid in (order_id_a, order_id_b):
+            try:
+                await order_client_a.cancel_order(account_a.account_number, _oid)
+            except Exception as cancel_exc:
+                _log.error(
+                    "oco_links.cancel_failed_after_insert_failure",
+                    order_id=_oid,
+                    exc=str(cancel_exc),
+                )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "oco_link_write_failed"},
+        ) from insert_exc
 
     return OcoOrderResponse(
         oco_link_id=oco_link_id,
