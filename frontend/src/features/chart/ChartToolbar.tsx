@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useState, useCallback } from 'react';
-import { Square, Pencil, Save, Maximize2, Camera, MoreHorizontal, X } from 'lucide-react';
+import { Square, Pencil, Maximize2, Camera, MoreHorizontal, X } from 'lucide-react';
 import { useChartStore } from './stores/chartStore';
 import { IndicatorPicker } from './IndicatorPicker';
 import { Button } from '@/components/primitives/Button';
@@ -12,8 +12,10 @@ import {
   SelectItem,
 } from '@/components/primitives/Select';
 
-// TODO(v0.9.1): wire save button to instrument_id resolution + etag capture
-// from ChartPage and call putChartLayout from services/chartLayouts.ts.
+// Layout persistence is fully automatic via ChartLayoutSync (500 ms debounce
+// after every timeframe / indicator / drawing / chart-type change). The Save
+// button that lived here pre-Phase 9 is no longer needed and was previously
+// disabled with a stale TODO; removed in Phase 9.6.
 
 function noop(): void {
   // Fullscreen not supported or rejected — silently ignore.
@@ -86,18 +88,6 @@ export function ChartToolbar({ drawingsOpen, onToggleDrawings }: ChartToolbarPro
           size="sm"
           type="button"
           className="min-h-[2.75rem] min-w-[2.75rem] px-2"
-          aria-label="Save Layout"
-          title="Save layout (instrument_id wiring pending v0.9.1)"
-          disabled
-        >
-          <Save className="h-4 w-4" aria-hidden="true" />
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="sm"
-          type="button"
-          className="min-h-[2.75rem] min-w-[2.75rem] px-2"
           aria-label="Fullscreen"
           onClick={handleFullscreen}
         >
@@ -155,18 +145,6 @@ export function ChartToolbar({ drawingsOpen, onToggleDrawings }: ChartToolbarPro
           onClick={onToggleDrawings}
         >
           <span>Drawings</span>
-        </Button>
-
-        {/* Save layout — TODO(v0.9.1): wire instrument_id + etag */}
-        <Button
-          variant="ghost"
-          size="sm"
-          type="button"
-          className="h-[2.75rem] min-w-[2.75rem] px-2 md:h-9"
-          aria-label="Save layout"
-          title="Save layout (instrument_id wiring pending v0.9.1)"
-        >
-          <span>Save</span>
         </Button>
 
         {/* Fullscreen */}

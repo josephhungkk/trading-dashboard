@@ -38,9 +38,13 @@ describe('ChartToolbar', () => {
     expect(screen.getByRole('toolbar', { name: 'Chart controls' })).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Indicators' })).toHaveLength(2);
     expect(screen.getAllByRole('button', { name: 'Drawings' })).toHaveLength(2);
-    expect(screen.getByRole('button', { name: 'Save Layout' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Toggle fullscreen/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Screenshot/i })).toBeInTheDocument();
+  });
+
+  it('does not render a manual Save button (auto-save via ChartLayoutSync)', () => {
+    render(<ChartToolbar {...makeToolbarProps()} />);
+    expect(screen.queryByRole('button', { name: /^Save( layout)?$/i })).not.toBeInTheDocument();
   });
 
   it('screenshot button is disabled (coming soon placeholder)', () => {
