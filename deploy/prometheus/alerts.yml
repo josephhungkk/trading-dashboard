@@ -286,3 +286,86 @@ groups:
         annotations:
           summary: "Redis pubsub failed to publish capability invalidation"
           runbook: "deploy/runbook-schwab-trade.md#capabilitypubsubfailures"
+
+  - name: phase8_capability
+    rules:
+      # G1: capability mismatch — fires when the capability table has a row for
+      # a (broker, asset_class, order_type, tif) combo with is_supported=False
+      # yet orders for that combo keep being submitted (sustained increments).
+      # NOTE: broker_capability_mismatch_total is declared in
+      #   backend/app/core/metrics.py (Phase 9.7 G1) but the application-side
+      #   increment is not yet wired.  See TODO in metrics.py pointing to
+      #   order_capability_service.py is_supported() — needs an `elif row is
+      #   not None:` branch to increment this counter before returning False.
+      #   This alert will NOT fire until that increment lands.
+      - alert: BrokerCapabilityMismatchSustained
+        expr: |
+          increase(broker_capability_mismatch_total[5m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Broker {{ $labels.broker }} capability mismatch sustained >5m"
+          description: >
+            broker_capability_mismatch_total for {{ $labels.broker }} has been
+            incrementing for >5m. A (asset_class, order_type, tif) combo exists
+            in broker_order_capability with is_supported=False yet orders keep
+            being submitted. Reconcile the capability table via
+            POST /api/admin/capabilities or update order_capability_service.py.
+
+      # G1: poller drift — fires when the order-poller heartbeat has not been
+      # observed for >60 s (gauge stays elevated).
+      # NOTE: broker_poller_drift_seconds is declared in
+      #   backend/app/core/metrics.py (Phase 9.7 G1) but the application-side
+      #   set() call is not yet wired.  See TODO in metrics.py pointing to
+      #   BrokerDiscoverer / HealthPoller in brokers.py.  Until then the Gauge
+      #   stays at 0 and this alert will NOT fire.
+      - alert: BrokerPollerDriftHigh
+        expr: broker_poller_drift_seconds > 60
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: >
+            Order poller drift >60s for {{ $labels.gateway_label }}/{{ $labels.account_id }}
+          description: >
+            broker_poller_drift_seconds > 60 s sustained for 2 m on
+            gateway_label={{ $labels.gateway_label }}
+            account_id={{ $labels.account_id }}.
+            The order poller may have stalled or the heartbeat feed is not
+            updating. Cross-check schwab_order_poller_iterations_total cadence
+            and the SchwabOrderPollerStalled alert; inspect sidecar logs for
+            orderevent_poller_tick_failed entries.
+
+      # G2: combined place+cancel+modify error rate >5% over 5 m.
+      # NOTE: broker_order_place_total / broker_order_cancel_total /
+      #   broker_order_modify_total are declared in backend/app/core/metrics.py
+      #   (Phase 9.7 G2) but the application-side increments are not yet wired.
+      #   See TODO comments in metrics.py pointing to orders_service.py and
+      #   api/orders.py for the exact call sites.  Until those increments land
+      #   the denominator will be 0, the division evaluates to NaN, and this
+      #   alert will NOT fire.  For Schwab-specific interim coverage see
+      #   SchwabPlaceOrderErrorRateHigh (phase8a_schwab_trade group), which uses
+      #   schwab_http_requests_total{endpoint="/accounts.orders.place"}.
+      - alert: BrokerPlaceModifyCancelErrors
+        expr: |
+          (
+            sum(rate(broker_order_place_total{result!="success"}[5m]))
+            + sum(rate(broker_order_cancel_total{result!="success"}[5m]))
+            + sum(rate(broker_order_modify_total{result!="success"}[5m]))
+          )
+          /
+          (
+            sum(rate(broker_order_place_total[5m]))
+            + sum(rate(broker_order_cancel_total[5m]))
+            + sum(rate(broker_order_modify_total[5m]))
+          )
+          > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Broker order operation error rate >5% over 5m"
+          description: >
+            Combined place+cancel+modify error rate (result!="success") exceeds
+            5% sustained for 5m. Check broker sidecar logs for RPC errors and
+            review broker_order_place_total, broker_order_cancel_total, and
+            broker_order_modify_total label breakdown for the affected label.
+            Cross-check SchwabPlaceOrderErrorRateHigh for Schwab-specific signal.

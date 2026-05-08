@@ -517,3 +517,91 @@ bar_service_backfill_total = Counter(
     labelnames=("source", "timeframe", "outcome"),  # done|failed|coalesced_wait
     registry=registry,
 )
+
+
+# ──────────────── Phase 9.7 G1-G2 — capability + order-flow metrics ──────────
+# G1: broker capability-check observability
+# TODO(app-side): increment broker_capability_mismatch_total in
+#   backend/app/services/order_capability_service.py when is_supported()
+#   returns False AND the DB row exists (row is not None but is_supported=False).
+#   That is the "mismatch" case: a combo is in the table but flagged unsupported,
+#   yet the operator is still submitting it.  Suggested call site: inside
+#   is_supported() after `supported = bool(row is not None and row["is_supported"])`
+#   — add an `elif row is not None:` branch that increments this counter before
+#   returning False.
+broker_capability_mismatch_total = Counter(
+    "broker_capability_mismatch_total",
+    "Capability checks that returned unsupported despite a DB row existing "
+    "(is_supported=False rows). Sustained increments indicate broker-capability "
+    "table drift vs the order types actually being submitted. "
+    "Feeds BrokerCapabilityMismatchSustained alert.",
+    labelnames=["broker"],
+    registry=registry,
+)
+
+# G1: poller drift gauge — seconds since the last successful poller tick per
+# (gateway_label, account_id).  The schwab sidecar already emits
+# schwab_order_poller_iterations_total; this backend Gauge is the companion
+# staleness signal intended to be set by the backend's order-poller health
+# probe or a BrokerDiscoverer extension.
+# TODO(app-side): set broker_poller_drift_seconds in
+#   backend/app/services/brokers.py (BrokerDiscoverer tick or a dedicated
+#   HealthPoller) by recording monotonic timestamps per (gateway_label,
+#   account_id) and computing elapsed since the last successful iteration.
+#   Alternatively, feed it from the schwab sidecar's OrderPoller heartbeat RPC
+#   if one is added in a future phase.  Until then this Gauge stays at its
+#   initial 0 and the alert will not fire.
+broker_poller_drift_seconds = Gauge(
+    "broker_poller_drift_seconds",
+    "Seconds since the last successful order-poller iteration per "
+    "(gateway_label, account_id). Initialises at 0 (no tick yet observed). "
+    "Feeds BrokerPollerDriftHigh alert (threshold >60 s sustained 2 m).",
+    labelnames=["gateway_label", "account_id"],
+    registry=registry,
+)
+
+# G2: per-broker order-operation outcome counters (place / cancel / modify).
+# These are backend-side operation totals, distinct from the sidecar-side
+# schwab_http_requests_total.  The BrokerPlaceModifyCancelErrors alert uses
+# the union of all three to compute a multi-broker error rate.
+# TODO(app-side): increment broker_order_place_total in
+#   backend/app/services/orders_service.py — place_order():
+#     result="success"  → after _mark_order_submitted() succeeds
+#     result="error"    → in the bare `except Exception` block (~line 352)
+#     result="timeout"  → in the BrokerSidecarTimeout catch block (~line 349)
+#   label=account.gateway_label
+# TODO(app-side): increment broker_order_cancel_total in
+#   backend/app/services/orders_service.py — cancel_order():
+#     result="success"  → on CancelOrderResult(status="cancel_requested")
+#     result="error"    → on CancelUnavailable 422 (broker rejected)
+#     result="timeout"  → on BrokerSidecarTimeout/BrokerSidecarUnavailable catch
+#   label=str(row["gateway_label"])
+# TODO(app-side): increment broker_order_modify_total in
+#   backend/app/api/orders.py — PUT /api/orders/{id} handler:
+#     result="success"  → on 200 response path
+#     result="error"    → on broker_modify_rejected JSONResponse 422
+#     result="timeout"  → on BrokerSidecarUnavailable 503 response
+#   label extracted from the order row's gateway_label
+broker_order_place_total = Counter(
+    "broker_order_place_total",
+    "Place-order attempts by gateway label and result (success|error|timeout). "
+    "Error rate denominator for BrokerPlaceModifyCancelErrors alert.",
+    labelnames=["label", "result"],
+    registry=registry,
+)
+
+broker_order_cancel_total = Counter(
+    "broker_order_cancel_total",
+    "Cancel-order attempts by gateway label and result (success|error|timeout). "
+    "Error rate denominator for BrokerPlaceModifyCancelErrors alert.",
+    labelnames=["label", "result"],
+    registry=registry,
+)
+
+broker_order_modify_total = Counter(
+    "broker_order_modify_total",
+    "Modify-order attempts by gateway label and result (success|error|timeout). "
+    "Error rate denominator for BrokerPlaceModifyCancelErrors alert.",
+    labelnames=["label", "result"],
+    registry=registry,
+)
