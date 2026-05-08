@@ -60,6 +60,8 @@ def _order_response(**overrides: object) -> OrderResponse:
         "id": uuid4(),
         "account_id": uuid4(),
         "broker_order_id": "1001",
+        # OrderResponse.conid was added in Phase 8b; required field.
+        "conid": "265598",
         "symbol": "AAPL",
         "side": "BUY",
         "order_type": "MARKET",

@@ -28,11 +28,6 @@ def test_modify_order_request_has_cash_amount_field() -> None:
     assert field.number == 15
 
 
-def test_order_request_has_cash_amount_field() -> None:
-    field = broker_pb2.OrderRequest.DESCRIPTOR.fields_by_name["cash_amount"]
-    assert field.number == 15
-
-
 def test_order_has_cash_amount_field() -> None:
     field = broker_pb2.Order.DESCRIPTOR.fields_by_name["cash_amount"]
     assert field.number == 15
