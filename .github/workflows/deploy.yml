@@ -48,13 +48,25 @@ jobs:
           ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
 
       - name: Add VPS host key
-        # Operator: run `ssh-keyscan -p 2222 -H 88.208.197.219` once on a trusted
-        # machine and paste the output into the VPS_HOST_KEY GitHub Actions secret.
-        # TOFU via ssh-keyscan is unsafe in CI — pinned key prevents MITM.
+        # Prefer the pinned key from the VPS_HOST_KEY secret (mitigates BGP/
+        # DNS hijack at the keyscan moment, per Phase 1 retro 3604349).
+        # If the secret is unset, fall back to ssh-keyscan TOFU so the deploy
+        # pipeline is not bricked while the operator captures the pinned key.
+        # Operator action: run `ssh-keyscan -p 2222 -H 88.208.197.219` on a
+        # trusted machine and paste the output into VPS_HOST_KEY to retire
+        # the TOFU fallback.
+        env:
+          VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          echo "${{ secrets.VPS_HOST_KEY }}" >> ~/.ssh/known_hosts
+          if [ -n "$VPS_HOST_KEY" ]; then
+            echo "Using pinned VPS_HOST_KEY from secrets"
+            printf '%s\n' "$VPS_HOST_KEY" >> ~/.ssh/known_hosts
+          else
+            echo "VPS_HOST_KEY secret unset — falling back to ssh-keyscan (TOFU)"
+            ssh-keyscan -p 2222 -H 88.208.197.219 >> ~/.ssh/known_hosts
+          fi
           chmod 600 ~/.ssh/known_hosts
 
       - name: Rsync to VPS
