@@ -1,5 +1,15 @@
 export { ChartPage } from './ChartPage';
 export { TradeChart } from './TradeChart';
+export { PositionOverlay, useInstrumentTickSize, usePositionsForCanonical } from './PositionOverlay';
+export type { ModifyRequest } from './PositionOverlay';
+export {
+  longPositionOverlay,
+  shortPositionOverlay,
+  registerCustomOverlays,
+  snapLongPositionToTick,
+  snapShortPositionToTick,
+} from './overlays';
+export type { PositionOverlayExtendData, PositionLegType } from './overlays';
 export { ChartToolbar } from './ChartToolbar';
 export { TimeframeBar } from './TimeframeBar';
 export { IndicatorPicker } from './IndicatorPicker';
@@ -11,4 +21,3 @@ export { ChartContextMenu } from './ChartContextMenu';
 export type { ChartContextMenuProps } from './ChartContextMenu';
 export { useChartStore } from './stores/chartStore';
 export { useLiveTailStore, FINAL_REVISION_VAL } from './stores/liveTailStore';
-

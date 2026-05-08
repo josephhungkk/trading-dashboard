@@ -15,6 +15,7 @@ vi.mock('klinecharts', () => ({
     createIndicator: vi.fn(),
   })),
   dispose: vi.fn(),
+  registerOverlay: vi.fn(),
 }));
 
 // Mock WebSocket so openLiveTail doesn't throw in jsdom.

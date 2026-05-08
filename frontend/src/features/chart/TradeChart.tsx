@@ -8,6 +8,8 @@ import { fetchBars, toChartBars } from './services/bars';
 import { openLiveTail } from './services/liveTail';
 import type { BarEnvelope } from './services/liveTail';
 import { defaultWindowMs } from './services/timeframe';
+import { PositionOverlay, type ModifyRequest } from './PositionOverlay';
+import { registerCustomOverlays } from './overlays';
 
 interface TradeChartProps {
   canonicalId: string;
@@ -16,6 +18,7 @@ interface TradeChartProps {
 export function TradeChart({ canonicalId }: TradeChartProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
+  const [chartReady, setChartReady] = React.useState(false);
   // Holds the live subscribeBar callback so the DataLoader can push ticks.
   const barCallbackRef = useRef<((data: KLineData) => void) | null>(null);
   const timeframe = useChartStore((s) => s.timeframe);
@@ -35,6 +38,7 @@ export function TradeChart({ canonicalId }: TradeChartProps): React.JSX.Element 
     const chart = init(containerRef.current);
     if (!chart) return;
     chartRef.current = chart;
+    registerCustomOverlays();
 
     // v10: symbol + period must be set before setDataLoader triggers getBars.
     chart.setSymbol({ ticker: canonicalId, pricePrecision: 2, volumePrecision: 0 });
@@ -74,6 +78,7 @@ export function TradeChart({ canonicalId }: TradeChartProps): React.JSX.Element 
         barCallbackRef.current = null;
       },
     });
+    setChartReady(true);
 
     const container = containerRef.current;
     return () => {
@@ -82,8 +87,14 @@ export function TradeChart({ canonicalId }: TradeChartProps): React.JSX.Element 
       barCallbackRef.current = null;
       dispose(container);
       chartRef.current = null;
+      setChartReady(false);
     };
   }, [canonicalId, timeframe]);
+
+  const handleModifyRequest = React.useCallback((req: ModifyRequest) => {
+    void req;
+    // TODO(Task 44): open ConfirmDialog and wire modify-nonce flow.
+  }, []);
 
   // Sync indicators into chart whenever the list changes.
   useEffect(() => {
@@ -140,11 +151,20 @@ export function TradeChart({ canonicalId }: TradeChartProps): React.JSX.Element 
   }, [canonicalId, timeframe, shouldAccept, recordSeen, lockBucket]);
 
   return (
-    <div
-      ref={containerRef}
-      className="h-full w-full"
-      data-testid="trade-chart"
-    />
+    <>
+      <div
+        ref={containerRef}
+        className="h-full w-full"
+        data-testid="trade-chart"
+      />
+      {chartReady && (
+        <PositionOverlay
+          canonicalId={canonicalId}
+          chartRef={chartRef}
+          onModifyRequest={handleModifyRequest}
+        />
+      )}
+    </>
   );
 }
 

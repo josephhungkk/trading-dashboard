@@ -26,6 +26,7 @@ const { mockSetDataLoader, mockSetSymbol, mockSetPeriod, mockCreateIndicator, mo
 vi.mock('klinecharts', () => ({
   init: mockInit,
   dispose: mockDispose,
+  registerOverlay: vi.fn(),
 }));
 
 // WebSocket mock that records every instantiated instance and exposes close code support.
