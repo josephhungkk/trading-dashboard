@@ -74,7 +74,7 @@ def _order_side(raw: str) -> int:
 
 
 def _order_type(raw: str) -> int:
-    return _ORDER_TYPE_MAP.get(raw.upper(), broker_pb2.OrderType.TYPE_UNSPECIFIED)
+    return _ORDER_TYPE_MAP.get(raw.upper(), broker_pb2.OrderType.ORDER_TYPE_UNSPECIFIED)
 
 
 def _tif(raw: str) -> int:
@@ -86,11 +86,20 @@ def _status(raw: str) -> int:
 
 
 def canonical_to_alpaca_crypto(canonical_id: str) -> str:
-    """crypto:BTC:US -> BTC/USD. Raises ValueError on malformed input."""
+    """Convert canonical crypto id to Alpaca pair format.
+
+    Standard 3-part form: ``crypto:BTC:US`` -> ``BTC/USD``.
+    Extended 4-part form: ``crypto:BTC:US:USDT`` -> ``BTC/USDT``.
+
+    MED-code-2: the quote currency is encoded as the optional 4th part.
+    Falls back to USD for the common 3-part ``crypto:<BASE>:<COUNTRY>`` form.
+    Raises ValueError on malformed input.
+    """
     parts = canonical_id.split(":")
     if len(parts) < 3 or parts[0] != "crypto":
         raise ValueError(f"not a crypto canonical_id: {canonical_id}")
-    return f"{parts[1].upper()}/USD"
+    quote = parts[3].upper() if len(parts) >= 4 else "USD"
+    return f"{parts[1].upper()}/{quote}"
 
 
 def alpaca_crypto_to_canonical(pair: str) -> str:
@@ -152,7 +161,10 @@ def to_proto_order(data: dict[str, Any]) -> broker_pb2.Order:
     contract = broker_pb2.Contract(
         symbol=symbol,
         currency=currency,
-        asset_class=broker_pb2.AssetClass.STOCK,
+        # HIGH-code-4: use _asset_class() so crypto orders get CRYPTO not STOCK.
+        # AlpacaClient._order_to_dict already normalises asset_class to uppercase
+        # with US_EQUITY -> STOCK substitution.
+        asset_class=_asset_class(str(data.get("asset_class") or "")),
         conid=symbol,
         local_symbol=symbol,
         multiplier="1",

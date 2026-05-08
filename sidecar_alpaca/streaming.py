@@ -40,7 +40,7 @@ def _map_crypto_trade_update(payload: dict[str, Any]) -> dict[str, str]:
 
 async def crypto_order_event_source(
     stream_factory: Callable[[], Any],
-) -> AsyncGenerator[dict[str, str], None]:
+) -> AsyncGenerator[dict[str, str]]:
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(
         maxsize=_CRYPTO_ORDER_EVENT_QUEUE_MAXSIZE
     )

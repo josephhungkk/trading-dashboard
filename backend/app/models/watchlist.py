@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CHAR, DateTime, Index, Text, func
+from sqlalchemy import CHAR, DateTime, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,4 +32,6 @@ class WatchlistEntry(Base):
         server_default=func.now(),
     )
 
-    __table_args__ = (Index("watchlist_entries_broker_symbol_idx", "broker_id", "symbol"),)
+    __table_args__ = (
+        UniqueConstraint("broker_id", "symbol", name="watchlist_entries_broker_symbol_uq"),
+    )

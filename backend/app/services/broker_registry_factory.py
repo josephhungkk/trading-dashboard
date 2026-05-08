@@ -186,10 +186,21 @@ class BrokerConfigurer:
         Configure, otherwise the paper sidecar might receive live creds
         (or vice versa). On mismatch, increment
         ``alpaca_mode_mismatch_total{label}`` and refuse.
+
+        HIGH-sec-3: use exact-match dict lookup instead of .endswith() substring
+        match to prevent a label like ``alpaca-paper-olive`` from being
+        classified as live.
         """
         from app.core.metrics import ALPACA_MODE_MISMATCH_TOTAL
 
-        expected_mode = "live" if label.endswith("-live") else "paper"
+        valid_alpaca_labels: dict[str, str] = {
+            "alpaca-live": "live",
+            "alpaca-paper": "paper",
+        }
+        expected_mode = valid_alpaca_labels.get(label)
+        if expected_mode is None:
+            log.error("alpaca.configure_refused.unknown_label", label=label)
+            return False
 
         client = await self.registry.get_client(label)
 
@@ -200,7 +211,7 @@ class BrokerConfigurer:
             return False
 
         sidecar_label = getattr(health, "label", "") or ""
-        sidecar_mode = "live" if sidecar_label.endswith("-live") else "paper"
+        sidecar_mode = valid_alpaca_labels.get(sidecar_label)
         if sidecar_mode != expected_mode:
             ALPACA_MODE_MISMATCH_TOTAL.labels(label=label).inc()
             log.error(

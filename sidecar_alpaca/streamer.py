@@ -31,8 +31,10 @@ log = structlog.get_logger(module="sidecar_alpaca.streamer")
 
 _IEX_CAP = 30
 _CRYPTO_CAP = 30
-_BACKOFF_MAX_SEC = 30.0
+_BACKOFF_MAX_SEC = 60.0  # CRIT-spec-1: spec says min(2**n, 60); was incorrectly 30
 _AUTH_TIMEOUT_SEC = 10.0
+# MED-code-1: per-message recv timeout to detect stalled connections.
+_RECV_TIMEOUT_SEC = 30.0
 _SUBSCRIBE_REJECTION_CODES = {
     409: "cap_exceeded",
     410: "cap_exceeded",
@@ -153,6 +155,18 @@ class AlpacaStreamer:
 
     async def on_resync(self, symbols: list[pb.SymbolRef] | list[str]) -> None:
         expected_pairs = _symbol_pairs(symbols)
+        # HIGH-code-3: mirror on_resync_crypto — cap to _IEX_CAP before replacing.
+        if len(expected_pairs) > _IEX_CAP:
+            for raw_symbol, _canonical_id in expected_pairs[_IEX_CAP:]:
+                ALPACA_UPSTREAM_SUBSCRIBE_REJECTED_TOTAL.labels(
+                    endpoint="iex", reason="cap_exceeded_on_resync"
+                ).inc()
+                log.warning(
+                    "alpaca.streamer.iex_cap_exceeded_on_resync",
+                    cap=_IEX_CAP,
+                    symbol=raw_symbol,
+                )
+            expected_pairs = expected_pairs[:_IEX_CAP]
         expected = {raw_symbol for raw_symbol, _canonical_id in expected_pairs}
         async with self._subs_lock:
             current = set(self._iex_active)
@@ -308,7 +322,10 @@ class AlpacaStreamer:
             try:
                 await self._connect_iex_once()
                 backoff_attempt = 0
-            except (ConnectionClosed, OSError) as exc:
+            except (ConnectionClosed, OSError, TimeoutError) as exc:
+                # HIGH-sec-2: TimeoutError from _authenticate must be caught here
+                # to subject auth timeouts to the same backoff as disconnects,
+                # preventing rapid credential spray on repeated auth failures.
                 if self._shutting_down:
                     return
                 ALPACA_WS_RECONNECT_TOTAL.labels(
@@ -331,7 +348,10 @@ class AlpacaStreamer:
                 await self._authenticate(ws, api_key, api_secret)
                 await self._replay_iex_subscriptions()
                 while not self._shutting_down:
-                    self._dispatch_frame(await ws.recv())
+                    # MED-code-1: bounded recv — detect stalled connections within
+                    # _RECV_TIMEOUT_SEC rather than waiting indefinitely.
+                    raw = await asyncio.wait_for(ws.recv(), timeout=_RECV_TIMEOUT_SEC)
+                    self._dispatch_frame(raw)
             finally:
                 if self._iex_ws is ws:
                     self._iex_ws = None
@@ -342,7 +362,8 @@ class AlpacaStreamer:
             try:
                 await self._connect_crypto_once()
                 backoff_attempt = 0
-            except (ConnectionClosed, OSError) as exc:
+            except (ConnectionClosed, OSError, TimeoutError) as exc:
+                # HIGH-sec-2: match _iex_loop — auth TimeoutError gets backoff too.
                 if self._shutting_down:
                     return
                 ALPACA_WS_RECONNECT_TOTAL.labels(
@@ -365,7 +386,9 @@ class AlpacaStreamer:
                 await self._authenticate(ws, api_key, api_secret, endpoint="crypto")
                 await self._replay_crypto_subscriptions()
                 while not self._shutting_down:
-                    self._dispatch_frame(await ws.recv(), endpoint="crypto")
+                    # MED-code-1: bounded recv — same as IEX endpoint.
+                    raw = await asyncio.wait_for(ws.recv(), timeout=_RECV_TIMEOUT_SEC)
+                    self._dispatch_frame(raw, endpoint="crypto")
             finally:
                 if self._crypto_ws is ws:
                     self._crypto_ws = None
@@ -540,6 +563,34 @@ class AlpacaStreamer:
             return
         log.warning("alpaca.streamer.iex_error", code=code, msg=row.get("msg"))
 
+    async def _handle_subscribe_rejection_async(
+        self,
+        raw_symbol: str,
+        canonical_id: str,
+        endpoint: str,
+        reason: str,
+        code: int | None,
+        msg: str | None,
+    ) -> None:
+        """Async half of rejection handling — acquires lock before mutating sets."""
+        async with self._subs_lock:
+            if endpoint == "iex":
+                self._iex_active.discard(raw_symbol)
+                self._iex_symbol_map.pop(raw_symbol, None)
+            else:
+                self._crypto_active.discard(raw_symbol)
+            self._record_active_locked()
+        log.warning(
+            "alpaca.streamer.subscribe_rejected",
+            endpoint=endpoint,
+            reason=reason,
+            code=code,
+            symbol=raw_symbol,
+            canonical_id=canonical_id,
+            msg=msg,
+        )
+        self._dispatch_drift_sentinel(canonical_id, reason)
+
     def _handle_subscribe_rejection(
         self,
         row: dict[str, Any],
@@ -547,27 +598,27 @@ class AlpacaStreamer:
         endpoint: str,
         reason: str,
     ) -> None:
+        # HIGH-code-2: _dispatch_frame runs sync, but active-set mutation must
+        # hold _subs_lock. Schedule the async half as a task so the lock is
+        # properly acquired without blocking the sync dispatch path.
         ALPACA_UPSTREAM_SUBSCRIBE_REJECTED_TOTAL.labels(
             endpoint=endpoint, reason=reason
         ).inc()
         raw_symbol = self._rejected_symbol(row, endpoint=endpoint)
         canonical_id = self._canonical_id_for_row(raw_symbol, endpoint=endpoint)
-        if endpoint == "crypto":
-            self._crypto_active.discard(raw_symbol)
-        else:
-            self._iex_active.discard(raw_symbol)
-            self._iex_symbol_map.pop(raw_symbol, None)
-        self._record_active_locked()
-        log.warning(
-            "alpaca.streamer.subscribe_rejected",
-            endpoint=endpoint,
-            reason=reason,
-            code=row.get("code"),
-            symbol=raw_symbol,
-            canonical_id=canonical_id,
-            msg=row.get("msg"),
+        task = asyncio.create_task(
+            self._handle_subscribe_rejection_async(
+                raw_symbol=raw_symbol,
+                canonical_id=canonical_id,
+                endpoint=endpoint,
+                reason=reason,
+                code=row.get("code"),
+                msg=row.get("msg"),
+            ),
+            name="alpaca-rejection-cleanup",
         )
-        self._dispatch_drift_sentinel(canonical_id, reason)
+        self._callback_tasks.add(task)
+        task.add_done_callback(self._callback_tasks.discard)
 
     def _rejected_symbol(self, row: dict[str, Any], *, endpoint: str) -> str:
         active = self._crypto_active if endpoint == "crypto" else self._iex_active

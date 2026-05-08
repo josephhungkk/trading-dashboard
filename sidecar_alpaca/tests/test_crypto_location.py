@@ -1,7 +1,6 @@
 import importlib
 import os
 
-
 os.environ.setdefault("MODE", "paper")
 
 
@@ -18,8 +17,7 @@ def test_default_crypto_location_us(monkeypatch):
 def test_build_crypto_stream_uses_default_location(monkeypatch):
     monkeypatch.delenv("ALPACA_CRYPTO_LOCATION", raising=False)
 
-    from sidecar_alpaca import config
-    from sidecar_alpaca import streaming
+    from sidecar_alpaca import config, streaming
 
     importlib.reload(config)
     importlib.reload(streaming)

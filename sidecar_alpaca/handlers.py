@@ -41,6 +41,16 @@ from sidecar_alpaca.symbol_util import canonical_crypto_symbol
 
 log = structlog.get_logger(module="sidecar_alpaca.handlers")
 
+
+class _ConfiguredClientUnavailableError(RuntimeError):
+    """Raised by _configured_trading_client when no client is configured.
+
+    Callers catch this BEFORE issuing any gRPC writes and return an empty
+    response — context.abort() has already been called inside the helper, so
+    no additional gRPC status needs to be set.
+    """
+
+
 _ORDER_EVENT_QUEUES: dict[str, asyncio.Queue[broker_pb2.OrderEventMessage]] = {}
 _ORDER_EVENT_SUBSCRIPTIONS: dict[str, Any] = {}
 _ORDER_EVENT_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -204,11 +214,15 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                     grpc.StatusCode.ALREADY_EXISTS,
                     "client_order_id_duplicate",
                 )
-        client = await self._configured_trading_client(account_id, context)
+                return broker_pb2.PlaceOrderResponse()
+        try:
+            client = await self._configured_trading_client(account_id, context)
+        except _ConfiguredClientUnavailableError:
+            return broker_pb2.PlaceOrderResponse()
         try:
             order_request = self._build_order_request(request)
             order = await asyncio.to_thread(client.submit_order, order_request)
-        except (Exception,) as exc:
+        except Exception as exc:
             # _build_order_request may raise InvalidOperation/ValueError on bad
             # input; keep inside try so _abort_internal sends the sentinel
             # instead of leaking raw input via gRPC INTERNAL detail.
@@ -225,16 +239,19 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.CancelOrderResponse:
         account_id = self._account_id(request.account_number)
-        client = await self._configured_trading_client(account_id, context)
+        try:
+            client = await self._configured_trading_client(account_id, context)
+        except _ConfiguredClientUnavailableError:
+            return broker_pb2.CancelOrderResponse(accepted=False)
         api_error = load_api_error_class()
         try:
             await asyncio.to_thread(client.cancel_order_by_id, request.broker_order_id)
-        except (api_error,) as exc:
+        except api_error as exc:
             if _api_error_status(exc) in {404, 422}:
                 return broker_pb2.CancelOrderResponse(accepted=False)
             await self._abort_internal(context, exc)
             return broker_pb2.CancelOrderResponse(accepted=False)
-        except (Exception,) as exc:
+        except Exception as exc:
             await self._abort_internal(context, exc)
             return broker_pb2.CancelOrderResponse(accepted=False)
         return broker_pb2.CancelOrderResponse(accepted=True)
@@ -245,7 +262,10 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.ModifyOrderResponse:
         account_id = self._account_id(request.account_number)
-        client = await self._configured_trading_client(account_id, context)
+        try:
+            client = await self._configured_trading_client(account_id, context)
+        except _ConfiguredClientUnavailableError:
+            return broker_pb2.ModifyOrderResponse()
         api_error = load_api_error_class()
         try:
             replace_request = self._build_replace_order_request(request)
@@ -254,12 +274,12 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 request.broker_order_id,
                 replace_request,
             )
-        except (api_error,) as exc:
+        except api_error as exc:
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             safe_detail = getattr(exc, "message", None) or "alpaca_replace_order_failed"
             context.set_details(str(safe_detail))
             return broker_pb2.ModifyOrderResponse()
-        except (Exception,) as exc:
+        except Exception as exc:
             await self._abort_internal(context, exc)
             return broker_pb2.ModifyOrderResponse()
         return broker_pb2.ModifyOrderResponse(
@@ -273,11 +293,14 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.PlaceBracketResponse:
         account_id = self._account_id(request.parent.account_number)
-        client = await self._configured_trading_client(account_id, context)
+        try:
+            client = await self._configured_trading_client(account_id, context)
+        except _ConfiguredClientUnavailableError:
+            return broker_pb2.PlaceBracketResponse()
         try:
             order_request = self._build_bracket_order_request(request)
             order = await asyncio.to_thread(client.submit_order, order_request)
-        except (Exception,) as exc:
+        except Exception as exc:
             await self._abort_internal(context, exc)
             return broker_pb2.PlaceBracketResponse()
 
@@ -319,22 +342,26 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
     ) -> broker_pb2.GetHistoricalBarsResponse:
         if request.timeframe != "1m":
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "timeframe_1m_only")
+            return broker_pb2.GetHistoricalBarsResponse()
         canonical_id = request.canonical_id.strip()
         if not canonical_id:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "canonical_id_required",
             )
+            return broker_pb2.GetHistoricalBarsResponse()
         if request.range_start.seconds <= 0 or request.range_end.seconds <= 0:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "range_start_end_required",
             )
+            return broker_pb2.GetHistoricalBarsResponse()
         if request.range_end.seconds <= request.range_start.seconds:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "range_end must be greater than range_start",
             )
+            return broker_pb2.GetHistoricalBarsResponse()
 
         asset_class = _historical_asset_class(canonical_id)
         if asset_class is None:
@@ -342,6 +369,7 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "unsupported_asset_class",
             )
+            return broker_pb2.GetHistoricalBarsResponse()
 
         try:
             stock_client, crypto_client = await self._configured_market_data_clients(
@@ -354,9 +382,13 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 request=request,
             )
             if asset_class == "equity":
-                response = await asyncio.to_thread(stock_client.get_stock_bars, bars_request)
+                response = await asyncio.to_thread(
+                    stock_client.get_stock_bars, bars_request
+                )
             else:
-                response = await asyncio.to_thread(crypto_client.get_crypto_bars, bars_request)
+                response = await asyncio.to_thread(
+                    crypto_client.get_crypto_bars, bars_request
+                )
         except (grpc.RpcError, RuntimeError, ValueError) as exc:
             log.warning("alpaca_get_historical_bars_failed", exc_info=exc)
             raise
@@ -459,6 +491,7 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.NOT_FOUND,
                 "trading_client_not_configured",
             )
+            raise _ConfiguredClientUnavailableError("trading_client_not_configured")
         return client
 
     def _build_order_request(self, request: broker_pb2.PlaceOrderRequest) -> Any:
@@ -583,6 +616,8 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
                 "trading_stream_cap_5",
             )
+            # CRIT-code-4: rejected acquires must not inflate the counter.
+            return
         _TRADING_STREAM_COUNTS[account_id] = count + 1
 
     @staticmethod
@@ -652,7 +687,7 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         if queue.full():
             try:
                 queue.get_nowait()
-            except (asyncio.QueueEmpty,) as exc:
+            except asyncio.QueueEmpty as exc:
                 log.warning("orderevent_queue_empty_on_overflow", exc_info=exc)
             log.warning("orderevent_queue_full", key="orderevent_queue_full")
         queue.put_nowait(message)

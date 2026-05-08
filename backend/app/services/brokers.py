@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import UUID
 
-import grpc  # type: ignore[import-untyped]
+import grpc
 import structlog
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import RowMapping
@@ -368,7 +368,7 @@ class BrokerSidecarClient:
         limit: int = 1000,
     ) -> base.HistoricalBarsResult:
         """Fetch historical OHLCV bars from the sidecar (Phase 9 BarService)."""
-        from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
+        from google.protobuf.timestamp_pb2 import Timestamp
 
         request = broker_pb2.GetHistoricalBarsRequest(
             canonical_id=canonical_id,
@@ -1310,9 +1310,12 @@ class BrokerDiscoverer:
                 if acct_row is None:
                     continue
                 account_id = cast(UUID, acct_row[0])
+                resolved_broker_id = SIDECAR_BROKERS.get(label, "ibkr")
                 try:
                     async with session.begin_nested():
-                        await self._upsert_positions(session, account_id, positions)
+                        await self._upsert_positions(
+                            session, account_id, positions, resolved_broker_id
+                        )
                 except DBAPIError as exc:
                     if getattr(exc.orig, "sqlstate", None) != "22003":
                         raise
@@ -1332,17 +1335,16 @@ class BrokerDiscoverer:
         session: AsyncSession,
         account_id: UUID,
         positions: list[base.Position],
+        broker_id: str,
     ) -> None:
         """Atomic upsert + delta-delete for one account's positions.
 
         Uses NOT EXISTS (architect-review HIGH-4) — NULL-safe and slightly
         faster than NOT IN.
+
+        HIGH-db-1: broker_id is now threaded from the call site (already known
+        at the discoverer loop) instead of issuing a SELECT per account tick.
         """
-        broker_id_result = await session.execute(
-            text("SELECT broker_id FROM broker_accounts WHERE id = :account_id"),
-            {"account_id": account_id},
-        )
-        broker_id = str(broker_id_result.scalar_one())
         rows: list[dict[str, str | None]] = []
         for p in positions:
             symbol = p.contract.symbol

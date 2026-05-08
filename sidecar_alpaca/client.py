@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import hashlib
 import signal
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,7 +38,16 @@ StopLossRequest: Any | None = None
 
 
 _TRADING_CLIENTS: dict[tuple[str, str], Any] = {}
-_TRADING_CLIENT_CREDENTIALS: dict[tuple[str, str], tuple[str, str, bool]] = {}
+# HIGH-sec-1: store SHA-256 fingerprint instead of plaintext credentials.
+# Used only for change-detection; the actual secret is never re-read from here.
+_TRADING_CLIENT_CREDENTIALS: dict[tuple[str, str], bytes] = {}
+
+
+def _credential_fingerprint(api_key: str, api_secret: str, paper: bool) -> bytes:
+    """Return a SHA-256 digest of the credential triple for change-detection only."""
+    return hashlib.sha256(
+        f"{api_key}:{api_secret}:{int(paper)}".encode()
+    ).digest()
 
 
 @dataclass
@@ -102,7 +112,8 @@ class AlpacaClient:
         orders = await self._http_call(
             "get_orders",
             lambda: self._client.get_orders(
-                filter=GetOrdersRequest(status=QueryOrderStatus.ALL),
+                # HIGH-code-5: bound result set to prevent unbounded memory growth.
+                filter=GetOrdersRequest(status=QueryOrderStatus.ALL, limit=500),
             ),
         )
         return [self._order_to_dict(order) for order in orders]
@@ -116,7 +127,7 @@ class AlpacaClient:
             ALPACA_HTTP_REQUESTS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             ALPACA_ACCOUNT_READ_FAILURES_TOTAL.labels(kind=endpoint).inc()
             raise AlpacaClientError(endpoint=endpoint, message=str(exc)) from exc
-        except (Exception,) as exc:
+        except Exception as exc:
             ALPACA_HTTP_REQUESTS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             ALPACA_ACCOUNT_READ_FAILURES_TOTAL.labels(kind=endpoint).inc()
             raise AlpacaClientError(endpoint=endpoint, message=str(exc)) from exc
@@ -146,10 +157,16 @@ class AlpacaClient:
         }
 
     def _order_to_dict(self, order: Any) -> dict[str, Any]:
+        # HIGH-code-4: include asset_class so normalize.to_proto_order can
+        # correctly classify crypto orders as CRYPTO instead of STOCK.
+        raw_asset_class = str(getattr(order, "asset_class", "") or "").upper()
+        # Normalise US_EQUITY -> STOCK to match _ASSET_CLASS_MAP in normalize.py.
+        asset_class = raw_asset_class.replace("US_EQUITY", "STOCK")
         return {
             "id": str(order.id),
             "client_order_id": str(order.client_order_id or ""),
             "symbol": str(order.symbol),
+            "asset_class": asset_class,
             "qty": str(order.qty),
             "filled_qty": str(order.filled_qty or 0),
             "side": str(order.side).upper(),
@@ -171,10 +188,10 @@ def configure_trading_client(
 ) -> Any:
     """Create or refresh the lazily shared trading client for an account/mode."""
     key = (account_id, mode)
-    credentials = (api_key, api_secret, paper)
+    fingerprint = _credential_fingerprint(api_key, api_secret, paper)
     if (
         key not in _TRADING_CLIENTS
-        or _TRADING_CLIENT_CREDENTIALS.get(key) != credentials
+        or _TRADING_CLIENT_CREDENTIALS.get(key) != fingerprint
     ):
         trading_client = _load_trading_client_class()
         _TRADING_CLIENTS[key] = trading_client(
@@ -183,7 +200,9 @@ def configure_trading_client(
             paper=paper,
             raw_data=False,
         )
-        _TRADING_CLIENT_CREDENTIALS[key] = credentials
+        # Store only the fingerprint — plaintext secret must not persist in memory
+        # beyond this frame (HIGH-sec-1).
+        _TRADING_CLIENT_CREDENTIALS[key] = fingerprint
     return _TRADING_CLIENTS[key]
 
 
@@ -223,16 +242,38 @@ def load_order_request_classes() -> dict[str, Any]:
         from alpaca.trading.enums import OrderClass as _OrderClass
         from alpaca.trading.requests import (
             LimitOnCloseOrderRequest as _LimitOnCloseOrderRequest,
+        )
+        from alpaca.trading.requests import (
             LimitOnOpenOrderRequest as _LimitOnOpenOrderRequest,
+        )
+        from alpaca.trading.requests import (
             LimitOrderRequest as _LimitOrderRequest,
+        )
+        from alpaca.trading.requests import (
             MarketOnCloseOrderRequest as _MarketOnCloseOrderRequest,
+        )
+        from alpaca.trading.requests import (
             MarketOnOpenOrderRequest as _MarketOnOpenOrderRequest,
+        )
+        from alpaca.trading.requests import (
             MarketOrderRequest as _MarketOrderRequest,
+        )
+        from alpaca.trading.requests import (
             ReplaceOrderRequest as _ReplaceOrderRequest,
-            StopLossRequest as _StopLossRequest,
+        )
+        from alpaca.trading.requests import (
             StopLimitOrderRequest as _StopLimitOrderRequest,
+        )
+        from alpaca.trading.requests import (
+            StopLossRequest as _StopLossRequest,
+        )
+        from alpaca.trading.requests import (
             StopOrderRequest as _StopOrderRequest,
+        )
+        from alpaca.trading.requests import (
             TakeProfitRequest as _TakeProfitRequest,
+        )
+        from alpaca.trading.requests import (
             TrailingStopOrderRequest as _TrailingStopOrderRequest,
         )
 
