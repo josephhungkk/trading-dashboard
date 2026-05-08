@@ -41,7 +41,7 @@ Primitives + patterns ship `.stories.tsx` + `.test.tsx`. Features tested E2E. Bo
 
 ## Broker adapters (Phase 4+)
 
-Per-broker invariants live in phase-memory files (read before changing those surfaces): `phase4_sidecar_topology.md` (IBKR mTLS+CRL+watchdog), `phase5a_shipped.md` (NLV cache), `phase5b_shipped.md` (trade execution), `phase5c_shipped.md` (modify+bracket+fills), `phase6_futu_topology.md`, `phase7a_schwab_topology.md` (OAuth+two-tier+BackendCallback), `phase7b1_shipped.md` (quote engine+WS gateway), `phase7c_alpaca_topology.md` (in-cluster docker+30-symbol cap). Don't copy that detail here.
+Per-broker invariants live in phase-memory files (read before changing those surfaces): `phase4_sidecar_topology.md` (IBKR mTLS+CRL+watchdog), `phase5a_shipped.md` (NLV cache), `phase5b_shipped.md` (trade execution), `phase5c_shipped.md` (modify+bracket+fills), `phase6_futu_topology.md`, `phase7a_schwab_topology.md` (OAuth+two-tier+BackendCallback), `phase7b1_shipped.md` (quote engine+WS gateway), `phase7c_alpaca_topology.md` (in-cluster docker+30-symbol cap), `phase9_shipped.md` (charting v1: bar aggregator + historical store + 45 indicators + drag-modify SL/TP). Don't copy that detail here.
 
 Cross-cutting load-bearing rules:
 - **Boundary stripping:** `AccountResponse` to FE = `id, broker_id, alias, mode, currency_base, display_order` only. Never `gateway_label`/`account_number`. `account_id` UUID is the only FE handle; `AccountService._resolve_account` is the single chokepoint.

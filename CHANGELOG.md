@@ -5,6 +5,164 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-05-08
+
+### Added — Phase 9 complete (Charting v1: bar aggregator + historical store + chart UI + 45 indicators)
+
+50 of 53 tasks across 9 of 11 chunks shipped (64 commits since v0.10.0). Plan
+[`docs/superpowers/plans/2026-05-07-phase9-charting-plan.md`](docs/superpowers/plans/2026-05-07-phase9-charting-plan.md);
+spec [`docs/superpowers/specs/2026-05-07-phase9-charting-design.md`](docs/superpowers/specs/2026-05-07-phase9-charting-design.md)
+(1225 lines after ARCHITECT-REVIEW applied 5 CRIT + 9 HIGH + 14 MED inline at `aa006b1`).
+Per-chunk reviewer chain (5 agents at end of each chunk) caught defects before merge — fixes batched
+into single commits per chunk: `40c63b3` (B), `44bb754` (C), `1a435ca`+`a8739b5` (D),
+`cd1b6ac`+`f63814a` (E), `36711a9` (F), `93a705d` (G), `8b0aa5b` (H).
+
+#### Chunk A — Foundation (commits `aa006b1..8958eca`, 12 commits)
+
+- **Alembic 0023** install TimescaleDB extension; **0023a** instrument_id resolver columns + backfill;
+  **0023b** tick_size column on instruments; **0024** `bars_1s`/`bars_1m` hypertables with 7d/6mo
+  retention + CHECK constraints (volume_source, source_priority); **0026** `chart_layouts` single-tenant
+  table with 64KB payload cap; **0027** `bar_backfill_jobs` with partial-unique-pending index.
+- **`bar_service.active_set`** query with 1000-instrument cap.
+- **`app_config` seeder** for `charts.*` namespace (8 keys: schema_version, retention windows,
+  pre-warm cron, etc.).
+- **CI plumbing**: switch postgres service image to `timescaledb 2.26.4-pg18`; pin pnpm 10.33.0;
+  unblock mypy `--strict` (13 pre-existing fixes); buf/ruff/eslint format gates.
+
+#### Chunk B — bar_aggregator service (commits `6a5bc45..2f7bd64` + `40c63b3`, 7 commits)
+
+- **`bar_aggregator/`** Docker scaffold + compose entries. Engine: bucket math + quote-bus subscribe.
+- **WAL via Redis Streams** (flush-ack-based trim + gap detect on restart).
+- **Per-channel coalescer 250ms** + final-revision bypass (sentinel `2**31-1`).
+- **Closed-bucket-only flush** + minute emitter (priority-99 UPSERT path lets later broker historical
+  fetches at priorities 1–4 cleanly overwrite without double-count).
+- Entrypoint + `/healthz` + Prometheus metrics + lifecycle.
+- **Reviewer fix at `40c63b3`**: 1 CRIT + 8 HIGH + 4 MED.
+
+#### Chunk B-bis — CAGGs (Task 18) — DEFERRED
+
+10 continuous-aggregate hypertables (5s/10s/15s/30s/45s from `bars_1s`; 5m/15m/30m/1h/1d from `bars_1m`)
+deferred pending production validation of `bars_1s` with real broker traffic. Tracked in
+`phase_reviewer_audit.md`; will land as v0.11.1 mini-phase or first prod run.
+
+#### Chunk C — Sidecars: GetHistoricalBars (commits `a60d08a..3879388` + `44bb754`, 7 commits)
+
+- **proto `GetHistoricalBars` RPC + `HistoricalBar` message** added to all 4 broker contracts.
+- **`sidecar_futu`** (HK only); **`sidecar_ibkr`** (token bucket + jittered scheduling); **`sidecar_alpaca`**
+  (asset-class routing equity/crypto); **`sidecar_schwab`** (401 retry-once on token expiry).
+- **Empirical history scripts** for all 4 brokers using paper credentials only.
+- **Reviewer fix at `44bb754`**: 4 CRIT + 5 HIGH + 5 MED.
+
+#### Chunk D — Backend orchestration (commits `a99bc90..a8739b5` + `1a435ca`, 8 commits)
+
+- **`POST /api/orders/nonce/modify`** + 30s GETDEL consume (consume-once nonce for drag-modify CSRF).
+- **`BarService.get_bars`** + cross-worker `pg_notify('bar_backfill_done')` coalesce via
+  `bar_backfill_jobs` partial-unique-pending index; 16s bounded wait with 250ms poll fallback.
+- **`/api/chart/layouts` CRUD** + read-translator + If-Match optimistic concurrency via atomic
+  `UPDATE WHERE updated_at = :expected_ts`.
+- **`GET /api/bars`** cursor pagination + 10k row cap.
+- **`BarService.pre_warm_active_set`** + cron schedule (15-minute pre-warm of last_seen instruments).
+- **WG-split tolerance**: `OperationalError` recovery cleanly marks backfill jobs failed.
+- **`/ws/bars`** revision-sequenced live-tail + 20-sub cap; auth via `bearer.<jwt>` subprotocol.
+- **Reviewer fixes at `1a435ca`+`a8739b5`**: 3 CRIT (no `session.commit`, `volume_source` CHECK,
+  pg_notify-inside-uncommitted-txn) + 12 HIGH + 13 MED. **Database-reviewer caught all 3 CRITs**.
+
+#### Chunk E — FE chart feature (commits `aee9ec0..cdf22ad` + `cd1b6ac` + `f63814a`, 7 commits)
+
+- Pin **klinecharts 10.0.0-beta1** (v10 DataLoader pattern — no v9 `applyNewData/updateData`).
+- **`/chart/:canonicalId`** route + `ChartPage` shell + inline View Chart links from
+  Position/Order/Watchlist rows.
+- **`TradeChart`** klinecharts wrapper + WS live-tail with revision-discard sequencing
+  (FINAL_REVISION sentinel).
+- **`DrawingTools` + `ChartContextMenu`** (~19 built-ins; right-click menu).
+- **`ChartToolbar` + `TimeframeBar` + `IndicatorPicker`**.
+- **Reviewer fixes at `cd1b6ac`+`f63814a`**: 8 HIGH + 10 MED + 3 LOW (1 sec-MED on
+  JWT-via-subprotocol leak deferred to Phase 10 with /ws/orders endpoint).
+
+#### Chunks F1 + F2 — 45 custom indicators (commits `449e375` + `cfbe876` + `36711a9`, 3 commits)
+
+- **22 MA + volatility indicators** (`449e375`); **23 momentum + volume + pattern indicators**
+  (`cfbe876`). All 45 carry `// Reference:` citation headers and golden-vector tests via
+  `_testUtils.ts`. Math primitives in `_shared.ts` (sma, ema, wilderEma, stddev, smoothedRsi).
+- **Reviewer fix at `36711a9`**: 1 MED (BBW middle-band epsilon guard against divide-by-zero).
+
+#### Chunk G — Drag-handle SL/TP (commits `afd2573` + `ae21244` + `93a705d`, 3 commits)
+
+- **`PositionOverlay`** + long/short klinecharts overlays + tick_size snap (`useInstrumentTickSize`).
+- **modify-nonce flow** + **`ConfirmDialog`** (mints fresh nonce on OPEN per spec line 719) + per-leg
+  pending state machine via `chartStore.pending_modify_id` Map.
+- **Reviewer fix at `93a705d`**: 1 CRIT (`PostModifyRequest.qty/order_type/tif` were Required →
+  every drag-modify 422'd → entire modify path broken end-to-end; relaxed to Optional with
+  service-side defaults from current order) + 5 HIGH (WS subscribeOrderEvents leaked JWT via
+  Sec-WebSocket-Protocol on every confirm — backend `/ws/orders` doesn't exist; removed FE call.
+  TDZ cleanup, mint AbortController, etc.) + 4 MED.
+
+#### Chunk H — Layout persistence + mobile (commits `c3e1314` + `8acdb07` + `8b0aa5b`, 3 commits)
+
+- **Mobile toolbar collapse + responsive parity** at 375×667 (iPhone SE): ChartToolbar collapses to
+  5 buttons + More overflow; TimeframeBar shows interval row only with overflow Range; DrawingTools
+  vertical strip with 7 most-used + overflow.
+- **`ChartLayoutSync`** — debounced PUT (500ms) with If-Match + abort/cleanup; `instrumentId=null`
+  no-op (Task 37 deferred).
+- **Reviewer fix at `8b0aa5b`**: 2 CRIT + 6 HIGH + 7 MED. **CRIT-1**: server `_etag()`
+  emitted ISO `+00:00` while Pydantic v2 `model_dump_json()` emitted `Z` — every UPDATE-path PUT
+  412'd because client read body's `Z`-form `updated_at` and sent it as `If-Match`. Fixed `_etag()`
+  to normalize to `Z`. **CRIT-2**: `useEffect` deps included unstable `onConflict`/`onError`
+  callbacks → effect re-ran on every parent render → `clearTimeout` + new `setTimeout` reset the
+  500ms window indefinitely. Fixed via ref-pin pattern. **HIGH-1**: `AbortController.abort()` on
+  rapid edits raced server-commit; switched to generation-counter + discard-stale-results so
+  serial PUTs each pick up the fresh server etag.
+
+#### Chunk I — E2E + perf + close-out (commits `fb5d83f` + this commit, 2 commits)
+
+- **6 Playwright golden flows** scaffolded (`frontend/e2e/phase9-charting.spec.ts`): active-set
+  load + RSI persist; cold-symbol backfill + live-tail; cursor pagination + cache-hit; drag SL
+  + ConfirmDialog; mobile 375×667 compact toolbar; aggregator crash + WAL replay.
+- **3 perf gates** scaffolded: p95 `/api/bars` ≤ 100ms (100 sequential GETs);
+  5y/1m cursor pagination ≤ 3s wall; 100 concurrent WS subs across 50 instruments + RSS < 256MB
+  (`backend/tests/perf/test_bars_p95.py`). FE perf: live-tail tick latency p95 ≤ 250ms; initial
+  chart render ≤ 2s (`frontend/e2e/phase9-perf.spec.ts`). All marked
+  `pytest.mark.skipif(not E2E_BACKEND_URL)` / `test.fixme(true, 'requires compose+fixtures')`.
+- **Storage budget** (analytical projection from spec §3 — empirical 24h actuals deferred):
+  `bars_1s` row ≈ 150 bytes → 100 instruments × 7d retention ≈ **8.7 GB**; 1000 instruments
+  ≈ **87 GB**. `bars_1m` ≈ 3.9 GB at 100 inst × 6mo. CAGGs add ≤30%. Total well under
+  **200 GB hard NUC PG headroom**; 1000-instrument operating ceiling confirmed by analytical
+  projection. Above 1000 needs aggregator sharding (architect MED #10) AND/OR shorter `bars_1s`
+  retention.
+
+### Deferred to v0.11.1 / Phase 9.5 / Phase 10
+
+- **Task 18 CAGGs** (10 continuous aggregates) — needs production `bars_1s` traffic to validate
+  refresh boundaries.
+- **`/ws/orders` backend endpoint + FE re-enable `subscribeOrderEvents`** (Phase 10).
+- **Diff modal UI** for chart_layouts conflict reconciliation (Phase 10 follow-up).
+- **Phase 9.5 CI debt mini-phase** — full per-phase reviewer-chain retro-review for phases 0–8
+  per audit matrix `phase_reviewer_audit.md`.
+- **Toast tone neutral→warning** on conflict (`useToast` doesn't yet support 'warning').
+- **500ms→1000ms layout-sync debounce widening** (defer; current perf adequate for desktop+WG).
+- **`instrument_id` resolution from `canonical_id`** (Task 37 deferred; ChartLayoutSync currently
+  null no-op).
+- **E2E + perf actual runs** against compose stack (deferred to first real CI run with full fixtures).
+
+### Top 3 lessons (for `phase9_shipped.md`)
+
+1. **Pydantic v2 vs `datetime.isoformat()` `Z`-form mismatch** is a silent killer for any If-Match
+   optimistic-concurrency pattern. Server-generated etags MUST match the body serialization
+   byte-for-byte. Always test the round-trip (`assert _etag(dt).strip('"') == body['updated_at']`).
+2. **`AbortController` for in-flight cancellation creates abort-then-server-commit races** when the
+   server has already accepted the request. Generation-counter + discard-stale is safer than
+   cancel-and-retry for idempotent PUTs.
+3. **Python 3.14 PEP 758 changed `except` syntax** — bare-comma `except A, B as exc:` is now legal
+   (parsed as tuple), but ALL reviewer agents (haiku + sonnet) flag it as Py2 syntax CRIT. Document
+   the false positive in commit messages and reviewer prompts to avoid 5+ false alarms per chunk.
+
+### Forward pointers
+
+- **Phase 10** — diff modal UI + `/ws/orders` + Phase 9.5 CI debt mini-phase
+- **Phase 11** — AI alerts/scanner (depends on Phase 9 historical store)
+- **Phase 18** — autonomous self-refining bots (depends on Phase 9 bar aggregator + indicators)
+- **Phase 19** — UK CGT (S104 + SA108) (depends on bar history for cost basis)
+
 ## [0.10.0] — 2026-05-07
 
 ### Added — Phase 8c complete (Alpaca trade write path: equity + crypto + bracket + OCO)

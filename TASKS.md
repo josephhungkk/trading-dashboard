@@ -348,9 +348,29 @@ Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 
 - [x] **Close-out** CHANGELOG.md / TASKS.md
 - [ ] **v0.10.0 tag** *(deferred to user — `git tag v0.10.0 && git push --tags`)*
 
-## Phase 9 — Charting v1 + bar aggregator + historical store
+## Phase 9 — Charting v1 + bar aggregator + historical store  *(complete — v0.11.0 · 2026-05-08)*
 
-TimescaleDB hypertable on PG-18, klineschart integration, 1s/1m/5m/15m/1h/1d bars, drag-handle stop/TP edit, historical backfill from broker APIs (Schwab CHART_EQUITY → free 1m US bars).
+50/53 tasks across 9/11 chunks shipped (64 commits since v0.10.0). See `CHANGELOG.md` v0.11.0 for the per-chunk breakdown and reviewer-fix commit refs. Spec [`docs/superpowers/specs/2026-05-07-phase9-charting-design.md`](docs/superpowers/specs/2026-05-07-phase9-charting-design.md); plan [`docs/superpowers/plans/2026-05-07-phase9-charting-plan.md`](docs/superpowers/plans/2026-05-07-phase9-charting-plan.md).
+
+- [x] Chunk A (Tasks 1-10) — Foundation: 7 Alembic migrations, bar_service.active_set, CI plumbing
+- [x] Chunk B (Tasks 11-17) — bar_aggregator service: Docker scaffold, WAL via Redis Streams, coalescer, minute emitter
+- [ ] Chunk B-bis (Task 18) — 10 CAGGs **DEFERRED** to v0.11.1 (needs production bars_1s traffic)
+- [x] Chunk C (Tasks 19-25) — Sidecar GetHistoricalBars (4 brokers) + empirical history scripts
+- [x] Chunk D (Tasks 26-33) — Backend orchestration: BarService.get_bars cross-worker coalesce, /api/chart/layouts CRUD with If-Match, /ws/bars revision-sequenced live-tail
+- [x] Chunk E (Tasks 34-40) — FE chart feature: klinecharts v10 DataLoader, /chart/:canonicalId, TradeChart, DrawingTools, ChartToolbar
+- [x] Chunk F1+F2 (Tasks 41-42) — 45 custom indicators with `// Reference:` headers + golden-vector tests
+- [x] Chunk G (Tasks 43-45) — Drag-handle SL/TP: PositionOverlay, modify-nonce, ConfirmDialog
+- [x] Chunk H (Tasks 46-48) — Mobile responsive parity + ChartLayoutSync debounced PUT
+- [x] Chunk I (Tasks 49-53) — Playwright E2E + perf scaffolds; close-out + v0.11.0 tag (E2E/perf actuals deferred to first compose+CI run)
+
+**Deferred to v0.11.1 / Phase 9.5 / Phase 10:** Task 18 CAGGs; /ws/orders backend; diff modal UI; Phase 9.5 CI debt mini-phase per `phase_reviewer_audit.md`; `instrument_id` resolution; toast tone bump; debounce widening.
+
+## v0.11.1 — Phase 9 follow-ups (planned)
+
+- [ ] Task 18 — 10 CAGGs (5s/10s/15s/30s/45s + 5m/15m/30m/1h/1d) once production bars_1s validated
+- [ ] Storage actuals — measure 24h steady state at 100 instruments; reconcile against analytical projection
+- [ ] E2E + perf compose run — provision fixtures, run all 6 Playwright flows + 3 perf gates, record actuals
+- [ ] `instrument_id` resolution from `canonical_id` (Task 37) — wire ChartLayoutSync end-to-end
 
 ## Phase 10 — Risk engine + position-sizing + multi-account rollup
 
