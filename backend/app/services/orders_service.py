@@ -18,6 +18,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.brokers import base
+from app.core import metrics
 from app.core.ids import uuid7
 from app.schemas.orders import (
     ContractSummary,
@@ -350,8 +351,12 @@ async def place_order(
             request.expiry_date or "",
         )
     except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
+        # Phase 9.7 G2: timeout class — broker reachability failed.
+        metrics.broker_order_place_total.labels(label=account.gateway_label, result="timeout").inc()
         return _order_response_from_mapping(row, submission_state="pending_unknown")
     except Exception:
+        # Phase 9.7 G2: error class — broker rejected or transport blew up.
+        metrics.broker_order_place_total.labels(label=account.gateway_label, result="error").inc()
         await db.execute(
             text(
                 """
@@ -372,6 +377,8 @@ async def place_order(
         broker_order_id=sidecar_result.broker_order_id,
     )
     await db.commit()
+    # Phase 9.7 G2: success class — emit AFTER _mark_order_submitted commits.
+    metrics.broker_order_place_total.labels(label=account.gateway_label, result="success").inc()
 
     if await is_kill_switch_active(cfg):
         try:
