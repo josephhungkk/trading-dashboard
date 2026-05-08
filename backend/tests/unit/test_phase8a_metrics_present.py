@@ -13,7 +13,21 @@ from app.core import metrics as backend_metrics
 
 @pytest.fixture(scope="module")
 def sidecar_metrics():
-    """Import sidecar_schwab/metrics.py from outside the backend package."""
+    """Import sidecar_schwab/metrics.py from outside the backend package.
+
+    Both backend.app.core.metrics and sidecar_schwab.metrics define
+    broker_normalize_unknown_total against prometheus_client's global
+    REGISTRY. In production they're separate processes; in tests both
+    end up in the same process so the second import raises
+    ValueError: Duplicated timeseries. Unregister the backend's copy
+    before importing sidecar so the sidecar import wins.
+    """
+    from prometheus_client import REGISTRY
+
+    backend_dup = REGISTRY._names_to_collectors.get("broker_normalize_unknown_total")
+    if backend_dup is not None:
+        REGISTRY.unregister(backend_dup)
+
     sidecar_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(sidecar_root))
     try:
