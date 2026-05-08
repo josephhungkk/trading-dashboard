@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import hmac
 import secrets
@@ -82,7 +83,12 @@ async def consume_state_nonce(
         raise StateNonceError("malformed state value")
     nonce, sig_b64 = signed.rsplit(".", 1)
     expected = hmac.new(app_secret_key, nonce.encode(), hashlib.sha256).digest()
-    given_sig = _b64_decode_padded(sig_b64)
+    try:
+        given_sig = _b64_decode_padded(sig_b64)
+    except (binascii.Error, ValueError) as exc:
+        # Tampered state may have a sig fragment that isn't valid base64 at
+        # all; treat that as an invalid signature rather than 500-ing.
+        raise StateNonceError("invalid signature encoding") from exc
     if not hmac.compare_digest(expected, given_sig):
         raise StateNonceError("invalid signature")
     # GETDEL - atomic single-use consume (Redis 6.2+).

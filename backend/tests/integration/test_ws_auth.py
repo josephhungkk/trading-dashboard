@@ -39,6 +39,10 @@ def _engine() -> QuoteEngine:
 def _app() -> FastAPI:
     app = FastAPI()
     app.state.quote_engine = _engine()
+    # ws_quotes._allowed_origin reads app.state.cors_origins; set the
+    # synthetic test origin we send below as Origin header so the CSWSH
+    # origin check (HIGH fix) admits the connection.
+    app.state.cors_origins = ["http://test.local"]
     app.include_router(ws_quotes_router)
     return app
 
@@ -53,6 +57,12 @@ async def _run_ws(
     subprotocols: list[str] | None = None,
     client_host: str = "testclient",
 ) -> list[Message]:
+    # Default Origin header to the synthetic value _app() registers in
+    # cors_origins; tests that need a different origin override it via
+    # `headers={"Origin": "..."}`.
+    if headers is None:
+        headers = {}
+    headers.setdefault("Origin", "http://test.local")
     app = _app()
     messages: list[Message] = []
     queue: asyncio.Queue[Message] = asyncio.Queue()
