@@ -18,11 +18,63 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: uv sync --frozen --all-groups
+      - name: Mint fresh Schwab access token
+        # Schwab access tokens expire after 30 min. Rather than maintain a
+        # short-lived SCHWAB_TEST_ACCESS_TOKEN secret, exchange the 7-day
+        # refresh_token for a fresh access token at job-start. If Schwab
+        # rotates the refresh_token (empirically rare), emit a workflow
+        # warning so the operator can re-sync the secret. Cross-platform
+        # via uv-managed Python (the runner may be Linux or Windows).
+        working-directory: backend
+        env:
+          SCHWAB_APP_KEY: ${{ secrets.SCHWAB_APP_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_REFRESH_TOKEN: ${{ secrets.SCHWAB_REFRESH_TOKEN }}
+        run: |
+          uv run python - <<'PY'
+          import base64, json, os, sys, urllib.parse, urllib.request, urllib.error
+          app_key = os.environ["SCHWAB_APP_KEY"]
+          app_secret = os.environ["SCHWAB_APP_SECRET"]
+          refresh = os.environ["SCHWAB_REFRESH_TOKEN"]
+          basic = base64.b64encode(f"{app_key}:{app_secret}".encode()).decode()
+          body = urllib.parse.urlencode(
+              {"grant_type": "refresh_token", "refresh_token": refresh}
+          ).encode()
+          req = urllib.request.Request(
+              "https://api.schwabapi.com/v1/oauth/token",
+              data=body,
+              headers={
+                  "Authorization": f"Basic {basic}",
+                  "Content-Type": "application/x-www-form-urlencoded",
+              },
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  tok = json.loads(r.read().decode())
+          except urllib.error.HTTPError as e:
+              print(f"::error::Schwab token refresh failed: HTTP {e.code} {e.read().decode()[:300]}")
+              sys.exit(1)
+          access = tok["access_token"]
+          new_refresh = tok.get("refresh_token", refresh)
+          # Mask before any further log lines could echo the value.
+          print(f"::add-mask::{access}")
+          if new_refresh != refresh:
+              print(f"::add-mask::{new_refresh}")
+              print(
+                  "::warning::Schwab rotated the refresh_token; SCHWAB_REFRESH_TOKEN "
+                  "secret + broker.schwab.refresh_token in app_secrets need re-sync."
+              )
+          gh_env = os.environ["GITHUB_ENV"]
+          with open(gh_env, "a") as fh:
+              fh.write(f"SCHWAB_TEST_ACCESS_TOKEN={access}\n")
+          print(f"minted access_token (len={len(access)} expires_in={tok.get('expires_in')}s)")
+          PY
       - name: Pytest (real_schwab smoke)
         working-directory: backend
         env:
           CI_USE_REAL_SCHWAB: '1'
-          SCHWAB_TEST_ACCESS_TOKEN: ${{ secrets.SCHWAB_TEST_ACCESS_TOKEN }}
+          # SCHWAB_TEST_ACCESS_TOKEN is exported by the previous step via
+          # GITHUB_ENV — fresh per run, never read from secrets.
           APP_ENV: dev
           APP_SECRET_KEY: ci-fake-key-not-used-in-this-job
           APP_CORS_ORIGINS: '["http://localhost:5173"]'
