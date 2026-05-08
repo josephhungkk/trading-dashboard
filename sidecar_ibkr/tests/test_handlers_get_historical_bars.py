@@ -12,7 +12,7 @@ import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from sidecar_ibkr._generated.broker.v1 import broker_pb2
-from sidecar_ibkr.handlers import BrokerHandlers, _PacingTokenBucket, _instrument_id_hash
+from sidecar_ibkr.handlers import BrokerHandlers, _instrument_id_hash, _PacingTokenBucket
 from sidecar_ibkr.pnl_cache import PnLCache
 
 pytestmark = [pytest.mark.unit]

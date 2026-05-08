@@ -9,6 +9,7 @@ the BrokerHandlers wrapping path without needing a live gateway in CI.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -16,6 +17,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+import sidecar_ibkr
+
+sys.modules.setdefault("sidecar", sidecar_ibkr)
 
 GOLDEN_DIR = Path(__file__).parent / "tests" / "golden"
 

@@ -77,6 +77,9 @@ class _Result:
     def scalar_one_or_none(self) -> Any:
         return self._scalar
 
+    def scalar_one(self) -> Any:
+        return self._scalar
+
 
 class _Session:
     def __init__(
@@ -97,6 +100,8 @@ class _Session:
         if "FROM orders" in sql and "WHERE id = :id" in sql:
             if params["id"] != self.order.id:
                 return _Result(row=None)
+            if "status::text" in sql and "account_id" not in sql:
+                return _Result(scalar=self.order.status)
             return _Result(
                 row={
                     "account_id": self.order.account_id,
@@ -145,6 +150,19 @@ class _Session:
             self.order.tif = params["tif"]
             self.order.notional = params["notional"]
             return _Result(row=None)
+        if "order_status_rank" in sql:
+            rank = {
+                "pending_submit": 0,
+                "submitted": 1,
+                "modified": 1,
+                "partial": 3,
+                "filled": 4,
+                "cancelled": 5,
+                "rejected": 5,
+                "expired": 5,
+            }
+            current = str(params["current"])
+            return _Result(scalar=current if rank.get(current, -1) > 1 else "modified")
         raise AssertionError(f"unexpected SQL: {sql}")
 
     async def commit(self) -> None:
@@ -180,10 +198,21 @@ class _Config:
         return default
 
 
+class _Capability:
+    async def is_supported(
+        self, broker_id: str, asset_class: str, order_type: str, tif: str
+    ) -> bool:
+        return True
+
+    async def get_notes(self, broker_id: str, asset_class: str, order_type: str, tif: str) -> str:
+        return ""
+
+
 class _Sidecar:
     def __init__(self, contract: base.Contract) -> None:
         self.contract = contract
         self.modify_calls: list[dict[str, str]] = []
+        self.raise_unavailable = False
 
     async def get_contract(self, conid: str) -> base.Contract:
         assert conid == self.contract.conid
@@ -207,6 +236,10 @@ class _Sidecar:
         stop_price: str,
         client_order_id: str,
     ) -> base.ModifyOrderResult:
+        if self.raise_unavailable:
+            from app.services.brokers import BrokerSidecarUnavailable
+
+            raise BrokerSidecarUnavailable("isa-paper")
         assert contract.conid == self.contract.conid
         self.modify_calls.append(
             {
@@ -284,10 +317,14 @@ async def modify_client() -> AsyncIterator[dict[str, Any]]:
     async def override_redis() -> fakeredis.aioredis.FakeRedis:
         return redis
 
+    async def override_capability() -> _Capability:
+        return _Capability()
+
     app.dependency_overrides[require_admin_jwt] = override_admin
     app.dependency_overrides[get_config] = override_config
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_broker_registry] = override_registry
+    app.dependency_overrides[orders_api.get_order_capability_service] = override_capability
     app.dependency_overrides[orders_api.get_orders_redis] = override_redis
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -311,6 +348,7 @@ def _payload(**overrides: Any) -> dict[str, Any]:
         "nonce": str(uuid4()),
         "qty": "1",
         "limit_price": "101",
+        "order_type": "LIMIT",
         "tif": "DAY",
         "stop_price": None,
     }
@@ -471,8 +509,8 @@ async def test_modify_nonce_mismatch_rejected(modify_client: dict[str, Any]) -> 
         json=payload,
     )
 
-    assert response.status_code == 422
-    assert response.json() == {"error": "payload_mismatch"}
+    assert response.status_code == 409
+    assert response.json() == {"error": "nonce_mismatch"}
 
 
 @pytest.mark.asyncio
@@ -489,9 +527,36 @@ async def test_modify_kill_switch_503(modify_client: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_modify_sidecar_unavailable_returns_503(
+    modify_client: dict[str, Any],
+) -> None:
+    payload = _payload()
+    await _store_nonce(
+        modify_client["redis"],
+        account_id=modify_client["account"].account_id,
+        payload=payload,
+        order=modify_client["order"],
+    )
+    modify_client["sidecar"].raise_unavailable = True
+
+    response = await modify_client["client"].put(
+        f"/api/orders/{modify_client['order'].id}",
+        json=payload,
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "sidecar_unavailable"}
+    assert response.headers["retry-after"] == "1"
+
+
+@pytest.mark.asyncio
 async def test_modify_immutable_fields_422(modify_client: dict[str, Any]) -> None:
-    del modify_client
     if OrderModifyRequest.model_config.get("extra") != "forbid":
         pytest.skip("current OrderModifyRequest schema ignores extra immutable fields")
 
-    pytest.fail("schema now forbids extras; replace this skip with a real 422 assertion")
+    response = await modify_client["client"].put(
+        f"/api/orders/{modify_client['order'].id}",
+        json=_payload(conid="999"),
+    )
+
+    assert response.status_code == 422

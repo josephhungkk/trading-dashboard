@@ -1,7 +1,10 @@
 """Tests for OCA group attachment (OCO adapter) — Phase 8b T-O.8."""
-import pytest
-from sidecar_ibkr.order_builder import attach_oca_group
+
 from unittest.mock import MagicMock
+
+import pytest
+
+from sidecar_ibkr.order_builder import attach_oca_group
 
 
 def test_attach_oca_group_sets_both_fields():

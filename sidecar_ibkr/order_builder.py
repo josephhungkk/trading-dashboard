@@ -9,7 +9,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
-
 # MED-sec-4: exchange-aware GTD timezone map.
 # Fallback is US/Eastern to preserve prior behaviour for unrecognised exchanges.
 _EXCHANGE_TZ = {
@@ -50,15 +49,15 @@ class PlaceOrderRequestLike(Protocol):
 
 class OrderLike(Protocol):
     action: str
-    totalQuantity: float
-    orderType: str
+    totalQuantity: float  # noqa: N815
+    orderType: str  # noqa: N815
     tif: str
-    lmtPrice: float
-    auxPrice: float
-    trailingPercent: float
-    goodTillDate: str
-    ocaGroup: str
-    ocaType: int
+    lmtPrice: float  # noqa: N815
+    auxPrice: float  # noqa: N815
+    trailingPercent: float  # noqa: N815
+    goodTillDate: str  # noqa: N815
+    ocaGroup: str  # noqa: N815
+    ocaType: int  # noqa: N815
 
 
 def _set_market(order: OrderLike, request: PlaceOrderRequestLike) -> None:

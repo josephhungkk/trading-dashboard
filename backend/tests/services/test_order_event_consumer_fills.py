@@ -368,7 +368,7 @@ async def test_pending_fills_drained_after_order_arrives(
 
 
 @pytest.mark.asyncio
-async def test_status_rank_rejects_backward_modified_to_submitted(
+async def test_status_rank_accepts_equal_rank_modified_to_submitted(
     db_engine: AsyncEngine, session_factory: async_sessionmaker[Any]
 ) -> None:
     account_id = await _seed_account(db_engine, account_number=f"{_ACCOUNT_PREFIX}RANK")
@@ -398,7 +398,7 @@ async def test_status_rank_rejects_backward_modified_to_submitted(
     status = await _scalar(
         db_engine, "SELECT status::text FROM orders WHERE id = :o", {"o": order_id}
     )
-    assert status == "modified"
+    assert status == "submitted"
 
 
 @pytest.mark.asyncio

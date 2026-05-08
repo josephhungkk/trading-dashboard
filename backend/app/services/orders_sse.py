@@ -55,8 +55,7 @@ async def _replay_events(
                        'filled_qty', filled_qty,
                        'avg_fill_price', avg_fill_price,
                        'broker_event_at', broker_event_at,
-                       'observed_at', observed_at,
-                       'raw_payload', raw_payload
+                       'observed_at', observed_at
                    )::text AS payload
               FROM order_events
              WHERE id > :last_id
@@ -79,8 +78,7 @@ async def _replay_events(
                        'filled_qty', filled_qty,
                        'avg_fill_price', avg_fill_price,
                        'broker_event_at', broker_event_at,
-                       'observed_at', observed_at,
-                       'raw_payload', raw_payload
+                       'observed_at', observed_at
                    )::text AS payload
               FROM order_events
              WHERE id > :last_id

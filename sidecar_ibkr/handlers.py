@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import time
 from collections.abc import AsyncIterator, Callable
@@ -141,6 +142,15 @@ if TYPE_CHECKING:
 
 
 logger = structlog.get_logger(__name__)
+
+
+async def _abort_rpc(context: object, code: grpc.StatusCode, details: str) -> None:
+    abort = getattr(context, "abort", None)
+    if abort is not None:
+        result = abort(code, details)
+        if inspect.isawaitable(result):
+            await result
+    raise grpc.RpcError(code, details)
 
 type _TickCallback = Callable[[broker_pb2.QuoteMessage], None]
 
@@ -626,7 +636,6 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         request: broker_pb2.ModifyOrderRequest,
         context: object,
     ) -> broker_pb2.ModifyOrderResponse:
-        del context
         broker_order_id = request.broker_order_id
 
         if broker_order_id.startswith("SIM-"):
@@ -636,10 +645,12 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             # backend consumer transitions the orders row.
             sim_meta = self._sim_orders.get(broker_order_id)
             if sim_meta is None:
-                raise grpc.RpcError(
+                await _abort_rpc(
+                    context,
                     grpc.StatusCode.NOT_FOUND,
                     f"sim order {broker_order_id} not registered (sidecar restart drops the map)",
                 )
+                return broker_pb2.ModifyOrderResponse()
 
             # 5c v0.5.5 fix: write the synthetic event directly to all OrderEvent
             # queues registered for this account. ib.orderStatusEvent.emit() is
@@ -665,9 +676,11 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         try:
             target_perm_id = int(broker_order_id)
         except ValueError as exc:
-            raise grpc.RpcError(
+            await _abort_rpc(
+                context,
                 grpc.StatusCode.INVALID_ARGUMENT, f"invalid broker_order_id: {exc}"
-            ) from exc
+            )
+            return broker_pb2.ModifyOrderResponse()
 
         raw_trades: object = self.ib.openTrades()  # type: ignore[attr-defined, unused-ignore]
         target_trade: _IbTrade | None = None
@@ -681,9 +694,11 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 break
 
         if target_trade is None:
-            raise grpc.RpcError(
+            await _abort_rpc(
+                context,
                 grpc.StatusCode.NOT_FOUND, f"order {broker_order_id} not in openTrades"
             )
+            return broker_pb2.ModifyOrderResponse()
 
         ib_order = target_trade.order
         ib_order.totalQuantity = float(request.qty)
@@ -694,13 +709,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         if request.tif:
             ib_order.tif = request.tif
         try:
-            contract: object = await self._resolve_contract(request.contract.conid)
+            contract: object = target_trade.contract
             new_trade: _IbTrade = cast(
                 "_IbTrade",
                 self.ib.placeOrder(contract, ib_order),  # type: ignore[attr-defined, unused-ignore]
             )
         except Exception as exc:
-            raise grpc.RpcError(grpc.StatusCode.UNKNOWN, f"placeOrder failed: {exc}") from exc
+            await _abort_rpc(context, grpc.StatusCode.UNKNOWN, f"placeOrder failed: {exc}")
+            return broker_pb2.ModifyOrderResponse()
 
         return broker_pb2.ModifyOrderResponse(
             broker_order_id=str(new_trade.order.permId),
@@ -712,7 +728,6 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         request: broker_pb2.PlaceBracketRequest,
         context: object,
     ) -> broker_pb2.PlaceBracketResponse:
-        del context
         parent_contract: object = await self._resolve_contract(request.parent.conid)
         parent_order = self._build_ib_order(request.parent)
         parent_order.transmit = False
@@ -763,38 +778,60 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
         sl_perm_id = ""
         tp_perm_id = ""
-        children_to_place: list[tuple[object, object, str]] = []
-        if request.has_stop_loss:
-            sl_contract = await self._resolve_contract(request.stop_loss.conid)
-            sl_order = self._build_ib_order(request.stop_loss)
-            sl_order.parentId = parent_order_id_int
-            sl_order.ocaGroup = request.oca_group
-            sl_order.ocaType = 1
-            sl_order.orderRef = request.stop_loss.client_order_id
-            sl_order.account = request.stop_loss.account_number
-            children_to_place.append((sl_contract, sl_order, "stop_loss"))
-        if request.has_take_profit:
-            tp_contract = await self._resolve_contract(request.take_profit.conid)
-            tp_order = self._build_ib_order(request.take_profit)
-            tp_order.parentId = parent_order_id_int
-            tp_order.ocaGroup = request.oca_group
-            tp_order.ocaType = 1
-            tp_order.orderRef = request.take_profit.client_order_id
-            tp_order.account = request.take_profit.account_number
-            children_to_place.append((tp_contract, tp_order, "take_profit"))
+        placed_children: list[_IbTrade] = []
+        try:
+            children_to_place: list[tuple[object, object, str]] = []
+            if request.has_stop_loss:
+                sl_contract = await self._resolve_contract(request.stop_loss.conid)
+                sl_order = self._build_ib_order(request.stop_loss)
+                sl_order.parentId = parent_order_id_int
+                sl_order.ocaGroup = request.oca_group
+                sl_order.ocaType = 1
+                sl_order.orderRef = request.stop_loss.client_order_id
+                sl_order.account = request.stop_loss.account_number
+                children_to_place.append((sl_contract, sl_order, "stop_loss"))
+            if request.has_take_profit:
+                tp_contract = await self._resolve_contract(request.take_profit.conid)
+                tp_order = self._build_ib_order(request.take_profit)
+                tp_order.parentId = parent_order_id_int
+                tp_order.ocaGroup = request.oca_group
+                tp_order.ocaType = 1
+                tp_order.orderRef = request.take_profit.client_order_id
+                tp_order.account = request.take_profit.account_number
+                children_to_place.append((tp_contract, tp_order, "take_profit"))
 
-        for i, (_c, child_order, _leg) in enumerate(children_to_place):
-            child_order.transmit = (i == len(children_to_place) - 1)
-
-        for child_contract, child_order, leg in children_to_place:
-            child_trade: _IbTrade = cast(
-                "_IbTrade",
-                self.ib.placeOrder(child_contract, child_order),  # type: ignore[attr-defined, unused-ignore]
+            for i, (child_contract, child_order, leg) in enumerate(children_to_place):
+                child_order.transmit = (i == len(children_to_place) - 1)
+                child_trade: _IbTrade = cast(
+                    "_IbTrade",
+                    self.ib.placeOrder(child_contract, child_order),  # type: ignore[attr-defined, unused-ignore]
+                )
+                placed_children.append(child_trade)
+                if leg == "stop_loss":
+                    sl_perm_id = str(child_trade.order.permId)
+                else:
+                    tp_perm_id = str(child_trade.order.permId)
+        except Exception as exc:
+            logger.warning(
+                "PlaceBracket.child_failure_rolling_back",
+                parent_order_id=parent_trade.order.orderId,
+                exc=str(exc),
             )
-            if leg == "stop_loss":
-                sl_perm_id = str(child_trade.order.permId)
-            else:
-                tp_perm_id = str(child_trade.order.permId)
+            try:
+                self.ib.cancelOrder(parent_trade.order)  # type: ignore[attr-defined, unused-ignore]
+            except Exception as cancel_exc:
+                logger.error("PlaceBracket.parent_cancel_failed", exc=str(cancel_exc))
+            for child in placed_children:
+                try:
+                    self.ib.cancelOrder(child.order)  # type: ignore[attr-defined, unused-ignore]
+                except Exception as cancel_exc:
+                    logger.error("PlaceBracket.child_cancel_failed", exc=str(cancel_exc))
+            await _abort_rpc(
+                context,
+                grpc.StatusCode.INTERNAL,
+                f"bracket child placement failed: {exc}",
+            )
+            return broker_pb2.PlaceBracketResponse()
 
         return broker_pb2.PlaceBracketResponse(
             parent_broker_order_id=str(parent_trade.order.permId),

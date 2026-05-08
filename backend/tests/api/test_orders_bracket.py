@@ -107,6 +107,50 @@ class _Session:
                     "last_nlv_currency": self.account.currency_base,
                 }
             )
+        if "FROM orders" in sql and "client_order_id = :client_order_id" in sql:
+            row = next(
+                (
+                    order
+                    for order in self.orders.values()
+                    if order.client_order_id == params["client_order_id"]
+                    and order.account_id == params["account_id"]
+                ),
+                None,
+            )
+            if row is None:
+                return _Result(None)
+            return _Result(
+                {
+                    "id": row.id,
+                    "client_order_id": row.client_order_id,
+                    "broker_order_id": row.broker_order_id,
+                    "status": row.status,
+                    "oca_group": row.oca_group,
+                }
+            )
+        if "FROM orders" in sql and "parent_order_id = :parent_id" in sql:
+            rows = [
+                {
+                    "id": order.id,
+                    "broker_order_id": order.broker_order_id,
+                    "status": order.status,
+                    "order_type": order.order_type,
+                }
+                for order in self.orders.values()
+                if order.parent_order_id == params["parent_id"]
+            ]
+            return _Result(rows=rows)
+        if "DELETE FROM orders" in sql and "parent_order_id = :parent_id" in sql:
+            parent_id = params["parent_id"]
+            self.orders = {
+                order_id: order
+                for order_id, order in self.orders.items()
+                if order.parent_order_id != parent_id
+            }
+            return _Result()
+        if "DELETE FROM orders" in sql and "id = :parent_id" in sql:
+            self.orders.pop(params["parent_id"], None)
+            return _Result()
         if "INSERT INTO orders" in sql:
             now = datetime(2026, 4, 27, 14, 45, tzinfo=UTC)
             row = _OrderRow(
@@ -137,6 +181,11 @@ class _Session:
             row.status = "submitted"
             row.updated_at = datetime(2026, 4, 27, 14, 46, tzinfo=UTC)
             return _Result({"id": row.id})
+        if "UPDATE orders" in sql and "SET status = 'rejected'" in sql:
+            for row in self.orders.values():
+                if row.id == params["id"] or row.parent_order_id == params["id"]:
+                    row.status = "rejected"
+            return _Result()
         if "FROM orders o" in sql and "FOR UPDATE NOWAIT" in sql:
             row = self.orders.get(params["order_id"])
             if row is None:
@@ -198,11 +247,22 @@ class _Config:
         return default
 
 
+class _Capability:
+    async def is_supported(
+        self, broker_id: str, asset_class: str, order_type: str, tif: str
+    ) -> bool:
+        return True
+
+    async def get_notes(self, broker_id: str, asset_class: str, order_type: str, tif: str) -> str:
+        return ""
+
+
 class _Sidecar:
     def __init__(self, contract: base.Contract) -> None:
         self.contract = contract
         self.place_bracket_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[tuple[str, str]] = []
+        self.raise_unavailable = False
 
     async def get_contract(self, conid: str) -> base.Contract:
         assert conid == self.contract.conid
@@ -216,6 +276,10 @@ class _Sidecar:
         take_profit_proto: Any,
         oca_group: str,
     ) -> base.BracketResult:
+        if self.raise_unavailable:
+            from app.services.brokers import BrokerSidecarUnavailable
+
+            raise BrokerSidecarUnavailable("isa-paper")
         self.place_bracket_calls.append(
             {
                 "parent": parent_request_proto,
@@ -282,12 +346,16 @@ async def bracket_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[
     async def override_redis() -> fakeredis.aioredis.FakeRedis:
         return redis
 
+    async def override_capability() -> _Capability:
+        return _Capability()
+
     app.dependency_overrides[require_admin_jwt] = override_admin
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_config] = override_config
     app.dependency_overrides[get_broker_registry] = override_registry
     from app.api import orders as orders_api
 
+    app.dependency_overrides[orders_api.get_order_capability_service] = override_capability
     app.dependency_overrides[orders_api.get_orders_redis] = override_redis
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -398,6 +466,23 @@ async def test_bracket_entry_plus_sl_only_writes_two_rows(
 
 
 @pytest.mark.asyncio
+async def test_bracket_replay_same_client_order_id_returns_cached_rows(
+    bracket_client: dict[str, Any],
+) -> None:
+    payload = _payload(bracket_client["account_id"])
+    await _store_nonce(bracket_client["redis"], payload)
+
+    first = await bracket_client["client"].post("/api/orders/bracket", json=payload)
+    second = await bracket_client["client"].post("/api/orders/bracket", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert len(_rows(bracket_client["session"])) == 3
+    assert len(bracket_client["sidecar"].place_bracket_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_bracket_entry_plus_tp_only_writes_two_rows(
     bracket_client: dict[str, Any],
 ) -> None:
@@ -458,3 +543,19 @@ async def test_bracket_cancel_parent_leaves_children_for_broker_cascade(
     assert len(children) == 2
     assert {child.status for child in children} == {"submitted"}
     assert bracket_client["sidecar"].cancel_calls == [("TEST_BRK_001", "BRK-PARENT-123")]
+
+
+@pytest.mark.asyncio
+async def test_bracket_sidecar_unavailable_rejects_pending_rows(
+    bracket_client: dict[str, Any],
+) -> None:
+    payload = _payload(bracket_client["account_id"])
+    await _store_nonce(bracket_client["redis"], payload)
+    bracket_client["sidecar"].raise_unavailable = True
+
+    response = await bracket_client["client"].post("/api/orders/bracket", json=payload)
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "sidecar_unavailable"}
+    assert response.headers["retry-after"] == "1"
+    assert {row.status for row in _rows(bracket_client["session"])} == {"rejected"}

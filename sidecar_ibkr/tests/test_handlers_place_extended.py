@@ -3,6 +3,7 @@
 Imports from sidecar_ibkr.order_builder (no proto/gRPC deps) so the test
 suite runs without a live broker sidecar or generated-code sys.modules.
 """
+
 from __future__ import annotations
 
 import re
@@ -12,10 +13,10 @@ import pytest
 
 from sidecar_ibkr.order_builder import build_ib_order
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def req(**kwargs: object) -> MagicMock:
     """Build a PlaceOrderRequest mock with sensible defaults; override via kwargs."""

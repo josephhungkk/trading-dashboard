@@ -42,8 +42,16 @@ _COMMISSION_BUFFER_TTL_SECONDS: float = 300.0
 
 
 def _commission_buffer_set(exec_id: str, commission: str, currency: str) -> None:
+    now = time.monotonic()
+    expired_keys = [
+        key
+        for key, (expires, _commission, _currency) in _COMMISSION_BUFFER.items()
+        if expires <= now
+    ]
+    for key in expired_keys:
+        _COMMISSION_BUFFER.pop(key, None)
     _COMMISSION_BUFFER[exec_id] = (
-        time.monotonic() + _COMMISSION_BUFFER_TTL_SECONDS,
+        now + _COMMISSION_BUFFER_TTL_SECONDS,
         commission,
         currency,
     )
@@ -381,19 +389,27 @@ class OrderEventConsumer:
             cr_payload = _parse_raw_payload(event.raw_payload)
             payload_dict = cr_payload if isinstance(cr_payload, dict) else {}
             commission = str(payload_dict.get("commission", "0"))
-            commission_currency = str(payload_dict.get("commission_currency", "USD")).upper()
-            async with self._session_factory() as session, session.begin():
-                result = await session.execute(
-                    text(
-                        "UPDATE fills SET commission = :c, commission_currency = :cc "
-                        "WHERE exec_id = :e"
-                    ),
-                    {"c": commission, "cc": commission_currency, "e": event.exec_id},
+            commission_currency = str(payload_dict.get("commission_currency", "USD")).upper()[:3]
+            try:
+                async with self._session_factory() as session, session.begin():
+                    result = await session.execute(
+                        text(
+                            "UPDATE fills SET commission = :c, commission_currency = :cc "
+                            "WHERE exec_id = :e"
+                        ),
+                        {"c": commission, "cc": commission_currency, "e": event.exec_id},
+                    )
+                    if (getattr(result, "rowcount", None) or 0) == 0:
+                        _commission_buffer_set(event.exec_id, commission, commission_currency)
+                async with self._failure_lock:
+                    self._consecutive_failures = 0
+            except DBAPIError as exc:
+                log.warning(
+                    "commission_report.db_error",
+                    exec_id=event.exec_id,
+                    exc=str(exc),
                 )
-                if (getattr(result, "rowcount", None) or 0) == 0:
-                    _commission_buffer_set(event.exec_id, commission, commission_currency)
-            async with self._failure_lock:
-                self._consecutive_failures = 0
+                metrics.commission_db_errors_total.inc()
             return
         try:
             account = await self._account_for_event(event)
@@ -501,7 +517,6 @@ class OrderEventConsumer:
             "broker_order_event_process_failed",
             label=label,
             broker_order_id=event.broker_order_id,
-            raw_payload=_parse_raw_payload_best_effort(event.raw_payload),
             consecutive_failures=failures,
             error=str(exc),
             error_type=type(exc).__name__,
@@ -727,7 +742,7 @@ class OrderEventConsumer:
         raw_payload: dict[str, Any] | list[Any] | None,
     ) -> None:
         payload_dict = raw_payload if isinstance(raw_payload, dict) else {}
-        currency = str(payload_dict.get("currency") or "USD").upper()
+        currency = str(payload_dict.get("currency") or "USD").upper()[:3]
         if order_id is None:
             await session.execute(
                 text(

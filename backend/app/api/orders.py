@@ -259,9 +259,11 @@ async def modify_order(
     redis: RedisDep,
     registry: RegistryDep,
     capability: CapabilityDep,
+    identity: IdentityDep,
 ) -> dict[str, Any] | JSONResponse:
     started = time.perf_counter()
     try:
+        await _check_modify_nonce_rate_limit(redis, identity.email)
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse(status_code=422, content={"detail": "JSON object required"})
@@ -312,8 +314,10 @@ async def place_bracket(
     redis: RedisDep,
     registry: RegistryDep,
     capability: CapabilityDep,
+    identity: IdentityDep,
 ) -> OrderBracketResponse | JSONResponse:
     try:
+        await _check_modify_nonce_rate_limit(redis, identity.email)
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse(status_code=422, content={"detail": "JSON object required"})

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import grpc
 import pytest
 
 from sidecar_ibkr import handlers
@@ -181,3 +182,29 @@ async def test_place_bracket_sim_mode_mints_three_uuids() -> None:
     assert response.stop_loss_broker_order_id.startswith("SIM-")
     assert response.take_profit_broker_order_id.startswith("SIM-")
     assert len(sim_handler._sim_orders) == 3
+
+
+@pytest.mark.asyncio
+async def test_place_bracket_child_failure_cancels_parent_and_placed_child(
+    real_handler, mock_ib
+) -> None:
+    calls = {"n": 0}
+
+    def fake_place_order(contract, order):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("tp rejected")
+        order.orderId = 1000 + calls["n"]
+        trade = MagicMock()
+        trade.order = order
+        trade.order.permId = 2000 + calls["n"]
+        trade.orderStatus.status = "Submitted"
+        return trade
+
+    mock_ib.placeOrder.side_effect = fake_place_order
+
+    with pytest.raises(grpc.RpcError) as exc:
+        await real_handler.PlaceBracket(_make_request(has_sl=True, has_tp=True), MagicMock())
+
+    assert exc.value.args[0] == grpc.StatusCode.INTERNAL
+    assert mock_ib.cancelOrder.call_count == 2

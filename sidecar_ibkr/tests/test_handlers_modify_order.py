@@ -105,6 +105,30 @@ async def test_modify_order_id_not_found(handler, mock_ib) -> None:
 
 
 @pytest.mark.asyncio
+async def test_modify_reuses_open_trade_contract(handler, mock_ib) -> None:
+    """Real modify succeeds even when request.contract.conid is unset."""
+    trade = MagicMock()
+    trade.order.permId = 123456
+    trade.order.account = "DU111"
+    trade.orderStatus.status = "Submitted"
+    trade.contract = MagicMock(name="live_contract")
+    mock_ib.openTrades.return_value = [trade]
+    mock_ib.placeOrder.return_value = trade
+    request = broker_pb2.ModifyOrderRequest(
+        broker_order_id="123456",
+        account_number="DU111",
+        qty="2",
+        tif=broker_pb2.TIF_DAY,
+    )
+
+    response = await handler.ModifyOrder(request, context=MagicMock())
+
+    assert response.broker_order_id == "123456"
+    assert response.status == "Submitted"
+    mock_ib.placeOrder.assert_called_once_with(trade.contract, trade.order)
+
+
+@pytest.mark.asyncio
 async def test_modify_simulator_only_rejected() -> None:
     """When simulator_only=True with non-SIM id, the openTrades scan returns
     empty in this test's mock so we fall through to NOT_FOUND. v1 doesn't

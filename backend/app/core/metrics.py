@@ -168,6 +168,12 @@ commission_buffer_overflow_total = Counter(
     registry=registry,
 )
 
+commission_db_errors_total = Counter(
+    "commission_db_errors_total",
+    "DB errors while applying commissionReport events to fills.",
+    registry=registry,
+)
+
 broker_bracket_cancel_cascade_seconds = Histogram(
     "broker_bracket_cancel_cascade_seconds",
     "Latency from parent.cancel_requested_at to child cancelled-event for OCA cascade.",

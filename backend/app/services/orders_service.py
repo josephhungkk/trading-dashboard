@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 import asyncpg  # type: ignore[import-untyped]
+import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,9 @@ from app.services.orders_policy import get_account_policy, is_kill_switch_active
 
 _MODIFY_REPLAY_CACHE: dict[tuple[UUID, str], tuple[float, dict[str, Any]]] = {}
 _MODIFY_REPLAY_TTL_SECONDS = 60.0
+_MODIFY_REPLAY_MAX = 500
+
+log = structlog.get_logger(__name__)
 
 
 class RedisLike(Protocol):
@@ -470,7 +474,7 @@ async def modify_order(
     nonce_key = f"nonce:order:{row['account_id']}:{request.nonce}"
     consumed_nonce_value = await redis.execute_command("GETDEL", nonce_key)
     if consumed_nonce_value is None:
-        raise PreviewUnavailable(422, {"error": "unknown_nonce"})
+        raise PreviewUnavailable(409, {"error": "nonce_mismatch"})
     expected_payload = {
         "account_id": str(row["account_id"]),
         "conid": str(row["conid"]),
@@ -485,7 +489,7 @@ async def modify_order(
         json.dumps(expected_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     if _decode_nonce_payload(consumed_nonce_value)["payload_hash"] != expected_hash:
-        raise PreviewUnavailable(422, {"error": "payload_mismatch"})
+        raise PreviewUnavailable(409, {"error": "nonce_mismatch"})
 
     raw_payload = {
         "client_order_id": str(row["client_order_id"]),
@@ -556,24 +560,51 @@ async def modify_order(
 
     client = await registry.get_client(account.gateway_label)
     contract = await client.get_contract(str(row["conid"]))
-    modify_result = await as_order_sidecar_client(client).modify_order(
-        broker_order_id=str(row["broker_order_id"] or ""),
-        account_number=account.account_number,
-        contract=contract,
-        side=str(row["side"]),
-        order_type=str(row["order_type"]),
-        tif=request.tif,
-        qty=qty_text,
-        limit_price=request.limit_price or "",
-        stop_price=request.stop_price or "",
-        client_order_id=str(row["client_order_id"]),
+    try:
+        modify_result = await as_order_sidecar_client(client).modify_order(
+            broker_order_id=str(row["broker_order_id"] or ""),
+            account_number=account.account_number,
+            contract=contract,
+            side=str(row["side"]),
+            order_type=str(row["order_type"]),
+            tif=request.tif,
+            qty=qty_text,
+            limit_price=request.limit_price or "",
+            stop_price=request.stop_price or "",
+            client_order_id=str(row["client_order_id"]),
+        )
+    except (BrokerSidecarUnavailable, BrokerSidecarTimeout) as exc:
+        raise PreviewUnavailable(
+            503,
+            {"error": "sidecar_unavailable"},
+            headers={"Retry-After": "1"},
+        ) from exc
+
+    current_status_row = await db.execute(
+        text("SELECT status::text FROM orders WHERE id = :id"),
+        {"id": order_id},
     )
+    current_status = current_status_row.scalar_one()
+    new_status_row = await db.execute(
+        text(
+            """
+            SELECT CASE
+                     WHEN order_status_rank(CAST(:current AS order_status_enum))
+                          > order_status_rank('modified'::order_status_enum)
+                       THEN CAST(:current AS order_status_enum)
+                     ELSE 'modified'::order_status_enum
+                   END::text
+            """
+        ),
+        {"current": current_status},
+    )
+    synthesized_status = str(new_status_row.scalar_one())
 
     projected = {
         "id": order_id,
         "client_order_id": str(row["client_order_id"]),
         "broker_order_id": modify_result.broker_order_id or str(row["broker_order_id"] or ""),
-        "status": "modified",
+        "status": synthesized_status,
         "qty": qty_text,
         "limit_price": request.limit_price,
         "stop_price": request.stop_price,
@@ -1259,6 +1290,9 @@ def _modify_replay_store(order_id: UUID, nonce: str, response: dict[str, Any]) -
         time.monotonic() + _MODIFY_REPLAY_TTL_SECONDS,
         dict(response),
     )
+    while len(_MODIFY_REPLAY_CACHE) > _MODIFY_REPLAY_MAX:
+        oldest_key = next(iter(_MODIFY_REPLAY_CACHE))
+        _MODIFY_REPLAY_CACHE.pop(oldest_key, None)
 
 
 async def _check_trade_policy(
@@ -1367,15 +1401,69 @@ async def place_bracket(
     )
     if cap_status(parent_notional, policy.max_notional_per_order) == "exceeded":
         raise PreviewUnavailable(422, {"error": "max_notional_exceeded"})
-    await _consume_nonce(
-        redis,
-        request.nonce,
-        account_id=request.account_id,
-        qty=parent_qty,
-        limit_price=request.limit_price,
+    nonce_consumed = False
+    existing = await db.execute(
+        text(
+            """
+            SELECT id, client_order_id, broker_order_id, status::text AS status, oca_group
+              FROM orders
+             WHERE client_order_id = :client_order_id
+               AND account_id = :account_id
+            """
+        ),
+        {"client_order_id": request.client_order_id, "account_id": request.account_id},
     )
+    existing_row = existing.mappings().one_or_none()
+    if existing_row is not None:
+        child_rows_result = await db.execute(
+            text(
+                """
+                SELECT id, broker_order_id, status::text AS status, order_type::text AS order_type
+                  FROM orders
+                 WHERE parent_order_id = :parent_id
+                 ORDER BY created_at, id
+                """
+            ),
+            {"parent_id": existing_row["id"]},
+        )
+        child_rows = list(child_rows_result.mappings().all())
+        expected_children = int(request.stop_price is not None) + int(
+            request.target_price is not None
+        )
+        if len(child_rows) == expected_children:
+            return _build_bracket_response_from_db(existing_row, child_rows)
+        await _consume_nonce(
+            redis,
+            request.nonce,
+            account_id=request.account_id,
+            qty=parent_qty,
+            limit_price=request.limit_price,
+        )
+        nonce_consumed = True
+        await db.execute(
+            text("DELETE FROM orders WHERE parent_order_id = :parent_id"),
+            {"parent_id": existing_row["id"]},
+        )
+        await db.execute(
+            text("DELETE FROM orders WHERE id = :parent_id"),
+            {"parent_id": existing_row["id"]},
+        )
+        await db.commit()
+
+    if not nonce_consumed:
+        await _consume_nonce(
+            redis,
+            request.nonce,
+            account_id=request.account_id,
+            qty=parent_qty,
+            limit_price=request.limit_price,
+        )
 
     parent_id = uuid7()
+    sl_id = uuid7() if request.stop_price else None
+    tp_id = uuid7() if request.target_price else None
+    sl_client_order_id = uuid7() if request.stop_price else None
+    tp_client_order_id = uuid7() if request.target_price else None
     oca_group = f"BRK-{parent_id.hex[:8]}"
     contract = await _resolve_contract(
         await registry.get_client(account.gateway_label), request.conid
@@ -1403,128 +1491,155 @@ async def place_bracket(
             "oca": oca_group,
         },
     )
+    if request.stop_price and sl_id is not None and sl_client_order_id is not None:
+        await db.execute(
+            text(
+                "INSERT INTO orders (id, account_id, client_order_id, conid, symbol, "
+                "side, order_type, tif, qty, stop_price, status, notional, "
+                "parent_order_id, oca_group) "
+                "VALUES (:id, :a, :coid, :conid, :symbol, :side, 'STOP', :tif, :qty, "
+                ":sp, 'pending_submit', :n, :pid, :oca)"
+            ),
+            {
+                "id": sl_id,
+                "a": request.account_id,
+                "coid": sl_client_order_id,
+                "conid": request.conid,
+                "symbol": symbol,
+                "side": "SELL" if request.side == "BUY" else "BUY",
+                "tif": request.tif,
+                "qty": parent_qty,
+                "sp": request.stop_price,
+                "n": Decimal(parent_qty) * Decimal(request.stop_price),
+                "pid": parent_id,
+                "oca": oca_group,
+            },
+        )
+    if request.target_price and tp_id is not None and tp_client_order_id is not None:
+        await db.execute(
+            text(
+                "INSERT INTO orders (id, account_id, client_order_id, conid, symbol, "
+                "side, order_type, tif, qty, limit_price, status, notional, "
+                "parent_order_id, oca_group) "
+                "VALUES (:id, :a, :coid, :conid, :symbol, :side, 'LIMIT', :tif, :qty, "
+                ":tp, 'pending_submit', :n, :pid, :oca)"
+            ),
+            {
+                "id": tp_id,
+                "a": request.account_id,
+                "coid": tp_client_order_id,
+                "conid": request.conid,
+                "symbol": symbol,
+                "side": "SELL" if request.side == "BUY" else "BUY",
+                "tif": request.tif,
+                "qty": parent_qty,
+                "tp": request.target_price,
+                "n": Decimal(parent_qty) * Decimal(request.target_price),
+                "pid": parent_id,
+                "oca": oca_group,
+            },
+        )
     await db.commit()
 
     client = await registry.get_client(account.gateway_label)
-    bracket_result = await client.place_bracket(
-        parent_request_proto=_build_place_proto(
-            request,
-            request.side,
-            request.order_type,
-            str(request.client_order_id),
-            parent_qty,
-            limit_price=request.limit_price,
-            stop_price=None,
-            account_number=account.account_number,
-            conid=request.conid,
-        ),
-        stop_loss_proto=(
-            _build_place_proto(
+    try:
+        bracket_result = await client.place_bracket(
+            parent_request_proto=_build_place_proto(
                 request,
-                "SELL" if request.side == "BUY" else "BUY",
-                "STOP",
-                str(uuid7()),
+                request.side,
+                request.order_type,
+                str(request.client_order_id),
                 parent_qty,
-                limit_price=None,
-                stop_price=request.stop_price,
-                account_number=account.account_number,
-                conid=request.conid,
-            )
-            if request.stop_price
-            else None
-        ),
-        take_profit_proto=(
-            _build_place_proto(
-                request,
-                "SELL" if request.side == "BUY" else "BUY",
-                "LIMIT",
-                str(uuid7()),
-                parent_qty,
-                limit_price=request.target_price,
+                limit_price=request.limit_price,
                 stop_price=None,
                 account_number=account.account_number,
                 conid=request.conid,
-            )
-            if request.target_price
-            else None
-        ),
-        oca_group=oca_group,
-    )
+            ),
+            stop_loss_proto=(
+                _build_place_proto(
+                    request,
+                    "SELL" if request.side == "BUY" else "BUY",
+                    "STOP",
+                    str(sl_client_order_id),
+                    parent_qty,
+                    limit_price=None,
+                    stop_price=request.stop_price,
+                    account_number=account.account_number,
+                    conid=request.conid,
+                )
+                if request.stop_price
+                else None
+            ),
+            take_profit_proto=(
+                _build_place_proto(
+                    request,
+                    "SELL" if request.side == "BUY" else "BUY",
+                    "LIMIT",
+                    str(tp_client_order_id),
+                    parent_qty,
+                    limit_price=request.target_price,
+                    stop_price=None,
+                    account_number=account.account_number,
+                    conid=request.conid,
+                )
+                if request.target_price
+                else None
+            ),
+            oca_group=oca_group,
+        )
+    except (BrokerSidecarUnavailable, BrokerSidecarTimeout) as exc:
+        log.warning("place_bracket.sidecar_unavailable", parent_id=parent_id, exc=str(exc))
+        await db.execute(
+            text(
+                """
+                UPDATE orders
+                   SET status = 'rejected',
+                       updated_at = NOW()
+                 WHERE id = :id
+                    OR parent_order_id = :id
+                """
+            ),
+            {"id": parent_id},
+        )
+        await db.commit()
+        raise PreviewUnavailable(
+            503,
+            {"error": "sidecar_unavailable"},
+            headers={"Retry-After": "1"},
+        ) from exc
 
     children: list[dict[str, Any]] = []
-    async with db.begin():
+    await db.execute(
+        text("UPDATE orders SET broker_order_id = :bo, status = 'submitted' WHERE id = :id"),
+        {"bo": bracket_result.parent_broker_order_id, "id": parent_id},
+    )
+    if request.stop_price and bracket_result.stop_loss_broker_order_id and sl_id is not None:
         await db.execute(
             text("UPDATE orders SET broker_order_id = :bo, status = 'submitted' WHERE id = :id"),
-            {"bo": bracket_result.parent_broker_order_id, "id": parent_id},
+            {"bo": bracket_result.stop_loss_broker_order_id, "id": sl_id},
         )
-        if request.stop_price and bracket_result.stop_loss_broker_order_id:
-            sl_id = uuid7()
-            await db.execute(
-                text(
-                    "INSERT INTO orders (id, account_id, client_order_id, conid, symbol, "
-                    "side, order_type, tif, qty, stop_price, status, notional, "
-                    "broker_order_id, parent_order_id, oca_group) "
-                    "VALUES (:id, :a, :coid, :conid, :symbol, :side, 'STOP', :tif, :qty, "
-                    ":sp, 'submitted', :n, :bo, :pid, :oca)"
-                ),
-                {
-                    "id": sl_id,
-                    "a": request.account_id,
-                    "coid": uuid7(),
-                    "conid": request.conid,
-                    "symbol": symbol,
-                    "side": "SELL" if request.side == "BUY" else "BUY",
-                    "tif": request.tif,
-                    "qty": parent_qty,
-                    "sp": request.stop_price,
-                    "n": Decimal(parent_qty) * Decimal(request.stop_price),
-                    "bo": bracket_result.stop_loss_broker_order_id,
-                    "pid": parent_id,
-                    "oca": oca_group,
-                },
-            )
-            children.append(
-                {
-                    "id": str(sl_id),
-                    "leg": "stop_loss",
-                    "broker_order_id": bracket_result.stop_loss_broker_order_id,
-                    "status": "submitted",
-                }
-            )
-        if request.target_price and bracket_result.take_profit_broker_order_id:
-            tp_id = uuid7()
-            await db.execute(
-                text(
-                    "INSERT INTO orders (id, account_id, client_order_id, conid, symbol, "
-                    "side, order_type, tif, qty, limit_price, status, notional, "
-                    "broker_order_id, parent_order_id, oca_group) "
-                    "VALUES (:id, :a, :coid, :conid, :symbol, :side, 'LIMIT', :tif, "
-                    ":qty, :tp, 'submitted', :n, :bo, :pid, :oca)"
-                ),
-                {
-                    "id": tp_id,
-                    "a": request.account_id,
-                    "coid": uuid7(),
-                    "conid": request.conid,
-                    "symbol": symbol,
-                    "side": "SELL" if request.side == "BUY" else "BUY",
-                    "tif": request.tif,
-                    "qty": parent_qty,
-                    "tp": request.target_price,
-                    "n": Decimal(parent_qty) * Decimal(request.target_price),
-                    "bo": bracket_result.take_profit_broker_order_id,
-                    "pid": parent_id,
-                    "oca": oca_group,
-                },
-            )
-            children.append(
-                {
-                    "id": str(tp_id),
-                    "leg": "take_profit",
-                    "broker_order_id": bracket_result.take_profit_broker_order_id,
-                    "status": "submitted",
-                }
-            )
+        children.append(
+            {
+                "id": str(sl_id),
+                "leg": "stop_loss",
+                "broker_order_id": bracket_result.stop_loss_broker_order_id,
+                "status": "submitted",
+            }
+        )
+    if request.target_price and bracket_result.take_profit_broker_order_id and tp_id is not None:
+        await db.execute(
+            text("UPDATE orders SET broker_order_id = :bo, status = 'submitted' WHERE id = :id"),
+            {"bo": bracket_result.take_profit_broker_order_id, "id": tp_id},
+        )
+        children.append(
+            {
+                "id": str(tp_id),
+                "leg": "take_profit",
+                "broker_order_id": bracket_result.take_profit_broker_order_id,
+                "status": "submitted",
+            }
+        )
+    await db.commit()
 
     return {
         "parent": {
@@ -1535,6 +1650,33 @@ async def place_bracket(
         },
         "children": children,
         "oca_group": oca_group,
+    }
+
+
+def _build_bracket_response_from_db(
+    parent: Any,
+    children: list[Any],
+) -> dict[str, Any]:
+    response_children: list[dict[str, Any]] = []
+    for child in children:
+        order_type = str(child["order_type"])
+        response_children.append(
+            {
+                "id": str(child["id"]),
+                "leg": "stop_loss" if order_type == "STOP" else "take_profit",
+                "broker_order_id": child["broker_order_id"] or "",
+                "status": child["status"],
+            }
+        )
+    return {
+        "parent": {
+            "id": str(parent["id"]),
+            "client_order_id": str(parent["client_order_id"]),
+            "broker_order_id": parent["broker_order_id"] or "",
+            "status": parent["status"],
+        },
+        "children": response_children,
+        "oca_group": parent["oca_group"] or "",
     }
 
 

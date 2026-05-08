@@ -100,7 +100,7 @@ groups:
         expr: increase(commission_buffer_overflow_total[15m]) > 0
         for: 1m
         labels:
-          severity: warning
+          severity: page
         annotations:
           summary: "Commission buffer exceeded 1000 entries"
           description: "In-memory _COMMISSION_BUFFER overflow - many commissionReport events arrived without matching fill rows. Indicates fills INSERT pipeline is stalled or exec_id mismatch upstream."
