@@ -5,6 +5,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.11.0.1] — 2026-05-08
+
+### Internal — Phase 9.5 + 9.6 close-out (CI green-up, 30 commits since v0.11.0)
+
+Patch release marking Phase 9.5 retro reviewer-chain sweep + Phase 9.6 CI
+red reconciliation as both **complete**. **No public/wire surface
+changes** vs v0.11.0; all commits are quality + observability + test
+hygiene. CI now green on all 5 jobs (proto + backend + sidecar +
+frontend + frontend-types-up-to-date) for 3 consecutive runs (`ea20e17`
+→ `0d94b26` → `677dab9`), satisfying the Phase 9.6 exit criteria.
+
+Two small production-code changes shipped en route:
+- `app/services/brokers.py::_upsert_positions` now correctly soft-deletes
+  stale positions on an empty broker response (account fully liquidated /
+  all instruments expired). The early-return guard before the upsert+
+  delete CTE was masking this cleanup path.
+- `app/services/schwab_oauth.py::consume_state_nonce` wraps
+  `_b64_decode_padded` in `try/binascii.Error → StateNonceError` so a
+  tampered state whose signature fragment isn't valid base64 surfaces as
+  the documented 403 contract instead of an uncaught 500.
+
+Phase 9.7 G1+G2 broker observability metrics fully wired (counters were
+declared in `app/core/metrics.py` since Phase 8 but never incremented at
+production call sites): `broker_capability_mismatch_total`,
+`broker_poller_drift_seconds`, `broker_order_place_total` /
+`_cancel_total` / `_modify_total`. Matching alert rules in
+`deploy/prometheus/alerts.yml` are now functional.
+
+Reviewer chain on the chunk (6 reviewers): zero CRIT+HIGH+MED left
+unaddressed; all deferred items anchored to ROADMAP phases (Phase 10 /
+18 / 24) in `docs/ROADMAP.md` "Deferred backlog assignments".
+
 ### Internal — Phase 9.5 Retro reviewer-chain sweep (CI Debt mini-phase, 2026-05-08)
 
 Walked `memory/phase_reviewer_audit.md` newest-first and dispatched retro

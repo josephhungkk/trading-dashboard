@@ -400,7 +400,7 @@ per-chunk reviewer rule. 15/15 phases applied. Pre-existing CI debt
 False positive suppressed (8 reviewers): unparenthesized `except A, B:`
 is valid under Python 3.14 PEP 758. See `phase9_5_shipped.md`.
 
-## Phase 9.6 — CI red reconciliation  *(in progress — pre-Phase-10 gate)*
+## Phase 9.6 — CI red reconciliation  *(complete — 2026-05-08 · 30 commits since v0.11.0)*
 
 CI on main has been red since multiple phases per
 `feedback_ci_review_per_phase_owed.md`. Phase 9.5 retro confirmed the
@@ -460,48 +460,79 @@ worked through them in clusters newest-first:
   /api/bars, /api/chart/layouts/* added; 616/-53 lines)
 - `ea20e17` inline FE capabilities response types (BE never declared
   the model as response_model so OpenAPI regen omitted the schemas)
+- `0d94b26` docs refresh — TASKS + CHANGELOG capture mid-sweep state
+- `6898263` wire `broker_poller_drift_seconds` Gauge (Phase 9.7 G1
+  metric) in `BrokerDiscoverer._discover_positions`
+- `677dab9` reviewer-chain fixes (5 reviewers, CRIT+HIGH+MED tier
+  applied per `feedback_architect_findings_apply_through_medium.md`):
+  silent-failure HIGH-2 (drift timestamp moved inside try block),
+  HIGH-3 (`contextlib.suppress` wraps metric `inc()` inside `except` +
+  `raise` so a Prometheus error can't shadow the original exception),
+  MED-1 (grpc_code=None guard), HIGH-1 (schwab_oauth refresh-counter
+  except now binds + logs the exception), code-reviewer MED-2
+  (`_last_position_tick_at` prune + `metrics.…remove()` for retired
+  accounts), typescript-reviewer MED (`readonly` arrays on
+  `BrokerCapabilitiesResponse`).
 
-**First all-green CI run:** `ea20e17` (2026-05-08 21:12 UTC) — proto +
-backend + sidecar + frontend + frontend-types-up-to-date all ✓.
+**Exit criteria met (2026-05-08 21:30 UTC):**
+- 3 consecutive green CI runs on main: `ea20e17` → `0d94b26` →
+  `677dab9`. All 5 jobs (proto + backend + sidecar + frontend +
+  frontend-types-up-to-date) green on each.
+- Phase 9.7 G1/G2 metrics fully wired (capability_mismatch +
+  poller_drift + place/cancel/modify counters); matching alert rules
+  in `deploy/prometheus/alerts.yml` are now functional.
+- One genuine production bug fixed en route:
+  `BrokerDiscoverer._upsert_positions` empty-payload soft-delete.
+- Reviewer chain run on the 27-commit chunk; CRIT+HIGH+MED applied
+  inline; deferred items anchored to future phases in
+  `docs/ROADMAP.md` "Deferred backlog assignments".
 
-Exit criteria: `gh run list --workflow=ci.yml --branch main` shows
-**3 consecutive green CI runs**. Currently 1 of 3. Subsequent
-Phase 9.7 follow-up commits will provide the remaining 2.
+Reviewer outcome (commit `677dab9`):
+- spec-compliance (haiku) — PASS on all 4 G1/G2 questions.
+- python-reviewer (haiku) — PASS, zero style nits.
+- code-reviewer (sonnet) — 1 HIGH (FE/BE shape mismatch, deferred to
+  Phase 10), 3 MED (1 fixed, 2 deferred), 3 LOW (deferred).
+- database-reviewer (sonnet) — clean, 1 LOW (multi-replica future →
+  Phase 24).
+- security-reviewer (sonnet) — 0 CRIT/HIGH, 1 MED (two-tick guard →
+  Phase 10), 4 LOW (deferred).
+- silent-failure-hunter (sonnet) — 1 CRIT suppressed (PEP 758 false
+  positive verified by `ast.parse`), 3 HIGH **all fixed**, 1 MED
+  **fixed**.
+- typescript-reviewer (haiku) — 1 MED fixed (readonly arrays).
 
-## Phase 9.7 — Backlog reconciliation  *(planned — actionable items only)*
+## Phase 9.7 — Backlog reconciliation  *(complete — 2026-05-08, folded into 9.6 sweep)*
 
-Sweep the open backlog from prior phases (see end-of-session list at
-13:30 UTC) and ship items that don't require operator action or
-production-traffic windows. Items NOT in scope here: Task 18 CAGGs
-(needs prod bars_1s), 24h storage actuals (needs monitoring window),
-positions `symbol`/`primary_exchange` backfill (operator runs
-re-discovery round), Phase 24 hardening (own phase).
+Originally planned as a separate sub-phase; in practice every actionable
+item was completed inline during the Phase 9.6 CI debt sweep. Audit:
 
-Actionable now:
+- [x] **Phase 2.x nginx `/metrics` proxy** — already in
+      `nginx/conf.d/dashboard.conf:68` since 2026-04-23 (the TASKS.md
+      entry was stale).
+- [x] **Phase 9 Task 37 — `instrument_id` resolution from
+      `canonical_id`** — already wired via `ChartPage.tsx`
+      (`useQuery({queryKey:['resolve-instrument'],...})` at line 37) +
+      `chartLayouts.ts::resolveInstrumentId`. Dead manual Save button
+      removed in `c90bc09` since auto-save covers it.
+- [x] **Phase 8 G3 — Phase 8a operator runbook** — already exists at
+      `docs/runbooks/phase8a-deploy.md`.
+- [x] **Phase 8 G1-G2 — capability + poller + place/cancel/modify
+      metrics + alerts** — counters wired this sweep in `f9df76f`,
+      `1df668c`, `5d3565a`, `7dc700e`, `6898263`; alerts in
+      `deploy/prometheus/alerts.yml:295-370` are now functional.
 
-- [ ] **Phase 2.x nginx `/metrics` proxy** — backend `/metrics` is
-      already gated by `require_admin_jwt`; only the nginx stanza is
-      missing. Fix: add `location = /metrics { proxy_pass
-      http://backend:8000/metrics; }` to `nginx/conf.d/dashboard.conf`
-      so Prometheus / Grafana can scrape via CF Access service token.
-      Verified in prod 2026-04-23.
-- [ ] **Phase 9 Task 37 — `instrument_id` resolution from
-      `canonical_id`** — wire `ChartLayoutSync` end-to-end. Currently
-      `instrument_id` is mocked / empty in some chart-layout fetch
-      paths. Fix: resolve via the existing `instruments` table lookup
-      by `canonical_id` and thread through the chart load → layout
-      save round-trip.
-- [ ] **Phase 8 G3 — Phase 8a operator runbook** — pure documentation.
-      Capture the post-deploy steps (capability matrix flip,
-      `provision-and-publish.ps1`, sidecar bounce) into
-      `docs/runbooks/phase8a-deploy.md`. Reuse content from
-      `phase7a_schwab_topology.md` + `phase8c_shipped.md`.
-- [ ] **Phase 8 G1-G2 — capability + poller + place/cancel/modify
-      metrics + alerts** — config-only. Add `broker_capability_
-      mismatch_total`, `broker_poller_drift_seconds`, plus alert rules
-      for sustained mismatch / drift to `alerts.yml` `phase8` group.
-      Backed by metrics already incremented in code; only the alert
-      definitions are missing.
+Items moved to ROADMAP-anchored homes (see `docs/ROADMAP.md`
+"Deferred backlog assignments"):
+
+- → **Phase 10:** FE/BE capabilities runtime-shape mismatch, two-tick
+  guard before BrokerDiscoverer position wipe, place/modify_order
+  extraction
+- → **Phase 18:** Phase 7b on-demand quote subscribe for preview, BASE-
+  tag refresh
+- → **Phase 24:** Task 18 CAGGs, 24-hour storage actuals,
+  `_last_position_tick_at` multi-replica concern
+- → **Operator runbook:** `positions.symbol`/`primary_exchange`
+  backfill
 - [ ] **Phase 7b on-demand quote subscribe for preview** (deferred
       from 5c) — backend-side eager `subscribe_quote` with timeout in
       the preview path so unheld tickers don't return `503

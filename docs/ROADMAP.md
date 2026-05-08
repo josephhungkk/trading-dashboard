@@ -84,3 +84,49 @@ Source enum is open-set — Alpaca / Coinbase / OANDA / Polygon / Finnhub / Twel
 - Paper-trading simulation engine (broker-side paper accounts remain canonical)
 - Multi-tenant / customer-facing — this is a single-user dashboard
 - Options market-making / HFT-grade latency
+
+## Deferred backlog assignments  *(updated 2026-05-08, post Phase 9.6 close-out)*
+
+Items that surfaced during Phases 7–9 but were either (a) blocked by
+operator action / production-traffic windows or (b) better-fit in a
+later phase. Each is anchored to its target phase below.
+
+### Phase 10 (Risk engine + position-sizing + multi-account rollup)
+
+- **FE/BE capabilities runtime-shape mismatch** — pre-trade gate reads
+  the capability matrix; reconciling the FE hook (expects
+  `BrokerCapabilitiesResponse` dict) vs BE `list_capabilities` (returns
+  flat list / asset_class-grouped dict) belongs here since the risk
+  engine consumes the same shape. Documented in
+  `frontend/src/services/capabilities/types.ts`.
+- **Two-tick guard before BrokerDiscoverer position wipe** — defensive
+  measure flagged by security review. A single buggy sidecar response
+  shouldn't open a window where pre-trade position-based caps are wrong.
+- **`place_order` / `modify_order` extraction (>50 LOC each)** — risk
+  engine wiring touches both functions heavily; natural extraction
+  trigger.
+
+### Phase 18 (Universe scanner + News/filings + Earnings)
+
+- **Phase 7b on-demand quote subscribe for preview** — same per-symbol
+  fan-out concern as the scanner.
+- **Phase 7b periodic BASE-tag refresh** — same family.
+
+### Phase 24 (Infra hardening)
+
+- **Phase 9 Task 18 CAGGs** (10 continuous aggregates 5s/10s/15s/30s/45s
+  + 5m/15m/30m/1h/1d) — needs production `bars_1s` traffic to validate
+  refresh cadence and storage-vs-compute trade-off. Originally Phase 9
+  Chunk B-bis; if ops gives the prod-traffic window before Phase 24
+  starts, ship as a `feat(phase9-bis):` standalone; otherwise Phase 24
+  consumes it alongside the multi-worker uvicorn rework.
+- **Phase 9 24-hour storage actuals** — same prerequisite (production
+  traffic window).
+- **`_last_position_tick_at` multi-replica concern** — single-replica
+  today; explicitly in scope for Phase 24's multi-worker uvicorn
+  refactor.
+
+### Operator runbook (not phase-owned)
+
+- **`positions.symbol` / `primary_exchange` backfill** — operator runs
+  a one-off re-discovery round when convenient.
