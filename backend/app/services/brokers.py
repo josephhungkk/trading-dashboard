@@ -1443,11 +1443,14 @@ class BrokerDiscoverer:
 
         HIGH-db-1: broker_id is now threaded from the call site (already known
         at the discoverer loop) instead of issuing a SELECT per account tick.
-        """
-        if not positions:
-            log.debug("upsert_positions.empty_skip", account_id=str(account_id))
-            return
 
+        Empty-broker-response handling: an empty positions list (account fully
+        liquidated, instrument expired, etc.) falls through to the same
+        upsert+delete CTE — `jsonb_to_recordset` over `[]` produces zero
+        upsert rows, so the `NOT EXISTS (SELECT 1 FROM upserted ...)` clause
+        deletes every existing row for the account. Previously this method
+        returned early on `[]`, leaving stale rows orphaned.
+        """
         rows: list[dict[str, str | None]] = []
         for p in positions:
             symbol = p.contract.symbol
