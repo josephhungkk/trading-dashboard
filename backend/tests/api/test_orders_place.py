@@ -186,6 +186,10 @@ class _Sidecar:
         qty: str,
         limit_price: str = "",
         stop_price: str = "",
+        trail_offset: str = "",
+        trail_offset_type: str = "",
+        trail_limit_offset: str = "",
+        expiry_date: str = "",
     ) -> base.PlaceOrderResult:
         self.place_calls.append(
             {
@@ -198,6 +202,10 @@ class _Sidecar:
                 "qty": qty,
                 "limit_price": limit_price,
                 "stop_price": stop_price,
+                "trail_offset": trail_offset,
+                "trail_offset_type": trail_offset_type,
+                "trail_limit_offset": trail_limit_offset,
+                "expiry_date": expiry_date,
             }
         )
         if self.place_error is not None:

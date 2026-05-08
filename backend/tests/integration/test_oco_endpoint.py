@@ -128,6 +128,8 @@ async def test_oco_legs_different_brokers(client: AsyncClient) -> None:
         orig_redis = getattr(app.state, "redis", None)
         mock_redis = AsyncMock()
         mock_redis.execute_command = AsyncMock(return_value="nonce-payload")
+        mock_redis.incr = AsyncMock(return_value=1)
+        mock_redis.expire = AsyncMock(return_value=True)
         app.state.redis = mock_redis
 
         try:
@@ -169,6 +171,8 @@ async def test_oco_legs_different_accounts(client: AsyncClient) -> None:
 
     mock_redis = AsyncMock()
     mock_redis.execute_command = AsyncMock(return_value="nonce-payload")
+    mock_redis.incr = AsyncMock(return_value=1)
+    mock_redis.expire = AsyncMock(return_value=True)
 
     orig_redis = getattr(app.state, "redis", None)
     app.state.redis = mock_redis
@@ -221,13 +225,15 @@ async def test_oco_happy_path_with_killswitch_on(client: AsyncClient) -> None:
     mock_sidecar = AsyncMock()
     mock_sidecar.place_order = AsyncMock(
         side_effect=[
-            PlaceOrderResult(broker_order_id="SIM-A-001"),
-            PlaceOrderResult(broker_order_id="SIM-B-002"),
+            PlaceOrderResult(broker_order_id="SIM-A-001", status="PENDING"),
+            PlaceOrderResult(broker_order_id="SIM-B-002", status="PENDING"),
         ]
     )
 
     mock_redis = AsyncMock()
     mock_redis.execute_command = AsyncMock(return_value="nonce-payload")
+    mock_redis.incr = AsyncMock(return_value=1)
+    mock_redis.expire = AsyncMock(return_value=True)
 
     mock_db_execute = AsyncMock()
     mock_db_commit = AsyncMock()
@@ -315,7 +321,7 @@ async def test_oco_atomicity_rollback(client: AsyncClient) -> None:
         **kwargs: Any,
     ) -> PlaceOrderResult:
         if conid == CONID_A:
-            return PlaceOrderResult(broker_order_id="SIM-A-001")
+            return PlaceOrderResult(broker_order_id="SIM-A-001", status="PENDING")
         raise RuntimeError("sidecar_timeout: leg B placement failed")
 
     mock_sidecar = AsyncMock()
@@ -324,6 +330,8 @@ async def test_oco_atomicity_rollback(client: AsyncClient) -> None:
 
     mock_redis = AsyncMock()
     mock_redis.execute_command = AsyncMock(return_value="nonce-payload")
+    mock_redis.incr = AsyncMock(return_value=1)
+    mock_redis.expire = AsyncMock(return_value=True)
 
     orig_redis = getattr(app.state, "redis", None)
     app.state.redis = mock_redis
@@ -385,6 +393,8 @@ def _make_redis_with_nonce(payload: str | None) -> AsyncMock:
     """Return a mock Redis whose GETDEL returns *payload*."""
     mock_redis = AsyncMock()
     mock_redis.execute_command = AsyncMock(return_value=payload)
+    mock_redis.incr = AsyncMock(return_value=1)
+    mock_redis.expire = AsyncMock(return_value=True)
     return mock_redis
 
 
