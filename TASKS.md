@@ -372,6 +372,34 @@ Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 
 - [ ] E2E + perf compose run — provision fixtures, run all 6 Playwright flows + 3 perf gates, record actuals
 - [ ] `instrument_id` resolution from `canonical_id` (Task 37) — wire ChartLayoutSync end-to-end
 
+## Phase 9.5 — Retro reviewer-chain sweep  *(complete — 2026-05-08)*
+
+CI Debt mini-phase. Walked `memory/phase_reviewer_audit.md` newest-first;
+dispatched retro reviewer chains for every phase that predated the
+per-chunk reviewer rule. 15/15 phases applied. Pre-existing CI debt
+(proto buf format + phase9 E2E perf gates) deferred — separate scope per
+`feedback_ci_review_per_phase_owed.md`.
+
+- [x] Phase 8c — verified per-chunk chains ran during impl
+- [x] Phase 8b — `fb1a186` (6 CRIT + 10 HIGH + 15 MED)
+- [x] Phase 8a — `c9d617c` (4 CRIT + 9 HIGH + 12 MED)
+- [x] Phase 7c — `7983601` (6 CRIT + 13 HIGH + 16 MED)
+- [x] Phase 7b.1 — `7f951db` (2 CRIT + 13 HIGH)
+- [x] Phase 7a — `1b438de` (11 HIGH + 14 MED)
+- [x] Phase 6 — `bf7e5d7` (4 CRIT + 10 HIGH + 13 MED)
+- [x] Phase 5c — `af501c3` (3 CRIT + 9 HIGH + 11 MED)
+- [x] Phase 5b — `d485c74` (3 CRIT + 12 HIGH + 18 MED)
+- [x] Phase 5a — `1825925` (3 HIGH + 5 MED)
+- [x] Phase 4 — `7a50116` (4 HIGH + 8 MED)
+- [x] Phase 3 — `fe655ee` (4 HIGH + 8 MED)
+- [x] Phase 2 — `e40f56a` (8 HIGH + 12 MED)
+- [x] Phase 1 — `3604349` (1 HIGH + 6 MED)
+- [x] Phase 0 — clean, no findings, no commit
+
+**Totals:** 28 CRIT + 107 HIGH + 138 MED across 14 retro-fix commits.
+False positive suppressed (8 reviewers): unparenthesized `except A, B:`
+is valid under Python 3.14 PEP 758. See `phase9_5_shipped.md`.
+
 ## Phase 10 — Risk engine + position-sizing + multi-account rollup
 
 PDT counter, buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly / fixed-fractional / vol-target). Multi-account portfolio rollup. Pre-trade gate becomes mandatory chokepoint.

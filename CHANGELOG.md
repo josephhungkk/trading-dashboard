@@ -5,6 +5,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Internal — Phase 9.5 Retro reviewer-chain sweep (CI Debt mini-phase, 2026-05-08)
+
+Walked `memory/phase_reviewer_audit.md` newest-first and dispatched retro
+reviewer chains for every phase that predated the per-chunk reviewer rule.
+**15/15 phases applied** at HEAD `3604349`. **No public/wire surface
+changes**; all changes are quality + security hardening on existing code
+paths.
+
+- 14 `fix(phaseN-retro):` commits applying **28 CRIT + 107 HIGH + 138 MED**
+  total reviewer findings across the codebase (Phase 0..8 + 8c which had
+  per-chunk chains during impl).
+- Phase 4 retro `7a50116` — 4H+8M (Schwab reconfigure healthy-marking, gRPC
+  peer-CN interceptor, IBKR-error-text sanitization, Windows ACL icacls).
+- Phase 3 retro `fe655ee` — 4H+8M (admin pages dedupe, ModeToggle catch,
+  lazy `getServices()`, `@msgpack/msgpack` replaces hand-rolled str16/32).
+- Phase 2 retro `e40f56a` — 8H+12M (XFF rightmost, JWKS None guard,
+  SECRET_KEY min_length=32, admin Path() validators, SQLAlchemy 2.0
+  RETURNING, ORM/migration index alignment, N+1 → get_exact, Referrer-
+  Policy, SecretDecryptError).
+- Phase 1 retro `3604349` — 1H+6M (deploy.yml VPS_HOST_KEY pin, nginx
+  limit_req_status 429, sshd-hardening idempotency, redis REDISCLI_AUTH,
+  schwab-refresher hardening, ufw wg0 scoping, robots meta).
+- Phases 5a..7c retro fixes shipped earlier in the sweep (commits in
+  `phase9_5_shipped.md`).
+
+False positive suppressed: 8 reviewers across 6 phases flagged
+unparenthesized `except A, B, C:` as a Py3 SyntaxError CRIT — verified
+valid under Python 3.14 PEP 758 (`ast.parse` passes).
+
+Pre-existing CI debt (`proto buf format`, `e2e/phase9-charting.spec.ts`,
+`e2e/phase9-perf.spec.ts`) deferred — separate scope per
+`feedback_ci_review_per_phase_owed.md`. Sweep introduced **zero new CI
+failures**.
+
 ## [0.11.0] — 2026-05-08
 
 ### Added — Phase 9 complete (Charting v1: bar aggregator + historical store + chart UI + 45 indicators)
