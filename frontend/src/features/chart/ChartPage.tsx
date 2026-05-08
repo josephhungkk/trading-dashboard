@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import { TradeChart } from './TradeChart';
 import { ChartToolbar } from './ChartToolbar';
+import { ChartLayoutSync } from './ChartLayoutSync';
 import { TimeframeBar } from './TimeframeBar';
 import { DrawingTools } from './DrawingTools';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -33,6 +34,7 @@ export function ChartPage({ canonicalId }: ChartPageProps): React.JSX.Element {
   const tickSize = useInstrumentTickSize(canonicalId) ?? 0.01;
   const setPendingModify = useChartStore((s) => s.setPendingModify);
   const { toast } = useToast();
+  const instrumentId: number | null = null; // TODO(Task 37): resolve from canonicalId.
 
   // HIGH-2: track all in-flight settle callbacks so unmount can drain them.
   const inflightSettlersRef = useRef<Set<() => void>>(new Set());
@@ -109,6 +111,19 @@ export function ChartPage({ canonicalId }: ChartPageProps): React.JSX.Element {
 
   return (
     <div className="flex h-full flex-col" data-chart-container>
+      <ChartLayoutSync
+        instrumentId={instrumentId}
+        onConflict={() => {
+          toast({
+            title: 'Layout updated elsewhere',
+            description: 'Your chart layout was changed in another tab/session.',
+            tone: 'neutral',
+          });
+        }}
+        onError={(reason) => {
+          toast({ title: 'Layout sync failed', description: reason, tone: 'error' });
+        }}
+      />
       <ChartToolbar
         drawingsOpen={drawingsOpen}
         onToggleDrawings={() => setDrawingsOpen((prev) => !prev)}

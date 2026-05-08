@@ -1,4 +1,5 @@
 export { ChartPage } from './ChartPage';
+export { ChartLayoutSync } from './ChartLayoutSync';
 export { TradeChart } from './TradeChart';
 export { PositionOverlay, useInstrumentTickSize, usePositionsForCanonical } from './PositionOverlay';
 export type { ModifyRequest } from './PositionOverlay';

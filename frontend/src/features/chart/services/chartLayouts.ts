@@ -15,10 +15,12 @@ export async function putChartLayout(
   instrumentId: number,
   layout: Omit<ChartLayout, 'updated_at'>,
   ifMatchEtag: string,
+  signal?: AbortSignal,
 ): Promise<ChartLayout> {
   const res = await fetch(`/api/chart/layouts/${instrumentId}`, {
     method: 'PUT',
     credentials: 'same-origin',
+    signal: signal ?? null,
     headers: {
       'Content-Type': 'application/json',
       // HIGH-7: strip control characters before injecting into header value.
