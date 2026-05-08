@@ -45,7 +45,9 @@ async def test_full_modify_chain(client: AsyncClient) -> None:
             "value_type": "bool",
         },
     )
-    assert r.status_code == 201
+    # 201 = first time this run; 409 = previous test in the same DB-shared
+    # run already inserted the same key. Both leave the state we want.
+    assert r.status_code in (201, 409), r.text
 
     r = await client.get("/api/accounts")
     assert r.status_code == 200
