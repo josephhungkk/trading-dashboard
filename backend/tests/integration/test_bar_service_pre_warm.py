@@ -403,11 +403,14 @@ def _make_lifespan_mocks(
     mock_pubsub.subscribe = AsyncMock()
     mock_pubsub.unsubscribe = AsyncMock()
 
-    async def _empty_listen():
-        if False:  # pragma: no cover
-            yield None
+    async def _block_forever_listen():
+        # Block until the outer task is cancelled — without this `listen()`
+        # would be an empty async generator and `run_listener`'s `while True`
+        # would tight-loop, hanging the test until pytest-timeout fires.
+        await asyncio.Event().wait()
+        yield  # pragma: no cover  (unreachable but keeps this an async gen)
 
-    mock_pubsub.listen = MagicMock(side_effect=_empty_listen)
+    mock_pubsub.listen = MagicMock(side_effect=_block_forever_listen)
     mock_pubsub.__aenter__ = AsyncMock(return_value=mock_pubsub)
     mock_pubsub.__aexit__ = AsyncMock(return_value=None)
     mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
