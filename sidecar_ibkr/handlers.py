@@ -152,6 +152,7 @@ async def _abort_rpc(context: object, code: grpc.StatusCode, details: str) -> No
             await result
     raise grpc.RpcError(code, details)
 
+
 type _TickCallback = Callable[[broker_pb2.QuoteMessage], None]
 
 _STREAM_QUEUE_MAX = 2048
@@ -255,9 +256,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         # registered listeners under ib_async's eventkit (cross-loop / IB-callback-
         # only dispatch). SIM echo paths bypass it by writing directly to the
         # OrderEvent gRPC stream's per-account queue list. Keyed by account_number.
-        self._order_event_queues: dict[
-            str, list[asyncio.Queue[broker_pb2.OrderEventMessage]]
-        ] = {}
+        self._order_event_queues: dict[str, list[asyncio.Queue[broker_pb2.OrderEventMessage]]] = {}
         self._pacing_bucket: _PacingTokenBucket = _PacingTokenBucket()
 
     async def Health(  # noqa: N802 — gRPC servicer methods mirror proto rpc names
@@ -579,6 +578,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             ib_order.account = request.account_number
             if request.oco_group_id:
                 from sidecar_ibkr.order_builder import attach_oca_group
+
                 attach_oca_group(ib_order, request.oco_group_id)
             trade: _IbTrade = cast(
                 "_IbTrade",
@@ -677,8 +677,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             target_perm_id = int(broker_order_id)
         except ValueError as exc:
             await _abort_rpc(
-                context,
-                grpc.StatusCode.INVALID_ARGUMENT, f"invalid broker_order_id: {exc}"
+                context, grpc.StatusCode.INVALID_ARGUMENT, f"invalid broker_order_id: {exc}"
             )
             return broker_pb2.ModifyOrderResponse()
 
@@ -695,8 +694,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
         if target_trade is None:
             await _abort_rpc(
-                context,
-                grpc.StatusCode.NOT_FOUND, f"order {broker_order_id} not in openTrades"
+                context, grpc.StatusCode.NOT_FOUND, f"order {broker_order_id} not in openTrades"
             )
             return broker_pb2.ModifyOrderResponse()
 
@@ -801,7 +799,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 children_to_place.append((tp_contract, tp_order, "take_profit"))
 
             for i, (child_contract, child_order, leg) in enumerate(children_to_place):
-                child_order.transmit = (i == len(children_to_place) - 1)
+                child_order.transmit = i == len(children_to_place) - 1
                 child_trade: _IbTrade = cast(
                     "_IbTrade",
                     self.ib.placeOrder(child_contract, child_order),  # type: ignore[attr-defined, unused-ignore]
@@ -852,9 +850,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             if ib_trade.order.account != request.account_number:
                 return
             try:
-                queue.put_nowait(
-                    self._proto_event_from_trade(ib_trade, kind="status", exec_id="")
-                )
+                queue.put_nowait(self._proto_event_from_trade(ib_trade, kind="status", exec_id=""))
                 # 5c v0.5.5 diagnostic: confirm synthetic emits queue properly.
                 logger.info(
                     "orderevent_emit_queued",
@@ -874,16 +870,12 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             try:
                 exec_id = str(getattr(getattr(fill, "execution", None), "execId", ""))
                 queue.put_nowait(
-                    self._proto_event_from_trade(
-                        ib_trade, kind="exec_details", exec_id=exec_id
-                    )
+                    self._proto_event_from_trade(ib_trade, kind="exec_details", exec_id=exec_id)
                 )
             except asyncio.QueueFull:
                 metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
 
-        def _on_commission_report(
-            trade: object, fill: object, commission_report: object
-        ) -> None:
+        def _on_commission_report(trade: object, fill: object, commission_report: object) -> None:
             ib_trade: _IbTrade = cast("_IbTrade", trade)
             if ib_trade.order.account != request.account_number:
                 return
@@ -979,9 +971,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             await context.abort(grpc.StatusCode.INTERNAL, str(exc))
             return
 
-        queue: asyncio.Queue[broker_pb2.QuoteMessage] = asyncio.Queue(
-            maxsize=_STREAM_QUEUE_MAX
-        )
+        queue: asyncio.Queue[broker_pb2.QuoteMessage] = asyncio.Queue(maxsize=_STREAM_QUEUE_MAX)
         call_subs: set[str] = set()
 
         def tick_callback(message: broker_pb2.QuoteMessage) -> None:
@@ -1066,9 +1056,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 # caller short-circuits before reaching the streamer
                 # (e.g. canonical_to_contract ValueError raised inside
                 # the streamer call).
-                metrics.ibkr_streamer_subscribe_total.labels(
-                    result="error"
-                ).inc()
+                metrics.ibkr_streamer_subscribe_total.labels(result="error").inc()
                 logger.warning(
                     "ibkr.stream_quotes.request_dispatch_error",
                     error=str(exc),
@@ -1274,7 +1262,18 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             details = await self.ib.reqContractDetailsAsync(ib_contract)  # type: ignore[attr-defined, unused-ignore]
 
         contracts = [self._proto_contract_from_details(detail) for detail in details]
-        self._search_cache[cache_key] = (time.monotonic(), contracts)
+        # Phase 4 retro M2: prune _search_cache so noisy queries cannot OOM
+        # the sidecar. Evict expired entries first (>300s TTL), then trim
+        # the oldest until we are back at MAX 500.
+        now = time.monotonic()
+        self._search_cache[cache_key] = (now, contracts)
+        if len(self._search_cache) > 500:
+            expired = [k for k, (ts, _) in self._search_cache.items() if now - ts >= 300]
+            for k in expired:
+                self._search_cache.pop(k, None)
+            while len(self._search_cache) > 500:
+                oldest = min(self._search_cache.items(), key=lambda kv: kv[1][0])[0]
+                self._search_cache.pop(oldest, None)
         return broker_pb2.SearchContractsResponse(contracts=contracts)
 
     async def _resolve_contract(self, conid: str) -> object:
@@ -1333,9 +1332,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             status=status,
             filled_qty="0",
             avg_fill_price="0",
-            raw_payload=json.dumps(
-                {"sim_synthetic": True, "account_number": account_number}
-            ),
+            raw_payload=json.dumps({"sim_synthetic": True, "account_number": account_number}),
             exec_id="",
             kind="status",
         )
@@ -1345,9 +1342,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
-                metrics.broker_order_events_dropped_total.labels(
-                    reason="queue_full"
-                ).inc()
+                metrics.broker_order_events_dropped_total.labels(reason="queue_full").inc()
             else:
                 logger.info(
                     "orderevent_emit_queued",
@@ -1615,6 +1610,5 @@ def _historical_bar_datetime(value: datetime | int | float | str) -> datetime:
 
 def _symbol_refs(canonical_ids: set[str]) -> list[broker_pb2.SymbolRef]:
     return [
-        broker_pb2.SymbolRef(canonical_id=canonical_id)
-        for canonical_id in sorted(canonical_ids)
+        broker_pb2.SymbolRef(canonical_id=canonical_id) for canonical_id in sorted(canonical_ids)
     ]

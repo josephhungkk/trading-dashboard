@@ -32,6 +32,7 @@ from sidecar_ibkr.backoff import (
 from sidecar_ibkr.handlers import BrokerHandlers
 from sidecar_ibkr.pnl_cache import PnLCache
 from sidecar_ibkr.tls import (
+    PeerCnInterceptor,
     assert_key_file_permissions,
     build_grpc_server_credentials,
     server_options_for_tls13,
@@ -39,7 +40,13 @@ from sidecar_ibkr.tls import (
 )
 
 SIDECAR_VERSION = __version__
-_REDACT_KEY = re.compile(r"^(password|secret|token|tls_key|private_key|api_key)$")
+_REDACT_KEY = re.compile(
+    # Phase 4 retro M4: include account-identifier keys so nested broker
+    # payloads (e.g. accounts={"acctNumber": "U1234567"}) cannot leak the
+    # raw account ID through structured logs.
+    r"^(password|secret|token|tls_key|private_key|api_key"
+    r"|account_number|account_hash|acctNumber|acct_number)$"
+)
 _REDACTED = "[REDACTED]"
 _LOG = structlog.get_logger(__name__)
 
@@ -137,6 +144,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="route PlaceOrder/ModifyOrder/PlaceBracket to real IBKR instead of the simulator",
     )
     return parser
+
+
+def _parse_expected_cns(value: str) -> frozenset[str]:
+    """Parse IBKR_SIDECAR_EXPECTED_CLIENT_CN into a frozenset of CNs.
+
+    H2: comma-separated list; empty string yields empty frozenset (disabled).
+    """
+    return frozenset(cn.strip() for cn in value.split(",") if cn.strip())
 
 
 def _path_env(name: str) -> Path | None:
@@ -254,9 +269,12 @@ async def run(args: argparse.Namespace) -> None:
         # base_round_partial. Backend's last_nlv_currency fallback in
         # _resolve_account (9910e3b) covers the residual case.
         missing_base = [
-            acct for acct in accounts
+            acct
+            for acct in accounts
             if not any(
-                v.account == acct and v.tag == "NetLiquidation" and v.currency
+                v.account == acct
+                and v.tag == "NetLiquidation"
+                and v.currency
                 and v.currency != "BASE"
                 for v in ib.accountValues()
             )
@@ -287,7 +305,13 @@ async def run(args: argparse.Namespace) -> None:
                 error_type=type(exc).__name__,
             )
 
-        server = grpc.aio.server(options=server_options_for_tls13())
+        # H2: peer CN allowlist — read at startup; passed to PeerCnInterceptor.
+        expected_cns = _parse_expected_cns(os.environ.get("IBKR_SIDECAR_EXPECTED_CLIENT_CN", ""))
+        peer_cn_interceptor = PeerCnInterceptor(expected_cns)
+        server = grpc.aio.server(
+            options=server_options_for_tls13(),
+            interceptors=[peer_cn_interceptor],
+        )
         creds = build_grpc_server_credentials(cert_pem, key_pem, ca_bundle_pem, crl_pem)
         bind_addr = f"10.10.0.2:{args.grpc_port}"
         port = server.add_secure_port(bind_addr, creds)
@@ -315,12 +339,10 @@ async def run(args: argparse.Namespace) -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, stop.set)
-            except (NotImplementedError, RuntimeError):
+            except NotImplementedError, RuntimeError:
                 signal.signal(sig, lambda _sig, _frame: stop.set())
 
-        watchdog_task = asyncio.create_task(
-            _disconnect_watchdog(ib, stop), name="ibkr-watchdog"
-        )
+        watchdog_task = asyncio.create_task(_disconnect_watchdog(ib, stop), name="ibkr-watchdog")
 
         await stop.wait()
 

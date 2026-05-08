@@ -772,10 +772,19 @@ class BrokerRegistry:
                         await reconfigure_schwab(config_service)
                         self._configured_started_at[label] = current
                     except Exception as exc:
-                        structlog.get_logger().warning(
+                        # Phase 4 retro H1: a reconfigure failure means the
+                        # in-memory ConfigService no longer matches the
+                        # restarted sidecar. Marking healthy=True here would
+                        # let the discoverer fan out queries that the sidecar
+                        # rejects with `503 broker layer not yet configured`.
+                        # Mark unhealthy so the next probe retries cleanly.
+                        structlog.get_logger().error(
                             "schwab_reconfigure_on_started_at_delta_failed",
-                            error=str(exc),
+                            error_class=type(exc).__name__,
+                            label=label,
                         )
+                        await self._mark_health(label, ok=False, health=None)
+                        return
 
         await self._mark_health(label, ok=True, health=health)
         log.debug("broker_registry_probe_ok", label=label)
@@ -1135,7 +1144,8 @@ class BrokerDiscoverer:
                          WHERE deleted_at IS NULL
                            AND last_seen_via = ANY(:healthy_labels)
                            AND (broker_id, account_number) NOT IN :rows_seen_keys
-                           AND last_seen_at < now() - INTERVAL '30 minutes';
+                           AND last_seen_at < now() - INTERVAL '30 minutes'
+                        RETURNING id;
                         """
                     ).bindparams(
                         bindparam("rows_seen_keys", expanding=True),
@@ -1152,15 +1162,18 @@ class BrokerDiscoverer:
                                updated_at = now()
                          WHERE deleted_at IS NULL
                            AND last_seen_via = ANY(:healthy_labels)
-                           AND last_seen_at < now() - INTERVAL '30 minutes';
+                           AND last_seen_at < now() - INTERVAL '30 minutes'
+                        RETURNING id;
                         """
                     )
                     soft_delete_params = {"healthy_labels": healthy_labels}
 
+                # Phase 4 retro M7: SQLAlchemy 2.0 async CursorResult.rowcount
+                # is unreliable across drivers (asyncpg vs aiomysql) and is
+                # explicitly out-of-spec for the typed Result protocol.
+                # RETURNING id + len(rows) is portable and exact.
                 soft_delete_result = await session.execute(soft_delete_stmt, soft_delete_params)
-                # SQLAlchemy 2.0's typed Result protocol omits `rowcount`,
-                # but the asyncpg-backed CursorResult exposes it at runtime.
-                soft_delete_count = getattr(soft_delete_result, "rowcount", 0) or 0
+                soft_delete_count = len(soft_delete_result.all())
 
         # Phase 5a (spec section 5): GetAccountSummary fan-out for per-account NLV cache.
         # Each call is bounded by wait_for(timeout=10.0); gather collects results
@@ -1237,7 +1250,7 @@ class BrokerDiscoverer:
                             "broker_discover_nlv_unparsable",
                             label=label,
                             account_number=account_number,
-                            raw_value=summary.net_liquidation.value,
+                            raw_value_len=len(summary.net_liquidation.value),
                         )
                         continue
                     try:
@@ -1546,10 +1559,19 @@ def _check_avg_cost_unit_invariant(
     positions: list[base.Position],
     summary: base.Summary,
 ) -> None:
-    total_cost = sum(
-        Decimal(position.quantity) * Decimal(position.avg_cost.value) for position in positions
-    )
-    nlv = Decimal(summary.net_liquidation.value)
+    # Phase 4 retro M1: blank/empty avg_cost and non-positive NLV (unfunded
+    # paper accounts, brand-new sub-accounts) used to crash this guard with
+    # InvalidOperation before reaching the comparison. Skip rather than raise.
+    try:
+        total_cost = sum(
+            (Decimal(p.quantity) * Decimal(p.avg_cost.value) for p in positions),
+            start=Decimal("0"),
+        )
+        nlv = Decimal(summary.net_liquidation.value)
+    except InvalidOperation, ValueError:
+        return
+    if nlv <= Decimal("0"):
+        return
     if total_cost > Decimal("1.5") * nlv:
         ratio = Decimal("Infinity") if nlv == Decimal("0") else total_cost / nlv
         log.warning(

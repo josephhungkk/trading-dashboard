@@ -96,7 +96,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Phase 4 retro M8: CASCADE so a skip-level downgrade past 0002 doesn't
+    # fail on FK-dependent objects added by later migrations (positions,
+    # orders, fills, last_nlv_* columns, etc.).
     op.execute("DROP INDEX IF EXISTS ix_broker_accounts_active")
-    op.execute("DROP TABLE IF EXISTS broker_accounts")
+    op.execute("DROP TABLE IF EXISTS broker_accounts CASCADE")
     op.execute("DROP TYPE IF EXISTS trading_mode_enum")
     op.execute("DROP TYPE IF EXISTS broker_id_enum")

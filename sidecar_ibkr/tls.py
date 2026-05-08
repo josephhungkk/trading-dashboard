@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import stat
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,21 +19,49 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from sidecar_ibkr import metrics
+
 _LOG = structlog.get_logger(__name__)
 
 # MED-4: keep strong refs to background tasks so they aren't GC'd before completion.
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 
 
+def _assert_windows_acl(key_path: Path) -> None:
+    """Verify that the private key file has no broad-access ACEs on Windows.
+
+    H4: runs ``icacls`` and rejects if "Everyone:" or "BUILTIN\\Users:" appear
+    in the output, which indicates the key is accessible to non-privileged
+    accounts. Raises ``RuntimeError`` on both ACL violations and icacls
+    subprocess failures. Always callable (no os.name guard) so unit tests can
+    exercise it on any platform via monkeypatching.
+    """
+    result = subprocess.run(
+        ["icacls", str(key_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"icacls check failed: {result.stderr}")
+    for bad in ("Everyone:", "BUILTIN\\Users:"):
+        if bad in result.stdout:
+            raise RuntimeError(
+                f"Private key {key_path} has overly-permissive ACL ({bad!r} found); aborting."
+            )
+
+
 def assert_key_file_permissions(key_path: Path) -> None:
     """Refuse to load a private key that is world-readable.
 
     HIGH-5: provision-sidecar-mtls.ps1 sets restrictive ACLs at provisioning
-    time; this is the runtime guard against ACL drift. POSIX mode-bit check
-    only — Windows ACL verification is a TODO(task14).
+    time; this is the runtime guard against ACL drift.
+    - POSIX: mode-bit check (S_IRWXO).
+    - Windows: icacls ACL check via ``_assert_windows_acl`` (H4).
     """
     if os.name == "nt":
-        # TODO(task14): icacls verification on Windows.
+        _assert_windows_acl(key_path)
         return
     mode = key_path.stat().st_mode
     if mode & stat.S_IRWXO:
@@ -56,9 +85,7 @@ def server_options_for_tls13() -> list[tuple[str, int | str]]:
     return [("grpc.tls_minimum_version", 1)]
 
 
-def _verify_crl(
-    crl_pem: bytes, ca_bundle_pem: bytes
-) -> x509.CertificateRevocationList:
+def _verify_crl(crl_pem: bytes, ca_bundle_pem: bytes) -> x509.CertificateRevocationList:
     """Load and verify a CRL is signed by the CA bundle and isn't expired.
 
     CR-3: parsing alone does not authenticate; an attacker with write access
@@ -73,9 +100,7 @@ def _verify_crl(
     crl = x509.load_pem_x509_crl(crl_pem)
 
     if crl.issuer != ca_cert.subject:
-        raise ValueError(
-            f"CRL issuer {crl.issuer} does not match CA subject {ca_cert.subject}"
-        )
+        raise ValueError(f"CRL issuer {crl.issuer} does not match CA subject {ca_cert.subject}")
     # cryptography accepts DSA/RSA/EC/Ed25519/Ed448 here; the static return type
     # of public_key() also includes X25519/X448 (key-agreement only) which would
     # never appear on a real CA. Ignore the union mismatch.
@@ -96,6 +121,10 @@ def _verify_crl(
             next_update=next_update.isoformat(),
             now=now.isoformat(),
         )
+        # M5: expose staleness so Prometheus/alerting can fire on aged CRLs.
+        metrics.crl_stale_seconds.set((now - next_update).total_seconds())
+    else:
+        metrics.crl_stale_seconds.set(0)
 
     return crl
 
@@ -243,3 +272,81 @@ def clientcert_sha256(der: bytes) -> str:
     fingerprint suitable for `cert_verify_fail` log lines (per spec §7).
     """
     return hashlib.sha256(der).hexdigest()
+
+
+class PeerCnInterceptor(grpc.aio.ServerInterceptor):
+    """H2: per-RPC interceptor that validates the mTLS peer Common Name.
+
+    Rejects RPCs whose client cert CN is not in ``expected_cns``. When
+    ``expected_cns`` is empty the interceptor is disabled (backwards-compat
+    for deployments that haven't configured CNs yet) and logs a one-time
+    warning at construction time.
+    """
+
+    def __init__(self, expected_cns: frozenset[str]) -> None:
+        self._expected_cns = expected_cns
+        if not expected_cns:
+            _LOG.warning("peer_cn_check_disabled")
+
+    async def intercept_service(
+        self,
+        continuation: Any,
+        handler_call_details: grpc.HandlerCallDetails,
+    ) -> grpc.RpcMethodHandler:
+        handler = await continuation(handler_call_details)
+        expected_cns = self._expected_cns
+
+        if not expected_cns:
+            # Allowlist empty → pass-through (disabled mode).
+            return handler
+
+        async def _unary_unary_wrapper(request: Any, context: grpc.aio.ServicerContext) -> Any:
+            if not _peer_cn_allowed(context, expected_cns):
+                await context.abort(grpc.StatusCode.PERMISSION_DENIED, "peer cn not allowed")
+            return await handler.unary_unary(request, context)
+
+        async def _unary_stream_wrapper(request: Any, context: grpc.aio.ServicerContext) -> Any:
+            if not _peer_cn_allowed(context, expected_cns):
+                await context.abort(grpc.StatusCode.PERMISSION_DENIED, "peer cn not allowed")
+            return handler.unary_stream(request, context)
+
+        async def _stream_unary_wrapper(
+            request_iterator: Any, context: grpc.aio.ServicerContext
+        ) -> Any:
+            if not _peer_cn_allowed(context, expected_cns):
+                await context.abort(grpc.StatusCode.PERMISSION_DENIED, "peer cn not allowed")
+            return await handler.stream_unary(request_iterator, context)
+
+        async def _stream_stream_wrapper(
+            request_iterator: Any, context: grpc.aio.ServicerContext
+        ) -> Any:
+            if not _peer_cn_allowed(context, expected_cns):
+                await context.abort(grpc.StatusCode.PERMISSION_DENIED, "peer cn not allowed")
+            return handler.stream_stream(request_iterator, context)
+
+        if handler is None:
+            return handler
+
+        if handler.unary_unary is not None:
+            return handler._replace(unary_unary=_unary_unary_wrapper)
+        if handler.unary_stream is not None:
+            return handler._replace(unary_stream=_unary_stream_wrapper)
+        if handler.stream_unary is not None:
+            return handler._replace(stream_unary=_stream_unary_wrapper)
+        if handler.stream_stream is not None:
+            return handler._replace(stream_stream=_stream_stream_wrapper)
+        return handler
+
+
+def _peer_cn_allowed(context: grpc.aio.ServicerContext, expected_cns: frozenset[str]) -> bool:
+    """Return True if the peer CN from auth_context is in the allowlist."""
+    auth = context.auth_context()
+    cn_bytes_list: list[bytes] = auth.get("x509_common_name", [])
+    for cn_bytes in cn_bytes_list:
+        try:
+            cn = cn_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if cn in expected_cns:
+            return True
+    return False

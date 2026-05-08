@@ -11,7 +11,7 @@ from collections import defaultdict
 from typing import Self
 
 try:
-    from prometheus_client import Counter
+    from prometheus_client import Counter, Gauge
 except ModuleNotFoundError:
 
     class _Value:
@@ -47,6 +47,33 @@ except ModuleNotFoundError:
             self._values[self._labels] += amount
 
     Counter = _FallbackCounter
+
+    class _FallbackGauge:
+        def __init__(
+            self,
+            name: str,
+            documentation: str,
+            labelnames: list[str],
+        ) -> None:
+            del documentation
+            self._name = name
+            self._labelnames = tuple(labelnames)
+            self._labels: tuple[tuple[str, str], ...] = ()
+            self._values: defaultdict[tuple[tuple[str, str], ...], float] = defaultdict(float)
+
+        def labels(self, **labels: str) -> Self:
+            gauge = type(self)(self._name, "", list(self._labelnames))
+            gauge._values = self._values
+            gauge._labels = tuple((name, labels[name]) for name in self._labelnames)
+            return gauge
+
+        def set(self, value: float) -> None:
+            self._values[self._labels] = value
+
+        def get(self) -> float:
+            return self._values[self._labels]
+
+    Gauge = _FallbackGauge
 
 
 broker_order_events_dropped_total = Counter(
@@ -88,5 +115,11 @@ quote_ibkr_subs_cap_hit_total = Counter(
 ibkr_stream_quote_drops_total = Counter(
     "ibkr_stream_quote_drops_total",
     "IBKR StreamQuotes per-call queue drops.",
+    labelnames=[],
+)
+
+crl_stale_seconds = Gauge(
+    "ibkr_sidecar_crl_stale_seconds",
+    "Seconds since CRL nextUpdate elapsed (0 if fresh).",
     labelnames=[],
 )

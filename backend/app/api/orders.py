@@ -291,11 +291,20 @@ async def modify_order(
         # in the python client. Surface the underlying detail as a clean 422
         # instead of letting the exception bubble to a 500.
         if exc.grpc_code in {"UNKNOWN", "INVALID_ARGUMENT", "NOT_FOUND"}:
+            # Phase 4 retro H3: don't surface raw IBKR/Schwab error text to
+            # the browser — it can leak account IDs, order references, and
+            # broker-specific messages. Log full detail server-side.
+            _log.warning(
+                "broker_modify_rejected",
+                grpc_code=exc.grpc_code,
+                grpc_details=exc.grpc_details,
+                label=exc.label,
+            )
             return JSONResponse(
                 status_code=422,
                 content={
                     "error": "broker_modify_rejected",
-                    "detail": exc.grpc_details or str(exc),
+                    "detail": f"broker rejected (code: {exc.grpc_code})",
                 },
             )
         return JSONResponse(
@@ -540,11 +549,18 @@ async def post_modify_order(
         )
     except BrokerSidecarUnavailable as exc:
         if exc.grpc_code in {"UNKNOWN", "INVALID_ARGUMENT", "NOT_FOUND"}:
+            # Phase 4 retro H3: server-side detail only, sanitized client.
+            _log.warning(
+                "broker_modify_rejected",
+                grpc_code=exc.grpc_code,
+                grpc_details=exc.grpc_details,
+                label=exc.label,
+            )
             return JSONResponse(
                 status_code=422,
                 content={
                     "error": "broker_modify_rejected",
-                    "detail": exc.grpc_details or str(exc),
+                    "detail": f"broker rejected (code: {exc.grpc_code})",
                 },
             )
         return JSONResponse(
@@ -749,11 +765,20 @@ async def place_oco_order(
             body.order_a.stop_price or "",
         )
     except Exception as exc_a:
+        # Phase 4 retro H3: log full broker detail server-side; surface a
+        # sanitized message to the client.
+        _log.warning(
+            "oco_leg_a_failed",
+            grpc_code=getattr(exc_a, "grpc_code", None),
+            grpc_details=getattr(exc_a, "grpc_details", None),
+            error_class=type(exc_a).__name__,
+        )
+        _grpc_code = getattr(exc_a, "grpc_code", None) or "UNKNOWN"
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "oco_leg_a_failed",
-                "detail": getattr(exc_a, "grpc_details", None) or str(exc_a),
+                "detail": f"broker rejected (code: {_grpc_code})",
             },
         ) from exc_a
 
@@ -795,11 +820,19 @@ async def place_oco_order(
                 oco_leg_a_order_id=order_id_a,
                 error=str(cancel_exc),
             )
+        # Phase 4 retro H3: server-side detail only.
+        _log.warning(
+            "oco_leg_b_failed",
+            grpc_code=getattr(exc_b, "grpc_code", None),
+            grpc_details=getattr(exc_b, "grpc_details", None),
+            error_class=type(exc_b).__name__,
+        )
+        _grpc_code_b = getattr(exc_b, "grpc_code", None) or "UNKNOWN"
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "oco_leg_b_failed",
-                "detail": getattr(exc_b, "grpc_details", None) or str(exc_b),
+                "detail": f"broker rejected (code: {_grpc_code_b})",
             },
         ) from exc_b
 
