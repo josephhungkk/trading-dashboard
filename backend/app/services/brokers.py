@@ -984,6 +984,10 @@ class BrokerDiscoverer:
         # start so we can trigger a one-shot BASE-tag refresh when a mid-run
         # account appears for the first time.
         self._known_accounts: set[tuple[str, str]] = set()
+        # Phase 9.7 G1: per-(label, account_number) monotonic timestamp of the
+        # last successful position fetch. Feeds broker_poller_drift_seconds
+        # gauge (BrokerPollerDriftHigh alert fires at >60s sustained 2m).
+        self._last_position_tick_at: dict[tuple[str, str], float] = {}
 
     async def discover_loop(self) -> None:
         # Single-consumer invariant: only this method calls _discover_once,
@@ -1424,6 +1428,18 @@ class BrokerDiscoverer:
                         label=label,
                         account_number=account_number,
                     )
+                # Phase 9.7 G1: record the successful tick timestamp.
+                self._last_position_tick_at[(label, account_number)] = time.monotonic()
+
+        # Phase 9.7 G1: refresh broker_poller_drift_seconds gauge for every
+        # account we've ever successfully polled. Even if THIS tick failed
+        # for some accounts, the gauge for those accounts grows as
+        # (now - last_successful_at) and triggers BrokerPollerDriftHigh.
+        now = time.monotonic()
+        for (label, account_number), last_at in self._last_position_tick_at.items():
+            metrics.broker_poller_drift_seconds.labels(
+                gateway_label=label, account_id=account_number
+            ).set(now - last_at)
 
         metrics.broker_discover_positions_update_duration_ms.observe(
             (time.monotonic() - t_start) * 1000
