@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 from dataclasses import dataclass
@@ -352,11 +353,19 @@ async def place_order(
         )
     except (BrokerSidecarTimeout, BrokerSidecarUnavailable) as _exc:
         # Phase 9.7 G2: timeout class — broker reachability failed.
-        metrics.broker_order_place_total.labels(label=account.gateway_label, result="timeout").inc()
+        # contextlib.suppress so an internal Prometheus error doesn't shadow
+        # the original broker exception (silent-failure-hunter HIGH-3).
+        with contextlib.suppress(Exception):
+            metrics.broker_order_place_total.labels(
+                label=account.gateway_label, result="timeout"
+            ).inc()
         return _order_response_from_mapping(row, submission_state="pending_unknown")
     except Exception:
         # Phase 9.7 G2: error class — broker rejected or transport blew up.
-        metrics.broker_order_place_total.labels(label=account.gateway_label, result="error").inc()
+        with contextlib.suppress(Exception):
+            metrics.broker_order_place_total.labels(
+                label=account.gateway_label, result="error"
+            ).inc()
         await db.execute(
             text(
                 """
@@ -566,15 +575,21 @@ async def modify_order(
         # PUT handler maps these to either 422 (broker_modify_rejected) or
         # 503 (sidecar_unreachable); for the metric we treat the gRPC
         # broker-reject codes as "error" and the rest as "timeout".
+        # `or ""` guards against grpc_code=None falling through silently
+        # (silent-failure-hunter MED-1).
+        grpc_code = getattr(exc, "grpc_code", "") or ""
         metric_result = (
             "error"
             if isinstance(exc, BrokerSidecarUnavailable)
-            and getattr(exc, "grpc_code", "") in {"UNKNOWN", "INVALID_ARGUMENT", "NOT_FOUND"}
+            and grpc_code in {"UNKNOWN", "INVALID_ARGUMENT", "NOT_FOUND"}
             else "timeout"
         )
-        metrics.broker_order_modify_total.labels(
-            label=account.gateway_label, result=metric_result
-        ).inc()
+        # contextlib.suppress so an internal Prometheus error doesn't shadow
+        # the PreviewUnavailable we're about to raise (HIGH-3).
+        with contextlib.suppress(Exception):
+            metrics.broker_order_modify_total.labels(
+                label=account.gateway_label, result=metric_result
+            ).inc()
         raise PreviewUnavailable(
             503,
             {"error": "sidecar_unavailable"},
@@ -583,7 +598,10 @@ async def modify_order(
     except Exception:
         await _restore_modify_baseline(db, order_id=order_id, baseline=prior_mutable)
         await db.commit()
-        metrics.broker_order_modify_total.labels(label=account.gateway_label, result="error").inc()
+        with contextlib.suppress(Exception):
+            metrics.broker_order_modify_total.labels(
+                label=account.gateway_label, result="error"
+            ).inc()
         raise
 
     raw_payload = {
@@ -852,8 +870,11 @@ async def cancel_order(
                 {"order_id": order_id},
             )
             await db.commit()
-            # Phase 9.7 G2: broker rejected cancel.
-            metrics.broker_order_cancel_total.labels(label=gateway_label, result="error").inc()
+            # Phase 9.7 G2: broker rejected cancel. suppress any internal
+            # Prometheus error so it can't shadow the CancelUnavailable
+            # we're about to raise (silent-failure-hunter HIGH-3).
+            with contextlib.suppress(Exception):
+                metrics.broker_order_cancel_total.labels(label=gateway_label, result="error").inc()
             raise CancelUnavailable(
                 422,
                 {"error": "broker_cancel_rejected", "detail": "broker rejected cancel"},
@@ -871,8 +892,9 @@ async def cancel_order(
             {"order_id": order_id},
         )
         await db.commit()
-        # Phase 9.7 G2: sidecar unreachable.
-        metrics.broker_order_cancel_total.labels(label=gateway_label, result="timeout").inc()
+        # Phase 9.7 G2: sidecar unreachable. suppress per HIGH-3.
+        with contextlib.suppress(Exception):
+            metrics.broker_order_cancel_total.labels(label=gateway_label, result="timeout").inc()
         raise CancelUnavailable(
             503,
             {"error": "sidecar_unavailable", "detail": "cancel forward failed; retry"},

@@ -42,7 +42,9 @@ export interface CapabilityComboRow {
 
 export interface BrokerCapabilitiesResponse {
   broker_id: string;
-  order_types: OrderTypeRow[];
-  time_in_force: TimeInForceRow[];
-  combos: CapabilityComboRow[];
+  // typescript-reviewer MED: readonly arrays so consumers don't accidentally
+  // mutate the response payload (CLAUDE.md immutability discipline).
+  order_types: readonly OrderTypeRow[];
+  time_in_force: readonly TimeInForceRow[];
+  combos: readonly CapabilityComboRow[];
 }

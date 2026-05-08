@@ -247,7 +247,14 @@ async def refresh_with_lock(
             try:
                 await redis.incr("schwab:refresh_uses_24h_count")
                 await redis.expire("schwab:refresh_uses_24h_count", 86400)
-            except Exception:
-                log.warning("schwab_oauth.redis_counter_failed")
+            except Exception as exc:
+                # silent-failure-hunter HIGH-1: bind the exception so the
+                # log line carries enough info to diagnose which Redis
+                # operation failed.
+                log.warning(
+                    "schwab_oauth.redis_counter_failed",
+                    error_class=type(exc).__name__,
+                    error=str(exc),
+                )
 
     return new_access, new_refresh, issued_at

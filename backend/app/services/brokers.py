@@ -1419,6 +1419,12 @@ class BrokerDiscoverer:
                         await self._upsert_positions(
                             session, account_id, positions, resolved_broker_id
                         )
+                    # Phase 9.7 G1: record the successful tick timestamp.
+                    # MUST be inside the try block so an overflow / DB error
+                    # does NOT update the timestamp (silent-failure-hunter
+                    # HIGH-2 — otherwise drift gauge would mask stale data
+                    # for accounts whose upsert kept failing).
+                    self._last_position_tick_at[(label, account_number)] = time.monotonic()
                 except DBAPIError as exc:
                     if getattr(exc.orig, "sqlstate", None) != "22003":
                         raise
@@ -1428,13 +1434,19 @@ class BrokerDiscoverer:
                         label=label,
                         account_number=account_number,
                     )
-                # Phase 9.7 G1: record the successful tick timestamp.
-                self._last_position_tick_at[(label, account_number)] = time.monotonic()
 
         # Phase 9.7 G1: refresh broker_poller_drift_seconds gauge for every
         # account we've ever successfully polled. Even if THIS tick failed
         # for some accounts, the gauge for those accounts grows as
         # (now - last_successful_at) and triggers BrokerPollerDriftHigh.
+        # Prune entries for accounts that have left the targets list
+        # (soft-deleted or label retired) so the gauge doesn't keep growing
+        # for non-existent accounts (code-reviewer MED-2).
+        live_keys = set(targets)
+        for stale_key in list(self._last_position_tick_at.keys()):
+            if stale_key not in live_keys:
+                del self._last_position_tick_at[stale_key]
+                metrics.broker_poller_drift_seconds.remove(stale_key[0], stale_key[1])
         now = time.monotonic()
         for (label, account_number), last_at in self._last_position_tick_at.items():
             metrics.broker_poller_drift_seconds.labels(
