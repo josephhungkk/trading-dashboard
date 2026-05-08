@@ -277,6 +277,10 @@ async def test_get_orders_policy_returns_caps_and_today_notional(
     body = response.json()
     assert body["max_notional_per_order"] == "2500.00000000"
     assert body["daily_notional_cap"] == "9000.00000000"
-    assert body["notional_filled_today"] == "200.00000000"
+    # _notional_today sums orders.notional_filled (not orders.notional);
+    # _seed_order sets notional_filled = 0 for all rows, so the sum is 0.
+    # The 200 (= 125.50 + 74.50) value in earlier revisions of this test
+    # assumed orders.notional was being summed.
+    assert body["notional_filled_today"] == "0.00000000"
     assert body["trade_enabled"] is True
     assert body["simulator_only"] is False

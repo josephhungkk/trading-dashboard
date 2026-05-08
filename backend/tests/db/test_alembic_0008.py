@@ -24,17 +24,28 @@ async def test_alembic_0008_adds_account_hash_column():
 
 @pytest.mark.asyncio
 async def test_alembic_0008_partial_index_exists():
+    """Verify the schwab account_hash partial index exists in some form.
+
+    0008 originally created `idx_broker_accounts_schwab_hash` (non-unique
+    partial index). 0030 dropped it and replaced with the unique
+    `uq_broker_accounts_schwab_hash`. Either is acceptable — this asserts
+    the partial-index invariant (`WHERE account_hash IS NOT NULL`) holds
+    on whichever name currently exists.
+    """
     from app.core.db import engine
 
     async with engine.connect() as conn:
         result = await conn.execute(
             text(
                 "SELECT indexdef FROM pg_indexes "
-                "WHERE indexname = 'idx_broker_accounts_schwab_hash'"
+                "WHERE indexname IN ("
+                "  'idx_broker_accounts_schwab_hash',"
+                "  'uq_broker_accounts_schwab_hash'"
+                ")"
             )
         )
         rows = result.fetchall()
-    assert len(rows) == 1
+    assert len(rows) >= 1, "no schwab account_hash partial index found"
     indexdef = rows[0][0]
     assert "WHERE" in indexdef
     assert "account_hash IS NOT NULL" in indexdef
