@@ -523,3 +523,172 @@ async def test_etag_uses_quoted_form(client: AsyncClient, instrument_id: int) ->
         headers={"If-Match": quoted_etag},
     )
     assert r3.status_code == 200, f"Expected 200 for quoted ETag, got {r3.status_code}: {r3.text}"
+
+
+# ---------------------------------------------------------------------------
+# Test 14: CRIT-1 — ETag header byte-equals f'"{body["updated_at"]}"' for INSERT + UPDATE
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_etag_header_matches_body_updated_at_insert(
+    client: AsyncClient, instrument_id: int
+) -> None:
+    """CRIT-1: ETag response header must byte-equal f'"{body["updated_at"]}"' on INSERT.
+
+    _etag() normalises +00:00 → Z to match Pydantic model_dump_json Z-form.
+    """
+    r = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 1}, "schema_version": 1},
+        headers={"If-Match": '"initial"'},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    expected_etag = f'"{body["updated_at"]}"'
+    assert r.headers["ETag"] == expected_etag, (
+        f"ETag header {r.headers['ETag']!r} != expected {expected_etag!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_etag_header_matches_body_updated_at_update(
+    client: AsyncClient, instrument_id: int
+) -> None:
+    """CRIT-1: ETag response header must byte-equal f'"{body["updated_at"]}"' on UPDATE.
+
+    Also verifies round-trip: PUT (200) → second PUT with response updated_at → 200 (not 412).
+    """
+    # First write — INSERT path
+    r1 = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 1}, "schema_version": 1},
+        headers={"If-Match": '"initial"'},
+    )
+    assert r1.status_code == 200, r1.text
+    body1 = r1.json()
+    etag1 = r1.headers["ETag"]
+    assert etag1 == f'"{body1["updated_at"]}"', (
+        f"INSERT ETag mismatch: header={etag1!r}, body updated_at={body1['updated_at']!r}"
+    )
+
+    # Second write — UPDATE path using the response ETag directly as If-Match
+    r2 = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 2}, "schema_version": 1},
+        headers={"If-Match": etag1},
+    )
+    assert r2.status_code == 200, (
+        f"CRIT-1 round-trip failed: second PUT returned {r2.status_code} (expected 200). "
+        f"ETag used: {etag1!r}. Body: {r2.text}"
+    )
+    body2 = r2.json()
+    etag2 = r2.headers["ETag"]
+    assert etag2 == f'"{body2["updated_at"]}"', (
+        f"UPDATE ETag mismatch: header={etag2!r}, body updated_at={body2['updated_at']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 15: MED-1 — 65536-byte payload rejected with 413 (not 500)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_put_exactly_max_payload_bytes_rejected(
+    client: AsyncClient, instrument_id: int
+) -> None:
+    """MED-1: payload of exactly MAX_PAYLOAD_BYTES (65536) bytes must return 413, not 500.
+
+    Previously `> 65536` allowed 65536 through to DB where CHECK `< 65536` rejected it as 500.
+    """
+    from app.api.chart_layouts import MAX_PAYLOAD_BYTES
+
+    # Build a JSON payload whose UTF-8 encoding is exactly MAX_PAYLOAD_BYTES bytes.
+    # json.dumps({"k": ""}) overhead is 9 bytes, fill the rest with 'x'.
+    overhead = len(json.dumps({"k": ""}).encode("utf-8"))
+    fill = "x" * (MAX_PAYLOAD_BYTES - overhead)
+    payload: dict[str, Any] = {"k": fill}
+    assert len(json.dumps(payload).encode("utf-8")) == MAX_PAYLOAD_BYTES
+
+    r = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": payload, "schema_version": 1},
+        headers={"If-Match": '"initial"'},
+    )
+    assert r.status_code == 413, (
+        f"Expected 413 for exactly {MAX_PAYLOAD_BYTES}-byte payload, got {r.status_code}: {r.text}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 16: HIGH-2 — concurrent first-write INSERTs: one 200, one 412
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_write_inserts_one_wins(
+    db: AsyncSession, instrument_id: int, mock_cfg: AsyncMock
+) -> None:
+    """HIGH-2: two concurrent first-write PUTs (no existing row) must not produce 500.
+
+    ON CONFLICT DO NOTHING ensures exactly one INSERT wins (200) and the other gets 412.
+    """
+    await _cleanup(db, instrument_id)
+
+    engine2 = create_async_engine(settings.database_url, poolclass=NullPool)
+    factory2 = async_sessionmaker(engine2, class_=AsyncSession, expire_on_commit=False)
+
+    async def _do_first_write(session: AsyncSession) -> int:
+        _app = _make_app(session, mock_cfg)
+        async with AsyncClient(transport=ASGITransport(app=_app), base_url="http://test") as c:
+            r = await c.put(
+                f"/api/chart/layouts/{instrument_id}",
+                json={"payload": {"first": True}, "schema_version": 1},
+                headers={"If-Match": '"initial"'},
+            )
+            return r.status_code
+
+    async with factory2() as s1, factory2() as s2:
+        results = await asyncio.gather(
+            _do_first_write(s1),
+            _do_first_write(s2),
+            return_exceptions=True,
+        )
+
+    await engine2.dispose()
+    await _cleanup(db, instrument_id)
+
+    status_codes = [r for r in results if isinstance(r, int)]
+    assert sorted(status_codes) == [200, 412], (
+        f"HIGH-2: expected one 200 and one 412 for concurrent first-writes; got: {status_codes}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 17: MED-3 — If-Match: * accepted on existing row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_if_match_wildcard_accepted_on_existing_row(
+    client: AsyncClient, instrument_id: int
+) -> None:
+    """MED-3: RFC 7232 §3.1 — If-Match: * must match any existing representation."""
+    # Create the row first.
+    r1 = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 1}, "schema_version": 1},
+        headers={"If-Match": '"initial"'},
+    )
+    assert r1.status_code == 200, r1.text
+
+    # Wildcard — must succeed (not 412).
+    r2 = await client.put(
+        f"/api/chart/layouts/{instrument_id}",
+        json={"payload": {"v": 2}, "schema_version": 1},
+        headers={"If-Match": "*"},
+    )
+    assert r2.status_code == 200, (
+        f"MED-3: If-Match: * should match existing row, got {r2.status_code}: {r2.text}"
+    )

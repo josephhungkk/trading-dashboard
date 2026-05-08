@@ -67,8 +67,15 @@ class ChartLayoutResponse(BaseModel):
 
 
 def _etag(updated_at: datetime) -> str:
-    """Return a strong ETag value (quoted per RFC 7232)."""
-    return f'"{updated_at.isoformat()}"'
+    """Build a strong ETag from updated_at, matching Pydantic JSON serialization (Z form).
+
+    Pydantic v2 ``model_dump_json`` emits ``...Z`` for UTC datetimes; ``isoformat()``
+    emits ``...+00:00``. Both forms must agree so client-side If-Match comparison works.
+    """
+    iso = updated_at.isoformat()
+    if iso.endswith("+00:00"):
+        iso = iso[:-6] + "Z"
+    return f'"{iso}"'
 
 
 def _add_etag(response: Response, updated_at: datetime) -> None:
@@ -174,7 +181,9 @@ async def put_chart_layout(
     # --- 64 KB cap ---
     # MED-20: post-Pydantic-parse size is the canonical measurement — Pydantic strips
     # whitespace, so this is defense-in-depth on top of nginx client_max_body_size 1m.
-    if len(json.dumps(body.payload).encode("utf-8")) > MAX_PAYLOAD_BYTES:
+    # MED-1: DB CHECK is `octet_length < 65536` (strict less-than); align API guard
+    # to `>= MAX_PAYLOAD_BYTES` so a 65536-byte payload is rejected here (not 500 from DB).
+    if len(json.dumps(body.payload).encode("utf-8")) >= MAX_PAYLOAD_BYTES:
         raise HTTPException(
             status_code=413,
             detail="chart_layout payload exceeds 64 KB",
@@ -209,7 +218,8 @@ async def put_chart_layout(
     if existing is not None:
         # Row exists — enforce ETag using _etag() for both sides (MED-25).
         current_etag = _etag(existing.updated_at)
-        if incoming_etag != current_etag:
+        # MED-3: RFC 7232 §3.1 wildcard — `If-Match: *` matches any existing representation.
+        if incoming_etag not in ('"*"', "*") and incoming_etag != current_etag:
             raise HTTPException(status_code=412, detail="etag_mismatch")
         # Perform atomic UPDATE WHERE updated_at = :expected_ts to guard against TOCTOU.
         result = (
@@ -237,7 +247,10 @@ async def put_chart_layout(
             # Concurrent PUT won the race — our etag is now stale.
             raise HTTPException(status_code=412, detail="etag_mismatch")
     else:
-        # No existing row — first write; insert unconditionally.
+        # No existing row — first write.
+        # HIGH-2: use ON CONFLICT DO NOTHING to guard against concurrent first-write INSERTs.
+        # If two clients race here, the second INSERT silently no-ops → RETURNING returns no
+        # rows → we return 412 so the client can retry with the now-existing row's etag.
         result = (
             await db.execute(
                 text(
@@ -246,6 +259,7 @@ async def put_chart_layout(
                         (instrument_id, payload, schema_version, updated_at)
                     VALUES
                         (:iid, CAST(:payload AS JSONB), :sv, NOW())
+                    ON CONFLICT (instrument_id) DO NOTHING
                     RETURNING updated_at
                     """
                 ),
@@ -255,7 +269,10 @@ async def put_chart_layout(
                     "sv": latest,
                 },
             )
-        ).one()
+        ).one_or_none()
+        if result is None:
+            # Concurrent first-write race: another client INSERTed in our blind spot.
+            raise HTTPException(status_code=412, detail="etag_mismatch")
 
     await db.commit()
 

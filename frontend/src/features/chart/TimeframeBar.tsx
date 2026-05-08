@@ -48,6 +48,7 @@ export function TimeframeBar(): React.JSX.Element {
             aria-label={`Range ${r}`}
             // TODO(Task 36 follow-up): call setFetchRange(r) when range wiring is implemented.
             // Marked aria-disabled + tabIndex=-1 until wiring lands.
+            // MED-8: no onClick needed; disabled + aria-disabled are sufficient.
             aria-disabled="true"
             tabIndex={-1}
             className={cn(
@@ -56,7 +57,6 @@ export function TimeframeBar(): React.JSX.Element {
               'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-active',
               'cursor-not-allowed opacity-60',
             )}
-            onClick={() => undefined}
           >
             {r}
           </button>
@@ -118,6 +118,7 @@ export function TimeframeBar(): React.JSX.Element {
                 key={r}
                 type="button"
                 aria-label={`Mobile range ${r}`}
+                // MED-8: no onClick needed; aria-disabled + tabIndex=-1 are sufficient.
                 aria-disabled="true"
                 tabIndex={-1}
                 className={cn(
@@ -126,7 +127,6 @@ export function TimeframeBar(): React.JSX.Element {
                   'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-active',
                   'cursor-not-allowed opacity-60',
                 )}
-                onClick={() => undefined}
               >
                 {r}
               </button>

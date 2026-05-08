@@ -74,30 +74,8 @@ export function DrawingTools(): React.JSX.Element {
   const setActiveTool = useChartStore((s) => s.setActiveDrawingTool);
   const [moreOpen, setMoreOpen] = useState(false);
 
-  const renderToolButton = (name: DrawingToolName): React.JSX.Element => {
-    const isActive = name === activeTool;
-    return (
-      <button
-        type="button"
-        key={name}
-        aria-label={name}
-        aria-pressed={isActive}
-        title={name}
-        onClick={() => setActiveTool(isActive ? null : name)}
-        className={[
-          'flex items-center justify-center',
-          'min-h-[2.75rem] min-w-[2.75rem]',
-          'rounded text-xs font-mono leading-none',
-          'transition-colors',
-          isActive
-            ? 'bg-primary text-primary-foreground'
-            : 'hover:bg-muted text-foreground',
-        ].join(' ')}
-      >
-        {toolLabel(name)}
-      </button>
-    );
-  };
+  // MED-9: renderToolButton was an inline factory recreated on every render.
+  // Inlined directly into each .map() callback; toolLabel is a module-level pure function.
 
   return (
     <div
@@ -106,10 +84,56 @@ export function DrawingTools(): React.JSX.Element {
       aria-label="Drawing tools"
       aria-orientation="vertical"
     >
-      {MOBILE_PRIORITY.map((name) => renderToolButton(name))}
+      {MOBILE_PRIORITY.map((name) => {
+        const isActive = name === activeTool;
+        return (
+          <button
+            key={name}
+            type="button"
+            aria-label={name}
+            aria-pressed={isActive}
+            title={name}
+            onClick={() => setActiveTool(isActive ? null : name)}
+            className={[
+              'flex items-center justify-center',
+              'min-h-[2.75rem] min-w-[2.75rem]',
+              'rounded text-xs font-mono leading-none',
+              'transition-colors',
+              isActive
+                ? 'bg-primary text-primary-foreground'
+                : 'hover:bg-muted text-foreground',
+            ].join(' ')}
+          >
+            {toolLabel(name)}
+          </button>
+        );
+      })}
 
       <div className="hidden md:contents" data-testid="drawing-tools-desktop-rest">
-        {DRAWING_TOOLS.filter((name) => !isMobilePriority(name)).map((name) => renderToolButton(name))}
+        {DRAWING_TOOLS.filter((name) => !isMobilePriority(name)).map((name) => {
+          const isActive = name === activeTool;
+          return (
+            <button
+              key={name}
+              type="button"
+              aria-label={name}
+              aria-pressed={isActive}
+              title={name}
+              onClick={() => setActiveTool(isActive ? null : name)}
+              className={[
+                'flex items-center justify-center',
+                'min-h-[2.75rem] min-w-[2.75rem]',
+                'rounded text-xs font-mono leading-none',
+                'transition-colors',
+                isActive
+                  ? 'bg-primary text-primary-foreground'
+                  : 'hover:bg-muted text-foreground',
+              ].join(' ')}
+            >
+              {toolLabel(name)}
+            </button>
+          );
+        })}
       </div>
 
       <button
@@ -133,7 +157,30 @@ export function DrawingTools(): React.JSX.Element {
           aria-modal="true"
           aria-label="More drawing tools"
         >
-          {DRAWING_TOOLS.filter((name) => !isMobilePriority(name)).map((name) => renderToolButton(name))}
+          {DRAWING_TOOLS.filter((name) => !isMobilePriority(name)).map((name) => {
+            const isActive = name === activeTool;
+            return (
+              <button
+                key={name}
+                type="button"
+                aria-label={name}
+                aria-pressed={isActive}
+                title={name}
+                onClick={() => setActiveTool(isActive ? null : name)}
+                className={[
+                  'flex items-center justify-center',
+                  'min-h-[2.75rem] min-w-[2.75rem]',
+                  'rounded text-xs font-mono leading-none',
+                  'transition-colors',
+                  isActive
+                    ? 'bg-primary text-primary-foreground'
+                    : 'hover:bg-muted text-foreground',
+                ].join(' ')}
+              >
+                {toolLabel(name)}
+              </button>
+            );
+          })}
           <button
             type="button"
             aria-label="Close more drawings"

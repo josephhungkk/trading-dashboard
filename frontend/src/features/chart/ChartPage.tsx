@@ -109,20 +109,26 @@ export function ChartPage({ canonicalId }: ChartPageProps): React.JSX.Element {
     setModifyReq(null);
   }, [toast]);
 
+  // CRIT-2 belt-and-suspenders: stable callbacks for ChartLayoutSync so parent re-renders
+  // don't destabilise the ref-pinned callbacks inside ChartLayoutSync.
+  const handleLayoutConflict = React.useCallback(() => {
+    toast({
+      title: 'Layout updated elsewhere',
+      description: 'Your chart layout was changed in another tab/session.',
+      tone: 'neutral',
+    });
+  }, [toast]);
+
+  const handleLayoutError = React.useCallback((reason: string) => {
+    toast({ title: 'Layout sync failed', description: reason, tone: 'error' });
+  }, [toast]);
+
   return (
     <div className="flex h-full flex-col" data-chart-container>
       <ChartLayoutSync
         instrumentId={instrumentId}
-        onConflict={() => {
-          toast({
-            title: 'Layout updated elsewhere',
-            description: 'Your chart layout was changed in another tab/session.',
-            tone: 'neutral',
-          });
-        }}
-        onError={(reason) => {
-          toast({ title: 'Layout sync failed', description: reason, tone: 'error' });
-        }}
+        onConflict={handleLayoutConflict}
+        onError={handleLayoutError}
       />
       <ChartToolbar
         drawingsOpen={drawingsOpen}

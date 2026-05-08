@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getChartLayout, putChartLayout } from './chartLayouts';
+import { getChartLayout, putChartLayout, EtagMismatchError } from './chartLayouts';
 import type { ChartLayout } from './chartLayouts';
 
 const SAMPLE_LAYOUT: ChartLayout = {
@@ -49,9 +49,35 @@ describe('getChartLayout', () => {
 
     await getChartLayout(99);
 
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith('/api/chart/layouts/99', {
-      credentials: 'same-origin',
-    });
+    const [url, init] = vi.mocked(fetch).mock.calls[0] ?? [];
+    expect(url).toBe('/api/chart/layouts/99');
+    expect((init as RequestInit).credentials).toBe('same-origin');
+  });
+
+  // HIGH-3: signal is threaded into the GET request when provided.
+  it('passes AbortSignal to fetch when provided (HIGH-3)', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => SAMPLE_LAYOUT,
+    } as Response);
+
+    const controller = new AbortController();
+    await getChartLayout(42, controller.signal);
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it('does not set signal when not provided', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => SAMPLE_LAYOUT,
+    } as Response);
+
+    await getChartLayout(42);
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect(init.signal).toBeUndefined();
   });
 });
 
@@ -64,12 +90,12 @@ describe('putChartLayout', () => {
     vi.unstubAllGlobals();
   });
 
-  it('throws etag_mismatch on 412', async () => {
+  it('throws EtagMismatchError on 412 (MED-4)', async () => {
     vi.mocked(fetch).mockResolvedValue({ ok: false, status: 412 } as Response);
 
     await expect(
       putChartLayout(42, { payload: {}, schema_version: 1 }, '2026-05-07T14:00:00Z'),
-    ).rejects.toThrow('etag_mismatch');
+    ).rejects.toBeInstanceOf(EtagMismatchError);
   });
 
   it('throws generic error on other non-ok status', async () => {
@@ -106,5 +132,51 @@ describe('putChartLayout', () => {
     expect((init.headers as Record<string, string>)['If-Match']).toBe(
       '"2026-05-07T14:00:00Z"',
     );
+  });
+
+  // MED-6: control characters in etag must throw rather than be silently stripped.
+  it('throws on etag containing control characters (MED-6)', async () => {
+    await expect(
+      putChartLayout(42, { payload: {}, schema_version: 1 }, 'bad\x00etag'),
+    ).rejects.toThrow('invalid etag: contains control characters');
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it('allows empty etag (first-write path)', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => SAMPLE_LAYOUT,
+    } as Response);
+
+    await putChartLayout(42, { payload: {}, schema_version: 1 }, '');
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>)['If-Match']).toBe('""');
+  });
+
+  // HIGH-4: signal must be passed as undefined (not null) to fetch.
+  it('passes AbortSignal to fetch when provided (HIGH-4)', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => SAMPLE_LAYOUT,
+    } as Response);
+
+    const controller = new AbortController();
+    await putChartLayout(42, { payload: {}, schema_version: 1 }, '', controller.signal);
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it('does not set signal property when signal not provided (HIGH-4)', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => SAMPLE_LAYOUT,
+    } as Response);
+
+    await putChartLayout(42, { payload: {}, schema_version: 1 }, '');
+
+    const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
+    expect(init.signal).toBeUndefined();
   });
 });

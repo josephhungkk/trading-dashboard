@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pushLayout, type LayoutPayload } from './layoutSync';
-import type { ChartLayout } from './chartLayouts';
+import { type ChartLayout } from './chartLayouts';
 
 const SAMPLE_PAYLOAD: LayoutPayload = {
   timeframe: '1m',
@@ -92,5 +92,40 @@ describe('pushLayout', () => {
 
     const init = vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit;
     expect((init.headers as Record<string, string>)['If-Match']).toBe('"etag-local"');
+  });
+
+  // MED-4: putChartLayout now throws EtagMismatchError (not a plain Error with message
+  // 'etag_mismatch'), so pushLayout must handle it via instanceof — verify the conflict
+  // path is reachable when the typed error is thrown.
+  it('returns conflict when putChartLayout throws EtagMismatchError (MED-4)', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: false, status: 412 } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => REMOTE_LAYOUT,
+      } as Response);
+
+    const result = await pushLayout(42, SAMPLE_PAYLOAD, 'etag-local');
+
+    expect(result).toEqual({ kind: 'conflict', remote: REMOTE_LAYOUT });
+  });
+
+  // HIGH-3: conflict-path GET must thread the signal through so it can be aborted on unmount.
+  it('conflict-path getChartLayout receives the signal (HIGH-3)', async () => {
+    const controller = new AbortController();
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: false, status: 412 } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => REMOTE_LAYOUT,
+      } as Response);
+
+    await pushLayout(42, SAMPLE_PAYLOAD, 'etag-local', controller.signal);
+
+    // The second fetch call (conflict-path GET) should carry the same signal.
+    const getInit = vi.mocked(fetch).mock.calls[1]?.[1] as RequestInit | undefined;
+    expect(getInit?.signal).toBe(controller.signal);
   });
 });
