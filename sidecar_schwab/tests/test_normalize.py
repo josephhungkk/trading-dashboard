@@ -163,7 +163,7 @@ def test_normalize_modified_status_maps_to_submitted_not_modified():
         ("STOP_LIMIT", broker_pb2.OrderType.ORDER_TYPE_STOP_LIMIT),
         ("TRAILING_STOP", broker_pb2.OrderType.ORDER_TYPE_TRAIL),
         ("TRAILING_STOP_LIMIT", broker_pb2.OrderType.ORDER_TYPE_TRAIL),
-        ("MARKET_ON_CLOSE", broker_pb2.OrderType.ORDER_TYPE_MARKET),
+        ("MARKET_ON_CLOSE", broker_pb2.OrderType.ORDER_TYPE_MOC),
         ("EXERCISE", broker_pb2.OrderType.ORDER_TYPE_MARKET),
         ("CABINET", broker_pb2.OrderType.ORDER_TYPE_LIMIT),
         ("NET_DEBIT", broker_pb2.OrderType.ORDER_TYPE_LIMIT),

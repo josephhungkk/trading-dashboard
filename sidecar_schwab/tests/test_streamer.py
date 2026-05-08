@@ -72,7 +72,9 @@ async def test_on_subscribe_first_ref_sends_subs() -> None:
     assert req["command"] == "SUBS"
     assert req["service"] == "LEVELONE_EQUITIES"
     assert req["parameters"]["keys"] == "AAPL"
-    assert _commands(ws) == ["SUBS", "ADD"]
+    # HIGH fix: first-ref sends SUBS only (no follow-up ADD); duplicate SUBS+ADD
+    # caused double-counted ticks on the Schwab streamer side.
+    assert _commands(ws) == ["SUBS"]
 
 
 @pytest.mark.asyncio
@@ -83,7 +85,8 @@ async def test_on_subscribe_second_ref_sends_add() -> None:
 
     await streamer.on_subscribe([_sym("AAPL")])
 
-    assert _commands(ws) == ["SUBS", "ADD", "ADD"]
+    # First call sends SUBS (refcount 0→1); second is a no-op (refcount 1→2).
+    assert _commands(ws) == ["SUBS"]
 
 
 @pytest.mark.asyncio
@@ -159,6 +162,7 @@ def test_tick_callback_fires_with_quote_message() -> None:
     streamer._upstream_refcount = {
         "canon:AAPL": _SymbolEntry("AAPL", 1),
     }
+    streamer._raw_to_canonical = {"AAPL": "canon:AAPL"}
     frame = {
         "data": [
             {
@@ -214,6 +218,12 @@ def test_levelone_equities_golden_trace_emits_quote_messages() -> None:
     streamer._upstream_refcount = {
         "stock:AAPL:US": _SymbolEntry("AAPL", 1),
         "idx:$SPX:US": _SymbolEntry("$SPX", 1),
+    }
+    # HIGH fix: tick dispatch reads canonical_id from the inverse map; tests
+    # that bypass on_subscribe must seed it directly.
+    streamer._raw_to_canonical = {
+        "AAPL": "stock:AAPL:US",
+        "$SPX": "idx:$SPX:US",
     }
 
     for frame in payload["frames"]:

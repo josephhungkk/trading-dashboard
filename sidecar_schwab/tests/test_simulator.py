@@ -85,7 +85,11 @@ async def test_modify_unknown_broker_order_id_returns_empty():
     assert new_bid == ""
 
 
-def test_gc_drops_entries_older_than_ttl():
+@pytest.mark.asyncio
+async def test_gc_drops_entries_older_than_ttl():
+    # SimRegistry.register schedules an async emit via asyncio.get_running_loop;
+    # this test must run inside an event loop (HIGH-8 removed the orphan-loop
+    # fallback in simulator.py:_schedule_emit).
     fan = _build_fan_out()
     now = [1000.0]
     sim = SimRegistry(fan_out=fan, clock=lambda: now[0])

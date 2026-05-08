@@ -1,10 +1,9 @@
 import json
-from dataclasses import asdict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from sidecar_schwab.order_state_cache import OrderState, OrderStateCache
+from sidecar_schwab.order_state_cache import OrderState, OrderStateCache, _state_to_dict
 
 
 def _make_redis() -> MagicMock:
@@ -40,7 +39,7 @@ async def test_put_writes_to_redis_and_in_memory() -> None:
     result = await cache.get("cli-1")
 
     redis.hset.assert_awaited_once_with(
-        _cache_key(), "cli-1", json.dumps(asdict(state))
+        _cache_key(), "cli-1", json.dumps(_state_to_dict(state))
     )
     redis.expire.assert_awaited_once_with(_cache_key(), 7 * 24 * 3600)
     redis.hget.assert_not_awaited()
@@ -56,9 +55,9 @@ async def test_get_falls_through_to_redis_on_miss() -> None:
         broker_order_id="brk-1",
         schwab_status="FILLED",
         entered_time_iso="2026-05-06T10:00:00Z",
-        last_exec_id="exec-1",
+        last_exec_ids={"exec-1"},
     )
-    redis.hget.return_value = json.dumps(asdict(state)).encode()
+    redis.hget.return_value = json.dumps(_state_to_dict(state)).encode()
 
     result = await cache.get("cli-1")
 
@@ -79,11 +78,11 @@ async def test_hydrate_from_redis_loads_all_keys() -> None:
         client_order_id="cli-2",
         broker_order_id="brk-2",
         schwab_status="FILLED",
-        last_exec_id="exec-2",
+        last_exec_ids={"exec-2"},
     )
     redis.hgetall.return_value = {
-        b"cli-1": json.dumps(asdict(state_1)).encode(),
-        b"cli-2": json.dumps(asdict(state_2)).encode(),
+        b"cli-1": json.dumps(_state_to_dict(state_1)).encode(),
+        b"cli-2": json.dumps(_state_to_dict(state_2)).encode(),
     }
 
     await cache.hydrate()
