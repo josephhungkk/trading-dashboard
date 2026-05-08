@@ -16,6 +16,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # asyncpg refuses multiple commands per prepared statement; split each DDL.
     op.execute(
         """
         CREATE OR REPLACE FUNCTION update_updated_at()
@@ -24,27 +25,29 @@ def upgrade() -> None:
             NEW.updated_at = now();
             RETURN NEW;
         END;
-        $$ LANGUAGE plpgsql;
-
-        DROP TRIGGER IF EXISTS positions_updated_at ON positions;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    op.execute("DROP TRIGGER IF EXISTS positions_updated_at ON positions")
+    op.execute(
+        """
         CREATE TRIGGER positions_updated_at
         BEFORE UPDATE ON positions
         FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at();
-
-        DROP TRIGGER IF EXISTS orders_updated_at ON orders;
+        EXECUTE FUNCTION update_updated_at()
+        """
+    )
+    op.execute("DROP TRIGGER IF EXISTS orders_updated_at ON orders")
+    op.execute(
+        """
         CREATE TRIGGER orders_updated_at
         BEFORE UPDATE ON orders
         FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at();
+        EXECUTE FUNCTION update_updated_at()
         """
     )
 
 
 def downgrade() -> None:
-    op.execute(
-        """
-        DROP TRIGGER IF EXISTS orders_updated_at ON orders;
-        DROP TRIGGER IF EXISTS positions_updated_at ON positions;
-        """
-    )
+    op.execute("DROP TRIGGER IF EXISTS orders_updated_at ON orders")
+    op.execute("DROP TRIGGER IF EXISTS positions_updated_at ON positions")
