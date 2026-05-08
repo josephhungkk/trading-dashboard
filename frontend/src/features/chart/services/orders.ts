@@ -22,13 +22,17 @@ interface ErrorBody {
 
 export class ModifyNonceError extends Error {}
 
-export async function mintModifyNonce(orderId: string): Promise<ModifyNonceResponse> {
-  const res = await fetch('/api/orders/nonce/modify', {
+// HIGH-3: signal parameter allows callers (ConfirmDialog) to abort the in-flight
+// fetch on unmount/close, preventing orphaned Redis nonces from accumulating.
+export async function mintModifyNonce(orderId: string, signal?: AbortSignal): Promise<ModifyNonceResponse> {
+  const init: RequestInit = {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ order_id: orderId }),
-  });
+  };
+  if (signal !== undefined) init.signal = signal;
+  const res = await fetch('/api/orders/nonce/modify', init);
   if (!res.ok) throw new ModifyNonceError(`mint failed: ${res.status}`);
   return res.json() as Promise<ModifyNonceResponse>;
 }
@@ -65,6 +69,11 @@ export async function getOrderState(orderId: string): Promise<{ stop_price?: str
   return res.json() as Promise<{ stop_price?: string; status: string }>;
 }
 
+/**
+ * @internal — backend /ws/orders endpoint not yet wired (Phase 10).
+ * Exported for future use and tests that validate the correct future behavior.
+ * Do NOT call from production UI code until the backend endpoint lands.
+ */
 export function subscribeOrderEvents(onEvent: (env: OrderEventEnvelope) => void): () => void {
   const handle = openOrderEvents(readJwtFromCookie, onEvent);
   return () => {

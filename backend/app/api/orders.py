@@ -361,17 +361,30 @@ _log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODIFY_NONCE_TTL = 30  # seconds
+_MODIFY_NONCE_RATE_LIMIT = 10  # requests per window
+_MODIFY_NONCE_RATE_WINDOW = 30  # seconds
+
+
+async def _check_modify_nonce_rate_limit(redis: RedisLike, email: str) -> None:
+    """MED-1: Rate-limit POST /api/orders/nonce/modify to 10 req / 30 s per user."""
+    key = f"rl:modify_nonce:{email}"
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, _MODIFY_NONCE_RATE_WINDOW)
+    if count > _MODIFY_NONCE_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="rate_limit_exceeded")
 
 
 class ModifyNonceMintRequest(BaseModel):
     """Body for POST /api/orders/nonce/modify."""
 
-    # MED-26: enforce UUID4 pattern to prevent phantom nonce spam against Redis.
+    # MED-3: relaxed from strict UUID4 to alphanumeric + URL-safe separators so IBKR/Alpaca
+    # numeric order IDs and synthetic bracket leg IDs (e.g. "abc123:sl") are accepted.
     # TODO: add existence-check against orders table before minting (requires service call).
     order_id: str = Field(
         min_length=1,
         max_length=64,
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        pattern=r"^[A-Za-z0-9_:.-]{1,64}$",
     )
 
 
@@ -383,13 +396,18 @@ class ModifyNonceMintResponse(BaseModel):
 
 
 class PostModifyRequest(BaseModel):
-    """Body for POST /api/orders/modify (nonce-gated modify shortcut)."""
+    """Body for POST /api/orders/modify (nonce-gated modify shortcut).
+
+    CRIT-1: qty, order_type, tif are now optional. When absent the handler
+    fetches the current values from the orders row and preserves them.
+    Drag-modify only changes price; other fields are unchanged by default.
+    """
 
     order_id: str = Field(min_length=1, max_length=64)
     nonce: str = Field(min_length=1, max_length=128)
-    qty: str
-    order_type: str
-    tif: str
+    qty: str | None = None  # if None, preserved from current order
+    order_type: str | None = None  # if None, preserved from current order
+    tif: str | None = None  # if None, preserved from current order
     limit_price: str | None = None
     stop_price: str | None = None
     trail_offset: str | None = None
@@ -402,13 +420,16 @@ class PostModifyRequest(BaseModel):
 async def mint_modify_nonce(
     body: ModifyNonceMintRequest,
     redis: RedisDep,
-    _identity: IdentityDep,
+    identity: IdentityDep,
 ) -> ModifyNonceMintResponse:
     """Mint a single-use 30-second nonce for PUT /api/orders/{id} (drag-handle SL/TP).
 
     Stores ``nonce:modify:{order_id}:{nonce}`` in Redis with TTL 30 s.
     Consumed via GETDEL at modify time (Task 30 CSRF gate).
+
+    MED-1: Rate-limited to 10 mints per 30 s per user.
     """
+    await _check_modify_nonce_rate_limit(redis, identity.email)
     nonce = uuid4().hex
     key = f"nonce:modify:{body.order_id}:{nonce}"
     await redis.set(key, "1", ex=_MODIFY_NONCE_TTL)
@@ -450,12 +471,33 @@ async def post_modify_order(
             order_id = UUID(body.order_id)
         except ValueError:
             return JSONResponse(status_code=422, content={"detail": "invalid order_id UUID"})
+
+        # CRIT-1: when qty/order_type/tif are absent, fetch current values from DB
+        # so drag-price-modify does not require the FE to re-supply all fields.
+        effective_qty = body.qty
+        effective_order_type = body.order_type
+        effective_tif = body.tif
+        if effective_qty is None or effective_order_type is None or effective_tif is None:
+            row_result = await db.execute(
+                text("SELECT qty, order_type, tif FROM orders WHERE id = :id"),
+                {"id": order_id},
+            )
+            row = row_result.mappings().one_or_none()
+            if row is None:
+                return JSONResponse(status_code=404, content={"detail": "order_not_found"})
+            if effective_qty is None:
+                effective_qty = str(row["qty"])
+            if effective_order_type is None:
+                effective_order_type = str(row["order_type"])
+            if effective_tif is None:
+                effective_tif = str(row["tif"])
+
         modify_request = OrderModifyRequest.model_validate(
             {
                 "nonce": body.nonce,
-                "qty": body.qty,
-                "order_type": body.order_type,
-                "tif": body.tif,
+                "qty": effective_qty,
+                "order_type": effective_order_type,
+                "tif": effective_tif,
                 "limit_price": body.limit_price,
                 "stop_price": body.stop_price,
                 "trail_offset": body.trail_offset,

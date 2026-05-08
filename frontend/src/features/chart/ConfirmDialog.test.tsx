@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ConfirmDialog } from './ConfirmDialog';
 import { mintModifyNonce, submitModify } from './services/orders';
@@ -69,7 +69,8 @@ describe('ConfirmDialog', () => {
 
     renderDialog();
 
-    expect(mintModifyNonce).toHaveBeenCalledWith('leg-1');
+    // HIGH-3: mintModifyNonce now receives (legId, AbortSignal)
+    expect(mintModifyNonce).toHaveBeenCalledWith('leg-1', expect.any(AbortSignal));
     expect(screen.getByText('Preparing…')).toBeInTheDocument();
 
     mint.resolve({ nonce: 'nonce-1', expires_at: '2026-05-08T12:00:30Z' });
@@ -150,6 +151,44 @@ describe('ConfirmDialog', () => {
 
     expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
     mint.resolve({ nonce: 'nonce-1', expires_at: '2026-05-08T12:00:30Z' });
+  });
+
+  it('aborts in-flight mint on unmount — AbortError caught silently, onError not called', async () => {
+    // HIGH-3: unmounting while mint is in-flight must abort the fetch and not call onError.
+    const abortMint = deferred<{ nonce: string; expires_at: string }>();
+    vi.mocked(mintModifyNonce).mockReturnValue(abortMint.promise);
+
+    const onErrorAbort = vi.fn() as (reason: string) => void;
+    const onConfirmedAbort = vi.fn() as (nonce: string) => void;
+
+    const { unmount } = render(
+      <ConfirmDialog
+        open
+        legId="leg-abort"
+        type="sl"
+        currentPrice={100}
+        newPrice={101}
+        tickSize={0.01}
+        onCancel={vi.fn()}
+        onConfirmed={onConfirmedAbort}
+        onError={onErrorAbort}
+      />,
+    );
+
+    // Mint is in-flight; abort signal must have been passed
+    expect(mintModifyNonce).toHaveBeenCalledWith('leg-abort', expect.any(AbortSignal));
+
+    // Unmount triggers controller.abort(); reject with AbortError to simulate fetch abort
+    await act(async () => {
+      unmount();
+      const abortErr = new DOMException('aborted', 'AbortError');
+      abortMint.reject(abortErr);
+      await Promise.resolve();
+    });
+
+    // AbortError must be swallowed — onError must NOT be called
+    expect(onErrorAbort).not.toHaveBeenCalled();
+    expect(onConfirmedAbort).not.toHaveBeenCalled();
   });
 
   it('confirm button is disabled while submitting with aria-busy true', async () => {

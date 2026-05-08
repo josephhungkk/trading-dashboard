@@ -316,19 +316,9 @@ async def test_nonce_redacted_from_logs(
 
 
 # ---------------------------------------------------------------------------
-# Test 9: MED-26 — mint with non-UUID order_id returns 422
+# Test 9: MED-3 — relaxed order_id pattern (alphanumeric + URL-safe separators)
+# UUID-only test removed: "abc" is now valid under the relaxed pattern.
 # ---------------------------------------------------------------------------
-
-
-async def test_mint_with_non_uuid_order_id_returns_422(
-    authed_client: AsyncClient,
-    fake_redis: fakeredis.aioredis.FakeRedis,
-) -> None:
-    """POST /api/orders/nonce/modify with order_id='abc' (not UUID4) returns 422."""
-    r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": "abc"})
-    assert r.status_code == 422, (
-        f"Expected 422 for non-UUID order_id, got {r.status_code}: {r.text}"
-    )
 
 
 async def test_mint_with_empty_order_id_returns_422(
@@ -348,6 +338,71 @@ async def test_mint_with_valid_uuid4_succeeds(
     r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": ORDER_ID})
     assert r.status_code == 200, (
         f"Expected 200 for valid UUID4 order_id, got {r.status_code}: {r.text}"
+    )
+
+
+async def test_mint_with_alphanumeric_order_id_succeeds(
+    authed_client: AsyncClient,
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """MED-3: non-UUID alphanumeric IDs (IBKR numeric, Alpaca, bracket leg) must be accepted."""
+    for order_id in ("1234567890", "abc-123", "ABCDEF", "bracket-42:sl", "abc"):
+        r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": order_id})
+        assert r.status_code == 200, (
+            f"Expected 200 for order_id={order_id!r}, got {r.status_code}: {r.text}"
+        )
+
+
+async def test_mint_with_invalid_chars_returns_422(
+    authed_client: AsyncClient,
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """MED-3: order_ids with spaces or shell-injection chars must still return 422."""
+    for bad_id in ("has space", "semi;colon", "slash/path", "back\\slash", 'quote"id'):
+        r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": bad_id})
+        assert r.status_code == 422, (
+            f"Expected 422 for order_id={bad_id!r}, got {r.status_code}: {r.text}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 (MED-1): rate-limit POST /api/orders/nonce/modify (10 req / 30 s)
+# ---------------------------------------------------------------------------
+
+
+async def test_mint_rate_limit_returns_429_after_limit(
+    authed_client: AsyncClient,
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """MED-1: 11th mint within the 30-second window must return 429."""
+    limit = 10
+    for i in range(limit):
+        r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": ORDER_ID})
+        assert r.status_code == 200, f"Request {i + 1} expected 200, got {r.status_code}: {r.text}"
+
+    r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": ORDER_ID})
+    assert r.status_code == 429, (
+        f"Expected 429 after rate-limit exceeded, got {r.status_code}: {r.text}"
+    )
+    assert r.json().get("detail") == "rate_limit_exceeded"
+
+
+async def test_mint_rate_limit_resets_after_window(
+    authed_client: AsyncClient,
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """MED-1: after the Redis key expires the counter resets and minting succeeds again."""
+    for _ in range(10):
+        await authed_client.post("/api/orders/nonce/modify", json={"order_id": ORDER_ID})
+
+    # Manually delete the rate-limit key to simulate window expiry
+    rl_key = "rl:modify_nonce:ci@example.com"
+    await fake_redis.delete(rl_key)
+
+    # First request in new window must succeed
+    r = await authed_client.post("/api/orders/nonce/modify", json={"order_id": ORDER_ID})
+    assert r.status_code == 200, (
+        f"Expected 200 after rate-limit window reset, got {r.status_code}: {r.text}"
     )
 
 

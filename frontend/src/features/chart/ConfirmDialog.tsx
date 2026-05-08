@@ -28,22 +28,30 @@ export function ConfirmDialog(props: ConfirmDialogProps): React.JSX.Element | nu
   const [nonceEntry, setNonceEntry] = React.useState<{ legId: string; nonce: string } | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const nonce = nonceEntry?.legId === legId ? nonceEntry.nonce : null;
+  // minting derived: open with no nonce yet means a mint is in-flight.
   const minting = open && nonce === null;
 
+  // HIGH-3: AbortController aborts the in-flight mint fetch on unmount or when the
+  // dialog closes, preventing orphaned Redis nonces from accumulating.
+  // All setState calls are inside async callbacks (not in the synchronous effect body)
+  // to satisfy react-hooks/set-state-in-effect.
   React.useEffect(() => {
     if (!open) return undefined;
 
-    let cancelled = false;
-    mintModifyNonce(legId)
+    const controller = new AbortController();
+    mintModifyNonce(legId, controller.signal)
       .then((r) => {
-        if (!cancelled) setNonceEntry({ legId, nonce: r.nonce });
+        setNonceEntry({ legId, nonce: r.nonce });
       })
-      .catch(() => {
-        if (!cancelled) onError('could not start modify');
+      .catch((err: unknown) => {
+        const error = err as { name?: string };
+        if (error.name === 'AbortError') return; // expected on unmount/close
+        setNonceEntry(null);
+        onError('could not start modify');
       });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [open, legId, onError]);
 

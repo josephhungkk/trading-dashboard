@@ -6,7 +6,9 @@ export interface ChartState {
   drawings: unknown[]; // klinecharts overlay objects (Task 38)
   chartType: 'candle' | 'area' | 'bar';
   activeDrawingTool: string | null;
-  pending_modify_id: Map<string, { nonce: string; targetPrice: number; startedAt: number }>;
+  // MED-2: nonce dropped from store — held in handleConfirmed closure only.
+  // PositionOverlay only needs to know IF a modify is pending (to disable drag).
+  pending_modify_id: Map<string, { targetPrice: number; startedAt: number }>;
   setTimeframe: (tf: string) => void;
   setIndicators: (inds: string[]) => void;
   addIndicator: (name: string) => void;
@@ -15,7 +17,7 @@ export interface ChartState {
   setActiveDrawingTool: (tool: string | null) => void;
   setPendingModify: (
     legId: string,
-    entry: { nonce: string; targetPrice: number; startedAt: number } | null,
+    entry: { targetPrice: number; startedAt: number } | null,
   ) => void;
 }
 

@@ -8,6 +8,7 @@ function resetStore(): void {
     drawings: [],
     chartType: 'candle',
     activeDrawingTool: null,
+    pending_modify_id: new Map(),
   });
 }
 
@@ -67,5 +68,46 @@ describe('useChartStore', () => {
     useChartStore.getState().setActiveDrawingTool('segment');
     useChartStore.getState().setActiveDrawingTool('circle');
     expect(useChartStore.getState().activeDrawingTool).toBe('circle');
+  });
+});
+
+// MED-2: pending_modify_id shape no longer includes nonce — held in closure only.
+describe('setPendingModify', () => {
+  beforeEach(() => {
+    useChartStore.setState({ pending_modify_id: new Map() });
+  });
+
+  it('sets entry without nonce field', () => {
+    const entry = { targetPrice: 185.5, startedAt: 1000 };
+    useChartStore.getState().setPendingModify('leg-1', entry);
+    const map = useChartStore.getState().pending_modify_id;
+    expect(map.has('leg-1')).toBe(true);
+    expect(map.get('leg-1')).toEqual({ targetPrice: 185.5, startedAt: 1000 });
+    // nonce must NOT be present in the stored entry
+    expect('nonce' in (map.get('leg-1') ?? {})).toBe(false);
+  });
+
+  it('clears entry when null passed', () => {
+    useChartStore.getState().setPendingModify('leg-1', { targetPrice: 185.5, startedAt: 1000 });
+    useChartStore.getState().setPendingModify('leg-1', null);
+    expect(useChartStore.getState().pending_modify_id.has('leg-1')).toBe(false);
+  });
+
+  it('tracks multiple legs independently', () => {
+    useChartStore.getState().setPendingModify('leg-a', { targetPrice: 100, startedAt: 1 });
+    useChartStore.getState().setPendingModify('leg-b', { targetPrice: 200, startedAt: 2 });
+    const map = useChartStore.getState().pending_modify_id;
+    expect(map.size).toBe(2);
+    expect(map.get('leg-a')?.targetPrice).toBe(100);
+    expect(map.get('leg-b')?.targetPrice).toBe(200);
+  });
+
+  it('clearing one leg does not affect others', () => {
+    useChartStore.getState().setPendingModify('leg-a', { targetPrice: 100, startedAt: 1 });
+    useChartStore.getState().setPendingModify('leg-b', { targetPrice: 200, startedAt: 2 });
+    useChartStore.getState().setPendingModify('leg-a', null);
+    const map = useChartStore.getState().pending_modify_id;
+    expect(map.has('leg-a')).toBe(false);
+    expect(map.has('leg-b')).toBe(true);
   });
 });

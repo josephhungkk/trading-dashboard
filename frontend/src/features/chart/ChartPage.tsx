@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import { TradeChart } from './TradeChart';
@@ -10,7 +10,10 @@ import { ConfirmDialog } from './ConfirmDialog';
 import type { ModifyRequest } from './PositionOverlay';
 import { useInstrumentTickSize, usePositionsForCanonical } from './PositionOverlay';
 import { useChartStore } from './stores/chartStore';
-import { getOrderState, subscribeOrderEvents } from './services/orders';
+// HIGH-1: subscribeOrderEvents NOT imported here — /ws/orders backend endpoint does
+// not exist yet; opening it leaks the JWT via Sec-WebSocket-Protocol on every confirm.
+// TODO(Phase 10): re-enable when /ws/orders is wired on the backend.
+import { getOrderState } from './services/orders';
 // getChartLayout import deferred until instrument_id resolution lands (Task 37).
 
 interface ChartPageProps {
@@ -31,6 +34,19 @@ export function ChartPage({ canonicalId }: ChartPageProps): React.JSX.Element {
   const setPendingModify = useChartStore((s) => s.setPendingModify);
   const { toast } = useToast();
 
+  // HIGH-2: track all in-flight settle callbacks so unmount can drain them.
+  const inflightSettlersRef = useRef<Set<() => void>>(new Set());
+
+  // HIGH-2: on unmount, settle any in-flight modifies to avoid state leaks.
+  // Capture ref value into a local so the cleanup closure has a stable reference.
+  React.useEffect(() => {
+    const settlers = inflightSettlersRef.current;
+    return () => {
+      for (const settle of settlers) settle();
+      settlers.clear();
+    };
+  }, []);
+
   // TODO(Task 37): resolve instrument_id from canonicalId via API.
   // For now pass 0 as a placeholder; getChartLayout returns null for unknown ids.
   const { isLoading, error } = useQuery({
@@ -50,30 +66,40 @@ export function ChartPage({ canonicalId }: ChartPageProps): React.JSX.Element {
     setModifyReq({ ...req, currentPrice });
   }, [positions, toast]);
 
+  // HIGH-2: settle pattern — idempotent, tracked in ref for unmount cleanup.
+  // HIGH-1: subscribeOrderEvents removed; 5s getOrderState is the only reconciliation path.
+  // MED-2: nonce held in closure only, not stored in shared store.
   const handleConfirmed = React.useCallback((nonce: string) => {
     if (modifyReq === null) return;
-
     const confirmedReq = modifyReq;
+
+    // MED-2: nonce is held in closure; store only carries targetPrice + startedAt.
     setPendingModify(confirmedReq.legId, {
-      nonce,
       targetPrice: confirmedReq.newPrice,
       startedAt: Date.now(),
     });
     setModifyReq(null);
 
-    const unsubscribe = subscribeOrderEvents((env) => {
-      if (env.modify_id !== nonce) return;
-      clearTimeout(timer);
-      setPendingModify(confirmedReq.legId, null);
-      unsubscribe();
-    });
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const timer = setTimeout(() => {
-      void getOrderState(confirmedReq.legId).finally(() => {
-        setPendingModify(confirmedReq.legId, null);
-        unsubscribe();
-      });
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      setPendingModify(confirmedReq.legId, null);
+      inflightSettlersRef.current.delete(settle);
+    };
+
+    inflightSettlersRef.current.add(settle);
+
+    // 5s fallthrough — only operational reconciliation path until Phase 10 /ws/orders.
+    timer = setTimeout(() => {
+      void getOrderState(confirmedReq.legId).finally(settle);
     }, 5000);
+
+    // nonce is captured in closure for future /ws/orders correlation (Phase 10).
+    void nonce;
   }, [modifyReq, setPendingModify]);
 
   const handleError = React.useCallback((reason: string) => {
