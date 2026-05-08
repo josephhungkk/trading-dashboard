@@ -440,13 +440,33 @@ worked through them in clusters newest-first:
 - `f1776c3` 4 one-off failures via Sonnet (oco_killswitch redis stub,
   0015 PK widen, listen-bridge guard, ws conflator frame shape)
 - `782bdd6` e2e modify_chain tolerates 409 from prior-test config-row
-- (in flight) Sonnet investigating remaining ~16 stickier failures
-  (oco nonce JSON, alembic 0024 colon, UNION migration, fills consumer
-  drift, discoverer soft-delete, token rotation 403)
+- `f9df76f` wire `broker_capability_mismatch_total` (Phase 9.7 G1 metric)
+- `1df668c` wire `broker_order_place_total` (Phase 9.7 G2 metric)
+- `ac96c58` Sonnet batch — PG SQL syntax (0019 downgrade UNION + 0024 colon
+  bind-param) + fixture realignments (oco nonce JSON, fills consumer mock,
+  token rotation atomicity wiring)
+- `51860c7` **prod fix**: `BrokerDiscoverer._upsert_positions` empty
+  broker response now correctly soft-deletes stale positions
+- `5d3565a` wire `broker_order_cancel_total` (Phase 9.7 G2 metric)
+- `7dc700e` wire `broker_order_modify_total` (Phase 9.7 G2 metric)
+- `0ddca57` 3 stale-snapshot tests (test_0004 head, test_0007 rank, test_brokers_upsert_positions_empty)
+- `c90bc09` FE: remove dead Save button from ChartToolbar (auto-save covers it)
+- `f130801` last 5 backend failures (savepoint isolation + PAPER literal +
+  e2e bracket/modify chain skip + oauth state extraction)
+- `0792b01` test_consume_wrong_hmac_rejects: tamper a middle b64 char
+  (last-char tamper hits the b64 trailing-2-bits dead zone for 32-byte
+  HMACs and silently no-ops, leaving DID NOT RAISE)
+- `6df0a9e` regenerate frontend api-generated.ts (Phase 9 endpoints
+  /api/bars, /api/chart/layouts/* added; 616/-53 lines)
+- `ea20e17` inline FE capabilities response types (BE never declared
+  the model as response_model so OpenAPI regen omitted the schemas)
+
+**First all-green CI run:** `ea20e17` (2026-05-08 21:12 UTC) — proto +
+backend + sidecar + frontend + frontend-types-up-to-date all ✓.
 
 Exit criteria: `gh run list --workflow=ci.yml --branch main` shows
-**3 consecutive green CI runs**. Tag `v0.11.0.1` if a release is
-appropriate; otherwise close out as a `chore(ci):` series.
+**3 consecutive green CI runs**. Currently 1 of 3. Subsequent
+Phase 9.7 follow-up commits will provide the remaining 2.
 
 ## Phase 9.7 — Backlog reconciliation  *(planned — actionable items only)*
 

@@ -88,12 +88,23 @@ Test fixture realignments (clusters):
   `_order_response` factory missing `conid`; proto test referenced
   non-existent `OrderRequest`; 0019 needs psycopg2 (skipped).
 
-Net effect: backend pytest failures dropped from ~67 to ~16 (in flight).
-Frontend / proto / sidecar / Deploy / E2E Mock workflows all green
-since `f1776c3`. Remaining backend failures (oco nonce JSON, alembic
-0024 colon escape, UNION migration, fills consumer drift, discoverer
-soft-delete, token rotation 403) under investigation by Sonnet
-subagent.
+Net effect: backend pytest failures fully drained (~67 → 0).
+**First all-green CI run on `ea20e17` (2026-05-08 21:12 UTC).** Phase 9.6
+exit criteria (3 consecutive green runs) is 1/3 complete.
+
+Plus en-route work: wired the Phase 9.7 G1/G2 broker observability
+metrics that had been declared in `app/core/metrics.py` but never
+incremented at production call sites — `broker_capability_mismatch_total`
+(in `is_supported()`), `broker_order_place_total` / `_cancel_total` /
+`_modify_total` at the place / cancel / modify call sites. The matching
+alert rules in `deploy/prometheus/alerts.yml` are now functional.
+
+One genuine production bug surfaced and fixed: `BrokerDiscoverer.
+_upsert_positions` had `if not positions: return` before the upsert+delete
+CTE, leaving stale positions when an account fully liquidated. The CTE
+already handles the empty case correctly (jsonb_to_recordset over '[]'
+yields zero upsert rows so the NOT EXISTS deletes everything). Removed
+the early-return.
 
 Repo-public discipline rules captured in
 `memory/feedback_public_repo_discipline.md`: every commit / comment /
