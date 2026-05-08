@@ -706,8 +706,8 @@ async def place_oco_order(
         contract_a = await client_a.get_contract(body.order_a.conid)
         contract_b = await client_a.get_contract(body.order_b.conid)
     except Exception:
-        contract_a = None  # type: ignore[assignment]
-        contract_b = None  # type: ignore[assignment]
+        contract_a = None
+        contract_b = None
 
     asset_class_a = getattr(contract_a, "asset_class", "STOCK") or "STOCK"
     asset_class_b = getattr(contract_b, "asset_class", "STOCK") or "STOCK"

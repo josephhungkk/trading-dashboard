@@ -124,7 +124,7 @@ async def lifespan(_app: FastAPI) -> Any:
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
 
     # CRIT-1: OrderCapabilityService singleton — shared cache + background listener.
-    capability_svc = OrderCapabilityService(redis=redis, db_factory=session_factory)
+    capability_svc = OrderCapabilityService(redis=redis, db_factory=session_factory)  # type: ignore[arg-type]  # redis-py Redis structurally satisfies RedisLike Protocol
     _app.state.capability_svc = capability_svc
     listener_capability: asyncio.Task[None] = asyncio.create_task(capability_svc.run_listener())
 
@@ -187,7 +187,7 @@ async def lifespan(_app: FastAPI) -> Any:
             _client = await broker_registry.get_client(str(_row["gateway_label"]))
             return await _client.cancel_order(str(_row["account_number"]), order_id)
 
-        oco_orchestrator = OcoOrchestratorImpl(  # type: ignore[arg-type]  # redis-py Redis satisfies _RedisLike at runtime
+        oco_orchestrator = OcoOrchestratorImpl(
             db=session_factory,
             redis=redis,
             cancel_callable=_oco_cancel_callable,
