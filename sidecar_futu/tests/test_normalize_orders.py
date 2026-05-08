@@ -1,8 +1,8 @@
 """T-F.3 — to_futu_order_params: TRAIL + GTD + auction-session type normalization."""
 from __future__ import annotations
 
-import pytest
 import futu as ft
+import pytest
 
 from sidecar_futu.normalize import to_futu_order_params
 

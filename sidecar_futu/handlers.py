@@ -155,6 +155,7 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 grpc.StatusCode.NOT_FOUND,
                 f"contract not found: {request.conid}",
             )
+            return broker_pb2.ContractResponse()
         contract = contract_from_futu_row(rows[0])
         if contract.symbol.startswith("HK."):
             contract.exchange = "SEHK"

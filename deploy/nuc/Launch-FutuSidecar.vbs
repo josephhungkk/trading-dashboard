@@ -31,7 +31,8 @@ cmd = """" & sidecarExe & """" & _
     " --tls-cert-pem """ & secretsDir & "\sidecar-futu.crt""" & _
     " --tls-key-pem """ & secretsDir & "\sidecar-futu.key""" & _
     " --tls-ca-bundle-pem """ & secretsDir & "\ca.pem""" & _
-    " --tls-crl-pem """ & secretsDir & "\crl.pem"""
+    " --tls-crl-pem """ & secretsDir & "\crl.pem""" & _
+    " --no-simulator"
 
 Set sh = CreateObject("WScript.Shell")
 ' Run hidden (intWindowStyle=0) and don't wait - let the sidecar own its own

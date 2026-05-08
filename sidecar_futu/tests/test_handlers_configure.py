@@ -18,6 +18,15 @@ def _make_rsa_pem() -> str:
     ).decode()
 
 
+def _make_rsa_pem_with_size(key_size: int) -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
 @pytest.mark.asyncio
 async def test_configure_valid_creds():
     handlers = BrokerHandlers(started_at=datetime.now(UTC))
@@ -67,6 +76,23 @@ async def test_configure_invalid_pem():
     )
     assert response.ok is False
     assert "rsa" in response.detail
+
+
+@pytest.mark.asyncio
+async def test_configure_rejects_non_1024_bit_rsa():
+    handlers = BrokerHandlers(started_at=datetime.now(UTC))
+    response = await handlers.Configure(
+        broker_pb2.ConfigureRequest(
+            unlock_pwd_md5="0123456789abcdef0123456789abcdef",
+            rsa_priv_pem=_make_rsa_pem_with_size(2048),
+            opend_host="x",
+            opend_port=11111,
+            connection_id="x",
+        ),
+        context=None,
+    )
+    assert response.ok is False
+    assert response.detail == "invalid_rsa_key_size"
 
 
 @pytest.mark.asyncio

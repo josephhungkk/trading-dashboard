@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import UUID
 
-import grpc
+import grpc  # type: ignore[import-untyped]
 import structlog
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import RowMapping
@@ -368,7 +368,7 @@ class BrokerSidecarClient:
         limit: int = 1000,
     ) -> base.HistoricalBarsResult:
         """Fetch historical OHLCV bars from the sidecar (Phase 9 BarService)."""
-        from google.protobuf.timestamp_pb2 import Timestamp
+        from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
 
         request = broker_pb2.GetHistoricalBarsRequest(
             canonical_id=canonical_id,
@@ -638,6 +638,7 @@ class BrokerRegistry:
         self._stop_event = asyncio.Event()
         self._configured: dict[str, datetime] = {}
         self._configured_started_at: dict[str, int] = {}
+        self._reconfig_locks: dict[str, asyncio.Lock] = {}
         self._config_service: Any | None = None
         self._configurer: Any | None = None
 
@@ -677,6 +678,13 @@ class BrokerRegistry:
     async def close(self) -> None:
         await asyncio.gather(*(client.close() for client in self._clients.values()))
 
+    def _reconfig_lock(self, label: str) -> asyncio.Lock:
+        lock = self._reconfig_locks.get(label)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._reconfig_locks[label] = lock
+        return lock
+
     async def _probe_client(self, label: str, client: BrokerSidecarClient) -> None:
         try:
             health = await client.health()
@@ -714,22 +722,27 @@ class BrokerRegistry:
         except Exception:
             started_at_dt = None
 
-        cached = self._configured.get(label)
         configurer = self._configurer
         if (
             configurer is not None
             and started_at_dt is not None
             and label in getattr(configurer, "targets", set())
-            and (cached is None or cached != started_at_dt)
         ):
-            try:
-                ok = await configurer.configure(label)
-                if ok and started_at_dt is not None:
-                    self._configured[label] = started_at_dt
-                elif not ok:
-                    log.warning("broker_reconfigure_returned_not_ok", label=label)
-            except Exception as exc:
-                log.warning("broker_reconfigure_failed", label=label, error=str(exc))
+            async with self._reconfig_lock(label):
+                cached = self._configured.get(label)
+                if cached is None or cached != started_at_dt:
+                    try:
+                        ok = await configurer.configure(label)
+                        if ok:
+                            self._configured[label] = started_at_dt
+                        else:
+                            log.warning("broker_reconfigure_returned_not_ok", label=label)
+                            await self._mark_health(label, ok=False, health=health)
+                            return
+                    except Exception as exc:
+                        log.warning("broker_reconfigure_failed", label=label, error=str(exc))
+                        await self._mark_health(label, ok=False, health=health)
+                        return
 
         schwab_started_at = cast("_Timestamp | None", getattr(health, "started_at", None))
         if label == "schwab" and schwab_started_at is not None:
@@ -1052,7 +1065,12 @@ class BrokerDiscoverer:
             """
         )
 
-        rows_seen_keys = [("ibkr", account.account_number) for _label, account in rows_seen]
+        from app.services.broker_registry_factory import SIDECAR_BROKERS
+
+        rows_seen_keys = [
+            (SIDECAR_BROKERS.get(label, "ibkr"), account.account_number)
+            for label, account in rows_seen
+        ]
         soft_delete_count = 0
 
         async with self._session_factory() as session, session.begin():
@@ -1074,8 +1092,6 @@ class BrokerDiscoverer:
                     {"keys": rows_seen_keys},
                 )
                 resurrected_ids = [cast(UUID, r[0]) for r in resurrect_rows]
-
-            from app.services.broker_registry_factory import SIDECAR_BROKERS
 
             for label, account in rows_seen:
                 await session.execute(

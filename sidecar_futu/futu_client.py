@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import concurrent.futures
 import os
 import re
 import stat
@@ -15,6 +14,7 @@ from typing import Any, cast
 
 import structlog
 from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 # Path.home() is cross-platform: $HOME on POSIX, %USERPROFILE% on Windows.
@@ -57,9 +57,7 @@ _MD5_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 async def _run_in_worker_thread(fn: Callable[[], Any]) -> Any:
-    loop = asyncio.get_running_loop()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        return await loop.run_in_executor(executor, fn)
+    return await asyncio.to_thread(fn)
 
 
 @dataclass(frozen=True, repr=False)
@@ -137,9 +135,13 @@ class FutuClient:
             return "invalid_unlock_pwd_md5"
         rsa_priv_pem = request.rsa_priv_pem.encode()
         try:
-            load_pem_private_key(rsa_priv_pem, password=None)
+            key = load_pem_private_key(rsa_priv_pem, password=None)
         except (ValueError, TypeError, UnsupportedAlgorithm):
             return "invalid_rsa_pem"
+        if not isinstance(key, RSAPrivateKey):
+            return "invalid_rsa_pem"
+        if key.key_size != 1024:
+            return "invalid_rsa_key_size"
         return None
 
     async def configure(self, request: Any) -> None:
@@ -395,39 +397,67 @@ class FutuClient:
         try:
             sl_id, _ = await self.place_order(request.stop_loss)
         except Exception as exc:
-            raise RuntimeError(f"stop_loss leg failed: {exc}") from exc
+            try:
+                await self.cancel_order(request.parent.account_number, parent_id)
+            except Exception as cancel_exc:
+                log.error(
+                    "place_bracket.parent_cancel_failed",
+                    parent_id=parent_id,
+                    exc=str(cancel_exc),
+                )
+            raise RuntimeError(
+                f"stop_loss leg failed (parent_id={parent_id}): {exc}"
+            ) from exc
         try:
             tp_id, _ = await self.place_order(request.take_profit)
         except Exception as exc:
-            raise RuntimeError(f"take_profit leg failed: {exc}") from exc
+            for account_number, leg_id in (
+                (request.parent.account_number, parent_id),
+                (request.stop_loss.account_number, sl_id),
+            ):
+                try:
+                    await self.cancel_order(account_number, leg_id)
+                except Exception as cancel_exc:
+                    log.error(
+                        "place_bracket.leg_cancel_failed",
+                        leg_id=leg_id,
+                        exc=str(cancel_exc),
+                    )
+            raise RuntimeError(
+                f"take_profit leg failed (parent_id={parent_id}, sl_id={sl_id}): {exc}"
+            ) from exc
 
         return parent_id, sl_id, tp_id
 
     async def search_contracts(self, query: str) -> list[dict[str, Any]]:
         if not self.gateway_connected or self._creds is None:
             return []
-        creds = self._creds
+        quote_ctx = await self.get_quote_context()
         needle = query.strip().casefold()
         code_list = [query.strip()] if "." in query else None
+        types_to_search = (
+            SecurityType.STOCK,
+            SecurityType.WARRANT,
+            SecurityType.BOND,
+        )
 
         def _query() -> list[dict[str, Any]]:
-            quote_ctx: Any | None = None
-            try:
-                quote_ctx = OpenQuoteContext(
-                    host=creds.opend_host,
-                    port=creds.opend_port,
-                    is_encrypt=True,
-                )
+            rows: list[dict[str, Any]] = []
+            for sec_type in types_to_search:
                 ret, data = quote_ctx.get_stock_basicinfo(
                     Market.HK,
-                    SecurityType.STOCK,
+                    sec_type,
                     code_list=code_list,
                 )
                 if ret != RET_OK:
-                    log.warning("futu_get_stock_basicinfo_failed", query=query, msg=str(data))
-                    return []
+                    log.warning(
+                        "futu_get_stock_basicinfo_failed",
+                        query=query,
+                        security_type=str(sec_type),
+                        msg=str(data),
+                    )
+                    continue
 
-                rows: list[dict[str, Any]] = []
                 for row in data.to_dict("records"):
                     code = str(row.get("code", ""))
                     name = str(row.get("name", ""))
@@ -438,10 +468,7 @@ class FutuClient:
                     remapped["security_type"] = row.get("stock_type", "")
                     remapped["currency"] = "HKD"
                     rows.append(remapped)
-                return rows
-            finally:
-                if quote_ctx is not None:
-                    quote_ctx.close()
+            return rows
 
         return cast("list[dict[str, Any]]", await _run_in_worker_thread(_query))
 

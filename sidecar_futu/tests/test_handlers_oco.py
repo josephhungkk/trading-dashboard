@@ -22,10 +22,10 @@ import pytest
 from sidecar_futu._generated.broker.v1 import broker_pb2
 from sidecar_futu.handlers import BrokerHandlers
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _place_req(
     client_order_id: str = "cid-leg-A",

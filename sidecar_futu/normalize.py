@@ -42,7 +42,7 @@ def account_from_futu_row(row: dict[str, Any]) -> AccountResult:
             account_number=str(row["acc_id"]),
             mode=mode,
             gateway_label="futu",
-            currency_base="HKD",
+            currency_base="",
         )
     )
 
@@ -105,6 +105,7 @@ def contract_from_futu_row(row: dict[str, Any]) -> broker_pb2.Contract:
     code = str(row.get("code", ""))
     return broker_pb2.Contract(
         symbol=code,
+        conid=code,
         exchange=code.split(".", maxsplit=1)[0],
         currency=row.get("currency") or "HKD",
         asset_class=asset_class,
@@ -342,7 +343,11 @@ def to_futu_order_params(
             params["trail_type"] = ft.TrailType.AMOUNT
         params["aux_price"] = float(trail_offset)
     elif order_type in {"AUCTION", "AUCTION_LIMIT"}:
-        params["order_type"] = ft.OrderType.AUCTION if order_type == "AUCTION" else ft.OrderType.AUCTION_LIMIT
+        params["order_type"] = (
+            ft.OrderType.AUCTION
+            if order_type == "AUCTION"
+            else ft.OrderType.AUCTION_LIMIT
+        )
     elif order_type in {"MOO", "LOO"}:
         params["order_type"] = ft.OrderType.AUCTION
     elif order_type in {"LOC", "MOC"}:

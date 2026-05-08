@@ -114,10 +114,34 @@ class BrokerConfigurer:
             "broker", f"{label}.unlock_pwd_md5"
         )
         rsa_priv_pem = await self.config_service.reveal_secret("broker", f"{label}.rsa_priv_pem")
-        opend_host = await self.config_service.get("broker", f"{label}.opend_host") or "127.0.0.1"
+        opend_host = await self.config_service.get("broker", f"{label}.opend_host")
+        if not opend_host:
+            log.warning(
+                "broker_futu_config_missing",
+                label=label,
+                key="opend_host",
+                default="127.0.0.1",
+            )
+            opend_host = "127.0.0.1"
         opend_port_raw = await self.config_service.get("broker", f"{label}.opend_port")
-        opend_port = int(opend_port_raw) if opend_port_raw else 11111
-        connection_id = await self.config_service.get("broker", f"{label}.connection_id") or ""
+        if not opend_port_raw:
+            log.warning(
+                "broker_futu_config_missing",
+                label=label,
+                key="opend_port",
+                default="11111",
+            )
+            opend_port_raw = "11111"
+        opend_port = int(opend_port_raw)
+        connection_id = await self.config_service.get("broker", f"{label}.connection_id")
+        if not connection_id:
+            log.warning(
+                "broker_futu_config_missing",
+                label=label,
+                key="connection_id",
+                default="",
+            )
+            connection_id = ""
 
         if not unlock_pwd_md5 or not rsa_priv_pem:
             log.warning("broker_configure_creds_missing", label=label)
