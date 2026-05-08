@@ -72,6 +72,19 @@ class FakeChannel:
         del method, request_serializer, response_deserializer, _registered_method
         return self._unary
 
+    def stream_stream(
+        self,
+        method: str,
+        request_serializer: Any = None,
+        response_deserializer: Any = None,
+        _registered_method: bool = False,
+    ) -> FakeUnaryUnary:
+        # Phase 9.7: BrokerStub now binds StreamQuotes (bidi, Phase 7b.1)
+        # at __init__ time. Probe never invokes it, but the channel must
+        # expose stream_stream or BrokerStub(channel) raises AttributeError.
+        del method, request_serializer, response_deserializer, _registered_method
+        return self._unary
+
     async def close(self) -> None:
         self.closed = True
 

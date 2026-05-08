@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from backend.app.services.bar_service import BarService
-from backend.scripts.seed_phase9_app_config import seed_phase9_app_config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services.bar_service import BarService
+from scripts.seed_phase9_app_config import seed_phase9_app_config
 
 pytestmark = [pytest.mark.integration]
 

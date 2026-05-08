@@ -9,6 +9,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# Phase 9.7: misplaced test (sidecar_schwab module). Skip if the schwab
+# proto stubs aren't on sys.path — the backend CI job doesn't generate
+# them. Schwab CI job still exercises the test.
+pytest.importorskip("sidecar_schwab._generated.broker.v1.broker_pb2")
 from sidecar_schwab.order_poller import OrderPoller
 from sidecar_schwab.order_state_cache import OrderState, OrderStateCache
 

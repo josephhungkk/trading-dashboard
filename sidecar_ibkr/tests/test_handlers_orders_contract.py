@@ -435,7 +435,10 @@ async def test_place_order_market_builds_correct_ib_order() -> None:
     assert response.broker_order_id == "12345"
     assert len(ib.place_order_calls) == 1
     _, ib_order = ib.place_order_calls[0]
-    assert isinstance(ib_order, MarketOrder)
+    # Phase 9.7: post-Phase-8b order_builder returns generic ib_async.Order
+    # with orderType set as string; isinstance(MarketOrder/LimitOrder/...)
+    # no longer matches. Assert orderType field directly.
+    assert ib_order.orderType == "MKT"
     assert ib_order.action == "BUY"
     assert ib_order.totalQuantity == 10.0
     assert ib_order.orderRef == request.client_order_id
@@ -459,7 +462,8 @@ async def test_place_order_limit_includes_limit_price() -> None:
     await h.PlaceOrder(request, context=object())
 
     _, ib_order = ib.place_order_calls[0]
-    assert isinstance(ib_order, LimitOrder)
+    # Phase 9.7: see comment in market test above re: orderType field.
+    assert ib_order.orderType == "LMT"
     assert ib_order.action == "SELL"
     assert ib_order.totalQuantity == 7.0
     assert ib_order.lmtPrice == 180.5
@@ -483,7 +487,8 @@ async def test_place_order_stop_includes_stop_price() -> None:
     await h.PlaceOrder(request, context=object())
 
     _, ib_order = ib.place_order_calls[0]
-    assert isinstance(ib_order, StopOrder)
+    # Phase 9.7: see comment in market test above re: orderType field.
+    assert ib_order.orderType == "STP"
     assert ib_order.action == "SELL"
     assert ib_order.totalQuantity == 3.0
     assert ib_order.auxPrice == 175.25
@@ -671,11 +676,12 @@ async def test_get_orders_maps_open_limit_order() -> None:
     assert o.order_id == "11111"
     assert o.contract.symbol == "AAPL"
     assert o.side == broker_pb2.BUY
-    assert o.order_type == broker_pb2.LIMIT
+    # Phase 9.7: proto enum rename — LIMIT → ORDER_TYPE_LIMIT, GTC → TIF_GTC.
+    assert o.order_type == broker_pb2.ORDER_TYPE_LIMIT
     assert o.quantity == "100"
     assert o.limit_price.value == "180.50"
     assert o.limit_price.currency == "USD"
-    assert o.time_in_force == broker_pb2.GTC
+    assert o.time_in_force == broker_pb2.TIF_GTC
     assert o.status == broker_pb2.SUBMITTED
     assert o.submitted_at.seconds == int(submitted_at.timestamp())
 

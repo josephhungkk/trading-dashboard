@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from backend.scripts.seed_phase9_app_config import seed_phase9_app_config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from scripts.seed_phase9_app_config import seed_phase9_app_config
 
 pytestmark = [pytest.mark.integration]
 

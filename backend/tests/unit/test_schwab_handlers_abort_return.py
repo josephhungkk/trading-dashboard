@@ -12,6 +12,14 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import grpc
+import pytest
+
+# Phase 9.7: this test imports from sidecar_schwab, whose proto stubs
+# are generated only by the sidecar_schwab CI job (not the backend
+# job). importorskip lets the backend pytest run cleanly when the
+# schwab _generated/ directory isn't on sys.path; the schwab CI job
+# still exercises this test.
+pytest.importorskip("sidecar_schwab._generated.broker.v1.broker_pb2")
 from sidecar_schwab.handlers import BrokerServicer
 
 

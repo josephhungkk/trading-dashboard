@@ -1505,20 +1505,25 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         return sides.get(side, broker_pb2.SIDE_UNSPECIFIED)
 
     def _order_type(self, order_type: str) -> broker_pb2.OrderType:
+        # Phase 9.7: enum values were renamed in proto (MARKET →
+        # ORDER_TYPE_MARKET etc.) during Phase 8b. handlers.py wasn't
+        # updated, so _order_type raised AttributeError every time an
+        # order's type was projected to proto.
         order_types: dict[str, broker_pb2.OrderType] = {
-            "MKT": broker_pb2.MARKET,
-            "LMT": broker_pb2.LIMIT,
-            "STP": broker_pb2.STOP,
-            "STP LMT": broker_pb2.STOP_LIMIT,
+            "MKT": broker_pb2.ORDER_TYPE_MARKET,
+            "LMT": broker_pb2.ORDER_TYPE_LIMIT,
+            "STP": broker_pb2.ORDER_TYPE_STOP,
+            "STP LMT": broker_pb2.ORDER_TYPE_STOP_LIMIT,
         }
-        return order_types.get(order_type, broker_pb2.TYPE_UNSPECIFIED)
+        return order_types.get(order_type, broker_pb2.ORDER_TYPE_UNSPECIFIED)
 
     def _time_in_force(self, time_in_force: str) -> broker_pb2.TimeInForce:
+        # Phase 9.7: same proto rename as _order_type — DAY → TIF_DAY etc.
         time_in_forces: dict[str, broker_pb2.TimeInForce] = {
-            "DAY": broker_pb2.DAY,
-            "GTC": broker_pb2.GTC,
-            "IOC": broker_pb2.IOC,
-            "FOK": broker_pb2.FOK,
+            "DAY": broker_pb2.TIF_DAY,
+            "GTC": broker_pb2.TIF_GTC,
+            "IOC": broker_pb2.TIF_IOC,
+            "FOK": broker_pb2.TIF_FOK,
         }
         return time_in_forces.get(time_in_force, broker_pb2.TIF_UNSPECIFIED)
 
