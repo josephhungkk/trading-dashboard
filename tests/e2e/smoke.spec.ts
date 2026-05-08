@@ -151,7 +151,7 @@ test.describe('Phase 4 broker accounts', () => {
       expect(acc).not.toHaveProperty('gateway_label');
       expect(acc).not.toHaveProperty('account_number');
       expect(typeof acc.id).toBe('string');
-      expect(['ibkr', 'futu', 'schwab']).toContain(acc.broker_id);
+      expect(['ibkr', 'futu', 'schwab', 'alpaca']).toContain(acc.broker_id);
       expect(['live', 'paper']).toContain(acc.mode);
     }
   });
