@@ -160,12 +160,18 @@ async def test_client_admin() -> AsyncIterator[AsyncClient]:
     monkeypatched verifier."""
     from app.core import deps as deps_mod
 
+    # Save the original so subsequent tests aren't auth-bypassed (was the
+    # root cause of test_admin_auth.py 200==401 failures).
+    original_verify = deps_mod._verifier.verify
     deps_mod._verifier.verify = MagicMock(  # type: ignore[method-assign]
         return_value=MagicMock(email="admin@test.local", kind="cf_access_jwt"),
     )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        client.headers["Cf-Access-Jwt-Assertion"] = "test-token"
-        yield client
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            client.headers["Cf-Access-Jwt-Assertion"] = "test-token"
+            yield client
+    finally:
+        deps_mod._verifier.verify = original_verify  # type: ignore[method-assign]
 
 
 @pytest_asyncio.fixture
