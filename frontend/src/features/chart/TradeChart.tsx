@@ -13,9 +13,10 @@ import { registerCustomOverlays } from './overlays';
 
 interface TradeChartProps {
   canonicalId: string;
+  onModifyRequest?: (req: ModifyRequest) => void;
 }
 
-export function TradeChart({ canonicalId }: TradeChartProps): React.JSX.Element {
+export function TradeChart({ canonicalId, onModifyRequest }: TradeChartProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const [chartReady, setChartReady] = React.useState(false);
@@ -92,9 +93,8 @@ export function TradeChart({ canonicalId }: TradeChartProps): React.JSX.Element 
   }, [canonicalId, timeframe]);
 
   const handleModifyRequest = React.useCallback((req: ModifyRequest) => {
-    void req;
-    // TODO(Task 44): open ConfirmDialog and wire modify-nonce flow.
-  }, []);
+    onModifyRequest?.(req);
+  }, [onModifyRequest]);
 
   // Sync indicators into chart whenever the list changes.
   useEffect(() => {

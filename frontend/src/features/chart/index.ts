@@ -2,6 +2,16 @@ export { ChartPage } from './ChartPage';
 export { TradeChart } from './TradeChart';
 export { PositionOverlay, useInstrumentTickSize, usePositionsForCanonical } from './PositionOverlay';
 export type { ModifyRequest } from './PositionOverlay';
+export { ConfirmDialog } from './ConfirmDialog';
+export type { ConfirmDialogProps } from './ConfirmDialog';
+export {
+  getOrderState,
+  mintModifyNonce,
+  submitModify,
+  subscribeOrderEvents,
+  ModifyNonceError,
+} from './services/orders';
+export type { ModifyNonceResponse, OrderEventEnvelope, OrderEventsHandle } from './services/orders';
 export {
   longPositionOverlay,
   shortPositionOverlay,
