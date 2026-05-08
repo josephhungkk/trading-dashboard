@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
@@ -26,6 +27,11 @@ from app.services.ibkr_maintenance import compute_broker_maintenance
 from app.services.quotes.base import canonical_id_components, country_for_exchange
 
 log = structlog.get_logger(__name__)
+
+# ISO-4217 currency code: 3 uppercase ASCII letters. Mirrors the DB CHECK
+# constraint on broker_accounts.last_nlv_currency to prevent IntegrityError
+# from values that pass isascii()/isupper() (e.g. "A1B") but fail [A-Z]{3}.
+_ISO3_RE = re.compile(r"^[A-Z]{3}$")
 
 RequestT = TypeVar("RequestT", contravariant=True)
 ResponseT = TypeVar("ResponseT", covariant=True)
@@ -918,7 +924,8 @@ class AccountService:
                    updated_at = now()
              WHERE id = :id AND deleted_at IS NULL
             RETURNING id, broker_id, account_number, alias, mode, gateway_label,
-                      currency_base, display_order;
+                      currency_base, display_order,
+                      last_nlv, last_nlv_currency, last_nlv_at;
             """
         )
         async with self._session_factory() as session, session.begin():
@@ -1185,17 +1192,16 @@ class BrokerDiscoverer:
         def _is_populated(summary: base.Summary) -> bool:
             nlv_currency = summary.net_liquidation.currency
             nlv_value = summary.net_liquidation.value
-            return (
-                len(nlv_currency) == 3
-                and nlv_currency.isascii()
-                and nlv_currency.isupper()
-                and bool(nlv_value)
-            )
+            return _ISO3_RE.match(nlv_currency) is not None and bool(nlv_value)
 
         def _format_decimal(s: str) -> str | None:
             try:
                 d = Decimal(s).quantize(Decimal("1e-8"))
             except InvalidOperation:
+                return None
+            if d == Decimal(0):
+                # Skip zero NLV — unfunded accounts should show no cached value
+                # (FE renders the placeholder rather than starting the staleness clock).
                 return None
             return format(d, "f")
 
@@ -1253,12 +1259,15 @@ class BrokerDiscoverer:
                             raise
                         nlv_overflow_count += 1
                         metrics.broker_discover_nlv_overflow_total.inc()
+                        # Don't log raw_value or str(exc): asyncpg's DBAPIError
+                        # messages embed the offending NUMERIC value, leaking
+                        # account NLV into structured logs.
                         log.warning(
                             "broker_discover_nlv_overflow",
                             label=label,
                             account_number=account_number,
-                            raw_value=summary.net_liquidation.value,
-                            error=str(exc),
+                            raw_value_len=len(summary.net_liquidation.value),
+                            error_class=type(exc).__name__,
                         )
         metrics.broker_discover_nlv_update_duration_ms.observe((time.monotonic() - t_start) * 1000)
 

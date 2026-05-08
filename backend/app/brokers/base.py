@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.ibkr_maintenance import BrokerMaintenance
 
@@ -159,6 +159,11 @@ class OrderEventMessage:
 
 
 class AccountResponse(BaseModel):
+    # extra='forbid' makes the FE boundary explicit: any future schema-add must
+    # be intentional. Prevents silent leakage of internal fields like
+    # gateway_label or account_number through RETURNING-clause widening.
+    model_config = ConfigDict(extra="forbid")
+
     id: UUID
     broker_id: Literal["ibkr", "futu", "schwab", "alpaca"]
     alias: str | None

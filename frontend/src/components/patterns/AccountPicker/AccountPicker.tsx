@@ -91,6 +91,7 @@ const AccountRow = memo(
   AccountRowComponent,
   (prev, next) =>
     prev.account.id === next.account.id &&
+    prev.account.alias === next.account.alias &&
     prev.account.nlv === next.account.nlv &&
     prev.account.nlvAt?.getTime() === next.account.nlvAt?.getTime() &&
     prev.maintenance.active === next.maintenance.active &&
