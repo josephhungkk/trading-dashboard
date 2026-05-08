@@ -35,7 +35,7 @@ async def test_0024_pk_is_inst_bucket(db_session: AsyncSession) -> None:
                       FROM pg_constraint c
                       JOIN pg_attribute a
                         ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
-                     WHERE c.conrelid = :tbl::regclass AND c.contype = 'p'
+                     WHERE c.conrelid = CAST(:tbl AS regclass) AND c.contype = 'p'
                      GROUP BY c.conname
                     """
                 ),

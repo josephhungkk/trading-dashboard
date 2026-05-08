@@ -26,6 +26,8 @@ async def test_concurrent_callbacks_serialized(
     httpx_mock,
 ):
     """Concurrent Tier-1 + Tier-2 callbacks: both succeed, single-writer holds."""
+    from app.main import app as _app
+
     httpx_mock.add_response(
         url="https://api.schwabapi.com/v1/oauth/token",
         method="POST",
@@ -39,24 +41,36 @@ async def test_concurrent_callbacks_serialized(
 
     from app.services.schwab_oauth import mint_state_nonce
 
-    s1 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
-    s2 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
-    await config_service.set_secret("broker", "schwab.app_key", "K")
-    await config_service.set_secret("broker", "schwab.app_secret", "S")
+    # Wire the test's redis fixture into app.state.redis so the OAuth callback
+    # handlers (which resolve redis via request.app.state.redis) consume from the
+    # same FakeRedis instance that the nonces were minted into.
+    orig_redis = getattr(_app.state, "redis", None)
+    _app.state.redis = redis
+    try:
+        s1 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
+        s2 = await mint_state_nonce(redis, user_email="u@x", app_secret_key=b"K")
+        await config_service.set_secret("broker", "schwab.app_key", "K")
+        await config_service.set_secret("broker", "schwab.app_secret", "S")
 
-    async def call_public():
-        return await test_client_no_auth.get(
-            "/api/oauth/schwab/callback",
-            params={"code": "C1", "state": s1},
-        )
+        async def call_public():
+            return await test_client_no_auth.get(
+                "/api/oauth/schwab/callback",
+                params={"code": "C1", "state": s1},
+            )
 
-    async def call_admin():
-        return await test_client_admin.post(
-            "/api/admin/brokers/schwab/oauth-callback",
-            params={"code": "C2", "state": s2},
-        )
+        async def call_admin():
+            return await test_client_admin.post(
+                "/api/admin/brokers/schwab/oauth-callback",
+                params={"code": "C2", "state": s2},
+            )
 
-    r1, r2 = await asyncio.gather(call_public(), call_admin())
+        r1, r2 = await asyncio.gather(call_public(), call_admin())
+    finally:
+        if orig_redis is None and hasattr(_app.state, "redis"):
+            del _app.state.redis
+        elif orig_redis is not None:
+            _app.state.redis = orig_redis
+
     assert r1.status_code == 200
     assert r2.status_code == 200
     final_token = await config_service.reveal_secret("broker", "schwab.refresh_token")

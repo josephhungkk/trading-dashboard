@@ -7,8 +7,9 @@ Create Date: 2026-05-07
 
 from __future__ import annotations
 
-from alembic import op
 from sqlalchemy import text
+
+from alembic import op
 
 revision = "0019_widen_qty_to_10dp"
 down_revision = "0018_pk_widen_asset_class"
@@ -75,14 +76,14 @@ def downgrade() -> None:
     # f-string interpolation used intentionally: table and column names come
     # from code constants above, never from user input.
     checks = [
-        f"SELECT 1 FROM {table_name} WHERE {column_name} IS NOT NULL "
-        f"AND {column_name} != trunc({column_name}, 8) LIMIT 1"
+        f"(SELECT 1 FROM {table_name} WHERE {column_name} IS NOT NULL "
+        f"AND {column_name} != trunc({column_name}, 8) LIMIT 1)"
         for table_name, column_name in QTY_COLUMNS
     ]
     if _column_exists("order_events", "fill_qty"):
         checks.append(
-            "SELECT 1 FROM order_events WHERE fill_qty IS NOT NULL "
-            "AND fill_qty != trunc(fill_qty, 8) LIMIT 1"
+            "(SELECT 1 FROM order_events WHERE fill_qty IS NOT NULL "
+            "AND fill_qty != trunc(fill_qty, 8) LIMIT 1)"
         )
 
     has_too_precise_qty = bool(

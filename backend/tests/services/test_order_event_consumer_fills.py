@@ -36,6 +36,18 @@ class _RecordingRedis:
         self.messages.append((channel, message))
         return 1
 
+    async def execute_command(self, *args: object) -> object:
+        """Stub for Redis commands used by _commission_buffer_pop / _commission_buffer_set.
+
+        HGETALL returns an empty list (no buffered commission); HSET/EXPIRE/DEL
+        return stub values so the consumer doesn't raise AttributeError and
+        silently swallow the fill event.
+        """
+        cmd = str(args[0]).upper() if args else ""
+        if cmd == "HGETALL":
+            return []  # empty dict → _commission_buffer_pop returns None
+        return 1
+
 
 class _Registry:
     def __init__(self) -> None:
@@ -341,7 +353,11 @@ async def test_pending_fills_drained_after_order_arrives(
         account_id=account_id,
         client_order_id=client_order_id,
         broker_order_id="BO-DRAIN",
-        status="submitted",
+        # Seed as pending_submit so that the "submitted" event status differs
+        # from the current DB status, bypassing the idempotency early-return
+        # guard (CRIT-2 Phase 8a) that skips events where current == new_status
+        # and exec_id is empty.
+        status="pending_submit",
     )
     consumer = OrderEventConsumer(_Registry(), session_factory, _RecordingRedis())  # type: ignore[arg-type]
 

@@ -206,6 +206,20 @@ async def test_oco_legs_different_accounts(client: AsyncClient) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _make_oco_nonce_payload() -> str:
+    """Return a JSON nonce payload whose hash matches LEG_A + LEG_B as Pydantic normalizes them."""
+    import json as _json
+
+    from app.api.orders import _oco_payload_hash
+    from app.schemas.orders import OcoOrderRequest
+
+    req = OcoOrderRequest(order_a=LEG_A, order_b=LEG_B, nonce="x")
+    leg_a_dict = req.order_a.model_dump(mode="json")
+    leg_b_dict = req.order_b.model_dump(mode="json")
+    payload_hash = _oco_payload_hash(leg_a_dict, leg_b_dict)
+    return _json.dumps({"payload_hash": payload_hash})
+
+
 @pytest.mark.asyncio
 async def test_oco_happy_path_with_killswitch_on(client: AsyncClient) -> None:
     """Both legs succeed → 200 with oco_link_id; oco_links INSERT is called."""
@@ -231,7 +245,7 @@ async def test_oco_happy_path_with_killswitch_on(client: AsyncClient) -> None:
     )
 
     mock_redis = AsyncMock()
-    mock_redis.execute_command = AsyncMock(return_value="nonce-payload")
+    mock_redis.execute_command = AsyncMock(return_value=_make_oco_nonce_payload())
     mock_redis.incr = AsyncMock(return_value=1)
     mock_redis.expire = AsyncMock(return_value=True)
 
@@ -329,7 +343,7 @@ async def test_oco_atomicity_rollback(client: AsyncClient) -> None:
     mock_sidecar.cancel_order = AsyncMock(side_effect=_fake_cancel)
 
     mock_redis = AsyncMock()
-    mock_redis.execute_command = AsyncMock(return_value="nonce-payload")
+    mock_redis.execute_command = AsyncMock(return_value=_make_oco_nonce_payload())
     mock_redis.incr = AsyncMock(return_value=1)
     mock_redis.expire = AsyncMock(return_value=True)
 
