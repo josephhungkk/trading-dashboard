@@ -400,6 +400,112 @@ per-chunk reviewer rule. 15/15 phases applied. Pre-existing CI debt
 False positive suppressed (8 reviewers): unparenthesized `except A, B:`
 is valid under Python 3.14 PEP 758. See `phase9_5_shipped.md`.
 
+## Phase 9.6 — CI red reconciliation  *(planned — pre-Phase-10 gate)*
+
+CI on main has been red since multiple phases per
+`feedback_ci_review_per_phase_owed.md`. Phase 9.5 retro confirmed the
+sweep introduced **zero new CI failures**; the existing red checks are
+pre-existing debt. Reconcile here so Phase 10 starts on a green CI.
+
+Root-cause inventory (verified at run `25558439124` on `e40f56a`):
+
+- [ ] **proto buf format check (exit 100)** — `proto/broker/v1/broker.proto`
+      has aligned-column whitespace (`int32  limit = 5;` etc.) that
+      `buf format` rewrites. Fix: `cd proto && buf format --write` then
+      regenerate sidecar/backend stubs (`scripts/gen-types.sh`) and
+      verify diff is whitespace-only.
+- [ ] **`e2e/phase9-charting.spec.ts` + `e2e/phase9-perf.spec.ts`
+      (vitest picks them up, import fails)** — Vitest is configured to
+      include `**/*.spec.ts` and the e2e specs import `@playwright/test`
+      which isn't in the vitest dep tree. Fix: add `exclude: ['e2e/**']`
+      to `frontend/vitest.config.ts` so Playwright e2e specs don't get
+      double-collected. (Playwright runs them from the `e2e/` directory
+      via its own runner — no fixture work needed for this fix.)
+- [ ] **`TradeTicketModal capability_error_shows_warning_and_disables_preview`** —
+      "An update to TradeTicketModalContent inside a test was not wrapped
+      in act(...)" warning is treated as a failure by Vitest's strict-
+      stderr mode. Fix: wrap the triggering state update in `await
+      act(async () => { ... })` or replace with `await waitFor(() =>
+      expect(...).toBeDisabled())` to flush the pending update.
+- [ ] **Deploy + E2E Mock Trade Chain workflows** — Investigate per-job
+      logs after the above are fixed; if still red, file under Phase 9.7
+      backlog (likely operator-action issues like missing CI secrets,
+      not code).
+
+Exit criteria: `gh run list --branch main` shows **3 consecutive green
+CI runs** (per the original Phase 9.5 close-out condition that was
+deferred). Tag the last commit `v0.11.0.1` if a release is appropriate;
+otherwise close out as a `chore(ci):` series.
+
+## Phase 9.7 — Backlog reconciliation  *(planned — actionable items only)*
+
+Sweep the open backlog from prior phases (see end-of-session list at
+13:30 UTC) and ship items that don't require operator action or
+production-traffic windows. Items NOT in scope here: Task 18 CAGGs
+(needs prod bars_1s), 24h storage actuals (needs monitoring window),
+positions `symbol`/`primary_exchange` backfill (operator runs
+re-discovery round), Phase 24 hardening (own phase).
+
+Actionable now:
+
+- [ ] **Phase 2.x nginx `/metrics` proxy** — backend `/metrics` is
+      already gated by `require_admin_jwt`; only the nginx stanza is
+      missing. Fix: add `location = /metrics { proxy_pass
+      http://backend:8000/metrics; }` to `nginx/conf.d/dashboard.conf`
+      so Prometheus / Grafana can scrape via CF Access service token.
+      Verified in prod 2026-04-23.
+- [ ] **Phase 9 Task 37 — `instrument_id` resolution from
+      `canonical_id`** — wire `ChartLayoutSync` end-to-end. Currently
+      `instrument_id` is mocked / empty in some chart-layout fetch
+      paths. Fix: resolve via the existing `instruments` table lookup
+      by `canonical_id` and thread through the chart load → layout
+      save round-trip.
+- [ ] **Phase 8 G3 — Phase 8a operator runbook** — pure documentation.
+      Capture the post-deploy steps (capability matrix flip,
+      `provision-and-publish.ps1`, sidecar bounce) into
+      `docs/runbooks/phase8a-deploy.md`. Reuse content from
+      `phase7a_schwab_topology.md` + `phase8c_shipped.md`.
+- [ ] **Phase 8 G1-G2 — capability + poller + place/cancel/modify
+      metrics + alerts** — config-only. Add `broker_capability_
+      mismatch_total`, `broker_poller_drift_seconds`, plus alert rules
+      for sustained mismatch / drift to `alerts.yml` `phase8` group.
+      Backed by metrics already incremented in code; only the alert
+      definitions are missing.
+- [ ] **Phase 7b on-demand quote subscribe for preview** (deferred
+      from 5c) — backend-side eager `subscribe_quote` with timeout in
+      the preview path so unheld tickers don't return `503
+      market_mid_unavailable`. Spec lives in `phase7b1_shipped.md`;
+      implementation needs all 3 streamer sidecars (IBKR / Futu / Alpaca)
+      to honour an immediate-then-unsubscribe call. Likely a 1-day task.
+- [ ] **Phase 7b periodic BASE-tag refresh** (deferred from 5b.1) —
+      eager `reqAccountUpdates` cycle when discoverer detects a new
+      account. v0.5.2 `last_nlv_currency` fallback covers steady state,
+      so no current user impact, but a new mid-run account currently
+      needs a sidecar restart. Wire a one-shot refresh in
+      `BrokerDiscoverer._discover_once` when `rows_seen` introduces a
+      previously-unseen `(broker_id, account_number)` pair.
+- [ ] **Phase 8 E2 — Schwab fake-server conftest + full place/cancel/
+      modify chain test** — non-trivial fixture work but fully self-
+      contained. Mirror the `FakeBrokerServicer` pattern from Phase 5c
+      (`backend/tests/fixtures/sidecar_servicer.py`) for Schwab; add
+      `tests/integration/test_e2e_schwab_chain.py`. Estimated 1-2 days.
+
+Deferred (still open but blocked on external factors):
+
+- Task 18 CAGGs (prod bars_1s traffic required)
+- 24h storage actuals measurement (24h prod monitoring window)
+- Phase 7b.1.5 positions `symbol`/`primary_exchange` backfill (operator
+  action via re-discovery round)
+- Phase 8 E4 nightly + weekly real-Schwab CI workflows (needs operator
+  to provision Schwab paper credentials in CI secrets first)
+- Phase 7b F3 cardinality load test (gated off CI; reuse harness from
+  B5/F2 unit tests when needed)
+
+Exit criteria: TASKS.md unchecked items above flipped to `[x]`; each
+item shipped as its own `feat(phaseN-followup):` or `fix(phaseN-
+followup):` commit; close-out memo `phase9_7_shipped.md` lists the
+delivered subset and the deferred-blocked subset with reason per row.
+
 ## Phase 10 — Risk engine + position-sizing + multi-account rollup
 
 PDT counter, buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly / fixed-fractional / vol-target). Multi-account portfolio rollup. Pre-trade gate becomes mandatory chokepoint.
