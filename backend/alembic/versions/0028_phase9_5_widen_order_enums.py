@@ -35,11 +35,13 @@ NEW_TIFS = ("IOC", "FOK", "GTD")
 
 
 def upgrade() -> None:
-    conn = op.get_bind()
+    # Phase 9.7: SQLAlchemy 2.0 conn.execute() requires a clause/text
+    # object; passing a bare f-string raises ObjectNotExecutableError.
+    # Switch to op.execute() which still accepts string DDL fragments.
     for v in NEW_ORDER_TYPES:
-        conn.execute(f"ALTER TYPE order_type_enum ADD VALUE IF NOT EXISTS '{v}'")
+        op.execute(f"ALTER TYPE order_type_enum ADD VALUE IF NOT EXISTS '{v}'")
     for v in NEW_TIFS:
-        conn.execute(f"ALTER TYPE order_tif_enum ADD VALUE IF NOT EXISTS '{v}'")
+        op.execute(f"ALTER TYPE order_tif_enum ADD VALUE IF NOT EXISTS '{v}'")
     # Drop the stale 0004 CHECK that whitelists only MARKET/LIMIT/STOP.
     op.execute("ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_type_check")
     # Replace with a NOT NULL guard (type system now enforces the value set).
