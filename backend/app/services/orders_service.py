@@ -815,7 +815,8 @@ async def cancel_order(
     # instead of returning the 5s-cooldown false-positive
     # "cancel_already_in_flight" (R31 cooldown intent is "5s after a
     # SUCCESSFUL forward").
-    client = await registry.get_client(str(row["gateway_label"]))
+    gateway_label = str(row["gateway_label"])
+    client = await registry.get_client(gateway_label)
     try:
         accepted = await _as_cancel_order_client(client).cancel_order(
             str(row["account_number"]),
@@ -834,6 +835,8 @@ async def cancel_order(
                 {"order_id": order_id},
             )
             await db.commit()
+            # Phase 9.7 G2: broker rejected cancel.
+            metrics.broker_order_cancel_total.labels(label=gateway_label, result="error").inc()
             raise CancelUnavailable(
                 422,
                 {"error": "broker_cancel_rejected", "detail": "broker rejected cancel"},
@@ -851,11 +854,15 @@ async def cancel_order(
             {"order_id": order_id},
         )
         await db.commit()
+        # Phase 9.7 G2: sidecar unreachable.
+        metrics.broker_order_cancel_total.labels(label=gateway_label, result="timeout").inc()
         raise CancelUnavailable(
             503,
             {"error": "sidecar_unavailable", "detail": "cancel forward failed; retry"},
             {"Retry-After": "1"},
         ) from None
+    # Phase 9.7 G2: cancel forward accepted by sidecar.
+    metrics.broker_order_cancel_total.labels(label=gateway_label, result="success").inc()
     return CancelOrderResult(status="cancel_requested")
 
 
