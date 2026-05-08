@@ -114,6 +114,46 @@ async def config_service(redis) -> AsyncIterator[ConfigService]:
     yield svc
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _app_state(request: pytest.FixtureRequest) -> AsyncIterator[None]:
+    """Wire module-level singletons + app.state for HTTP-driving tests.
+
+    Bucket A of the CI debt cleanup: ~55 tests under tests/api/* use the
+    bare `client` ASGITransport fixture and hit endpoints whose deps read
+    set_config_service(), app.state.redis, app.state.capability_svc — all
+    of which are normally wired in app.main.lifespan but never run under
+    ASGITransport. Drive the equivalent setup once per test from fakeredis
+    + real test DB so endpoints find what they expect.
+
+    Skipped for tests marked @pytest.mark.no_db (pure schema/snapshot work
+    that must not touch the DB).
+    """
+    if request.node.get_closest_marker("no_db") is not None:
+        yield
+        return
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.services.order_capability_service import OrderCapabilityService
+
+    fake_r = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    cc = ConfigCache(fake_r, "config:invalidate", "config", ttl_seconds=10)
+    sc = ConfigCache(fake_r, "config:invalidate:secrets", "secret", ttl_seconds=10)
+    fernet = get_fernet(settings.secret_key, settings.secret_key_prev)
+    svc = ConfigService(factory, cc, sc, fernet)
+    set_config_service(svc)
+
+    capability_svc = OrderCapabilityService(redis=fake_r, db_factory=factory)
+    app.state.redis = fake_r
+    app.state.capability_svc = capability_svc
+
+    try:
+        yield
+    finally:
+        await fake_r.aclose()
+
+
 @pytest_asyncio.fixture
 async def test_client_admin() -> AsyncIterator[AsyncClient]:
     """Async client that injects a fake admin Cf-Access-Jwt-Assertion via
