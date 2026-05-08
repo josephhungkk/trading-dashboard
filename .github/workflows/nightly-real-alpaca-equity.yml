@@ -8,6 +8,7 @@ on:
 jobs:
   nightly-alpaca-equity-e2e:
     runs-on: [self-hosted, nuc]
+    if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 15
     strategy:
       fail-fast: false

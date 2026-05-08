@@ -8,6 +8,7 @@ on:
 jobs:
   real-alpaca-crypto:
     runs-on: [self-hosted, nuc]
+    if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 15
     env:
       ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}

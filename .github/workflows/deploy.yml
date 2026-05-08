@@ -16,6 +16,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    if: github.repository == 'josephhungkk/trading-dashboard'
     steps:
       - uses: actions/checkout@v4
 

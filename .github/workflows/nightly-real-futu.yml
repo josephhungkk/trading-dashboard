@@ -9,6 +9,7 @@ on:
 jobs:
   real-futu:
     runs-on: self-hosted  # NUC15PRO — only host with WG access to futu OpenD at 10.10.0.x
+    if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 15
     env:
       FUTU_HOST: ${{ secrets.FUTU_HOST }}

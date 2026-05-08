@@ -11,6 +11,7 @@ permissions:
 jobs:
   smoke:
     runs-on: [self-hosted, nuc]
+    if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

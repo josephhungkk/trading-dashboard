@@ -8,6 +8,7 @@ on:
 jobs:
   nightly-schwab-trade-e2e:
     runs-on: ubuntu-latest
+    if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 15
     strategy:
       fail-fast: false

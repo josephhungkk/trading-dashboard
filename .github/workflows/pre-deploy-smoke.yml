@@ -9,6 +9,7 @@ on:
 jobs:
   real-ibkr-smoke:
     runs-on: [self-hosted, nuc]
+    if: github.repository == 'josephhungkk/trading-dashboard'
     env:
       REAL_IBKR: "1"
       IBKR_PAPER_GATEWAY: ${{ inputs.gateway }}

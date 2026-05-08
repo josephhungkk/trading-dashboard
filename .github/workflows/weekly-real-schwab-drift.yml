@@ -8,6 +8,7 @@ on:
 jobs:
   capability-drift-check:
     runs-on: ubuntu-latest
+    if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 20
     env:
       SCHWAB_APP_KEY: ${{ secrets.SCHWAB_APP_KEY }}

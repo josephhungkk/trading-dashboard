@@ -9,6 +9,7 @@ on:
 jobs:
   nightly-ibkr-trade-e2e:
     runs-on: [self-hosted, nuc]
+    if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 20
     strategy:
       fail-fast: false
