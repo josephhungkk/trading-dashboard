@@ -269,7 +269,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Issue Confirmation Nonce */
+        /**
+         * Issue Confirmation Nonce
+         * @description HIGH-7: mint a Redis-backed single-use nonce (SETEX, TTL 300 s).
+         */
         post: operations["issue_confirmation_nonce_api_admin_csrf_issue_post"];
         delete?: never;
         options?: never;
@@ -382,6 +385,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bars": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Bars
+         * @description Return a paginated page of historical bars for one instrument + timeframe.
+         *
+         *     Parameters
+         *     ----------
+         *     canonical_id:
+         *         Instrument canonical identifier, e.g. ``"equity_us:AAPL:NASDAQ"``.
+         *     timeframe:
+         *         Bar timeframe — one of ``1s``, ``1m``, ``5m``, ``15m``, ``30m``,
+         *         ``1h``, ``1d``.
+         *     start:
+         *         Inclusive range start (UTC ISO8601).
+         *     end:
+         *         Exclusive range end (UTC ISO8601).
+         *     limit:
+         *         Maximum bars per page (1-10000, default 10000).
+         *     cursor:
+         *         Opaque pagination cursor from a previous response.  Omit for first
+         *         page.
+         *
+         *     Raises
+         *     ------
+         *     400 ``invalid_cursor``       — cursor is malformed or has unknown version.
+         *     404 ``instrument_not_found`` — canonical_id not in instruments table.
+         *     413 ``bar_fetch_too_large``  — backfill exceeded the 100-chunk hard cap.
+         *     503 ``bar_source_unavailable`` — no healthy sidecar for this asset class.
+         */
+        get: operations["get_bars_api_bars_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/brokers/accounts": {
         parameters: {
             query?: never;
@@ -411,6 +458,70 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/chart/layouts/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve Instrument Id
+         * @description Return the numeric instrument_id for a given canonical_id.
+         *
+         *     Used by the FE to convert ``canonicalId`` (route param) to the integer
+         *     key required by the chart_layouts CRUD endpoints (Task 37).
+         *
+         *     Returns 404 if the canonical_id is not in the instruments table.
+         */
+        get: operations["resolve_instrument_id_api_chart_layouts_resolve_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/chart/layouts/{instrument_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Chart Layout
+         * @description Return the chart layout for an instrument, translated to the latest schema.
+         *
+         *     Translation is read-only — the DB row is never mutated.
+         *     Returns 404 if no layout exists.
+         */
+        get: operations["get_chart_layout_api_chart_layouts__instrument_id__get"];
+        /**
+         * Put Chart Layout
+         * @description Upsert the chart layout for an instrument.
+         *
+         *     Requires ``If-Match: "<etag>"`` header (spec §4).
+         *     - 428 if header is missing.
+         *     - 412 if etag does not match the stored ``updated_at``.
+         *     - 413 if payload exceeds 64 KiB.
+         *     - Always writes at latest schema version.
+         */
+        put: operations["put_chart_layout_api_chart_layouts__instrument_id__put"];
+        post?: never;
+        /**
+         * Delete Chart Layout
+         * @description Delete the chart layout for an instrument.
+         *
+         *     Returns 204 on success, 404 if no row exists.
+         */
+        delete: operations["delete_chart_layout_api_chart_layouts__instrument_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -535,6 +646,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/orders/modify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Modify Order
+         * @description POST /api/orders/modify — nonce-gated modify endpoint for FE drag-handle SL/TP.
+         *
+         *     Step 1: Consume ``nonce:modify:{order_id}:{nonce}`` via GETDEL.
+         *              412 if missing / expired / already consumed.
+         *     Step 2: Delegate to the existing modify service with the supplied fields.
+         *
+         *     Breaking change: callers that submit modify without obtaining a nonce via
+         *     POST /api/orders/nonce/modify will receive a 412 (pre-Task-43 FE callers
+         *     should migrate to the new two-step flow).
+         */
+        post: operations["post_modify_order_api_orders_modify_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/nonce/modify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mint Modify Nonce
+         * @description Mint a single-use 30-second nonce for PUT /api/orders/{id} (drag-handle SL/TP).
+         *
+         *     Stores ``nonce:modify:{order_id}:{nonce}`` in Redis with TTL 30 s.
+         *     Consumed via GETDEL at modify time (Task 30 CSRF gate).
+         *
+         *     MED-1: Rate-limited to 10 mints per 30 s per user.
+         */
+        post: operations["mint_modify_nonce_api_orders_nonce_modify_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/nonce/oco": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mint Oco Nonce
+         * @description Mint a single-use 60-second nonce for POST /api/orders/oco.
+         *
+         *     Stores ``nonce:oco:{account_id}:{nonce}`` in Redis with a SHA-256 hash
+         *     of both leg payloads so the placement endpoint can reject tampered requests.
+         *     Rate-limited via the shared modify-nonce rate limiter (10 req / 30 s).
+         */
+        post: operations["mint_oco_nonce_api_orders_nonce_oco_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orders/oco": {
         parameters: {
             query?: never;
@@ -549,12 +737,14 @@ export interface paths {
          * @description Place two OCO legs atomically.
          *
          *     Invariants enforced here (T-O.6):
+         *     - Rate limit gate: 10 OCO mints per 30 s per user (HIGH-sec-2).
          *     - Kill-switch gate: broker.oco.enabled must be "true" in app_config.
          *     - Both legs must reference the same broker (by gateway prefix).
          *     - Both legs must reference the same account_id.
-         *     - Capability gate is checked individually for each leg.
+         *     - Nonce namespace: nonce:oco:{account_id}:{nonce} with payload-hash validation (HIGH-sec-1).
+         *     - Capability gate is checked individually for each leg using resolved asset_class (HIGH-code-2).
          *     - Atomicity: leg B failure triggers best-effort cancel of leg A.
-         *     - oco_links row is INSERTed (status='PENDING_BOTH') after both legs succeed.
+         *     - oco_links INSERT wrapped in try/except; INSERT failure cancels both legs (HIGH-db-2).
          */
         post: operations["place_oco_order_api_orders_oco_post"];
         delete?: never;
@@ -705,16 +895,38 @@ export interface components {
              */
             position_count: number;
         };
-        /** BrokerCapabilitiesResponse */
-        BrokerCapabilitiesResponse: {
-            /** Broker Id */
-            broker_id: string;
-            /** Combos */
-            combos: components["schemas"]["CapabilityComboRow"][];
-            /** Order Types */
-            order_types: components["schemas"]["OrderTypeRow"][];
-            /** Time In Force */
-            time_in_force: components["schemas"]["TimeInForceRow"][];
+        /**
+         * BarItem
+         * @description Single bar row in the paginated response.
+         */
+        BarItem: {
+            /**
+             * Bucket Start
+             * Format: date-time
+             */
+            bucket_start: string;
+            /** Close */
+            close: string;
+            /** High */
+            high: string;
+            /** Low */
+            low: string;
+            /** Open */
+            open: string;
+            /** Trade Count */
+            trade_count: number;
+            /** Volume */
+            volume: string;
+        };
+        /**
+         * BarsPageResponse
+         * @description Paginated bars response (spec §4).
+         */
+        BarsPageResponse: {
+            /** Bars */
+            bars: components["schemas"]["BarItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /**
          * BrokerMaintenance
@@ -752,18 +964,34 @@ export interface components {
             /** Accounts */
             accounts: components["schemas"]["BrokerSidecarStatus"][];
         };
-        /** CapabilityComboRow */
-        CapabilityComboRow: {
-            /** Broker Id */
-            broker_id: string;
-            /** Notes */
-            notes: string;
-            /** Order Type */
-            order_type: string;
-            /** Supported */
-            supported: boolean;
-            /** Time In Force */
-            time_in_force: string;
+        /**
+         * ChartLayoutPayload
+         * @description Request body for PUT /api/chart/layouts/{instrument_id}.
+         */
+        ChartLayoutPayload: {
+            /** Payload */
+            payload: {
+                [key: string]: unknown;
+            };
+            /** Schema Version */
+            schema_version: number;
+        };
+        /**
+         * ChartLayoutResponse
+         * @description Response body for GET /api/chart/layouts/{instrument_id}.
+         */
+        ChartLayoutResponse: {
+            /** Payload */
+            payload: {
+                [key: string]: unknown;
+            };
+            /** Schema Version */
+            schema_version: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** ConfigIn */
         ConfigIn: {
@@ -888,12 +1116,68 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /**
+         * InstrumentIdResponse
+         * @description Response body for GET /api/chart/layouts/resolve.
+         */
+        InstrumentIdResponse: {
+            /** Instrument Id */
+            instrument_id: number;
+        };
+        /**
+         * ModifyNonceMintRequest
+         * @description Body for POST /api/orders/nonce/modify.
+         */
+        ModifyNonceMintRequest: {
+            /** Order Id */
+            order_id: string;
+        };
+        /**
+         * ModifyNonceMintResponse
+         * @description Response for POST /api/orders/nonce/modify.
+         */
+        ModifyNonceMintResponse: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Nonce */
+            nonce: string;
+        };
         /** Money */
         Money: {
             /** Currency */
             currency: string;
             /** Value */
             value: string;
+        };
+        /**
+         * OcoNonceMintRequest
+         * @description Body for POST /api/orders/nonce/oco.
+         */
+        OcoNonceMintRequest: {
+            /** Leg A */
+            leg_a: {
+                [key: string]: unknown;
+            };
+            /** Leg B */
+            leg_b: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * OcoNonceMintResponse
+         * @description Response for POST /api/orders/nonce/oco.
+         */
+        OcoNonceMintResponse: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Nonce */
+            nonce: string;
         };
         /**
          * OcoOrderRequest
@@ -1101,17 +1385,6 @@ export interface components {
              */
             updated_at: string;
         };
-        /** OrderTypeRow */
-        OrderTypeRow: {
-            /** Code */
-            code: string;
-            /** Description */
-            description: string;
-            /** Label */
-            label: string;
-            /** Sort Order */
-            sort_order: number;
-        };
         /** PolicyResponse */
         PolicyResponse: {
             /**
@@ -1160,6 +1433,38 @@ export interface components {
              */
             status: "ok" | "high" | "extreme";
         };
+        /**
+         * PostModifyRequest
+         * @description Body for POST /api/orders/modify (nonce-gated modify shortcut).
+         *
+         *     CRIT-1: qty, order_type, tif are now optional. When absent the handler
+         *     fetches the current values from the orders row and preserves them.
+         *     Drag-modify only changes price; other fields are unchanged by default.
+         */
+        PostModifyRequest: {
+            /** Expiry Date */
+            expiry_date?: string | null;
+            /** Limit Price */
+            limit_price?: string | null;
+            /** Nonce */
+            nonce: string;
+            /** Order Id */
+            order_id: string;
+            /** Order Type */
+            order_type?: string | null;
+            /** Qty */
+            qty?: string | null;
+            /** Stop Price */
+            stop_price?: string | null;
+            /** Tif */
+            tif?: string | null;
+            /** Trail Limit Offset */
+            trail_limit_offset?: string | null;
+            /** Trail Offset */
+            trail_offset?: string | null;
+            /** Trail Offset Type */
+            trail_offset_type?: string | null;
+        };
         /** PreviewRequest */
         PreviewRequest: {
             /**
@@ -1167,6 +1472,8 @@ export interface components {
              * Format: uuid
              */
             account_id: string;
+            /** Cash Amount */
+            cash_amount?: string | null;
             /** Conid */
             conid: string;
             /** Expiry Date */
@@ -1179,7 +1486,7 @@ export interface components {
              */
             order_type: "MARKET" | "LIMIT" | "STOP" | "STOP_LIMIT" | "TRAIL" | "TRAIL_LIMIT" | "MOC" | "MOO" | "LOC" | "LOO";
             /** Qty */
-            qty: string;
+            qty?: string | null;
             /**
              * Side
              * @enum {string}
@@ -1302,19 +1609,6 @@ export interface components {
         Tier2HeartbeatIn: {
             /** Last Run Seconds */
             last_run_seconds: number;
-        };
-        /** TimeInForceRow */
-        TimeInForceRow: {
-            /** Code */
-            code: string;
-            /** Description */
-            description: string;
-            /** Label */
-            label: string;
-            /** Requires Expiry */
-            requires_expiry: boolean;
-            /** Sort Order */
-            sort_order: number;
         };
         /** ValidationError */
         ValidationError: {
@@ -1610,7 +1904,7 @@ export interface operations {
         parameters: {
             query: {
                 code: string;
-                state: string;
+                state?: string;
             };
             header?: never;
             path?: never;
@@ -2262,6 +2556,42 @@ export interface operations {
             };
         };
     };
+    get_bars_api_bars_get: {
+        parameters: {
+            query: {
+                canonical_id: string;
+                timeframe: string;
+                start: string;
+                end: string;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BarsPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_broker_status_api_brokers_accounts_get: {
         parameters: {
             query?: never;
@@ -2284,7 +2614,9 @@ export interface operations {
     };
     get_broker_capabilities_api_brokers__broker_id__capabilities_get: {
         parameters: {
-            query?: never;
+            query?: {
+                asset_class?: string | null;
+            };
             header?: never;
             path: {
                 broker_id: string;
@@ -2299,8 +2631,140 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BrokerCapabilitiesResponse"];
+                    "application/json": {
+                        [key: string]: {
+                            [key: string]: unknown;
+                        }[];
+                    } | {
+                        [key: string]: unknown;
+                    }[];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_instrument_id_api_chart_layouts_resolve_get: {
+        parameters: {
+            query: {
+                canonical_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstrumentIdResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_chart_layout_api_chart_layouts__instrument_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instrument_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChartLayoutResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_chart_layout_api_chart_layouts__instrument_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instrument_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChartLayoutPayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChartLayoutResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_chart_layout_api_chart_layouts__instrument_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instrument_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -2506,6 +2970,105 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_modify_order_api_orders_modify_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PostModifyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mint_modify_nonce_api_orders_nonce_modify_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModifyNonceMintRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModifyNonceMintResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mint_oco_nonce_api_orders_nonce_oco_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OcoNonceMintRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OcoNonceMintResponse"];
                 };
             };
             /** @description Validation Error */
