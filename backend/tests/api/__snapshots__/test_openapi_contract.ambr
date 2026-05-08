@@ -5,8 +5,15 @@
     "ContractSummary": {
       "properties": {
         "conid": {
-          "title": "Conid",
-          "type": "integer"
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Conid"
         },
         "description": {
           "title": "Description",
@@ -206,7 +213,14 @@
               "enum": [
                 "MARKET",
                 "LIMIT",
-                "STOP"
+                "STOP",
+                "STOP_LIMIT",
+                "TRAIL",
+                "TRAIL_LIMIT",
+                "MOC",
+                "MOO",
+                "LOC",
+                "LOO"
               ],
               "title": "Order Type",
               "type": "string"
@@ -266,7 +280,10 @@
             "tif": {
               "enum": [
                 "DAY",
-                "GTC"
+                "GTC",
+                "IOC",
+                "FOK",
+                "GTD"
               ],
               "title": "Tif",
               "type": "string"
@@ -468,7 +485,14 @@
           "enum": [
             "MARKET",
             "LIMIT",
-            "STOP"
+            "STOP",
+            "STOP_LIMIT",
+            "TRAIL",
+            "TRAIL_LIMIT",
+            "MOC",
+            "MOO",
+            "LOC",
+            "LOO"
           ],
           "title": "Order Type",
           "type": "string"
@@ -528,7 +552,10 @@
         "tif": {
           "enum": [
             "DAY",
-            "GTC"
+            "GTC",
+            "IOC",
+            "FOK",
+            "GTD"
           ],
           "title": "Tif",
           "type": "string"
@@ -611,8 +638,15 @@
         "ContractSummary": {
           "properties": {
             "conid": {
-              "title": "Conid",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "title": "Conid"
             },
             "description": {
               "title": "Description",
@@ -1019,7 +1053,7 @@
           "type": "string"
         },
         "qty": {
-          "pattern": "^\\d+(\\.\\d+)?$",
+          "pattern": "^\\d{1,10}(\\.\\d{1,10})?$",
           "title": "Qty",
           "type": "string"
         },
@@ -1171,8 +1205,22 @@
       "type": "object"
     },
     "OrderModifyRequest": {
-      "description": "PUT /api/orders/{id} body. account_id/conid/side/order_type immutable.",
+      "additionalProperties": false,
+      "description": "PUT /api/orders/{id} body. account_id/conid/side immutable.",
       "properties": {
+        "expiry_date": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expiry Date"
+        },
         "limit_price": {
           "anyOf": [
             {
@@ -1192,8 +1240,24 @@
           "title": "Nonce",
           "type": "string"
         },
+        "order_type": {
+          "enum": [
+            "MARKET",
+            "LIMIT",
+            "STOP",
+            "STOP_LIMIT",
+            "TRAIL",
+            "TRAIL_LIMIT",
+            "MOC",
+            "MOO",
+            "LOC",
+            "LOO"
+          ],
+          "title": "Order Type",
+          "type": "string"
+        },
         "qty": {
-          "pattern": "^\\d+(\\.\\d+)?$",
+          "pattern": "^\\d{1,10}(\\.\\d{1,10})?$",
           "title": "Qty",
           "type": "string"
         },
@@ -1213,15 +1277,61 @@
         "tif": {
           "enum": [
             "DAY",
-            "GTC"
+            "GTC",
+            "IOC",
+            "FOK",
+            "GTD"
           ],
           "title": "Tif",
           "type": "string"
+        },
+        "trail_limit_offset": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(\\.\\d{1,8})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trail Limit Offset"
+        },
+        "trail_offset": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(\\.\\d{1,8})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trail Offset"
+        },
+        "trail_offset_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "AMOUNT",
+                "PERCENT"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trail Offset Type"
         }
       },
       "required": [
         "nonce",
         "qty",
+        "order_type",
         "tif"
       ],
       "title": "OrderModifyRequest",

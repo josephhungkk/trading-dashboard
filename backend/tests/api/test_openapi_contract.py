@@ -149,6 +149,7 @@ async def test_detail_routes_document_404_envelope(client):
         assert example["error"] == "not_found"
 
 
+@pytest.mark.no_db
 def test_openapi_schema_lock_phase5b(snapshot):
     """Lock the 5 Phase-5b wire models against drift.
 
@@ -170,6 +171,7 @@ def test_openapi_schema_lock_phase5b(snapshot):
     assert json.dumps(locked, indent=2, sort_keys=True) == snapshot
 
 
+@pytest.mark.no_db
 def test_openapi_schema_lock_phase5c(snapshot):
     """Lock the 7 Phase-5c wire models against drift.
 
