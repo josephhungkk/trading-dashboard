@@ -14,6 +14,10 @@ import { useModeStore } from '@/stores/global/mode';
 import { useActiveStores, getScopedStores } from '@/stores/registry';
 // eslint-disable-next-line boundaries/element-types -- layout passes service registry to store hydrate
 import { getServices } from '@/services/registry';
+// eslint-disable-next-line boundaries/element-types -- layout initialises global stores lazily on mount (HIGH-3)
+import { useConnectedStore } from '@/stores/global/connected';
+// eslint-disable-next-line boundaries/element-types -- layout initialises global stores lazily on mount (HIGH-3)
+import { useCommandsStore } from '@/stores/global/commands';
 // eslint-disable-next-line boundaries/element-types -- hooks layer composes account fetch with maintenance publish
 import { fetchAccountsAndSyncMaintenance } from '@/hooks/useAccountsList';
 
@@ -36,10 +40,17 @@ export function AppShell(): React.JSX.Element {
   const mode = useModeStore((s) => s.mode);
   const stores = useActiveStores();
 
+  // Initialise global stores lazily so getServices() is not called at module-eval time (HIGH-3)
   React.useEffect(() => {
+    useConnectedStore.getState().init();
+    useCommandsStore.getState().init();
+  }, []);
+
+  React.useEffect(() => {
+    const capturedMode = mode;
     void stores.hydrate(getServices(), fetchAccountsAndSyncMaintenance);
     return () => {
-      getScopedStores(mode).suspend();
+      getScopedStores(capturedMode).suspend();
     };
   }, [mode, stores]);
 

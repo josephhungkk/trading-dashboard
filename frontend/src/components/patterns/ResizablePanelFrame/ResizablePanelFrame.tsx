@@ -71,6 +71,8 @@ export function ResizablePanelFrame({
               )}
             >
               {p.collapsible && (
+                // TODO(phase3-retro): chevron doesn't flip on collapse — needs per-panel isCollapsed state
+                // driven by onResize; deferred because Panel has no onCollapse/onExpand prop.
                 <button
                   type="button"
                   aria-label={`Toggle ${p.id}`}

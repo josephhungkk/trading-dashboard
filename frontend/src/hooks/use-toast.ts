@@ -34,7 +34,7 @@ export function useToast(): {
   dismiss: (id: string) => void;
 } {
   return {
-    toast: useToastStore.getState().push,
-    dismiss: useToastStore.getState().dismiss,
+    toast: (item) => useToastStore.getState().push(item),
+    dismiss: (id) => useToastStore.getState().dismiss(id),
   };
 }

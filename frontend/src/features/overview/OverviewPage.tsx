@@ -148,9 +148,8 @@ interface OrderStatusCounts {
 }
 
 function countOrderStatuses(statuses: OrderStatus[]): OrderStatusCounts {
-  const counts: OrderStatusCounts = {
-    open: 0, filled: 0, partial: 0, cancelled: 0, rejected: 0, expired: 0,
-  };
-  for (const s of statuses) counts[s] += 1;
-  return counts;
+  return statuses.reduce<OrderStatusCounts>(
+    (acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }),
+    { open: 0, filled: 0, partial: 0, cancelled: 0, rejected: 0, expired: 0 },
+  );
 }

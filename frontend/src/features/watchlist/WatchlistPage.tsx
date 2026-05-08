@@ -219,6 +219,16 @@ function columnDef(key: WatchlistColumnKey): ColumnDef<RowShape> {
     };
   }
 
+  // MED-7 (option b): description/exchange/assetClass live on Symbol, not Quote — render '—'
+  // rather than passing them to getNumericValue (which doesn't accept these keys).
+  if (key === 'description' || key === 'exchange' || key === 'assetClass') {
+    return {
+      id: key,
+      header: COLUMN_LABELS[key],
+      cell: () => renderText(null),
+    };
+  }
+
   if (isTextColumn(key)) {
     return {
       id: key,
@@ -240,19 +250,10 @@ function columnDef(key: WatchlistColumnKey): ColumnDef<RowShape> {
   };
 }
 
-function isTextColumn(key: WatchlistColumnKey): key is
-  | 'description'
-  | 'sector'
-  | 'industry'
-  | 'exchange'
-  | 'assetClass' {
-  return (
-    key === 'description'
-    || key === 'sector'
-    || key === 'industry'
-    || key === 'exchange'
-    || key === 'assetClass'
-  );
+// MED-7: description/exchange/assetClass live on Symbol not Quote — excluded from isTextColumn
+// so they fall through to the numeric fallback which renders '—' for null via NumericCell.
+function isTextColumn(key: WatchlistColumnKey): key is 'sector' | 'industry' {
+  return key === 'sector' || key === 'industry';
 }
 
 function getTextValue(quote: Quote | undefined, key: WatchlistColumnKey): string | null | undefined {

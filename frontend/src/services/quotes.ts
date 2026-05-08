@@ -1,3 +1,4 @@
+import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack';
 import type { Quote, Symbol } from './types';
 import { SYMBOLS, STRESS_SYMBOLS } from './fixtures';
 import { connectWs } from './ws';
@@ -267,6 +268,9 @@ export class RealQuotesService implements QuotesService {
 
   private activateFallback(error?: unknown): void {
     if (this.fallback) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+    }
     this.reconnectTimer = null;
     this.ws = null;
     this.fallback = new MockQuotesService();
@@ -415,153 +419,11 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
+// HIGH-4: replaced hand-rolled msgpack encoder/decoder with @msgpack/msgpack (fixes str16/str32/arr32/map32 gaps)
 function encodeMsgpack(value: unknown): Uint8Array {
-  const chunks: number[] = [];
-  writeMsgpack(value, chunks);
-  return new Uint8Array(chunks);
-}
-
-function writeMsgpack(value: unknown, out: number[]): void {
-  if (value === null) {
-    out.push(0xc0);
-    return;
-  }
-  if (typeof value === 'boolean') {
-    out.push(value ? 0xc3 : 0xc2);
-    return;
-  }
-  if (typeof value === 'number') {
-    if (Number.isInteger(value) && value >= 0 && value <= 0x7f) {
-      out.push(value);
-      return;
-    }
-    const bytes = new Uint8Array(8);
-    new DataView(bytes.buffer).setFloat64(0, value);
-    out.push(0xcb, ...bytes);
-    return;
-  }
-  if (typeof value === 'string') {
-    writeMsgpackString(value, out);
-    return;
-  }
-  if (Array.isArray(value)) {
-    writeMsgpackArray(value, out);
-    return;
-  }
-  if (isRecord(value)) {
-    writeMsgpackMap(value, out);
-    return;
-  }
-  throw new TypeError('unsupported msgpack value');
-}
-
-function writeMsgpackString(value: string, out: number[]): void {
-  const bytes = new TextEncoder().encode(value);
-  if (bytes.length < 32) {
-    out.push(0xa0 | bytes.length, ...bytes);
-    return;
-  }
-  if (bytes.length <= 0xff) {
-    out.push(0xd9, bytes.length, ...bytes);
-    return;
-  }
-  throw new RangeError('msgpack string too large');
-}
-
-function writeMsgpackArray(value: unknown[], out: number[]): void {
-  if (value.length < 16) out.push(0x90 | value.length);
-  else if (value.length <= 0xffff) out.push(0xdc, (value.length >> 8) & 0xff, value.length & 0xff);
-  else throw new RangeError('msgpack array too large');
-  for (const item of value) writeMsgpack(item, out);
-}
-
-function writeMsgpackMap(value: Record<string, unknown>, out: number[]): void {
-  const entries = Object.entries(value);
-  if (entries.length < 16) out.push(0x80 | entries.length);
-  else if (entries.length <= 0xffff) out.push(0xde, (entries.length >> 8) & 0xff, entries.length & 0xff);
-  else throw new RangeError('msgpack map too large');
-  for (const [key, item] of entries) {
-    writeMsgpackString(key, out);
-    writeMsgpack(item, out);
-  }
+  return msgpackEncode(value);
 }
 
 function decodeMsgpack(bytes: Uint8Array): unknown {
-  const cursor = { offset: 0 };
-  const value = readMsgpack(bytes, cursor);
-  if (cursor.offset !== bytes.length) throw new TypeError('trailing msgpack bytes');
-  return value;
-}
-
-function readMsgpack(bytes: Uint8Array, cursor: { offset: number }): unknown {
-  const prefix = readByte(bytes, cursor);
-  if (prefix <= 0x7f) return prefix;
-  if (prefix >= 0x80 && prefix <= 0x8f) return readMsgpackMap(bytes, cursor, prefix & 0x0f);
-  if (prefix >= 0x90 && prefix <= 0x9f) return readMsgpackArray(bytes, cursor, prefix & 0x0f);
-  if (prefix >= 0xa0 && prefix <= 0xbf) return readMsgpackString(bytes, cursor, prefix & 0x1f);
-  if (prefix === 0xc0) return null;
-  if (prefix === 0xc2) return false;
-  if (prefix === 0xc3) return true;
-  if (prefix === 0xcb) return readFloat64(bytes, cursor);
-  if (prefix === 0xcc) return readByte(bytes, cursor);
-  if (prefix === 0xcd) return readUint16(bytes, cursor);
-  if (prefix === 0xce) return readUint32(bytes, cursor);
-  if (prefix === 0xd9) return readMsgpackString(bytes, cursor, readByte(bytes, cursor));
-  if (prefix === 0xda) return readMsgpackString(bytes, cursor, readUint16(bytes, cursor));
-  if (prefix === 0xdc) return readMsgpackArray(bytes, cursor, readUint16(bytes, cursor));
-  if (prefix === 0xde) return readMsgpackMap(bytes, cursor, readUint16(bytes, cursor));
-  throw new TypeError(`unsupported msgpack prefix ${prefix}`);
-}
-
-function readMsgpackMap(bytes: Uint8Array, cursor: { offset: number }, length: number): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (let i = 0; i < length; i += 1) {
-    const key = readMsgpack(bytes, cursor);
-    if (typeof key !== 'string') throw new TypeError('msgpack map key was not a string');
-    result[key] = readMsgpack(bytes, cursor);
-  }
-  return result;
-}
-
-function readMsgpackArray(bytes: Uint8Array, cursor: { offset: number }, length: number): unknown[] {
-  const result: unknown[] = [];
-  for (let i = 0; i < length; i += 1) result.push(readMsgpack(bytes, cursor));
-  return result;
-}
-
-function readMsgpackString(bytes: Uint8Array, cursor: { offset: number }, length: number): string {
-  const start = cursor.offset;
-  const end = start + length;
-  if (end > bytes.length) throw new TypeError('truncated msgpack string');
-  cursor.offset = end;
-  return new TextDecoder().decode(bytes.subarray(start, end));
-}
-
-function readByte(bytes: Uint8Array, cursor: { offset: number }): number {
-  const value = bytes[cursor.offset];
-  if (value === undefined) throw new TypeError('truncated msgpack payload');
-  cursor.offset += 1;
-  return value;
-}
-
-function readUint16(bytes: Uint8Array, cursor: { offset: number }): number {
-  const high = readByte(bytes, cursor);
-  const low = readByte(bytes, cursor);
-  return (high << 8) | low;
-}
-
-function readUint32(bytes: Uint8Array, cursor: { offset: number }): number {
-  const b1 = readByte(bytes, cursor);
-  const b2 = readByte(bytes, cursor);
-  const b3 = readByte(bytes, cursor);
-  const b4 = readByte(bytes, cursor);
-  return ((b1 * 0x100 + b2) * 0x100 + b3) * 0x100 + b4;
-}
-
-function readFloat64(bytes: Uint8Array, cursor: { offset: number }): number {
-  const start = cursor.offset;
-  const end = start + 8;
-  if (end > bytes.length) throw new TypeError('truncated msgpack float64');
-  cursor.offset = end;
-  return new DataView(bytes.buffer, bytes.byteOffset + start, 8).getFloat64(0);
+  return msgpackDecode(bytes);
 }

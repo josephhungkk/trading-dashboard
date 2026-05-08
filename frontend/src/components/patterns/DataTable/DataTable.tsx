@@ -91,6 +91,7 @@ export function DataTable<T>({
             </tr>
           ))}
         </thead>
+        {/* TODO(phase3-retro): virtualizer uses absolute tr inside tbody — refactor to div-grid */}
         <tbody
           style={{
             height: `${virtual.getTotalSize()}px`,

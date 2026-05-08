@@ -51,22 +51,8 @@ export function AdminConfigPage(): React.JSX.Element {
     }
   }, []);
 
-  React.useEffect(() => {
-    let active = true;
-    void listConfigs()
-      .then((data) => {
-        if (active) setRows(data);
-      })
-      .catch((err: unknown) => {
-        if (active) setError(messageFrom(err));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- load is async; setState is called in .then/.catch, not synchronously
+  React.useEffect(() => { void load(); }, [load]);
 
   const onDelete = React.useCallback(async (row: ConfigRecord): Promise<void> => {
     setError(null);
@@ -296,7 +282,13 @@ function formState(row: ConfigRecord | null): ConfigFormState {
 function parseValue(value: string, valueType: ConfigValueType): ConfigValue {
   if (valueType === 'int') return Number.parseInt(value, 10);
   if (valueType === 'bool') return value === 'true';
-  if (valueType === 'json') return JSON.parse(value) as ConfigValue;
+  if (valueType === 'json') {
+    try {
+      return JSON.parse(value) as ConfigValue;
+    } catch (err) {
+      throw new Error(`Invalid JSON: ${err instanceof Error ? err.message : 'parse failed'}`);
+    }
+  }
   return value;
 }
 

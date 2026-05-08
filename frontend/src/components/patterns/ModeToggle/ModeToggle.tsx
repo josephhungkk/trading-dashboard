@@ -39,6 +39,12 @@ export function ModeToggle(): React.JSX.Element {
       getScopedStores(from).suspend();
       setMode(target);
       toast({ title: `Switched to ${target.toUpperCase()} mode`, tone: 'success' });
+    } catch (err) {
+      toast({
+        title: `Failed to switch to ${target.toUpperCase()} mode`,
+        description: err instanceof Error ? err.message : 'unknown error',
+        tone: 'error',
+      });
     } finally {
       setStatus('idle');
     }
