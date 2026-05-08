@@ -32,9 +32,13 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # IF NOT EXISTS — `chart_layouts` was hand-created on the NUC PG before
+    # this migration existed (per integration/conftest.py note). The schema
+    # is identical, so skipping creation is safe; this lets prod recover
+    # without manual `alembic stamp` while dev/CI still create the table.
     op.execute(
         """
-        CREATE TABLE chart_layouts (
+        CREATE TABLE IF NOT EXISTS chart_layouts (
           id              BIGSERIAL     PRIMARY KEY,
           instrument_id   BIGINT        NOT NULL
                           REFERENCES instruments(id) ON DELETE CASCADE,
@@ -48,7 +52,7 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        "CREATE INDEX chart_layouts_updated_at_idx"
+        "CREATE INDEX IF NOT EXISTS chart_layouts_updated_at_idx"
         " ON chart_layouts (updated_at DESC)"
     )
 
