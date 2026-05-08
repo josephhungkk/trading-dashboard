@@ -8,7 +8,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Self
@@ -20,6 +20,10 @@ from sidecar_futu import metrics
 from sidecar_futu._generated.broker.v1 import broker_pb2 as pb
 
 log = structlog.get_logger(module="sidecar_futu.streamer")
+
+# HIGH fix: Futu timestamps are naive strings in HKT (UTC+8). Attaching the
+# correct timezone prevents an 8-hour offset when converting to UTC.
+_HKT = timezone(timedelta(hours=8))
 
 _MAX_SYMBOLS = 5000
 RET_OK = 0
@@ -56,6 +60,8 @@ class FutuStreamer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._subs_lock = asyncio.Lock()
         self._upstream_refcount: dict[str, _SymbolEntry] = {}
+        # HIGH fix: O(1) reverse lookup raw_futu_code → canonical_id.
+        self._raw_to_canonical: dict[str, str] = {}
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -104,6 +110,8 @@ class FutuStreamer:
                 self._upstream_refcount[canonical_id] = _SymbolEntry(
                     raw_futu_code, 1
                 )
+                # HIGH fix: seed inverse map for O(1) tick dispatch.
+                self._raw_to_canonical[raw_futu_code] = canonical_id
                 to_subscribe.append((canonical_id, raw_futu_code))
         for canonical_id, raw_futu_code in to_subscribe:
             await self._subscribe_one(canonical_id, raw_futu_code)
@@ -118,6 +126,8 @@ class FutuStreamer:
                     continue
                 entry.refcount -= 1
                 if entry.refcount <= 0:
+                    # HIGH fix: keep inverse map in sync.
+                    self._raw_to_canonical.pop(entry.raw_futu_code, None)
                     del self._upstream_refcount[canonical_id]
                     to_unsubscribe.append((canonical_id, entry.raw_futu_code))
         for canonical_id, raw_futu_code in to_unsubscribe:
@@ -136,12 +146,16 @@ class FutuStreamer:
                 for key in current_ids - expected_ids
             ]
             new = [(key, expected_map[key]) for key in expected_ids - current_ids]
-            for canonical_id, _ in stale:
+            for canonical_id, raw_futu_code in stale:
+                # HIGH fix: keep inverse map in sync on resync drop.
+                self._raw_to_canonical.pop(raw_futu_code, None)
                 del self._upstream_refcount[canonical_id]
             for canonical_id, raw_futu_code in new:
                 self._upstream_refcount[canonical_id] = _SymbolEntry(
                     raw_futu_code, 1
                 )
+                # HIGH fix: seed inverse map for newly-added entries.
+                self._raw_to_canonical[raw_futu_code] = canonical_id
         for canonical_id, raw_futu_code in new:
             await self._subscribe_one(canonical_id, raw_futu_code)
         for canonical_id, raw_futu_code in stale:
@@ -219,10 +233,8 @@ class FutuStreamer:
             log.warning("futu.streamer.dispatch_loop_closed")
 
     def _canonical_for_raw(self, raw_futu_code: str) -> str:
-        for canonical_id, entry in self._upstream_refcount.items():
-            if entry.raw_futu_code == raw_futu_code:
-                return canonical_id
-        return ""
+        # HIGH fix: O(1) lookup via inverse map instead of O(n) linear scan.
+        return self._raw_to_canonical.get(raw_futu_code, "")
 
     def _quote_subtype(self) -> Any:
         if self._quote_subtype_value is not None:
@@ -345,7 +357,11 @@ def _futu_row_timestamp(row: dict[str, Any]) -> Timestamp:
         date = row.get("data_date")
         time_ = row.get("data_time")
         if date and time_:
-            ts.FromDatetime(datetime.fromisoformat(f"{date} {time_}"))
+            # HIGH fix: Futu returns naive datetime strings in HKT (UTC+8).
+            # replace(tzinfo=_HKT) attaches the correct timezone so
+            # FromDatetime converts to UTC correctly (previously was 8 h off).
+            dt_naive = datetime.fromisoformat(f"{date} {time_}")
+            ts.FromDatetime(dt_naive.replace(tzinfo=_HKT))
             return ts
     except (TypeError, ValueError):
         pass

@@ -40,6 +40,7 @@ from app._generated.broker.v1 import broker_pb2_grpc as pb_grpc
 from app.core.metrics import (
     QUOTE_SIDECAR_FIRST_FRAME_TOTAL,
     QUOTE_SIDECAR_RECONNECT_TOTAL,
+    STREAM_QUEUE_DROPPED_TOTAL,
 )
 from app.services.quotes.registry import SubscriptionRegistry
 from app.services.quotes.router import SourceHealthMap, SourceHealthState
@@ -50,6 +51,8 @@ _BACKOFF_MAX_SECONDS: float = 60.0
 _OPERATOR_TRACE_ENV: str = "OPERATOR_TRACE_QUOTES"
 _DRIFT_PREFIX: bytes = b'{"drift":'
 _DRIFT_REASONS: set[str] = {"cap_exceeded", "entitlement", "unknown"}
+# HIGH fix: bound the pending queue; drop-oldest on overflow to shed load.
+_PENDING_QUEUE_MAX: int = 2048
 
 OnQuote = Callable[[pb.QuoteMessage], Awaitable[None]]
 SymbolRefBuilder = Callable[[str], pb.SymbolRef]
@@ -77,7 +80,9 @@ class SidecarStream:
         self._health = health
         self._build_symbol_ref = symbol_ref_builder
 
-        self._pending: asyncio.Queue[pb.StreamQuotesRequest] = asyncio.Queue()
+        self._pending: asyncio.Queue[pb.StreamQuotesRequest] = asyncio.Queue(
+            maxsize=_PENDING_QUEUE_MAX
+        )
         self._last_known_started_at: int | None = None
         self._stopping = asyncio.Event()
         self._token_rotation = asyncio.Event()
@@ -90,7 +95,7 @@ class SidecarStream:
         symbols = [self._build_symbol_ref(c) for c in canonical_ids]
         if not symbols:
             return
-        await self._pending.put(
+        await self._enqueue(
             pb.StreamQuotesRequest(subscribe=pb.StreamQuotesRequest.Subscribe(symbols=symbols))
         )
 
@@ -98,9 +103,27 @@ class SidecarStream:
         symbols = [self._build_symbol_ref(c) for c in canonical_ids]
         if not symbols:
             return
-        await self._pending.put(
+        await self._enqueue(
             pb.StreamQuotesRequest(unsubscribe=pb.StreamQuotesRequest.Unsubscribe(symbols=symbols))
         )
+
+    async def _enqueue(self, req: pb.StreamQuotesRequest) -> None:
+        """Enqueue ``req`` with drop-oldest overflow protection.
+
+        The queue is bounded at ``_PENDING_QUEUE_MAX``. On overflow the oldest
+        item is discarded and ``STREAM_QUEUE_DROPPED_TOTAL`` is incremented so
+        the alert pack can detect a slow/stalled sidecar connection.
+        """
+        while True:
+            try:
+                self._pending.put_nowait(req)
+                return
+            except asyncio.QueueFull:
+                try:
+                    self._pending.get_nowait()
+                    STREAM_QUEUE_DROPPED_TOTAL.labels(source=self._source).inc()
+                except asyncio.QueueEmpty:
+                    continue
 
     def request_reconnect(self) -> None:
         """Signal the run loop to drop the current bidi stream and reconnect.
@@ -112,6 +135,17 @@ class SidecarStream:
         """Tell the run loop to exit on the next iteration boundary."""
         self._stopping.set()
         self._token_rotation.set()  # unblocks any wait_for sleep
+
+    async def close_channel(self) -> None:
+        """Close the underlying gRPC channel (call after ``stop()`` + task join).
+
+        HIGH fix: the channel was never closed, leaving sockets open after
+        engine shutdown. The engine factory calls this in its finally block
+        via ``engine.stop()`` which triggers stream teardown.
+        """
+        if self._channel is not None:
+            await self._channel.close(grace=2.0)
+            self._channel = None
 
     # ── run loop ──────────────────────────────────────────────────────────
 

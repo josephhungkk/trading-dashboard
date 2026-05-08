@@ -18,6 +18,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     Text,
     func,
+    text,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -63,7 +64,9 @@ class Instrument(Base):
     primary_exchange: Mapped[str] = mapped_column(Text, nullable=False)
     currency: Mapped[str] = mapped_column(CHAR(3), nullable=False)
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -94,7 +97,9 @@ class SymbolAlias(Base):
         ForeignKey("instruments.id", ondelete="CASCADE"),
         nullable=False,
     )
-    meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -93,10 +93,10 @@ class SubscriptionRegistry:
         self._cap_global = cap_global
         self._rate_limit_per_minute = sub_rate_limit_per_minute
 
-        # Plain dicts (not defaultdict) — defaultdict's read-creates-entry
-        # behavior leaks phantom entries on rejected/empty batches.
+        # Plain dicts — defaultdict's read-creates-entry leaks phantom entries
+        # on rejected/empty batches (MED fix: _global_refs now plain dict).
         self._per_ws: dict[WSConnId, set[CanonicalId]] = {}
-        self._global_refs: dict[CanonicalId, int] = defaultdict(int)
+        self._global_refs: dict[CanonicalId, int] = {}
         self._routes: dict[CanonicalId, SourceId | str] = {}
         self._rate_buckets: dict[WSConnId, deque[float]] = {}
         # Phase 7c CRIT-1: per-source refcount, keyed by the SourceRouter-
@@ -196,7 +196,7 @@ class SubscriptionRegistry:
 
                 ws_set_view.add(sym)
                 ws_set_dirty = True
-                prev = self._global_refs[sym]
+                prev = self._global_refs.get(sym, 0)
                 self._global_refs[sym] = prev + 1
                 if prev == 0:
                     diff.added.add(sym)
@@ -241,6 +241,10 @@ class SubscriptionRegistry:
 
             if not ws_set:
                 self._per_ws.pop(ws, None)
+                # MED fix: clear orphan rate bucket when the ws_set drains to
+                # empty. Without this, a client that fully unsubscribes leaves
+                # a non-expiring deque in _rate_buckets consuming memory.
+                self._rate_buckets.pop(ws, None)
         return diff
 
     async def remove_ws(self, ws: WSConnId) -> UnsubscribeDiff:

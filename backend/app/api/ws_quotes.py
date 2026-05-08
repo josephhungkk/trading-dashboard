@@ -29,6 +29,9 @@ router = APIRouter(tags=["quotes-ws"])
 
 _SUBPROTOCOL = "msgpack-v1"
 _SEND_TIMEOUT_SECONDS = 2.0
+# HIGH fix: pre-accept connection cap (DoS / resource exhaustion protection).
+_MAX_WS_CONNECTIONS: int = 50
+_active_ws_connections: int = 0
 
 
 class ClientFrame(BaseModel):
@@ -114,6 +117,20 @@ class WSConflator:
         await self._ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="slow-client")
 
 
+def _allowed_origin(ws: WebSocket, allowed: list[str]) -> bool:
+    """HIGH fix: CSWSH protection — validate Origin header before accepting.
+
+    Connections without an Origin header are only permitted when the immediate
+    peer is the WireGuard dev gateway (10.10.0.1), which is a trusted network
+    path that doesn't go through a browser.
+    """
+    origin = ws.headers.get("origin", "")
+    if not origin:
+        client_host = ws.client.host if ws.client else ""
+        return client_host == "10.10.0.1"
+    return origin in allowed
+
+
 def get_quote_engine(ws: WebSocket) -> QuoteEngine:
     engine = getattr(ws.app.state, "quote_engine", None)
     if engine is None:
@@ -123,6 +140,23 @@ def get_quote_engine(ws: WebSocket) -> QuoteEngine:
 
 @router.websocket("/ws/quotes")
 async def ws_quotes(ws: WebSocket) -> None:
+    global _active_ws_connections
+
+    # HIGH fix: pre-accept connection cap — reject before handshake completes.
+    if _active_ws_connections >= _MAX_WS_CONNECTIONS:
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="capacity")
+        return
+
+    # HIGH fix: CSWSH Origin check — reject browser cross-origin upgrade attempts.
+    # Prefer cors_origins from app.state (set at startup); fall back to settings.
+    from app.core.config import settings as _settings  # local import avoids circular
+
+    state_origins = getattr(ws.app.state, "cors_origins", None)
+    allowed_origins = list(state_origins if state_origins is not None else _settings.cors_origins)
+    if not _allowed_origin(ws, allowed_origins):
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="origin")
+        return
+
     try:
         await require_admin_jwt_ws(ws)
     except WebSocketException:
@@ -133,6 +167,7 @@ async def ws_quotes(ws: WebSocket) -> None:
 
     engine = get_quote_engine(ws)
     await ws.accept(subprotocol=_SUBPROTOCOL)
+    _active_ws_connections += 1
     QUOTE_WS_CONNECTIONS.inc()
 
     ws_id = uuid4()
@@ -148,6 +183,7 @@ async def ws_quotes(ws: WebSocket) -> None:
         task.cancel()
         await engine.disconnect_ws(ws_id)
         await _cancel_and_await(task)
+        _active_ws_connections -= 1
         QUOTE_WS_CONNECTIONS.dec()
 
 
@@ -165,7 +201,7 @@ async def _handle_raw_frame(
         unpacked = msgpack.unpackb(
             raw,
             raw=False,
-            strict_map_key=False,
+            strict_map_key=True,  # MED fix: reject non-string map keys
             max_str_len=512,
             max_bin_len=512,
             max_array_len=1000,
@@ -249,10 +285,12 @@ def _validation_reason(exc: ValidationError) -> Literal["bad_op", "missing_field
 
 
 def _quote_frame(op: Literal["q", "snap", "stale"], q: pb.QuoteMessage) -> dict[str, Any]:
+    # MED fix: use "q" as the payload key (matches spec wire format §7.2).
+    # Frontend reads frame["q"] after this change.
     return {
         "op": op,
         "sym": q.canonical_id,
-        "data": MessageToDict(q, preserving_proto_field_name=True),
+        "q": MessageToDict(q, preserving_proto_field_name=True),
     }
 
 

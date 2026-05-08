@@ -33,3 +33,22 @@ DEFAULT_QUOTE_SOURCE_PRIORITY: Final[dict[str, list[str]]] = {
     "index.EU": ["ibkr"],
     "forex": [],  # 7b.2 ships oanda
 }
+
+# MED fix: seed defaults for ibkr_gateway_quote_assignment +
+# ibkr_gateway_quote_fallback so SourceRouter.route_with_gateway works
+# without requiring the operator to configure these keys post-deploy.
+DEFAULT_IBKR_GATEWAY_QUOTE_ASSIGNMENT: Final[dict[str, str]] = {
+    "stock.US": "isa-live",
+    "etf.US": "isa-live",
+    "index.US": "isa-live",
+    "stock.UK": "isa-live",
+    "stock.EU": "normal-live",
+    "index.EU": "normal-live",
+    "_default": "isa-live",
+}
+
+DEFAULT_IBKR_GATEWAY_QUOTE_FALLBACK: Final[list[str]] = [
+    "normal-live",
+    "normal-paper",
+    "isa-paper",
+]

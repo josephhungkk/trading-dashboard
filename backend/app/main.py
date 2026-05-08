@@ -50,6 +50,7 @@ from app.services.order_event_consumer import OrderEventConsumer
 from app.services.pending_fills_sweeper import PendingFillsSweeper
 from app.services.pending_submit_watchdog import PendingSubmitWatchdog
 from app.services.postgres_listen_bridge import PostgresListenBridge
+from app.services.quotes.engine_factory import build_quote_engine
 from app.services.quotes.instruments_seed import seed_instruments_from_positions
 
 configure_logging()
@@ -167,6 +168,29 @@ async def lifespan(_app: FastAPI) -> Any:
     except MissingBrokerSecrets as exc:
         log.warning("broker_lifespan_skipped", reason=str(exc))
 
+    # ── CRIT-1 fix: wire QuoteEngine into app.state ───────────────────────────
+    # Engine is built regardless of whether the broker layer started — it only
+    # needs the mTLS certs (shared with the broker sidecars). If the secrets
+    # aren't provisioned yet, build_quote_engine returns None and WS connections
+    # will close 1011 with a structured log (same observable behaviour as before,
+    # but now documented and intentional rather than a silent None dereference).
+    quote_engine = None
+    try:
+        quote_engine = await build_quote_engine(
+            svc=svc,
+            redis=redis,
+            db_factory=session_factory,
+        )
+        if quote_engine is not None:
+            await quote_engine.start()
+            log.info("quote_engine_started", sources=sorted(quote_engine.streams.keys()))
+        else:
+            log.warning("quote_engine_skipped_not_configured")
+    except Exception as exc:
+        log.warning("quote_engine_start_failed", error=str(exc))
+        quote_engine = None
+    _app.state.quote_engine = quote_engine
+
     global _bar_service
     bar_service = BarService()
     _bar_service = bar_service
@@ -197,6 +221,13 @@ async def lifespan(_app: FastAPI) -> Any:
         with contextlib.suppress(asyncio.CancelledError):
             await pre_warm_task
         scheduler.shutdown(wait=False)
+        # ── CRIT-1: stop QuoteEngine before broker/redis shutdown ─────────────
+        if quote_engine is not None:
+            try:
+                await quote_engine.stop()
+            except Exception:
+                log.exception("quote_engine_stop_failed")
+        _app.state.quote_engine = None
         await _app.state.bar_service.stop()
         _bar_service = None
         if pending_fills_sweeper is not None:

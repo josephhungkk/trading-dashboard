@@ -312,13 +312,19 @@ export class RealQuotesService implements QuotesService {
     if (frame.op === 'q' || frame.op === 'snap' || frame.op === 'stale') {
       this.handleQuoteFrame(frame, frame.op === 'stale');
     } else if (frame.op === 'err') {
-      console.warn('[quotes] websocket error frame', frame.data);
+      // MED fix: gate behind DEV to avoid console noise in production.
+      if (import.meta.env.DEV) {
+        console.warn('[quotes] websocket error frame', frame.data);
+      }
     }
   }
 
   private handleQuoteFrame(frame: ServerFrame, isStale: boolean): void {
-    if (typeof frame.sym !== 'string' || !isRecord(frame.data)) return;
-    const quote = quoteFromWire(frame.sym, frame.data as QuoteWireData, isStale);
+    // MED fix: server sends quote payload under "q" key (spec §7.2 alignment).
+    // Fallback to "data" preserves compatibility if backend is on older rev.
+    const payload = (frame as Record<string, unknown>)['q'] ?? frame.data;
+    if (typeof frame.sym !== 'string' || !isRecord(payload)) return;
+    const quote = quoteFromWire(frame.sym, payload as QuoteWireData, isStale);
     this.snapshots.set(frame.sym, quote);
     const subs = this.subscriptions.get(frame.sym);
     if (!subs) return;

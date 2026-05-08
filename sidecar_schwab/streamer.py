@@ -74,6 +74,8 @@ class SchwabStreamer:
         self._start_lock = asyncio.Lock()
         self._subs_lock = asyncio.Lock()
         self._upstream_refcount: dict[str, _SymbolEntry] = {}
+        # HIGH fix: O(1) reverse lookup raw_symbol → canonical_id.
+        self._raw_to_canonical: dict[str, str] = {}
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -112,10 +114,15 @@ class SchwabStreamer:
                         )
                         continue
                     self._upstream_refcount[canonical_id] = _SymbolEntry(raw_symbol, 1)
-                    commands.extend((("SUBS", raw_symbol), ("ADD", raw_symbol)))
+                    # HIGH fix: new symbol → send only SUBS (not SUBS+ADD).
+                    # Sending both duplicates the subscription on the Schwab
+                    # streamer side, causing double-counted ticks.
+                    commands.append(("SUBS", raw_symbol))
+                    # HIGH fix: maintain inverse map for O(1) tick dispatch.
+                    self._raw_to_canonical[raw_symbol] = canonical_id
                     continue
                 entry.refcount += 1
-                commands.append(("ADD", entry.raw_symbol))
+                # refcount > 1: upstream sub already live; no wire command needed.
         for command, raw_symbol in commands:
             await self._send_levelone(command, [raw_symbol])
 
@@ -130,6 +137,8 @@ class SchwabStreamer:
                 entry.refcount -= 1
                 if entry.refcount <= 0:
                     raw_to_unsub.append(entry.raw_symbol)
+                    # HIGH fix: keep inverse map in sync.
+                    self._raw_to_canonical.pop(entry.raw_symbol, None)
                     del self._upstream_refcount[canonical_id]
         for raw_symbol in raw_to_unsub:
             await self._send_levelone("UNSUBS", [raw_symbol])
@@ -139,21 +148,25 @@ class SchwabStreamer:
             expected_map = {_ids(symbol)[0]: _ids(symbol)[1] for symbol in expected}
             current_ids = set(self._upstream_refcount)
             expected_ids = set(expected_map)
-            stale = [
-                self._upstream_refcount[key].raw_symbol
+            stale_entries = [
+                (key, self._upstream_refcount[key].raw_symbol)
                 for key in current_ids - expected_ids
             ]
+            stale_raw = [raw for _, raw in stale_entries]
             new = [expected_map[key] for key in expected_ids - current_ids]
-            for canonical_id in current_ids - expected_ids:
+            for canonical_id, raw_symbol in stale_entries:
+                # HIGH fix: keep inverse map in sync on resync drop.
+                self._raw_to_canonical.pop(raw_symbol, None)
                 del self._upstream_refcount[canonical_id]
             for canonical_id in expected_ids - current_ids:
-                self._upstream_refcount[canonical_id] = _SymbolEntry(
-                    expected_map[canonical_id], 1
-                )
+                raw_symbol = expected_map[canonical_id]
+                self._upstream_refcount[canonical_id] = _SymbolEntry(raw_symbol, 1)
+                # HIGH fix: seed inverse map for newly-added entries.
+                self._raw_to_canonical[raw_symbol] = canonical_id
         if new:
             await self._send_levelone("SUBS", sorted(new))
-        if stale:
-            await self._send_levelone("UNSUBS", sorted(stale))
+        if stale_raw:
+            await self._send_levelone("UNSUBS", sorted(stale_raw))
 
     async def _reader_loop(self) -> None:
         backoff_attempt = 0
@@ -170,7 +183,9 @@ class SchwabStreamer:
             )
             await self._record_reconnect(reason)
             if reason != "token_rotation":
-                await asyncio.sleep(min(2**backoff_attempt, _BACKOFF_MAX_SEC))
+                # HIGH fix: cap exponent at 6 (2^6=64 > _BACKOFF_MAX_SEC=60)
+                # so 2**backoff_attempt never overflows for large attempt counts.
+                await asyncio.sleep(min(2 ** min(backoff_attempt, 6), _BACKOFF_MAX_SEC))
                 backoff_attempt += 1
             if await self._reconnect_with_new_creds():
                 backoff_attempt = 0
@@ -287,7 +302,8 @@ class SchwabStreamer:
         req = self._base_request(self._streamer_info, "LEVELONE_EQUITIES", command)
         req["parameters"] = {"keys": ",".join(raw_symbols), "fields": _FIELD_MASK}
         await self._ws.send(json.dumps({"requests": [req]}))
-        log.info("schwab.streamer.subs", command=command, symbols=raw_symbols)
+        # MED fix: subscription wire commands are noisy at INFO; demote to DEBUG.
+        log.debug("schwab.streamer.subs", command=command, symbols=raw_symbols)
 
     def _base_request(
         self, info: dict[str, Any], service: str, command: str
@@ -354,10 +370,8 @@ class SchwabStreamer:
         )
 
     def _canonical_for_raw(self, raw_symbol: str) -> str:
-        for canonical_id, entry in self._upstream_refcount.items():
-            if entry.raw_symbol == raw_symbol:
-                return canonical_id
-        return ""
+        # HIGH fix: O(1) lookup via inverse map instead of O(n) linear scan.
+        return self._raw_to_canonical.get(raw_symbol, "")
 
     async def _close_ws(self) -> None:
         ws = self._ws

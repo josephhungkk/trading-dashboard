@@ -40,11 +40,14 @@ import json
 import os
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
 from google.protobuf.json_format import MessageToDict  # type: ignore[import-untyped]
 from redis.asyncio import Redis
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app._generated.broker.v1 import broker_pb2 as pb
 from app.core.metrics import (
@@ -53,6 +56,7 @@ from app.core.metrics import (
     QUOTE_ENGINE_TICKS_TOTAL,
     QUOTE_REDIS_PUBLISH_FAILURES_TOTAL,
 )
+from app.models.instruments import Instrument
 from app.services.quotes.base import CanonicalId
 from app.services.quotes.registry import (
     SubscribeDiff,
@@ -94,6 +98,7 @@ class QuoteEngine:
         streams: dict[str, SidecarStream] | None = None,
         publisher_worker_id: UUID | None = None,
         single_worker: bool = True,
+        db_factory: async_sessionmaker[Any] | None = None,
     ) -> None:
         self._registry = registry
         self._router = router
@@ -104,6 +109,9 @@ class QuoteEngine:
         # ``_subscriber_task`` startup on it. Stored as a public-readable
         # attribute so the lifespan wiring can assert the contract.
         self.single_worker: bool = single_worker
+        # CRIT-2 fix: factory for DB sessions used to resolve Instrument rows
+        # during route assignment. None in unit tests that mock the router.
+        self._db_factory: async_sessionmaker[Any] | None = db_factory
 
         # INV-Q-1: subscriber task is None in single-worker mode. When
         # ``single_worker=False`` lands in Phase 24 this becomes the
@@ -137,6 +145,10 @@ class QuoteEngine:
                 if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                     _log.warning("quote_engine.stream_task_exit_exception", error=repr(result))
         self._stream_tasks.clear()
+        # HIGH fix: close gRPC channels after tasks are joined so no new RPCs
+        # can be started on a closing channel.
+        for stream in self._streams.values():
+            await stream.close_channel()
 
     # ── conflator registration ────────────────────────────────────────────
 
@@ -157,6 +169,12 @@ class QuoteEngine:
 
         self._conflator_subs.setdefault(ws, set()).update(diff.added)
 
+        # CRIT-2 fix: assign source routes via SourceRouter for newly-added
+        # symbols (0→1 refcount transitions). Without this, get_route() always
+        # returns None and _group_by_source() produces an empty dict, so no
+        # SidecarStream ever receives subscriptions → no quotes flow.
+        await self._assign_routes(diff.added)
+
         # Group accepted symbols by source via registry routes; only newly-
         # added canonical_ids cross the wire to the sidecar.
         per_source = self._group_by_source(diff.added)
@@ -166,6 +184,52 @@ class QuoteEngine:
                 await stream.add(canonicals)
 
         return diff
+
+    async def _assign_routes(self, canonical_ids: Iterable[str]) -> None:
+        """Resolve source route for each canonical_id and write to registry.
+
+        Looks up the :class:`Instrument` row from the DB (needed by
+        :class:`SourceRouter.route`), then calls
+        :meth:`SubscriptionRegistry.set_route`. Symbols with no DB row or no
+        healthy source are left un-routed — they will not forward to any
+        sidecar this tick, but will be retried on the next subscribe call.
+        Silently skips if no ``db_factory`` was supplied (unit-test mode).
+        """
+        if self._db_factory is None:
+            return
+        async with self._db_factory() as session:
+            for canonical_id in canonical_ids:
+                instrument = await self._lookup_instrument(session, canonical_id)
+                if instrument is None:
+                    _log.warning(
+                        "quote_engine.subscribe.instrument_not_found",
+                        canonical_id=canonical_id,
+                    )
+                    continue
+                source = await self._router.route(instrument)
+                if source is None:
+                    _log.warning(
+                        "quote_engine.subscribe.no_source",
+                        canonical_id=canonical_id,
+                    )
+                    continue
+                self._registry.set_route(canonical_id, source)
+
+    @staticmethod
+    async def _lookup_instrument(
+        session: object,
+        canonical_id: str,
+    ) -> Instrument | None:
+        """Fetch the :class:`Instrument` row for ``canonical_id``. Returns
+        ``None`` if the row does not exist (symbol never seeded)."""
+        from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+
+        if not isinstance(session, _AsyncSession):
+            return None  # pragma: no cover — only reached in test mode
+        result = await session.execute(
+            select(Instrument).where(Instrument.canonical_id == canonical_id)
+        )
+        return result.scalar_one_or_none()
 
     async def unsubscribe(self, ws: WSConnId, symbols: Iterable[str]) -> UnsubscribeDiff:
         # Snapshot routes BEFORE registry.remove — _decrement_locked drops

@@ -413,6 +413,14 @@ QUOTE_SIDECAR_RECONNECT_TOTAL = Counter(
     registry=registry,
 )
 
+STREAM_QUEUE_DROPPED_TOTAL = Counter(
+    "stream_queue_dropped_total",
+    "SidecarStream pending-queue drop-oldest events (Phase 9.5 HIGH fix). "
+    "Non-zero rate indicates a slow/stalled sidecar gRPC connection.",
+    labelnames=["source"],
+    registry=registry,
+)
+
 QUOTE_SIDECAR_FIRST_FRAME_TOTAL = Counter(
     "quote_sidecar_first_frame_total",
     "First-frame kind sent on (re)connect: subscribe (cold/sidecar-restart) "
