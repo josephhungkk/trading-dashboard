@@ -129,6 +129,10 @@ class _Session:
                     row["updated_at"] = datetime(2026, 4, 27, 14, 46, tzinfo=UTC)
                     return _Result(row=row)
             return _Result(row=None)
+        # Phase 5c+ daily-notional cap query — stub returning 0 used today.
+        # App calls .scalar_one_or_none() so populate the scalar field.
+        if "SUM(notional_filled)" in sql:
+            return _Result(scalar=Decimal("0"))
         raise AssertionError(f"unexpected SQL: {sql}")
 
     async def commit(self) -> None:
