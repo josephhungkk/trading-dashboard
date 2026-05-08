@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     env: str = Field(default="dev", alias="APP_ENV")
-    secret_key: str = Field(alias="APP_SECRET_KEY")
+    secret_key: str = Field(alias="APP_SECRET_KEY", min_length=32)
     secret_key_prev: str | None = Field(default=None, alias="APP_SECRET_KEY_PREV")
     cors_origins: list[str] = Field(default_factory=list, alias="APP_CORS_ORIGINS")
     database_url: str = Field(alias="DATABASE_URL")

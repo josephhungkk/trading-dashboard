@@ -1,17 +1,20 @@
 """Admin router: /api/admin/config + /api/admin/secrets + reveal endpoint."""
+# TODO(phase2-retro): split into admin_config / admin_secrets / admin_capabilities (560+ lines).
 
 import re
 import secrets
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Response, status
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.capabilities import KNOWN_ASSET_CLASSES
 from app.api.schemas import (
+    KEY_PATTERN,
+    NAMESPACE_PATTERN,
     ConfigIn,
     ConfigInUpsert,
     ConfigOut,
@@ -23,7 +26,7 @@ from app.api.schemas import (
 from app.core import metrics
 from app.core.cf_access import AdminIdentity
 from app.core.deps import get_config, get_db, get_redis, require_admin_jwt
-from app.services.config import ConfigService
+from app.services.config import ConfigService, SecretDecryptError
 from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 
 ConfigDep = Annotated[ConfigService, Depends(get_config)]
@@ -144,15 +147,15 @@ async def list_config(
 
 @router.get("/config/{namespace}/{key}", response_model=ConfigOut)
 async def get_config_entry(
-    namespace: str,
-    key: str,
+    namespace: Annotated[str, Path(pattern=NAMESPACE_PATTERN, max_length=128)],
+    key: Annotated[str, Path(pattern=KEY_PATTERN, max_length=128)],
     cfg: ConfigDep,
 ) -> ConfigOut:
-    rows = await cfg.list(namespace)
-    for r in rows:
-        if r.key == key:
-            return _row_to_config_out(r)
-    raise HTTPException(status_code=404, detail="not found")
+    # HIGH-7: single-row point lookup instead of list()-then-loop (N+1).
+    row = await cfg.get_exact(namespace, key)
+    if row is None:
+        raise HTTPException(status_code=404, detail="not found")
+    return _row_to_config_out(row)
 
 
 @router.post("/config", response_model=ConfigOut, status_code=status.HTTP_201_CREATED)
@@ -161,6 +164,8 @@ async def create_config(
     cfg: ConfigDep,
     identity: IdentityDep,
 ) -> ConfigOut:
+    # TODO(phase2-retro): replace pre-check + upsert with atomic
+    # INSERT ... ON CONFLICT DO NOTHING + RETURNING xmax (TOCTOU).
     existing = [r for r in await cfg.list(body.namespace) if r.key == body.key]
     if existing:
         raise HTTPException(status_code=409, detail="already exists")
@@ -177,8 +182,8 @@ async def create_config(
 
 @router.put("/config/{namespace}/{key}", response_model=ConfigOut)
 async def put_config(
-    namespace: str,
-    key: str,
+    namespace: Annotated[str, Path(pattern=NAMESPACE_PATTERN, max_length=128)],
+    key: Annotated[str, Path(pattern=KEY_PATTERN, max_length=128)],
     body: ConfigInUpsert,
     cfg: ConfigDep,
     identity: IdentityDep,
@@ -200,8 +205,8 @@ async def put_config(
 
 @router.delete("/config/{namespace}/{key}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_config(
-    namespace: str,
-    key: str,
+    namespace: Annotated[str, Path(pattern=NAMESPACE_PATTERN, max_length=128)],
+    key: Annotated[str, Path(pattern=KEY_PATTERN, max_length=128)],
     cfg: ConfigDep,
     identity: IdentityDep,
 ) -> Response:
@@ -236,8 +241,8 @@ async def list_secrets(
 
 @router.get("/secrets/{namespace}/{key}", response_model=SecretMetadataOut)
 async def get_secret_metadata(
-    namespace: str,
-    key: str,
+    namespace: Annotated[str, Path(pattern=NAMESPACE_PATTERN, max_length=128)],
+    key: Annotated[str, Path(pattern=KEY_PATTERN, max_length=128)],
     cfg: ConfigDep,
 ) -> SecretMetadataOut:
     meta = await cfg.get_secret_metadata(namespace, key)
@@ -279,8 +284,8 @@ async def create_secret(
 
 @router.put("/secrets/{namespace}/{key}", response_model=SecretMetadataOut)
 async def put_secret(
-    namespace: str,
-    key: str,
+    namespace: Annotated[str, Path(pattern=NAMESPACE_PATTERN, max_length=128)],
+    key: Annotated[str, Path(pattern=KEY_PATTERN, max_length=128)],
     body: SecretInUpsert,
     cfg: ConfigDep,
     identity: IdentityDep,
@@ -308,8 +313,8 @@ async def put_secret(
 
 @router.post("/secrets/{namespace}/{key}/reveal", response_model=SecretRevealOut)
 async def reveal_secret(
-    namespace: str,
-    key: str,
+    namespace: Annotated[str, Path(pattern=NAMESPACE_PATTERN, max_length=128)],
+    key: Annotated[str, Path(pattern=KEY_PATTERN, max_length=128)],
     response: Response,
     cfg: ConfigDep,
     identity: IdentityDep,
@@ -318,18 +323,29 @@ async def reveal_secret(
     if meta is None:
         raise HTTPException(status_code=404, detail="not found")
 
-    if meta.value_type == "int":
-        value: Any = await cfg.reveal_secret_int(namespace, key)
-    elif meta.value_type == "bool":
-        value = await cfg.reveal_secret_bool(namespace, key)
-    elif meta.value_type == "json":
-        value = await cfg.reveal_secret_json(namespace, key)
-    else:
-        value = await cfg.reveal_secret(namespace, key)
+    try:
+        if meta.value_type == "int":
+            value: Any = await cfg.reveal_secret_int(namespace, key)
+        elif meta.value_type == "bool":
+            value = await cfg.reveal_secret_bool(namespace, key)
+        elif meta.value_type == "json":
+            value = await cfg.reveal_secret_json(namespace, key)
+        else:
+            value = await cfg.reveal_secret(namespace, key)
+    except SecretDecryptError as exc:
+        log.error("secret_decrypt_failed ns=%s key=%s err=%s", namespace, key, exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "secret_decryption_failed",
+                "hint": "verify APP_SECRET_KEY/PREV_KEY rotation state",
+            },
+        ) from exc
 
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
 
     metrics.admin_secret_reveal_total.labels(actor_kind=identity.kind).inc()
     log.info(
@@ -447,8 +463,8 @@ async def set_order_capability(
 
 @router.delete("/secrets/{namespace}/{key}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_secret(
-    namespace: str,
-    key: str,
+    namespace: Annotated[str, Path(pattern=NAMESPACE_PATTERN, max_length=128)],
+    key: Annotated[str, Path(pattern=KEY_PATTERN, max_length=128)],
     cfg: ConfigDep,
     identity: IdentityDep,
 ) -> Response:

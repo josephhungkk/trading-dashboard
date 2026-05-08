@@ -11,6 +11,8 @@ from app.core import metrics
 
 log = logging.getLogger(__name__)
 
+MAX_RECONNECT_BACKOFF_SECONDS = 30
+
 
 class ConfigCache:
     def __init__(
@@ -65,15 +67,20 @@ class ConfigCache:
             try:
                 async with self.redis.pubsub() as pubsub:
                     await pubsub.subscribe(self.channel)
-                    attempt = 0
                     async for msg in pubsub.listen():
                         if msg["type"] != "message":
                             continue
+                        # M11: reset backoff only after a real message, not on subscribe ack.
+                        attempt = 0
                         try:
                             ns, key = msg["data"].decode().split("|", 1)
                             self.pop((ns, key))
                         except UnicodeDecodeError, ValueError:
                             log.warning("bad invalidation payload: %r", msg["data"])
+                            # M10: count unparseable payloads per channel.
+                            metrics.config_cache_payload_decode_errors.labels(
+                                channel=self.channel
+                            ).inc()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -84,5 +91,5 @@ class ConfigCache:
                     e,
                 )
                 metrics.redis_subscribe_reconnect_total.labels(channel=self.channel).inc()
-                await asyncio.sleep(min(2**attempt, 30))
+                await asyncio.sleep(min(2**attempt, MAX_RECONNECT_BACKOFF_SECONDS))
                 attempt += 1

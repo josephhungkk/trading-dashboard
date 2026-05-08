@@ -94,6 +94,8 @@ class CFAccessVerifier:
         return AdminIdentity(email="dev@localhost", kind="dev-bypass", claims={})
 
     def verify(self, token: str, client_ip: str) -> AdminIdentity:
+        if self._jwks_client is None:
+            raise RuntimeError("CFAccessVerifier not configured (team_domain empty)")
         try:
             signing_key = self._jwks_client.get_signing_key_from_jwt(token).key
         except PyJWKClientError, KeyError:

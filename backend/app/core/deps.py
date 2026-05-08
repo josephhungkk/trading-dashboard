@@ -105,9 +105,13 @@ def get_settings() -> Settings:
 
 def _client_ip(request: Request) -> str:
     xff = request.headers.get("x-forwarded-for", "")
+    # Phase 2 retro: trust rightmost XFF (last-hop trusted proxy); leftmost is client-supplied.
     if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else ""
+        return xff.split(",")[-1].strip()
+    if request.client is None:
+        log.warning("client_ip_missing path=%s", request.url.path)
+        return ""
+    return request.client.host
 
 
 async def require_admin_jwt(request: Request) -> AdminIdentity:
@@ -138,6 +142,10 @@ async def require_admin_jwt(request: Request) -> AdminIdentity:
         identity = _verifier.verify(token, client_ip=client_ip)
         metrics.cf_jwt_verification_total.labels(result="ok").inc()
         return identity
+    except RuntimeError as e:
+        metrics.cf_jwt_verification_total.labels(result="not_configured").inc()
+        log.error("cf_access_verifier_not_configured: %s", e)
+        raise HTTPException(status_code=503, detail="auth not configured") from e
     except ExpiredSignatureError as e:
         metrics.cf_jwt_verification_total.labels(result="expired").inc()
         raise HTTPException(status_code=401, detail="jwt expired") from e

@@ -53,6 +53,13 @@ admin_secret_reveal_total = Counter(
     registry=registry,
 )
 
+config_cache_payload_decode_errors = Counter(
+    "config_cache_payload_decode_errors_total",
+    "Unparseable invalidation payloads received on a config cache pub/sub channel",
+    labelnames=["channel"],
+    registry=registry,
+)
+
 avg_cost_unit_suspected_wrong_total = Counter(
     "avg_cost_unit_suspected_wrong_total",
     "Positions where avg_cost appears to be in wrong currency unit (GBX vs GBP)",

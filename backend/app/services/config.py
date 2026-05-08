@@ -41,11 +41,16 @@ class ConfigTypeError(ValueError):
     pass
 
 
+class SecretDecryptError(RuntimeError):
+    """Raised when Fernet decryption fails — key rotation mismatch or row tampered."""
+
+
 @dataclass
 class SecretMetadata:
     namespace: str
     key: str
     value_type: str
+    # created_at/updated_at are always tz-aware (TIMESTAMPTZ columns via asyncpg).
     created_at: datetime
     updated_at: datetime
 
@@ -169,6 +174,8 @@ class ConfigService:
         return materialized
 
     async def set(self, ns: str, key: str, value: Any, value_type: ValueType = "str") -> AppConfig:
+        if "|" in ns or "|" in key:
+            raise ValueError("namespace/key cannot contain '|'")
         if value_type not in ("str", "int", "bool", "json"):
             raise ValueError(f"invalid value_type={value_type!r}")
         row_value, row_value_json = _pack_config_row(value, value_type)
@@ -202,14 +209,22 @@ class ConfigService:
     async def delete(self, ns: str, key: str) -> bool:
         async with self._session_factory() as s:
             result = await s.execute(
-                delete(AppConfig).where(AppConfig.namespace == ns, AppConfig.key == key)
+                delete(AppConfig)
+                .where(AppConfig.namespace == ns, AppConfig.key == key)
+                .returning(AppConfig.namespace)
             )
-            existed = bool(result.rowcount > 0)  # type: ignore[attr-defined]
+            existed = result.first() is not None
             await s.commit()
         self._cache.pop((ns, key))
         await self._cache.publish_invalidation(ns, key)
         metrics.config_ops_total.labels(op="delete", kind="config", result="ok").inc()
         return existed
+
+    async def get_exact(self, ns: str, key: str) -> AppConfig | None:
+        """Single-row point lookup by (namespace, key). Avoids N+1 vs cfg.list()."""
+        async with self._session_factory() as s:
+            stmt = select(AppConfig).where(AppConfig.namespace == ns, AppConfig.key == key)
+            return (await s.execute(stmt)).scalar_one_or_none()
 
     async def list(self, namespace: str | None = None) -> builtins.list[AppConfig]:
         async with self._session_factory() as s:
@@ -224,6 +239,8 @@ class ConfigService:
     async def set_secret(
         self, ns: str, key: str, value: Any, value_type: ValueType = "str"
     ) -> AppSecret:
+        if "|" in ns or "|" in key:
+            raise ValueError("namespace/key cannot contain '|'")
         if value_type not in ("str", "int", "bool", "json"):
             raise ValueError(f"invalid value_type={value_type!r}")
         plaintext = _encode_plaintext(value, value_type)
@@ -303,13 +320,17 @@ class ConfigService:
             )
         try:
             plaintext = self._fernet.decrypt(row.value_encrypted)
-        except InvalidToken:
+        except InvalidToken as exc:
             log.error(
                 "fernet_decrypt_failed ns=%s key=%s (APP_SECRET_KEY rotated or row tampered)",
                 ns,
                 key,
             )
-            raise
+            raise SecretDecryptError(
+                f"fernet decryption failed for {ns}.{key}; "
+                "verify APP_SECRET_KEY/PREV_KEY rotation state"
+            ) from exc
+        # TODO(phase2-retro): replace double-decrypt with key-index check (timing oracle).
         if self._primary_fernet is not None:
             try:
                 self._primary_fernet.decrypt(row.value_encrypted)
@@ -321,9 +342,11 @@ class ConfigService:
     async def delete_secret(self, ns: str, key: str) -> bool:
         async with self._session_factory() as s:
             result = await s.execute(
-                delete(AppSecret).where(AppSecret.namespace == ns, AppSecret.key == key)
+                delete(AppSecret)
+                .where(AppSecret.namespace == ns, AppSecret.key == key)
+                .returning(AppSecret.namespace)
             )
-            existed = bool(result.rowcount > 0)  # type: ignore[attr-defined]
+            existed = result.first() is not None
             await s.commit()
         self._secrets_cache.pop((ns, key))
         await self._secrets_cache.publish_invalidation(ns, key)

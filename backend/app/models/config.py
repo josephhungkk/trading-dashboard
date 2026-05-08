@@ -1,9 +1,14 @@
-"""SQLAlchemy models for app_config and app_secrets (Phase 2)."""
+"""SQLAlchemy models for app_config and app_secrets (Phase 2).
+
+All writes go through ConfigService.set / set_secret which set updated_at explicitly
+via raw Core upsert; the ORM onupdate= trigger is therefore dead on the write path (M2).
+Indexes use DESC to match migration 0001 (HIGH-6: keep ORM + migration in sync).
+"""
 
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Index, LargeBinary, PrimaryKeyConstraint, String, func
+from sqlalchemy import CheckConstraint, Index, LargeBinary, PrimaryKeyConstraint, String, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,7 +29,6 @@ class AppConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),
-        onupdate=func.now(),
         nullable=False,
     )
 
@@ -40,7 +44,8 @@ class AppConfig(Base):
             "(value_type <> 'json' AND value IS NOT NULL AND value_json IS NULL)",
             name="app_config_value_exclusive",
         ),
-        Index("ix_app_config_updated_at", "updated_at", postgresql_using="btree"),
+        # DESC matches migration 0001 ix_app_config_updated_at (HIGH-6).
+        Index("ix_app_config_updated_at", text("updated_at DESC"), postgresql_using="btree"),
     )
 
 
@@ -57,7 +62,6 @@ class AppSecret(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),
-        onupdate=func.now(),
         nullable=False,
     )
 
@@ -67,5 +71,6 @@ class AppSecret(Base):
             "value_type IN ('str','int','bool','json')",
             name="app_secrets_value_type_check",
         ),
-        Index("ix_app_secrets_updated_at", "updated_at", postgresql_using="btree"),
+        # DESC matches migration 0001 ix_app_secrets_updated_at (HIGH-6).
+        Index("ix_app_secrets_updated_at", text("updated_at DESC"), postgresql_using="btree"),
     )
