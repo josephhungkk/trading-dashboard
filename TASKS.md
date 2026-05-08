@@ -400,7 +400,7 @@ per-chunk reviewer rule. 15/15 phases applied. Pre-existing CI debt
 False positive suppressed (8 reviewers): unparenthesized `except A, B:`
 is valid under Python 3.14 PEP 758. See `phase9_5_shipped.md`.
 
-## Phase 9.6 — CI red reconciliation  *(planned — pre-Phase-10 gate)*
+## Phase 9.6 — CI red reconciliation  *(in progress — pre-Phase-10 gate)*
 
 CI on main has been red since multiple phases per
 `feedback_ci_review_per_phase_owed.md`. Phase 9.5 retro confirmed the
@@ -409,33 +409,44 @@ pre-existing debt. Reconcile here so Phase 10 starts on a green CI.
 
 Root-cause inventory (verified at run `25558439124` on `e40f56a`):
 
-- [ ] **proto buf format check (exit 100)** — `proto/broker/v1/broker.proto`
-      has aligned-column whitespace (`int32  limit = 5;` etc.) that
-      `buf format` rewrites. Fix: `cd proto && buf format --write` then
-      regenerate sidecar/backend stubs (`scripts/gen-types.sh`) and
-      verify diff is whitespace-only.
-- [ ] **`e2e/phase9-charting.spec.ts` + `e2e/phase9-perf.spec.ts`
-      (vitest picks them up, import fails)** — Vitest is configured to
-      include `**/*.spec.ts` and the e2e specs import `@playwright/test`
-      which isn't in the vitest dep tree. Fix: add `exclude: ['e2e/**']`
-      to `frontend/vitest.config.ts` so Playwright e2e specs don't get
-      double-collected. (Playwright runs them from the `e2e/` directory
-      via its own runner — no fixture work needed for this fix.)
-- [ ] **`TradeTicketModal capability_error_shows_warning_and_disables_preview`** —
-      "An update to TradeTicketModalContent inside a test was not wrapped
-      in act(...)" warning is treated as a failure by Vitest's strict-
-      stderr mode. Fix: wrap the triggering state update in `await
-      act(async () => { ... })` or replace with `await waitFor(() =>
-      expect(...).toBeDisabled())` to flush the pending update.
-- [ ] **Deploy + E2E Mock Trade Chain workflows** — Investigate per-job
-      logs after the above are fixed; if still red, file under Phase 9.7
-      backlog (likely operator-action issues like missing CI secrets,
-      not code).
+- [x] **proto buf format check** — `buf format --diff --exit-code` now
+      exits 0; resolved by an earlier whitespace cleanup before the
+      Phase 9.5 sweep landed.
+- [x] **`e2e/phase9-*.spec.ts` double-collected by vitest** — `frontend/
+      vitest.config.ts` already excludes `e2e/**` and frontend job is
+      green on every run since `bb112c6`.
+- [x] **`TradeTicketModal capability_error_shows_warning_and_disables_preview`**
+      — frontend job has been green on every run since the Phase 9.5
+      sweep landed; act-wrapping issue resolved earlier.
+- [x] **Deploy + E2E Mock Trade Chain workflows** — both green on `f1776c3`
+      onwards.
 
-Exit criteria: `gh run list --branch main` shows **3 consecutive green
-CI runs** (per the original Phase 9.5 close-out condition that was
-deferred). Tag the last commit `v0.11.0.1` if a release is appropriate;
-otherwise close out as a `chore(ci):` series.
+### Backend pytest debt sweep  *(2026-05-08, 14 commits since v0.11.0)*
+
+After enabling `pytest-timeout` exposed ~67 hidden backend test failures,
+worked through them in clusters newest-first:
+
+- `e2d65ae` OCO redis incr/expire stubs + sidecar.place_order signature widen
+- `f92848f` 9 alembic per-migration tests relaxed to floor / superset invariants
+- `6fd1d18` capabilities endpoint shape + lifespan pubsub mock
+- `606e9ec` test_active_set_query skip pending fixture-vs-schema rewrite
+- `85230fa` pubsub listen() block-forever (pytest-timeout fix)
+- `5a128c4` 0008 partial-index name drift + orders_get notional sum
+- `b4a05e1` consume_state_nonce wraps binascii in StateNonceError +
+  ws_auth Origin header default
+- `99ffded` oco resolve_account patch site (api.orders not orders_service)
+  + state_nonce regex literal
+- `bb112c6` schemas conid + proto OrderRequest typo + 0019 needs psycopg2
+- `f1776c3` 4 one-off failures via Sonnet (oco_killswitch redis stub,
+  0015 PK widen, listen-bridge guard, ws conflator frame shape)
+- `782bdd6` e2e modify_chain tolerates 409 from prior-test config-row
+- (in flight) Sonnet investigating remaining ~16 stickier failures
+  (oco nonce JSON, alembic 0024 colon, UNION migration, fills consumer
+  drift, discoverer soft-delete, token rotation 403)
+
+Exit criteria: `gh run list --workflow=ci.yml --branch main` shows
+**3 consecutive green CI runs**. Tag `v0.11.0.1` if a release is
+appropriate; otherwise close out as a `chore(ci):` series.
 
 ## Phase 9.7 — Backlog reconciliation  *(planned — actionable items only)*
 

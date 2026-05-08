@@ -39,6 +39,68 @@ Pre-existing CI debt (`proto buf format`, `e2e/phase9-charting.spec.ts`,
 `feedback_ci_review_per_phase_owed.md`. Sweep introduced **zero new CI
 failures**.
 
+### Internal — Phase 9.6 Backend pytest debt sweep (2026-05-08, repo public)
+
+Repo flipped public 2026-05-08 (`josephhungkk/trading-dashboard`); same
+day, enabled `pytest-timeout` (60s thread method) on the backend test
+suite, which exposed ~67 hidden failures that had been silently hanging
+the run. Worked them down newest-first across 14 commits. **No
+public/wire surface changes**; only test fixtures + two small production
+robustness hardenings.
+
+Production-code changes (both small):
+- `app/services/schwab_oauth.py`: `consume_state_nonce` now wraps
+  `_b64_decode_padded` in `try/binascii.Error → StateNonceError` so a
+  tampered state whose signature fragment isn't valid base64 surfaces as
+  the documented 403 contract instead of an uncaught 500.
+
+Test fixture realignments (clusters):
+- 6 OCO endpoint tests: `mock_redis.incr/expire` returned `AsyncMock`,
+  breaking the rate limiter's `count > int` compare; stubbed to return
+  `1`. `resolve_account` was patched at the source module instead of the
+  call site (`app.api.orders`), so the real DB lookup was running and
+  returning 404 against synthetic UUIDs. Fixed all 5 patch sites.
+- 6 orders-place tests: production `_Sidecar.place_order` call site
+  passes 13 args (after Phase 8b added trail/expiry); fixture only
+  accepted 9. Widened.
+- 9 alembic per-migration tests relaxed to floor / superset invariants
+  so later additions (BRACKET, OCO, asset_class PK widen, Futu LIMIT
+  IOC/FOK/GTD revert via 0014a) don't break post-condition assertions.
+- `test_capabilities_api.py`: endpoint returns flat list (or dict
+  grouped by asset_class), not a `BrokerCapabilitiesResponse`-shaped
+  dict. Added `_rows_from_body()` normalizer.
+- `test_bar_service_pre_warm.py`: `redis.pubsub()` is sync, returns an
+  async-context-manager. AsyncMock returned a coroutine, breaking
+  `async with self._redis.pubsub() as p:`. `listen()` then needed to
+  block forever (not yield empty) so `OrderCapabilityService.run_listener`
+  could be cancelled cleanly without tight-looping past pytest-timeout.
+- `test_ws_auth.py`: WS gateway `_allowed_origin` (HIGH CSWSH fix) was
+  rejecting all upgrades with 1008 origin because `_app()` set no
+  `cors_origins` and `_run_ws` sent no Origin header.
+- `test_active_set_query.py`: 3 tests skipped pending fixture-vs-schema
+  rewrite (positions has no broker_id; watchlist_entries.currency is
+  NOT NULL; the 1500-instrument seed never populates the joined tables).
+- 4 small one-offs handled via Sonnet subagent: oco_killswitch redis
+  stub, alembic_0015 PK widen, postgres_listen_bridge security guard
+  payload format, ws_conflator frame shape (`q` not `data`).
+- 0008 partial-index name drift (0030 renamed to `uq_*`); orders_get
+  notional sum (sums `notional_filled` not `notional`); schemas
+  `_order_response` factory missing `conid`; proto test referenced
+  non-existent `OrderRequest`; 0019 needs psycopg2 (skipped).
+
+Net effect: backend pytest failures dropped from ~67 to ~16 (in flight).
+Frontend / proto / sidecar / Deploy / E2E Mock workflows all green
+since `f1776c3`. Remaining backend failures (oco nonce JSON, alembic
+0024 colon escape, UNION migration, fills consumer drift, discoverer
+soft-delete, token rotation 403) under investigation by Sonnet
+subagent.
+
+Repo-public discipline rules captured in
+`memory/feedback_public_repo_discipline.md`: every commit / comment /
+branch name is now world-readable; test fixtures use `U99999999` /
+`DUP000000` synthetic stubs; never echo real broker creds, account
+numbers, or APP_SECRET_KEY in code or commits.
+
 ## [0.11.0] — 2026-05-08
 
 ### Added — Phase 9 complete (Charting v1: bar aggregator + historical store + chart UI + 45 indicators)
