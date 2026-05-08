@@ -25,11 +25,16 @@ async def client() -> AsyncIterator[AsyncClient]:
         return AdminIdentity(email="ci@example.com", kind="user", claims={})
 
     app.dependency_overrides[require_admin_jwt] = _admin
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as c:
-        yield c
+    # ASGITransport does not drive lifespan; invoke Starlette's built-in
+    # lifespan_context so set_config_service() runs before any request.
+    # Broker init inside lifespan is wrapped in try/except — failures are
+    # logged + skipped, which is the expected path in CI (no sidecars).
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as c:
+            yield c
     app.dependency_overrides.clear()
 
 
