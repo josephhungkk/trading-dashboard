@@ -561,6 +561,20 @@ async def modify_order(
     except (BrokerSidecarUnavailable, BrokerSidecarTimeout) as exc:
         await _restore_modify_baseline(db, order_id=order_id, baseline=prior_mutable)
         await db.commit()
+        # Phase 9.7 G2: timeout class for sidecar unreachable / broker reject
+        # surfaced as UNKNOWN/INVALID_ARGUMENT/NOT_FOUND. The api/orders.py
+        # PUT handler maps these to either 422 (broker_modify_rejected) or
+        # 503 (sidecar_unreachable); for the metric we treat the gRPC
+        # broker-reject codes as "error" and the rest as "timeout".
+        metric_result = (
+            "error"
+            if isinstance(exc, BrokerSidecarUnavailable)
+            and getattr(exc, "grpc_code", "") in {"UNKNOWN", "INVALID_ARGUMENT", "NOT_FOUND"}
+            else "timeout"
+        )
+        metrics.broker_order_modify_total.labels(
+            label=account.gateway_label, result=metric_result
+        ).inc()
         raise PreviewUnavailable(
             503,
             {"error": "sidecar_unavailable"},
@@ -569,6 +583,7 @@ async def modify_order(
     except Exception:
         await _restore_modify_baseline(db, order_id=order_id, baseline=prior_mutable)
         await db.commit()
+        metrics.broker_order_modify_total.labels(label=account.gateway_label, result="error").inc()
         raise
 
     raw_payload = {
@@ -644,6 +659,8 @@ async def modify_order(
         "tif": request.tif,
     }
     await _modify_replay_store(redis, order_id, request.nonce, projected)
+    # Phase 9.7 G2: success class — emit AFTER projected has been replay-stored.
+    metrics.broker_order_modify_total.labels(label=account.gateway_label, result="success").inc()
     return projected
 
 
