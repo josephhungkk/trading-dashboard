@@ -5,12 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+User=cloudflared
+Group=cloudflared
 ExecStart=/usr/bin/cloudflared --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
 Restart=on-failure
 RestartSec=5s
 RuntimeDirectory=cloudflared
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+# cloudflared makes only outbound connections — no bind capability needed.
+CapabilityBoundingSet=
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -14,7 +14,7 @@ services:
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--save", "", "--appendonly", "no"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 10s
       retries: 5
       start_period: 5s
@@ -193,6 +193,13 @@ services:
       PLAYWRIGHT_HEADLESS: "true"
       CF_ACCESS_CLIENT_ID: "${CF_ACCESS_CLIENT_ID}"
       CF_ACCESS_CLIENT_SECRET: "${CF_ACCESS_CLIENT_SECRET}"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - "/tmp:size=200m"         # Playwright browser cache + screenshots
+      - "/home:size=50m"         # Playwright profile dir
+      - "/run:size=10m"
     networks: [td-net]
     profiles: ["tier2"]
 

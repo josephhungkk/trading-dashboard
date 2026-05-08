@@ -9,8 +9,16 @@ set -euo pipefail
 
 echo "==> Adding Cloudflare apt repo..."
 install -d -m 0755 /usr/share/keyrings
-curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
-    | gpg --dearmor -o /usr/share/keyrings/cloudflare-main.gpg
+
+# Verified 2026-05-08 — re-verify with:
+#   curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sha256sum
+EXPECTED_GPG_SHA256="1bd95f4082b320d541bee351560fc2765aa9f9cd8efa4c9e32135e63f252721d"
+TMP_GPG=$(mktemp)
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o "$TMP_GPG"
+echo "$EXPECTED_GPG_SHA256  $TMP_GPG" | sha256sum --check --status \
+    || { echo "ERROR: cloudflare GPG key checksum mismatch — possible MITM"; rm -f "$TMP_GPG"; exit 1; }
+gpg --dearmor < "$TMP_GPG" | sudo tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
+rm -f "$TMP_GPG"
 chmod 0644 /usr/share/keyrings/cloudflare-main.gpg
 
 CODENAME=$(lsb_release -cs)
@@ -30,7 +38,7 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 2222/tcp  comment 'SSH on non-default port'
 ufw allow 51820/udp comment 'WireGuard'
-ufw allow in on wg0 comment 'WG mesh is trusted (peer admission via wg keys)'
+ufw allow in on wg0 to any port 80 proto tcp comment 'nginx WG dev bypass'
 ufw --force enable
 ufw status verbose
 
@@ -53,6 +61,11 @@ EOF
 systemctl enable --now fail2ban
 sleep 2
 fail2ban-client status sshd
+
+echo "==> Ensuring cloudflared system user exists..."
+if ! id cloudflared > /dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
+fi
 
 echo "==> install-prep complete."
 echo "  Next: run deploy/vps/sshd-hardening.sh (interactively, with safety gate)."

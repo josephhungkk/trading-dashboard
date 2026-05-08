@@ -20,8 +20,10 @@ if [[ ! -f "$CRED_PATH" && -f "/etc/cloudflared/cloudflared-$TUNNEL_ID.json" ]];
 fi
 [[ -f "$CRED_PATH" ]] || { echo "Credentials file missing: $CRED_PATH"; exit 1; }
 
-chown root:root "$CRED_PATH"
+chown cloudflared:cloudflared "$CRED_PATH"
 chmod 0600 "$CRED_PATH"
+chown cloudflared:cloudflared /etc/cloudflared
+chmod 0750 /etc/cloudflared
 
 REPO="/home/trader/trading-dashboard"
 [[ -f "$REPO/deploy/vps/cloudflared.config.yml.template" ]] || {

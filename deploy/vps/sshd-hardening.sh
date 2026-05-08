@@ -17,8 +17,10 @@ echo "==> Applying hardening..."
 
 harden_set() {
     local key="$1"; local value="$2"
+    # Comment out any existing (active or already-commented) line for this key.
     sed -i -E "s/^#?\s*${key}\s+.*/# &/" "$SSHD_CONFIG"
-    echo "$key $value" >> "$SSHD_CONFIG"
+    # Only append if no active line for this key already exists (idempotent on re-run).
+    grep -qE "^${key}\s" "$SSHD_CONFIG" || echo "$key $value" >> "$SSHD_CONFIG"
 }
 
 harden_set Port 2222
