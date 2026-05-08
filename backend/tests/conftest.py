@@ -149,12 +149,17 @@ async def _app_state(request: pytest.FixtureRequest) -> AsyncIterator[None]:
     app.state.capability_svc = capability_svc
 
     # Stub broker_registry + account_service so endpoint tests don't hit
-    # "broker layer not yet configured" 503. Tests that need real broker
-    # behavior patch via app.dependency_overrides or @patch().
+    # "broker layer not yet configured" 503. Use spec= so attribute access
+    # is constrained to real class surface — bare MagicMock returns Mock
+    # for any attribute, which then breaks comparisons (`'>' not
+    # supported between instances of 'AsyncMock' and 'int'`) and dict
+    # indexing. Tests that need real broker behavior patch via
+    # app.dependency_overrides or @patch().
     from app.core.deps import set_account_service, set_broker_registry
+    from app.services.brokers import AccountService, BrokerRegistry
 
-    set_broker_registry(MagicMock())
-    set_account_service(MagicMock())
+    set_broker_registry(MagicMock(spec=BrokerRegistry))
+    set_account_service(MagicMock(spec=AccountService))
 
     try:
         yield

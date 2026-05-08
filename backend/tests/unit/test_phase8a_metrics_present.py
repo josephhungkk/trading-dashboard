@@ -24,9 +24,24 @@ def sidecar_metrics():
     """
     from prometheus_client import REGISTRY
 
-    backend_dup = REGISTRY._names_to_collectors.get("broker_normalize_unknown_total")
-    if backend_dup is not None:
-        REGISTRY.unregister(backend_dup)
+    # Unregister ALL pre-registered collectors that the sidecar module is
+    # about to redefine. Both backend.app.core.metrics and
+    # sidecar_schwab.metrics share the prometheus_client global REGISTRY
+    # in-process; whichever imports second collides on every shared name.
+    # Sweep the known shared metric prefixes; collectors we don't care
+    # about staying in REGISTRY are untouched.
+    shared_prefixes = (
+        "broker_normalize_unknown",
+        "schwab_http_requests",
+        "schwab_account_hash_refresh",
+        "schwab_access_token_age",
+    )
+    to_unregister = []
+    for name, collector in list(REGISTRY._names_to_collectors.items()):
+        if any(name.startswith(p) for p in shared_prefixes):
+            to_unregister.append(collector)
+    for c in set(to_unregister):
+        REGISTRY.unregister(c)
 
     sidecar_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(sidecar_root))
