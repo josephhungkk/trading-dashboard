@@ -46,7 +46,9 @@ async def test_default_happy_path_returns_canned_data(
         qty="1.00000000",
         limit_price="190.50000000",
     )
-    cancel_order = await sidecar_client.cancel_order("DUA0000000", "100001")
+    # Cancel against the actual SIM id returned by place_order — the default
+    # CancelOrder returns accepted=False for unknown broker_order_ids.
+    cancel_order = await sidecar_client.cancel_order("DUA0000000", place_order.broker_order_id)
     events = [event async for event in sidecar_client.order_event_stream("DUA0000000")]
     contracts = await sidecar_client.search_contracts("AAPL", asset_class="STOCK")
 
@@ -56,7 +58,9 @@ async def test_default_happy_path_returns_canned_data(
     assert positions == []
     assert orders == []
     assert contract.symbol == "AAPL"
-    assert place_order.broker_order_id == "100001"
+    # Default PlaceOrder returns SIM-prefixed broker_order_id (uuid7) when
+    # place_order_response override isn't set — matches simulator semantics.
+    assert place_order.broker_order_id.startswith("SIM-")
     assert place_order.status == "Submitted"
     assert cancel_order is True
     assert events == []

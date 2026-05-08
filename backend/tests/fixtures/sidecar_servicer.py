@@ -111,6 +111,10 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self.cancel_order_response: broker_pb2.CancelOrderResponse | None = None
         self.search_contracts_response: broker_pb2.SearchContractsResponse | None = None
         self.order_event_messages: list[broker_pb2.OrderEventMessage] = []
+        # Default: OrderEvent stream returns after yielding canned messages.
+        # Tests that need to push live events post-subscribe should set
+        # live_stream=True and use _event_subscribers[i].put(...).
+        self.live_stream: bool = False
         self.place_order_calls: list[broker_pb2.PlaceOrderRequest] = []
         self.cancel_order_calls: list[broker_pb2.CancelOrderRequest] = []
         self._sim_orders: dict[str, dict[str, str]] = {}
@@ -390,6 +394,11 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         try:
             for message in self.order_event_messages:
                 yield message
+            # Without live_stream, terminate the stream after canned events
+            # — clients consuming `[event async for event in stream]` would
+            # otherwise hang on queue.get() forever.
+            if not self.live_stream:
+                return
             while not context.cancelled():
                 yield await queue.get()
         finally:
