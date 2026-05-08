@@ -148,6 +148,14 @@ async def _app_state(request: pytest.FixtureRequest) -> AsyncIterator[None]:
     app.state.redis = fake_r
     app.state.capability_svc = capability_svc
 
+    # Stub broker_registry + account_service so endpoint tests don't hit
+    # "broker layer not yet configured" 503. Tests that need real broker
+    # behavior patch via app.dependency_overrides or @patch().
+    from app.core.deps import set_account_service, set_broker_registry
+
+    set_broker_registry(MagicMock())
+    set_account_service(MagicMock())
+
     try:
         yield
     finally:
