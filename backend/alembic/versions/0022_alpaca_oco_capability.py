@@ -1,7 +1,7 @@
 """Phase 8c T-O.5 -- flip Alpaca OCO capability rows.
 
 Revision ID: 0022_alpaca_oco_capability
-Revises: 0021_cr_alpaca_crypto_bracket
+Revises: 0021d_seed_oco_order_type
 Create Date: 2026-05-07
 
 ON CONFLICT handles any pre-existing row safely.
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0022_alpaca_oco_capability"
-down_revision = "0021_cr_alpaca_crypto_bracket"
+down_revision = "0021d_seed_oco_order_type"
 branch_labels = None
 depends_on = None
 

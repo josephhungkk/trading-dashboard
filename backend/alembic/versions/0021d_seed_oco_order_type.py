@@ -1,19 +1,16 @@
-"""Idempotent seed for OCO order_type — recovers VPS prod from FK violation.
+"""Idempotent OCO seed inserted between 0021_cr and 0022.
 
-Phase 9.6 added migration 0020b_seed_bracket_order_type with only BRACKET
-in `_SEED_ROWS`; that migration ran on prod before OCO was added to the
-list (in commit ac56672). Alembic does not re-run a migration once it's
-in alembic_version, so prod's `order_types` table was missing the OCO row
-when migration 0022_alpaca_oco_capability tried to INSERT a
-broker_order_capability with order_type='OCO' — failing the FK to
-order_types.code.
+Phase 9.6 added 0020b_seed_bracket_order_type with only BRACKET. That
+migration ran on prod before OCO was added to its `_SEED_ROWS` (commit
+ac56672), so prod's `order_types` table is missing OCO. Migration 0022
+then fails its FK on `broker_order_capability.order_type='OCO'`.
 
-This migration runs after 0035 (current head) and seeds OCO with
-ON CONFLICT DO NOTHING, so dev DBs that already received the OCO row
-via the extended 0020b are unaffected.
+This migration seeds OCO idempotently and is chained immediately
+before 0022. Dev DBs that already have OCO via the extended 0020b are
+unaffected (`ON CONFLICT (code) DO NOTHING`).
 
-Revision ID: 0036_seed_oco_order_type
-Revises: 0035_phase9_5_nlv_at_index
+Revision ID: 0021d_seed_oco_order_type
+Revises: 0021_cr_alpaca_crypto_bracket
 Create Date: 2026-05-08
 """
 
@@ -23,8 +20,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0036_seed_oco_order_type"
-down_revision = "0035_phase9_5_nlv_at_index"
+revision = "0021d_seed_oco_order_type"
+down_revision = "0021_cr_alpaca_crypto_bracket"
 branch_labels = None
 depends_on = None
 
