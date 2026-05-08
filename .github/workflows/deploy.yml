@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository == 'josephhungkk/trading-dashboard'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.14'
       - name: Generate backend proto stubs
@@ -44,7 +44,7 @@ jobs:
             app/_generated/broker/v1/broker_pb2_grpc.py
 
       - name: Install SSH key
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@a6f90b1f127823b31d4d4a8d96047790581349bd  # v0.9.1
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
 
@@ -106,10 +106,10 @@ jobs:
           ssh -p 2222 trader@88.208.197.219 \
             'for i in $(seq 1 30); do curl -sf -H "Host: dashboard.kiusinghung.com" http://127.0.0.1/health && exit 0; sleep 2; done; exit 1'
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v4.4.0
         # Pinned to match lockfile v9.0 (tests/e2e/pnpm-lock.yaml).
         with: { version: 10.33.0 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -131,7 +131,7 @@ jobs:
 
       - name: Upload smoke artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: smoke-failure-${{ github.run_id }}
           path: |
