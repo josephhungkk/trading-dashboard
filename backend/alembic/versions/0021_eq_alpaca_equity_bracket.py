@@ -13,7 +13,10 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0021_eq_alpaca_equity_bracket"
-down_revision = "0020a_alpaca_crypto_capability_flip"
+# Phase 9.6: re-pointed from 0020a to 0020b so the BRACKET row is seeded
+# into order_types BEFORE this migration's INSERT into
+# broker_order_capability hits the FK to order_types.code.
+down_revision = "0020b_seed_bracket_order_type"
 branch_labels = None
 depends_on = None
 
