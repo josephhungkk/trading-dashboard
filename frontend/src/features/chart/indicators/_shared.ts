@@ -312,7 +312,7 @@ export const indicatorCalcs = {
     const middle = smaSeries(close, period);
     return dataList.map((_, i) => {
       const mid = middle[i];
-      if (mid == null || mid === 0) return { bbw: null };
+      if (mid == null || Math.abs(mid) < 1e-10) return { bbw: null };
       const dev = stddev(close, i - period + 1, period, mid);
       return { bbw: ((mid + multiplier * dev) - (mid - multiplier * dev)) / mid };
     });
