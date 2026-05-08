@@ -396,6 +396,21 @@ def _make_lifespan_mocks(
     """Configure all mock classes needed to run the FastAPI lifespan without real I/O."""
     mock_redis = AsyncMock()
     mock_redis.aclose = AsyncMock()
+    # `redis.pubsub()` is a sync method returning an instance that IS an
+    # async context manager. AsyncMock would return a coroutine and break
+    # `async with self._redis.pubsub() as p:` in OrderCapabilityService.run_listener.
+    mock_pubsub = AsyncMock()
+    mock_pubsub.subscribe = AsyncMock()
+    mock_pubsub.unsubscribe = AsyncMock()
+
+    async def _empty_listen():
+        if False:  # pragma: no cover
+            yield None
+
+    mock_pubsub.listen = MagicMock(side_effect=_empty_listen)
+    mock_pubsub.__aenter__ = AsyncMock(return_value=mock_pubsub)
+    mock_pubsub.__aexit__ = AsyncMock(return_value=None)
+    mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
     mock_redis_cls.from_url.return_value = mock_redis
 
     mock_bridge = MagicMock()
