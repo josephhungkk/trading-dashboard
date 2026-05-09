@@ -126,3 +126,74 @@ async def test_evaluate_returns_gate_verdict_shape(evaluation_ctx) -> None:
     assert verdict.blockers == []
     assert verdict.warnings == []
     assert verdict.latency_ms >= 0
+
+
+# ─── B2: account + broker kill switch ───────────────────────────────────
+
+
+async def test_account_kill_switch_off_allows(evaluation_ctx) -> None:
+    from app.services.risk_service import RiskService
+
+    db = AsyncMock(spec=AsyncSession)
+    db.execute = AsyncMock(
+        return_value=MagicMock(
+            scalar_one_or_none=MagicMock(return_value=MagicMock(is_enabled=False, reason=""))
+        )
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_account_kill_switch(evaluation_ctx)
+    assert res is None  # ALLOW = no blocker/warning
+
+
+async def test_account_kill_switch_off_when_no_row(evaluation_ctx) -> None:
+    """Account never frozen → no row in account_kill_switches → ALLOW."""
+    from app.services.risk_service import RiskService
+
+    db = AsyncMock(spec=AsyncSession)
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_account_kill_switch(evaluation_ctx)
+    assert res is None
+
+
+async def test_account_kill_switch_on_blocks(evaluation_ctx) -> None:
+    from app.services.risk_service import RiskService
+
+    db = AsyncMock(spec=AsyncSession)
+    row = MagicMock(is_enabled=True, reason="risk freeze", account_id=evaluation_ctx.account_id)
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=row)))
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_account_kill_switch(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.code == "account_kill_switch_enabled"
+    assert "risk freeze" in blocker.message
+
+
+async def test_broker_kill_switch_off_allows(evaluation_ctx) -> None:
+    from app.services.risk_service import RiskService
+
+    config = AsyncMock()
+    config.get_bool = AsyncMock(return_value=False)
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=config, sidecar=AsyncMock())
+    res = await svc._check_broker_kill_switch(evaluation_ctx)
+    assert res is None
+    config.get_bool.assert_awaited_once_with("broker", "kill_switch_enabled", default=False)
+
+
+async def test_broker_kill_switch_on_blocks(evaluation_ctx) -> None:
+    """Composes Phase 5b H0: app_config.broker.kill_switch_enabled=True."""
+    from app.services.risk_service import RiskService
+
+    config = AsyncMock()
+    config.get_bool = AsyncMock(return_value=True)
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=config, sidecar=AsyncMock())
+    res = await svc._check_broker_kill_switch(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.code == "broker_kill_switch_enabled"
+    assert "ibkr" in blocker.message  # broker_id from evaluation_ctx

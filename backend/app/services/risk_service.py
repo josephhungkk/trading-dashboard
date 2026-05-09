@@ -15,14 +15,40 @@ import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.risk import RiskLimit
-from app.schemas.risk import GateVerdict
+from app.models.risk import AccountKillSwitch, RiskLimit
+from app.schemas.risk import GateBlockerEntry, GateVerdict, GateWarningEntry
+
+CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
+
+
+class _ConfigProto(Protocol):
+    """Minimal protocol for the ConfigService dependency this service needs."""
+
+    async def get_bool(self, namespace: str, key: str, *, default: bool = False) -> bool: ...
+
+
+class _RedisProto(Protocol):
+    """Minimal protocol for the Redis dependency this service needs."""
+
+    async def get(self, key: str) -> Any: ...
+    async def set(self, key: str, value: str, *, ex: int | None = None) -> Any: ...
+    async def decr(self, key: str) -> Any: ...
+    async def incr(self, key: str) -> Any: ...
+    async def incrbyfloat(self, key: str, amount: float) -> Any: ...
+
+
+class _SidecarProto(Protocol):
+    """Minimal protocol for the broker-client dependency this service needs."""
+
+    async def preview_order(self, **kwargs: Any) -> Any: ...
+    async def get_account_summary(self, account_id: uuid.UUID) -> Any: ...
+
 
 log = structlog.get_logger(__name__)
 
@@ -57,9 +83,9 @@ class RiskService:
     def __init__(
         self,
         db: AsyncSession,
-        redis: object,
-        config: object,
-        sidecar: object,
+        redis: _RedisProto,
+        config: _ConfigProto,
+        sidecar: _SidecarProto,
     ) -> None:
         self._db = db
         self._redis = redis
@@ -92,6 +118,35 @@ class RiskService:
             if row is not None:
                 return row
         return None
+
+    async def _check_account_kill_switch(self, ctx: EvaluationContext) -> CheckResult:
+        """B2: BLOCK when account_kill_switches.is_enabled=True for the account."""
+        stmt = select(AccountKillSwitch).where(AccountKillSwitch.account_id == ctx.account_id)
+        row = (await self._db.execute(stmt)).scalar_one_or_none()
+        if row is None or not row.is_enabled:
+            return None
+        return (
+            GateBlockerEntry(
+                check="account_kill_switch",
+                message=f"account kill switch enabled — reason: {row.reason}",
+                code="account_kill_switch_enabled",
+            ),
+            None,
+        )
+
+    async def _check_broker_kill_switch(self, ctx: EvaluationContext) -> CheckResult:
+        """B2: composes Phase 5b H0 (app_config.broker.kill_switch_enabled)."""
+        is_on = await self._config.get_bool("broker", "kill_switch_enabled", default=False)
+        if not is_on:
+            return None
+        return (
+            GateBlockerEntry(
+                check="broker_kill_switch",
+                message=f"broker {ctx.broker_id} kill switch enabled (Phase 5b H0)",
+                code="broker_kill_switch_enabled",
+            ),
+            None,
+        )
 
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict.
