@@ -95,6 +95,16 @@ class RiskLimitHistory(Base):
 
 class AccountKillSwitch(Base):
     __tablename__ = "account_kill_switches"
+    # [Chunk-A db reviewer M4] mirror DB CHECK constraints in __table_args__
+    # so Base.metadata.create_all (used by tests against fresh PG) keeps the
+    # invariants Alembic 0036 enforces.
+    __table_args__ = (
+        CheckConstraint("length(reason) <= 1000", name="account_kill_switches_reason_len_check"),
+        CheckConstraint(
+            "(is_enabled IS FALSE) OR (enabled_at IS NOT NULL AND enabled_by IS NOT NULL)",
+            name="account_kill_switches_enabled_metadata_check",
+        ),
+    )
 
     # FK to broker_accounts(id) is at DB layer only — see module docstring.
     account_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)

@@ -34,16 +34,21 @@ class _ScopeRule(BaseModel):
 
     @model_validator(mode="after")
     def _scope_id_matches_scope_type(self) -> _ScopeRule:
-        scope_type = getattr(self, "scope_type", None)
-        scope_id = getattr(self, "scope_id", None)
-        if scope_type == "global" and scope_id is not None:
+        if self.scope_type == "global" and self.scope_id is not None:
             raise ValueError("scope_id must be NULL when scope_type='global'")
-        if scope_type in ("broker", "account") and not scope_id:
-            raise ValueError(f"scope_id is required when scope_type='{scope_type}'")
+        if self.scope_type in ("broker", "account") and not self.scope_id:
+            raise ValueError(f"scope_id is required when scope_type='{self.scope_type}'")
         return self
+
+    # Subclass attribute declarations for type checkers — see RiskLimitCreate /
+    # RiskLimitUpdate, which redeclare these as required fields.
+    scope_type: ScopeType
+    scope_id: str | None
 
 
 class RiskLimitCreate(_ScopeRule):
+    """Request payload to create a new risk limit row."""
+
     scope_type: ScopeType
     scope_id: str | None = None
     limit_kind: LimitKind
@@ -57,7 +62,10 @@ class RiskLimitCreate(_ScopeRule):
 
 
 class RiskLimitUpdate(_ScopeRule):
-    """PUT-semantics: full body required (mirrors Phase 8a MED-2 pattern)."""
+    """Request payload to update an existing risk limit row.
+
+    PUT-semantics: full body required (mirrors Phase 8a MED-2 pattern).
+    """
 
     scope_type: ScopeType
     scope_id: str | None = None
@@ -72,6 +80,8 @@ class RiskLimitUpdate(_ScopeRule):
 
 
 class RiskLimitOut(BaseModel):
+    """Read-side projection of a `risk_limits` row for `/api/risk/limits`."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -88,6 +98,12 @@ class RiskLimitOut(BaseModel):
 
 
 class AccountKillSwitchToggleRequest(BaseModel):
+    """Request payload to toggle an account-level kill switch.
+
+    Reason is required when enabling — operators always document why a
+    real-money account was frozen.
+    """
+
     is_enabled: bool
     reason: Annotated[str, Field(max_length=1000)] = ""
 
@@ -99,6 +115,8 @@ class AccountKillSwitchToggleRequest(BaseModel):
 
 
 class AccountKillSwitchOut(BaseModel):
+    """Read-side projection of `account_kill_switches`."""
+
     model_config = ConfigDict(from_attributes=True)
 
     account_id: uuid.UUID
@@ -110,12 +128,16 @@ class AccountKillSwitchOut(BaseModel):
 
 
 class GateBlockerEntry(BaseModel):
+    """One reason the risk gate refused a place_order/modify attempt."""
+
     check: str
     message: str
     code: str
 
 
 class GateWarningEntry(BaseModel):
+    """One advisory emitted by the risk gate (does not block dispatch)."""
+
     check: str
     message: str
     value: float | None = None
@@ -123,6 +145,8 @@ class GateWarningEntry(BaseModel):
 
 
 class GateVerdict(BaseModel):
+    """Aggregated verdict the risk gate returns from `RiskService.evaluate`."""
+
     final_verdict: Verdict
     blockers: list[GateBlockerEntry] = Field(default_factory=list)
     warnings: list[GateWarningEntry] = Field(default_factory=list)
@@ -130,6 +154,8 @@ class GateVerdict(BaseModel):
 
 
 class RiskDecisionOut(BaseModel):
+    """Read-side projection of `risk_decisions` for `/api/risk/decisions`."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int

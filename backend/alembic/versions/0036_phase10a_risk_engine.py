@@ -189,6 +189,13 @@ def upgrade() -> None:
         "CREATE INDEX idx_risk_decisions_blocked ON risk_decisions "
         "(evaluated_at DESC) WHERE verdict = 'block'"
     )
+    # [Chunk-A db reviewer M2] index FK so ON-DELETE-cascade scans from
+    # instruments don't seq-scan risk_decisions; partial index keeps it
+    # cheap when most rows have NULL instrument_id (price-only orders).
+    op.execute(
+        "CREATE INDEX idx_risk_decisions_instrument ON risk_decisions "
+        "(instrument_id) WHERE instrument_id IS NOT NULL"
+    )
     op.execute(
         """
         CREATE OR REPLACE FUNCTION fn_risk_decisions_notify() RETURNS TRIGGER AS $$
