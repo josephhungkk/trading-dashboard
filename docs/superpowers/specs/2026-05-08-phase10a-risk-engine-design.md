@@ -316,7 +316,7 @@ CREATE TABLE risk_decisions (
   latency_ms      INT NOT NULL CHECK (latency_ms >= 0),  -- [L2]
   attempt_kind    TEXT NOT NULL CHECK (attempt_kind IN ('place_order', 'modify_order')),
   request_id      TEXT NOT NULL,
-  order_id        BIGINT REFERENCES orders(id) ON DELETE SET NULL  -- [M5] populated post-dispatch
+  order_id        UUID REFERENCES orders(id) ON DELETE SET NULL  -- [M5] populated post-dispatch (orders.id is UUID)
 );
 
 CREATE INDEX idx_risk_decisions_account_time ON risk_decisions (account_id, evaluated_at DESC);
