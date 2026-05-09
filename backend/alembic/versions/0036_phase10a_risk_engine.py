@@ -218,8 +218,33 @@ def upgrade() -> None:
         """
     )
 
+    # ── v_account_intraday_pnl (B3 [M2]) ────────────────────────────────────
+    # Spec §1 #3: max-daily-loss = realized + unrealized intraday P&L vs cap.
+    # The 10a plan Step-3a expected `fills.realized_pnl_base` and
+    # `positions.unrealized_pnl_base`; neither column exists in the current
+    # schema (fills schema is 0007_advanced_orders.py — qty/price/commission
+    # only; positions schema is 0005_positions.py — qty/avg_cost only).
+    #
+    # Persisted realized/unrealized PnL is deferred to Phase 10a.5 (track:
+    # populate from sidecar account_summary RPC during BrokerDiscoverer poll).
+    # This view ships as a structural stub returning zeros so the gate code
+    # path is correct end-to-end; until 10a.5 lands, the check is a soft
+    # guarantee — no false BLOCKs, no false ALLOWs against an unset cap.
+    op.execute(
+        """
+        CREATE OR REPLACE VIEW v_account_intraday_pnl AS
+        SELECT
+          ba.id AS account_id,
+          (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS day_start_utc,
+          0::NUMERIC(20, 8) AS realized,
+          0::NUMERIC(20, 8) AS unrealized
+        FROM broker_accounts ba
+        """
+    )
+
 
 def downgrade() -> None:
+    op.execute("DROP VIEW IF EXISTS v_account_intraday_pnl")
     op.execute("DROP TRIGGER IF EXISTS trg_risk_decisions_notify ON risk_decisions")
     op.execute("DROP FUNCTION IF EXISTS fn_risk_decisions_notify()")
     op.execute(

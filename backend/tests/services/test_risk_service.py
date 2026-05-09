@@ -197,3 +197,124 @@ async def test_broker_kill_switch_on_blocks(evaluation_ctx) -> None:
     assert blocker is not None
     assert blocker.code == "broker_kill_switch_enabled"
     assert "ibkr" in blocker.message  # broker_id from evaluation_ctx
+
+
+# ─── B3: max-daily-loss (realized + unrealized intraday P&L) ────────────
+
+
+def _mock_session_for_max_loss(
+    *, cap_row: object | None, view_row: tuple[Decimal, Decimal] | None
+) -> AsyncMock:
+    """Build a session whose execute() yields cap-resolver result then view result.
+
+    When cap_row is None, the resolver walks all 3 scopes (account → broker →
+    global), so execute is called 3x and the view is never queried.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    if cap_row is None:
+        none_result = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        session.execute = AsyncMock(side_effect=[none_result, none_result, none_result])
+        return session
+    cap_result = MagicMock(scalar_one_or_none=MagicMock(return_value=cap_row))
+    view_result = MagicMock(first=MagicMock(return_value=view_row))
+    session.execute = AsyncMock(side_effect=[cap_result, view_result])
+    return session
+
+
+def _max_loss_limit(*, value: str, warn_at_pct: str | None) -> object:
+    """Build a RiskLimit-shaped object the check needs (limit_value, warn_at_pct)."""
+    from app.models.risk import RiskLimit
+
+    return RiskLimit(
+        id=10,
+        scope_type="account",
+        scope_id="acct-id",
+        limit_kind="max_daily_loss_currency_base",
+        limit_value=Decimal(value),
+        warn_at_pct=Decimal(warn_at_pct) if warn_at_pct is not None else None,
+        is_active=True,
+        notes="",
+        updated_by="op",
+    )
+
+
+async def test_max_daily_loss_no_cap_allows(evaluation_ctx) -> None:
+    """No active cap at any scope → no risk to evaluate → ALLOW (None)."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(cap_row=None, view_row=None)
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is None
+    # cap resolver walked all 3 scopes; view never queried
+    assert db.execute.await_count == 3
+
+
+async def test_max_daily_loss_under_cap_allows(evaluation_ctx) -> None:
+    """realized=-100, unrealized=-50, cap=1000, warn=80% → loss=150 (15%) → ALLOW."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(
+        cap_row=_max_loss_limit(value="1000", warn_at_pct="80"),
+        view_row=(Decimal("-100"), Decimal("-50")),
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is None
+    assert db.execute.await_count == 2  # cap resolver hit on first scope + view
+
+
+async def test_max_daily_loss_at_warn_pct_warns(evaluation_ctx) -> None:
+    """cap=1000, warn=80%, realized=-800, unrealized=0 → loss=800 (80%) → WARN."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(
+        cap_row=_max_loss_limit(value="1000", warn_at_pct="80"),
+        view_row=(Decimal("-800"), Decimal("0")),
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "max_daily_loss"
+    assert warning.value == 800.0
+    assert warning.threshold == 1000.0
+    assert "80" in warning.message  # warn_at_pct surfaces in operator-facing text
+
+
+async def test_max_daily_loss_over_cap_blocks(evaluation_ctx) -> None:
+    """cap=1000, realized=-1500, unrealized=0 → loss=1500 → BLOCK."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(
+        cap_row=_max_loss_limit(value="1000", warn_at_pct="80"),
+        view_row=(Decimal("-1500"), Decimal("0")),
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.check == "max_daily_loss"
+    assert blocker.code == "max_daily_loss_exceeded"
+    assert "1500" in blocker.message
+
+
+async def test_max_daily_loss_realized_plus_unrealized_blocks(evaluation_ctx) -> None:
+    """cap=1000, realized=-600, unrealized=-500 → composed loss=1100 → BLOCK."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(
+        cap_row=_max_loss_limit(value="1000", warn_at_pct=None),
+        view_row=(Decimal("-600"), Decimal("-500")),
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.code == "max_daily_loss_exceeded"

@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.risk import AccountKillSwitch, RiskLimit
@@ -147,6 +147,70 @@ class RiskService:
             ),
             None,
         )
+
+    async def _check_max_daily_loss(self, ctx: EvaluationContext) -> CheckResult:
+        """B3: realized + unrealized intraday P&L vs cap (account base currency).
+
+        Spec §1 #3. Cap kind ``max_daily_loss_currency_base`` resolved via the
+        account → broker → global walk. View ``v_account_intraday_pnl`` returns
+        a ``(realized, unrealized)`` row per account; until Phase 10a.5 wires
+        sidecar PnL into ``fills`` / ``positions`` the view yields zeros (see
+        migration 0036 comment block).
+
+        Sign convention: realized + unrealized are signed (negative = loss).
+        ``loss_today = -(realized + unrealized)``; positive when underwater.
+        BLOCK when ``loss_today >= limit_value``; WARN at ``warn_at_pct`` of cap.
+        """
+        cap = await self._resolve_limit(
+            ctx.account_id, ctx.broker_id, "max_daily_loss_currency_base"
+        )
+        if cap is None:
+            return None  # no cap → not evaluated → ALLOW
+
+        row = (
+            await self._db.execute(
+                text(
+                    "SELECT realized, unrealized FROM v_account_intraday_pnl "
+                    "WHERE account_id = :account_id"
+                ),
+                {"account_id": ctx.account_id},
+            )
+        ).first()
+        realized = Decimal(row[0]) if row is not None else Decimal("0")
+        unrealized = Decimal(row[1]) if row is not None else Decimal("0")
+        loss_today = -(realized + unrealized)
+
+        cap_value = Decimal(cap.limit_value)
+        if loss_today >= cap_value:
+            return (
+                GateBlockerEntry(
+                    check="max_daily_loss",
+                    message=(
+                        f"intraday loss {loss_today} {ctx.currency_base} ≥ cap "
+                        f"{cap_value} {ctx.currency_base}"
+                    ),
+                    code="max_daily_loss_exceeded",
+                ),
+                None,
+            )
+
+        if cap.warn_at_pct is not None:
+            warn_threshold = cap_value * Decimal(cap.warn_at_pct) / Decimal("100")
+            if loss_today >= warn_threshold:
+                return (
+                    None,
+                    GateWarningEntry(
+                        check="max_daily_loss",
+                        message=(
+                            f"intraday loss {loss_today} {ctx.currency_base} at "
+                            f"{cap.warn_at_pct}% of cap {cap_value} {ctx.currency_base}"
+                        ),
+                        value=float(loss_today),
+                        threshold=float(cap_value),
+                    ),
+                )
+
+        return None
 
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict.

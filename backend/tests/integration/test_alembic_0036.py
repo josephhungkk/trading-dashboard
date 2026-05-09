@@ -189,3 +189,36 @@ async def test_0036_account_kill_switch_history_trigger(
     assert len(history) == 1
     assert history[0][0] == "first"  # OLD value
     assert history[0][1] == "op2"
+
+
+@pytest.mark.asyncio
+async def test_0036_creates_intraday_pnl_view(db_session: AsyncSession) -> None:
+    """B3 [M2]: v_account_intraday_pnl exists and yields the contract columns.
+
+    Stub view returns zeros until Phase 10a.5 wires sidecar PnL into the
+    fills/positions tables. The structural shape (account_id, day_start_utc,
+    realized, unrealized) is the contract _check_max_daily_loss queries.
+    """
+    cols = (
+        (
+            await db_session.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'v_account_intraday_pnl' "
+                    "ORDER BY ordinal_position"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert cols == ["account_id", "day_start_utc", "realized", "unrealized"]
+    # Stub returns zero realized/unrealized for any account that exists.
+    sample = (
+        await db_session.execute(
+            text("SELECT realized, unrealized FROM v_account_intraday_pnl LIMIT 1")
+        )
+    ).first()
+    if sample is not None:  # dev DB has accounts seeded; CI clean DB may not
+        assert sample[0] == 0
+        assert sample[1] == 0

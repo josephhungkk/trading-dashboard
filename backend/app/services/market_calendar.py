@@ -137,3 +137,15 @@ def is_session_window_open(exchange: str, order_type: str, now: datetime | None 
 def crypto_eod(expiry_date: date) -> datetime:
     """Return tz-aware UTC EOD for a crypto expiry (crypto trades 24/7)."""
     return datetime.combine(expiry_date, time(23, 59, 59), UTC)
+
+
+async def account_day_boundary_utc(db: object, account_id: object) -> datetime:
+    """Phase 10a [M2]: 00:00 UTC of "today" for the broker's primary market.
+
+    Stub returns UTC midnight regardless of account; refined in Phase 10a.5
+    once per-broker primary-exchange tz lookup lands. The signature accepts
+    ``db`` and ``account_id`` so the future tz-aware implementation can be
+    swapped in without touching callers.
+    """
+    now_utc = datetime.now(UTC)
+    return now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
