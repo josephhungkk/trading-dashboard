@@ -24,6 +24,7 @@ from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from app.brokers import base
 from app.core import metrics
 from app.services.ibkr_maintenance import compute_broker_maintenance
+from app.services.pnl_intraday_writer import PnlIntradayWriter
 from app.services.quotes.base import canonical_id_components, country_for_exchange
 
 log = structlog.get_logger(__name__)
@@ -1493,6 +1494,69 @@ class BrokerDiscoverer:
                         "broker_discover_positions_overflow",
                         label=label,
                         account_number=account_number,
+                    )
+
+                # Phase 10a.5 A2.3: pnl_intraday fan-in.
+                # Source-field invariant (CRIT-1): realized_today MUST come from
+                # SUM(Position.realized_pnl_today), NOT Summary.realized_pnl
+                # (the latter is cumulative-since-open for IBKR).
+                # Multi-currency policy (HIGH-1): only positions whose
+                # realized_pnl_today.currency matches account.currency_base are
+                # summed; mismatched positions are dropped + counted.
+                #
+                # summary_updated_at is set to observation-time (now()) rather
+                # than threaded from the Summary fan-out — positions and summary
+                # are fetched in disjoint fan-outs in the current discoverer;
+                # the spec's "Summary.updated_at" path requires a refactor that
+                # is out of scope for A2.3. now() is conservative for staleness:
+                # the gate's WARN threshold (90s) still fires on real outages.
+                try:
+                    async with session.begin_nested():
+                        currency_row = (
+                            await session.execute(
+                                text("SELECT currency_base FROM broker_accounts WHERE id = :aid"),
+                                {"aid": account_id},
+                            )
+                        ).one_or_none()
+                        if currency_row is not None:
+                            account_currency = str(currency_row[0])
+                            matching = [
+                                p
+                                for p in positions
+                                if p.realized_pnl_today.currency == account_currency
+                                and p.unrealized_pnl.currency == account_currency
+                            ]
+                            skipped = len(positions) - len(matching)
+                            if skipped > 0:
+                                metrics.pnl_intraday_currency_skip_total.labels(
+                                    broker_id=resolved_broker_id,
+                                ).inc(skipped)
+                            realized_today_total = sum(
+                                (Decimal(p.realized_pnl_today.value) for p in matching),
+                                Decimal("0"),
+                            )
+                            unrealized_total = sum(
+                                (Decimal(p.unrealized_pnl.value) for p in matching),
+                                Decimal("0"),
+                            )
+                            writer = PnlIntradayWriter(session)
+                            await writer.upsert(
+                                account_id=account_id,
+                                realized_today=realized_today_total,
+                                unrealized=unrealized_total,
+                                currency=account_currency,
+                                summary_updated_at=datetime.now(UTC),
+                                source_label=label,
+                            )
+                            metrics.pnl_intraday_last_update_seconds.labels(
+                                account_id=str(account_id),
+                            ).set(0.0)
+                except DBAPIError as exc:
+                    metrics.pnl_intraday_upsert_failures_total.inc()
+                    log.warning(
+                        "pnl_intraday_upsert_failed",
+                        account_id=str(account_id),
+                        err=str(exc),
                     )
 
         # Phase 9.7 G1: refresh broker_poller_drift_seconds gauge for every

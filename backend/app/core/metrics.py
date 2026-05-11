@@ -614,3 +614,39 @@ broker_order_modify_total = Counter(
     labelnames=["label", "result"],
     registry=registry,
 )
+
+# ─── Phase 10a.5 A2 metrics — pnl_intraday pipeline ─────────────────────
+
+pnl_intraday_rows_total = Gauge(
+    "pnl_intraday_rows_total",
+    "Total pnl_intraday rows per account; growth-anomaly observability.",
+    labelnames=["account_id"],
+    registry=registry,
+)
+
+pnl_intraday_upsert_failures_total = Counter(
+    "pnl_intraday_upsert_failures_total",
+    "PnlIntradayWriter upsert failures (logged + dropped, not raised).",
+    registry=registry,
+)
+
+pnl_intraday_last_update_seconds = Gauge(
+    "pnl_intraday_last_update_seconds",
+    "Age (seconds) of newest pnl_intraday row per account; alert >90s.",
+    labelnames=["account_id"],
+    registry=registry,
+)
+
+pnl_intraday_currency_skip_total = Counter(
+    "pnl_intraday_currency_skip_total",
+    "Position rows dropped at writer due to currency mismatch vs currency_base.",
+    labelnames=["broker_id"],
+    registry=registry,
+)
+
+pnl_intraday_writer_source_drift_seconds = Gauge(
+    "pnl_intraday_writer_source_drift_seconds",
+    "Time-of-day at which each broker's intraday counter resets.",
+    labelnames=["broker_id"],
+    registry=registry,
+)
