@@ -78,8 +78,11 @@ class PnlIntradayWriter:
 
         Returns the number of rows deleted.
         """
+        # `(date - integer)` requires explicit integer cast on the param
+        # so asyncpg's prepared-statement type inference doesn't trip.
         sql = (
-            "DELETE FROM pnl_intraday WHERE day_start_utc < ((now() AT TIME ZONE 'UTC')::date - :d)"
+            "DELETE FROM pnl_intraday "
+            "WHERE day_start_utc < ((now() AT TIME ZONE 'UTC')::date - CAST(:d AS integer))"
         )
 
         result = await self._session.execute(text(sql), {"d": days})

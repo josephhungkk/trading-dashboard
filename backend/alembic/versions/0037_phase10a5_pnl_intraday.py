@@ -76,18 +76,11 @@ def upgrade() -> None:
         WHERE p.day_start_utc = (now() AT TIME ZONE 'UTC')::date
     """)
 
-    # DB H-1: CONCURRENTLY required for prod safety (spec mandate).
-    # CREATE INDEX CONCURRENTLY cannot run inside a transaction; switch the
-    # bind to autocommit isolation for this one DDL.
-    bind = op.get_bind()
-    bind = bind.execution_options(isolation_level="AUTOCOMMIT")
-    bind.execute(
-        sa.text(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-            "idx_risk_decisions_verdict_time "
-            "ON risk_decisions (verdict, evaluated_at DESC)"
-        )
-    )
+    # DB H-1: CONCURRENTLY index moved to 0037b for autocommit isolation.
+    # transaction_per_migration=True in env.py wraps this rev in BEGIN;
+    # CREATE INDEX CONCURRENTLY is illegal inside a transaction. The
+    # follow-up rev creates the index without a transaction wrapper.
+    pass
 
     # DB M-3: prune helper rejects retain_days < 1. Callers MUST pass days >= 30
     # (spec retention floor); the function itself enforces only the lower hard
@@ -115,7 +108,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS prune_risk_decisions_allow(int)")
-    op.execute("DROP INDEX IF EXISTS idx_risk_decisions_verdict_time")
+    # NB: idx_risk_decisions_verdict_time is owned by 0037b — let alembic
+    # downgrade through 0037b drop it first.
     op.execute("DROP VIEW IF EXISTS v_account_intraday_pnl")
     # DB L-2: downgrade stub keeps query-shape compat (staleness_s + summary_updated_at).
     op.execute("""

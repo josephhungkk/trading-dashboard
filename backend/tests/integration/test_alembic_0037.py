@@ -128,9 +128,12 @@ async def test_0037_view_exposes_staleness(session: AsyncSession) -> None:
         },
     )
 
+    # Phase 10a.5 DB M-4: view now projects staleness_s as float epoch
+    # directly (was INTERVAL `staleness`). risk_service query is also
+    # simpler — no EXTRACT wrapper at the read site.
     result = await s.execute(
         text(
-            "SELECT realized, unrealized, staleness "
+            "SELECT realized, unrealized, staleness_s "
             "FROM v_account_intraday_pnl WHERE account_id = :account_id"
         ),
         {"account_id": aid},
@@ -138,7 +141,7 @@ async def test_0037_view_exposes_staleness(session: AsyncSession) -> None:
     row = result.one()
     assert row.realized == Decimal("100")
     assert row.unrealized == Decimal("50")
-    assert row.staleness.total_seconds() >= 119
+    assert row.staleness_s >= 119.0
 
 
 @pytest.mark.asyncio

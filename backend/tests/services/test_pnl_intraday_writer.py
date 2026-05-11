@@ -139,18 +139,23 @@ async def test_prune_drops_old_rows(session: AsyncSession) -> None:
     aid = uuid4()
     await _seed_account(session, aid)
 
-    now = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    old_day = now - timedelta(days=45)
-    young_day = now - timedelta(days=5)
+    now_ts = datetime.now(UTC)
+    today = now_ts.date()
+    old_day = today - timedelta(days=45)
+    young_day = today - timedelta(days=5)
 
     insert_sql = (
         "INSERT INTO pnl_intraday "
         "(account_id, day_start_utc, realized_today, unrealized, "
         " currency, summary_updated_at, source_label) "
-        "VALUES (:aid, :day, 0, 0, 'USD', :day, 'ibkr')"
+        "VALUES (:aid, :day, 0, 0, 'USD', :sua, 'ibkr')"
     )
-    await session.execute(text(insert_sql), {"aid": aid, "day": old_day})
-    await session.execute(text(insert_sql), {"aid": aid, "day": young_day})
+    await session.execute(
+        text(insert_sql), {"aid": aid, "day": old_day, "sua": now_ts - timedelta(days=45)}
+    )
+    await session.execute(
+        text(insert_sql), {"aid": aid, "day": young_day, "sua": now_ts - timedelta(days=5)}
+    )
 
     writer = PnlIntradayWriter(session)
     deleted = await writer.prune_older_than(days=30)
