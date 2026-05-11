@@ -7,7 +7,7 @@ on:
 
 jobs:
   nightly-alpaca-equity-e2e:
-    runs-on: [self-hosted, nuc]
+    runs-on: ubuntu-latest
     if: github.repository == 'josephhungkk/trading-dashboard'
     timeout-minutes: 15
     strategy:
@@ -17,6 +17,33 @@ jobs:
     env:
       ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
       ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
+      DATABASE_URL: postgresql+asyncpg://trader:ci@localhost:5432/dashboard
+      APP_SECRET_KEY: ci-secret-key-32-chars-minimum-req
+      APP_ENV: dev
+      APP_CORS_ORIGINS: '["http://localhost:5173"]'
+      POSTGRES_POOL_SIZE: '2'
+      POSTGRES_MAX_OVERFLOW: '2'
+      REDIS_PASSWORD: ci
+      REDIS_URL: redis://localhost:6379/0
+    services:
+      postgres:
+        image: timescale/timescaledb:2.26.4-pg18
+        env:
+          POSTGRES_USER: trader
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: dashboard
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U trader"
+          --health-interval 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
