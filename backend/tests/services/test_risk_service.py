@@ -318,3 +318,126 @@ async def test_max_daily_loss_realized_plus_unrealized_blocks(evaluation_ctx) ->
     assert warning is None
     assert blocker is not None
     assert blocker.code == "max_daily_loss_exceeded"
+
+
+# ─── B4: PDT (broker-reported + in-flight Redis counter) ────────────────
+
+
+def _pdt_warn_limit(*, warn_remaining: str) -> object:
+    """Build a RiskLimit row for ``pdt_warn_remaining`` cap kind.
+
+    Spec §1 #4 + §3 ENUM: ``pdt_warn_remaining.limit_value`` is the threshold
+    below which the gate WARNs. BLOCK is unconditional at remaining ≤ 0.
+    """
+    from app.models.risk import RiskLimit
+
+    return RiskLimit(
+        id=20,
+        scope_type="account",
+        scope_id="acct-id",
+        limit_kind="pdt_warn_remaining",
+        limit_value=Decimal(warn_remaining),
+        warn_at_pct=None,
+        is_active=True,
+        notes="",
+        updated_by="op",
+    )
+
+
+def _mock_session_for_pdt(*, cap_row: object | None) -> AsyncMock:
+    """Session whose execute() yields the cap-resolver result.
+
+    No DB calls beyond the cap walk; the in-flight counter and broker-reported
+    fall-back live on Redis + sidecar respectively.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    if cap_row is None:
+        none_result = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        session.execute = AsyncMock(side_effect=[none_result, none_result, none_result])
+        return session
+    cap_result = MagicMock(scalar_one_or_none=MagicMock(return_value=cap_row))
+    session.execute = AsyncMock(side_effect=[cap_result])
+    return session
+
+
+async def test_pdt_no_cap_allows(evaluation_ctx) -> None:
+    """No active ``pdt_warn_remaining`` cap → ALLOW (no risk evaluated)."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_pdt(cap_row=None)
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_pdt(evaluation_ctx)
+    assert res is None
+    assert db.execute.await_count == 3  # walked all 3 scopes
+
+
+async def test_pdt_inflight_counter_remaining_high_allows(evaluation_ctx) -> None:
+    """In-flight=5, warn_at=2 → 5 > 2 → ALLOW (no broker fallback)."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_pdt(cap_row=_pdt_warn_limit(warn_remaining="2"))
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value="5")  # inflight set
+    sidecar = AsyncMock()  # not consulted
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_pdt(evaluation_ctx)
+    assert res is None
+    sidecar.get_account_summary.assert_not_awaited()
+
+
+async def test_pdt_inflight_at_warn_threshold_warns(evaluation_ctx) -> None:
+    """In-flight=2, warn_at=2 → remaining ≤ warn → WARN."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_pdt(cap_row=_pdt_warn_limit(warn_remaining="2"))
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value="2")
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_pdt(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "pdt"
+    assert warning.value == 2.0
+    assert warning.threshold == 2.0
+
+
+async def test_pdt_inflight_zero_blocks(evaluation_ctx) -> None:
+    """In-flight=0 → BLOCK (PDT trade-count exhausted)."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_pdt(cap_row=_pdt_warn_limit(warn_remaining="2"))
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value="0")
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_pdt(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.check == "pdt"
+    assert blocker.code == "pdt_exhausted"
+
+
+async def test_pdt_inflight_unset_falls_back_to_broker_reported(evaluation_ctx) -> None:
+    """Counter unset → ``sidecar.get_account_summary`` provides ``dayTradesRemaining``.
+
+    broker_reported=1, warn_at=2 → 1 ≤ 2 → WARN (and not BLOCK because >0).
+    """
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_pdt(cap_row=_pdt_warn_limit(warn_remaining="2"))
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)  # inflight not set
+    sidecar = AsyncMock()
+    sidecar.get_account_summary = AsyncMock(return_value=MagicMock(day_trades_remaining=1))
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_pdt(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "pdt"
+    assert warning.value == 1.0
+    sidecar.get_account_summary.assert_awaited_once_with(evaluation_ctx.account_id)

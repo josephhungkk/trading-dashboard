@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.risk import AccountKillSwitch, RiskLimit
 from app.schemas.risk import GateBlockerEntry, GateVerdict, GateWarningEntry
+from app.services.risk_inflight_counters import inflight_pdt_remaining
 
 CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
 
@@ -209,6 +210,49 @@ class RiskService:
                         threshold=float(cap_value),
                     ),
                 )
+
+        return None
+
+    async def _check_pdt(self, ctx: EvaluationContext) -> CheckResult:
+        """B4: PDT remaining = in-flight Redis counter, fall back to broker.
+
+        Spec §1 #4 + H1. Cap kind ``pdt_warn_remaining.limit_value`` is the
+        threshold below which the gate WARNs; BLOCK is unconditional at
+        ``current <= 0``. Counter unset (cold cache) ⇒ fetch broker-reported
+        ``day_trades_remaining`` from ``sidecar.get_account_summary`` so the
+        gate stays decisive on first trade after a backend restart.
+        """
+        cap = await self._resolve_limit(ctx.account_id, ctx.broker_id, "pdt_warn_remaining")
+        if cap is None:
+            return None
+
+        current = await inflight_pdt_remaining(self._redis, ctx.account_id)
+        if current is None:
+            summary = await self._sidecar.get_account_summary(ctx.account_id)
+            current = int(summary.day_trades_remaining)
+
+        warn_remaining = int(cap.limit_value)
+
+        if current <= 0:
+            return (
+                GateBlockerEntry(
+                    check="pdt",
+                    message=f"day-trades remaining {current} ≤ 0",
+                    code="pdt_exhausted",
+                ),
+                None,
+            )
+
+        if current <= warn_remaining:
+            return (
+                None,
+                GateWarningEntry(
+                    check="pdt",
+                    message=(f"day-trades remaining {current} ≤ warn threshold {warn_remaining}"),
+                    value=float(current),
+                    threshold=float(warn_remaining),
+                ),
+            )
 
         return None
 
