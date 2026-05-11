@@ -524,6 +524,7 @@ async def _audit_risk_decision_modify_with_dedupe(
     request_id: str,
     order_id: UUID,
     conid: str,
+    attempt_kind: str,
 ) -> None:
     """Phase 10a.5 A5.1: modify-path mirror of the place-path dedupe helper."""
     if verdict.final_verdict == "allow":
@@ -535,7 +536,7 @@ async def _audit_risk_decision_modify_with_dedupe(
             was_set = True
         if not was_set:
             with contextlib.suppress(Exception):
-                metrics.risk_audit_dedupe_skipped_total.labels(attempt_kind="modify_order").inc()
+                metrics.risk_audit_dedupe_skipped_total.labels(attempt_kind=attempt_kind).inc()
             return
     await _audit_risk_decision_modify(
         db=db,
@@ -1035,6 +1036,7 @@ async def modify_order(
             request_id=risk_request_id,
             order_id=order_id,
             conid=str(row["conid"]),
+            attempt_kind="modify_order",
         )
         if risk_verdict.final_verdict == "block":
             raise PreviewUnavailable(
