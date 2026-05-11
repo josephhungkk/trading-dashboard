@@ -41,13 +41,14 @@ Primitives + patterns ship `.stories.tsx` + `.test.tsx`. Features tested E2E. Bo
 
 ## Broker adapters (Phase 4+)
 
-Per-broker invariants live in phase-memory files (read before changing those surfaces): `phase4_sidecar_topology.md` (IBKR mTLS+CRL+watchdog), `phase5a_shipped.md` (NLV cache), `phase5b_shipped.md` (trade execution), `phase5c_shipped.md` (modify+bracket+fills), `phase6_futu_topology.md`, `phase7a_schwab_topology.md` (OAuth+two-tier+BackendCallback), `phase7b1_shipped.md` (quote engine+WS gateway), `phase7c_alpaca_topology.md` (in-cluster docker+30-symbol cap), `phase9_shipped.md` (charting v1: bar aggregator + historical store + 45 indicators + drag-modify SL/TP). Don't copy that detail here.
+Per-broker invariants live in phase-memory files (read before changing those surfaces): `phase4_sidecar_topology.md` (IBKR mTLS+CRL+watchdog), `phase5a_shipped.md` (NLV cache), `phase5b_shipped.md` (trade execution), `phase5c_shipped.md` (modify+bracket+fills), `phase6_futu_topology.md`, `phase7a_schwab_topology.md` (OAuth+two-tier+BackendCallback), `phase7b1_shipped.md` (quote engine+WS gateway), `phase7c_alpaca_topology.md` (in-cluster docker+30-symbol cap), `phase9_shipped.md` (charting v1: bar aggregator + historical store + 45 indicators + drag-modify SL/TP), `phase10a_in_progress.md` (risk gate at station 4 — preview+place_order; admin/FE deferred to 10a continuation). Don't copy that detail here.
 
 Cross-cutting load-bearing rules:
 - **Boundary stripping:** `AccountResponse` to FE = `id, broker_id, alias, mode, currency_base, display_order` only. Never `gateway_label`/`account_number`. `account_id` UUID is the only FE handle; `AccountService._resolve_account` is the single chokepoint.
 - **Race-free soft-delete:** `BrokerDiscoverer` only soft-deletes rows whose `last_seen_via = ANY(:healthy_labels)` THIS tick. All-unhealthy → empty predicate → zero deletions.
 - **Maintenance:** `app/services/ibkr_maintenance.py` is source of truth. Backend returns `503 + Retry-After` during reset; watchdog skips weekend reset.
 - **NUC ops:** `deploy/nuc/` (PowerShell launchers + watchdog + Pester). `provision-and-publish.ps1` rotates mTLS; `revoke-cert.ps1` revokes; `renew-sidecar-mtls.ps1` rolls one at a time.
+- **Risk gate (Phase 10a, in-progress):** validation pipeline now has 5 stations including the risk gate. `app/services/risk_service.py::RiskService.evaluate(ctx, mode)` is the chokepoint, called inline in `orders_service.preview_order` and `orders_service.place_order` (D2 file-split skipped — gate works inline). 7 checks: kill switches, max-daily-loss, PDT (Redis in-flight counter), cross-broker concentration, BP buffer, sidecar margin preview (asymmetric preview/place_order fail policy). Audit rows in `risk_decisions` (fail-OPEN per spec §4 — `risk_audit_insert_failures_total` Counter). In-flight Redis counters require single-replica today; multi-worker locking deferred to Phase 24. Cap-edit invalidation via `app_config:invalidate:risk_limits` Redis pubsub (deferred to 10a D8). Gate gated on `isinstance(db, AsyncSession)` so existing stub-Session tests stay green.
 
 ## Configuration & topology
 

@@ -572,6 +572,49 @@ delivered subset and the deferred-blocked subset with reason per row.
 
 PDT counter, buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly / fixed-fractional / vol-target). Multi-account portfolio rollup. Pre-trade gate becomes mandatory chokepoint.
 
+### Phase 10a — Risk gate at station 4  *(in-progress · 2026-05-08 → 2026-05-11 · 25/30 commits since v0.11.0.1)*
+
+Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: `docs/superpowers/plans/2026-05-08-phase10a-risk-engine-plan.md`.
+
+**Chunk A — schema + ORM + Pydantic** *(complete)*
+- [x] A1 Alembic 0036 — risk_limits + account_kill_switches + risk_decisions + history triggers + v_account_intraday_pnl view (`0894edc`)
+- [x] A2 ORM models with __table_args__ CHECKs mirroring DB invariants (`1754660`)
+- [x] A3 Pydantic v2 schemas: GateVerdict + GateBlockerEntry + GateWarningEntry + RiskLimitOut + AccountKillSwitchOut (`deb58dc`)
+- [x] A4 Chunk-A reviewer fixes: 4 MED inline (`14f9f29`)
+
+**Chunk B — RiskService + 7 checks + aggregator** *(complete)*
+- [x] B1 RiskService skeleton + _resolve_limit walk (account → broker → global) (`5b00899`)
+- [x] B2 _check_account_kill_switch + _check_broker_kill_switch (composes Phase 5b H0) (`c902445`)
+- [x] B3 _check_max_daily_loss + intraday-pnl view stub (zero-stub until 10a.5) (`bb65a8c`)
+- [x] B4 _check_pdt + Redis in-flight counters module (H1 staleness window) (`d86b09f`)
+- [x] B5 _check_position_concentration cross-broker by instrument_id (H2) (`8988aaf`)
+- [x] B6 _check_buying_power with in-flight commitments (H3, qwen2.5-coder:14b draft) (`d26c265`)
+- [x] B7 _check_margin asymmetric preview/place_order policy (C3, H4, qwen2.5-coder:14b draft) (`6fe883c`)
+- [x] B8 evaluate aggregator (allow/warn/block precedence + fail-CLOSED on exception) (`a496e69`)
+- [x] B9 Chunk-B reviewer fixes: 4 HIGH + 4 MED inline (Redis-error WARN, SETNX cold-cache, Decimal counters, log.exception live frame) (`918e4f9`)
+
+**Chunk C — sidecar PreviewOrder RPCs** *(complete)*
+- [x] C1 proto add PreviewOrder rpc + Request/Response messages (Decimal-string money fields C2) (`7bc3133`)
+- [x] C2 sidecar_ibkr handler with whatIf + filledEvent.wait + LRU dedup (M7) (`b1f708b`)
+- [x] C3 sidecar_schwab handler + 60req/min separate token bucket (M8) (`450368f`)
+- [x] C4 sidecar_alpaca UNIMPLEMENTED stub (`c8d60ab`)
+- [x] C5 BrokerSidecarClient.preview_order with blake2b content-hash idempotency (M6) (`1c42b30`)
+- [x] C6 Chunk-C reviewer fixes: 1 CRIT + 7 HIGH + 4 MED inline (token bucket lock, raw_payload allowlist, OrderedDict LRU, per-key lock, accepted=False on TWS reject) (`72e7f41`)
+
+**Chunk D — orders_service gate insertion** *(2/9 done — load-bearing pieces shipped)*
+- [x] D3 RiskService.evaluate insert at station 4 in preview_order + PreviewResponse risk_warnings/risk_blockers fields (`03391b9`)
+- [x] D4 RiskService.evaluate insert at station 4 in place_order + audit row + risk_audit_insert_failures_total metric (`34a170e`)
+- D2 (orders_service.py file-split) **intentionally skipped** per "no abstractions beyond what the task requires" — high blast-radius refactor with 30+ importers; gate works inline.
+- D5-D8 **deferred to Phase 10a continuation session:** modify_order gate mirror; FE/BE BrokerCapabilities reconcile; integration tests (audit + admin + chaos); /api/risk read APIs + /api/admin/risk-limits CRUD with CSRF.
+
+**Chunks E (FE) + F (close-out)** *(deferred to Phase 10a continuation session)*
+- E1-E4: /admin/risk + /admin/account-status pages; banner integration in order ticket; type regen.
+- F1-F5: invariant docs (CLAUDE.md cross-cutting); CHANGELOG; v0.12.0 tag.
+
+**Phase 10a current test posture (HEAD `34a170e`):** backend 139 + IBKR 232 + Schwab 209 green; mypy --strict clean across modified surfaces.
+
+**Phase 10a.5 backlog:** conid → instrument_id resolver wiring; test stub upgrades (drop isinstance(db, AsyncSession) gate); counter decrement at gate-pass + revert on dispatch failure; audit row on ALLOW/WARN paths; v_account_intraday_pnl backed by sidecar PnL pipeline; multi-worker uvicorn with Redis Lua locks (Phase 24).
+
 ## Phase 11 — AI router + Alerts + Telegram
 
 Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` module any subsystem can call. Price/condition alerts engine. Telegram bot. Prompt-cost tracking.
