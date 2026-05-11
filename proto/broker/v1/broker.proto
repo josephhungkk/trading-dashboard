@@ -40,6 +40,38 @@ service Broker {
   // and pre-warm; sidecar chunks/paces internally per broker SDK quotas.
   // See docs/superpowers/specs/2026-05-07-phase9-charting-design.md §4 lines 622-645.
   rpc GetHistoricalBars(GetHistoricalBarsRequest) returns (GetHistoricalBarsResponse);
+  // Phase 10a — pre-trade margin/risk preview RPC. IBKR uses ib_async
+  // placeOrder(whatIf=True) + filledEvent.wait; Schwab uses POST
+  // /trader/v1/accounts/{accountHash}/previewOrder; Alpaca returns
+  // UNIMPLEMENTED. Money fields are Decimal-strings per [C2].
+  // Spec: docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md §5.
+  rpc PreviewOrder(PreviewOrderRequest) returns (PreviewOrderResponse);
+}
+
+// Phase 10a — PreviewOrder messages (spec §5).
+message PreviewOrderRequest {
+  string account_hash    = 1;
+  string side            = 2; // "buy" | "sell" — matches risk_service EvaluationContext.side
+  string symbol          = 3; // canonical/instrument symbol
+  string asset_class     = 4; // "STOCK" | "ETF" | "OPTION" | ...
+  string order_type      = 5; // "MKT" | "LMT" | "STP" | "STP_LMT"
+  string time_in_force   = 6; // "DAY" | "GTC" | ...
+  string qty             = 7; // Decimal-string [C2]
+  optional string limit_price = 8; // Decimal-string [C2]
+  optional string stop_price  = 9; // Decimal-string [C2]
+  string idempotency_key = 10; // blake2b content-hash; "preview:" prefix [M6]
+}
+
+message PreviewOrderResponse {
+  bool   accepted               = 1;
+  string reject_reason          = 2;
+  optional string initial_margin     = 3;  // Decimal-string [C2]
+  optional string maintenance_margin = 4;  // Decimal-string [C2]
+  optional string commission         = 5;  // Decimal-string [C2]
+  optional string available_funds_after = 6;  // Decimal-string [C2]
+  optional string buying_power_after = 7;  // Decimal-string [C2]
+  repeated string warnings           = 8;
+  string raw_provider_payload        = 9;
 }
 
 message GetHistoricalBarsRequest {

@@ -1,9 +1,12 @@
+import datetime
+
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -124,6 +127,52 @@ FILLED: OrderStatus
 CANCELLED: OrderStatus
 REJECTED: OrderStatus
 
+class PreviewOrderRequest(_message.Message):
+    __slots__ = ("account_hash", "side", "symbol", "asset_class", "order_type", "time_in_force", "qty", "limit_price", "stop_price", "idempotency_key")
+    ACCOUNT_HASH_FIELD_NUMBER: _ClassVar[int]
+    SIDE_FIELD_NUMBER: _ClassVar[int]
+    SYMBOL_FIELD_NUMBER: _ClassVar[int]
+    ASSET_CLASS_FIELD_NUMBER: _ClassVar[int]
+    ORDER_TYPE_FIELD_NUMBER: _ClassVar[int]
+    TIME_IN_FORCE_FIELD_NUMBER: _ClassVar[int]
+    QTY_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_PRICE_FIELD_NUMBER: _ClassVar[int]
+    STOP_PRICE_FIELD_NUMBER: _ClassVar[int]
+    IDEMPOTENCY_KEY_FIELD_NUMBER: _ClassVar[int]
+    account_hash: str
+    side: str
+    symbol: str
+    asset_class: str
+    order_type: str
+    time_in_force: str
+    qty: str
+    limit_price: str
+    stop_price: str
+    idempotency_key: str
+    def __init__(self, account_hash: _Optional[str] = ..., side: _Optional[str] = ..., symbol: _Optional[str] = ..., asset_class: _Optional[str] = ..., order_type: _Optional[str] = ..., time_in_force: _Optional[str] = ..., qty: _Optional[str] = ..., limit_price: _Optional[str] = ..., stop_price: _Optional[str] = ..., idempotency_key: _Optional[str] = ...) -> None: ...
+
+class PreviewOrderResponse(_message.Message):
+    __slots__ = ("accepted", "reject_reason", "initial_margin", "maintenance_margin", "commission", "available_funds_after", "buying_power_after", "warnings", "raw_provider_payload")
+    ACCEPTED_FIELD_NUMBER: _ClassVar[int]
+    REJECT_REASON_FIELD_NUMBER: _ClassVar[int]
+    INITIAL_MARGIN_FIELD_NUMBER: _ClassVar[int]
+    MAINTENANCE_MARGIN_FIELD_NUMBER: _ClassVar[int]
+    COMMISSION_FIELD_NUMBER: _ClassVar[int]
+    AVAILABLE_FUNDS_AFTER_FIELD_NUMBER: _ClassVar[int]
+    BUYING_POWER_AFTER_FIELD_NUMBER: _ClassVar[int]
+    WARNINGS_FIELD_NUMBER: _ClassVar[int]
+    RAW_PROVIDER_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    accepted: bool
+    reject_reason: str
+    initial_margin: str
+    maintenance_margin: str
+    commission: str
+    available_funds_after: str
+    buying_power_after: str
+    warnings: _containers.RepeatedScalarFieldContainer[str]
+    raw_provider_payload: str
+    def __init__(self, accepted: bool = ..., reject_reason: _Optional[str] = ..., initial_margin: _Optional[str] = ..., maintenance_margin: _Optional[str] = ..., commission: _Optional[str] = ..., available_funds_after: _Optional[str] = ..., buying_power_after: _Optional[str] = ..., warnings: _Optional[_Iterable[str]] = ..., raw_provider_payload: _Optional[str] = ...) -> None: ...
+
 class GetHistoricalBarsRequest(_message.Message):
     __slots__ = ("canonical_id", "timeframe", "range_start", "range_end", "limit")
     CANONICAL_ID_FIELD_NUMBER: _ClassVar[int]
@@ -136,7 +185,7 @@ class GetHistoricalBarsRequest(_message.Message):
     range_start: _timestamp_pb2.Timestamp
     range_end: _timestamp_pb2.Timestamp
     limit: int
-    def __init__(self, canonical_id: _Optional[str] = ..., timeframe: _Optional[str] = ..., range_start: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., range_end: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., limit: _Optional[int] = ...) -> None: ...
+    def __init__(self, canonical_id: _Optional[str] = ..., timeframe: _Optional[str] = ..., range_start: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., range_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., limit: _Optional[int] = ...) -> None: ...
 
 class GetHistoricalBarsResponse(_message.Message):
     __slots__ = ("bars", "truncated")
@@ -162,7 +211,7 @@ class HistoricalBar(_message.Message):
     close: str
     volume: str
     trade_count: int
-    def __init__(self, bucket_start: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., open: _Optional[str] = ..., high: _Optional[str] = ..., low: _Optional[str] = ..., close: _Optional[str] = ..., volume: _Optional[str] = ..., trade_count: _Optional[int] = ...) -> None: ...
+    def __init__(self, bucket_start: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., open: _Optional[str] = ..., high: _Optional[str] = ..., low: _Optional[str] = ..., close: _Optional[str] = ..., volume: _Optional[str] = ..., trade_count: _Optional[int] = ...) -> None: ...
 
 class Empty(_message.Message):
     __slots__ = ()
@@ -188,7 +237,7 @@ class HealthResponse(_message.Message):
     sidecar_version: str
     started_at: _timestamp_pb2.Timestamp
     broker_id: str
-    def __init__(self, label: _Optional[str] = ..., gateway_connected: bool = ..., gateway_version: _Optional[str] = ..., last_tick_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., sidecar_version: _Optional[str] = ..., started_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., broker_id: _Optional[str] = ...) -> None: ...
+    def __init__(self, label: _Optional[str] = ..., gateway_connected: bool = ..., gateway_version: _Optional[str] = ..., last_tick_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., sidecar_version: _Optional[str] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., broker_id: _Optional[str] = ...) -> None: ...
 
 class Account(_message.Message):
     __slots__ = ("account_number", "mode", "gateway_label", "currency_base", "account_hash")
@@ -238,7 +287,7 @@ class Summary(_message.Message):
     unrealized_pnl: Money
     buying_power: Money
     updated_at: _timestamp_pb2.Timestamp
-    def __init__(self, net_liquidation: _Optional[_Union[Money, _Mapping]] = ..., total_cash: _Optional[_Union[Money, _Mapping]] = ..., realized_pnl: _Optional[_Union[Money, _Mapping]] = ..., unrealized_pnl: _Optional[_Union[Money, _Mapping]] = ..., buying_power: _Optional[_Union[Money, _Mapping]] = ..., updated_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    def __init__(self, net_liquidation: _Optional[_Union[Money, _Mapping]] = ..., total_cash: _Optional[_Union[Money, _Mapping]] = ..., realized_pnl: _Optional[_Union[Money, _Mapping]] = ..., unrealized_pnl: _Optional[_Union[Money, _Mapping]] = ..., buying_power: _Optional[_Union[Money, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class SummaryResponse(_message.Message):
     __slots__ = ("summary",)
@@ -342,7 +391,7 @@ class Order(_message.Message):
     trail_offset_type: str
     trail_limit_offset: str
     expiry_date: str
-    def __init__(self, order_id: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., quantity: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., time_in_force: _Optional[_Union[TimeInForce, str]] = ..., status: _Optional[_Union[OrderStatus, str]] = ..., quantity_filled: _Optional[str] = ..., avg_fill_price: _Optional[_Union[Money, _Mapping]] = ..., submitted_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., avg_fill_price_inferred: bool = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
+    def __init__(self, order_id: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., quantity: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., time_in_force: _Optional[_Union[TimeInForce, str]] = ..., status: _Optional[_Union[OrderStatus, str]] = ..., quantity_filled: _Optional[str] = ..., avg_fill_price: _Optional[_Union[Money, _Mapping]] = ..., submitted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., avg_fill_price_inferred: bool = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
 
 class OrdersResponse(_message.Message):
     __slots__ = ("orders",)
@@ -498,7 +547,7 @@ class OrderEventMessage(_message.Message):
     raw_payload: str
     exec_id: str
     kind: str
-    def __init__(self, broker_order_id: _Optional[str] = ..., client_order_id: _Optional[str] = ..., status: _Optional[str] = ..., filled_qty: _Optional[str] = ..., avg_fill_price: _Optional[str] = ..., event_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., raw_payload: _Optional[str] = ..., exec_id: _Optional[str] = ..., kind: _Optional[str] = ...) -> None: ...
+    def __init__(self, broker_order_id: _Optional[str] = ..., client_order_id: _Optional[str] = ..., status: _Optional[str] = ..., filled_qty: _Optional[str] = ..., avg_fill_price: _Optional[str] = ..., event_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., raw_payload: _Optional[str] = ..., exec_id: _Optional[str] = ..., kind: _Optional[str] = ...) -> None: ...
 
 class SearchContractsRequest(_message.Message):
     __slots__ = ("query", "asset_class")
@@ -563,7 +612,7 @@ class StreamQuotesRequest(_message.Message):
         TICK_COUNT_RECEIVED_FIELD_NUMBER: _ClassVar[int]
         client_time: _timestamp_pb2.Timestamp
         tick_count_received: int
-        def __init__(self, client_time: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., tick_count_received: _Optional[int] = ...) -> None: ...
+        def __init__(self, client_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., tick_count_received: _Optional[int] = ...) -> None: ...
     class Resync(_message.Message):
         __slots__ = ("expected",)
         EXPECTED_FIELD_NUMBER: _ClassVar[int]
@@ -631,7 +680,7 @@ class QuoteMessage(_message.Message):
     is_delayed: bool
     delay_seconds: int
     raw_payload: bytes
-    def __init__(self, canonical_id: _Optional[str] = ..., tick_time: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., received_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., source: _Optional[str] = ..., last: _Optional[str] = ..., bid: _Optional[str] = ..., ask: _Optional[str] = ..., volume: _Optional[str] = ..., day_high: _Optional[str] = ..., day_low: _Optional[str] = ..., open: _Optional[str] = ..., prev_close: _Optional[str] = ..., change_pct: _Optional[str] = ..., change: _Optional[str] = ..., is_delayed: bool = ..., delay_seconds: _Optional[int] = ..., raw_payload: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, canonical_id: _Optional[str] = ..., tick_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., received_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., source: _Optional[str] = ..., last: _Optional[str] = ..., bid: _Optional[str] = ..., ask: _Optional[str] = ..., volume: _Optional[str] = ..., day_high: _Optional[str] = ..., day_low: _Optional[str] = ..., open: _Optional[str] = ..., prev_close: _Optional[str] = ..., change_pct: _Optional[str] = ..., change: _Optional[str] = ..., is_delayed: bool = ..., delay_seconds: _Optional[int] = ..., raw_payload: _Optional[bytes] = ...) -> None: ...
 
 class TokenRefreshRequest(_message.Message):
     __slots__ = ("broker_id",)
@@ -647,4 +696,4 @@ class TokenRefreshResponse(_message.Message):
     access_token: str
     refresh_token: str
     access_issued_at: _timestamp_pb2.Timestamp
-    def __init__(self, access_token: _Optional[str] = ..., refresh_token: _Optional[str] = ..., access_issued_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    def __init__(self, access_token: _Optional[str] = ..., refresh_token: _Optional[str] = ..., access_issued_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
