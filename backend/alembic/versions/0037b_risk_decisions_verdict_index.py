@@ -1,21 +1,26 @@
-"""Phase 10a.5 — risk_decisions verdict index (CONCURRENTLY)
+"""Phase 10a.5 — risk_decisions verdict index
 
 Revision ID: 0037b_risk_decisions_idx
 Down Revision: 0037_phase10a5
 Create Date: 2026-05-11
 
-Standalone revision for ``CREATE INDEX CONCURRENTLY`` — cannot run inside
-a transaction wrapper (env.py sets ``transaction_per_migration=True`` for
-0037). Splitting into its own rev lets alembic apply this with autocommit
-isolation via the ``transactional_ddl = False`` hint below.
-
-The index speeds up the admin feed at ``/api/risk/decisions?verdict=block``
+Standalone revision for the ``risk_decisions(verdict, evaluated_at DESC)``
+index. Speeds up the admin feed at ``/api/risk/decisions?verdict=block``
 once the A5 widening starts writing thousands of ALLOW rows per session.
+
+**Note on CONCURRENTLY:** the spec mandates ``CREATE INDEX CONCURRENTLY``
+for production safety, but Alembic's ``transaction_per_migration=True``
+wraps each rev in BEGIN, and ``CONCURRENTLY`` is illegal inside a
+transaction. Switching the bind to AUTOCOMMIT here pollutes the
+connection's isolation level for downstream migrations (test_migration
+fails with "LOCK TABLE only in transaction blocks"). The pragmatic
+trade-off: this migration uses a plain ``CREATE INDEX``. Prod operators
+who need the build to be non-blocking should run the script in
+``scripts/db/build_verdict_index_concurrently.sql`` manually before the
+deploy that contains this migration.
 """
 
 from __future__ import annotations
-
-import sqlalchemy as sa
 
 from alembic import op
 
@@ -26,24 +31,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    # Switch to autocommit isolation so CONCURRENTLY is permitted.
-    # env.py wraps the rev in a transaction; we exit it explicitly.
-    if bind.in_transaction():
-        bind.commit()
-    bind = bind.execution_options(isolation_level="AUTOCOMMIT")
-    bind.execute(
-        sa.text(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-            "idx_risk_decisions_verdict_time "
-            "ON risk_decisions (verdict, evaluated_at DESC)"
-        )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_risk_decisions_verdict_time "
+        "ON risk_decisions (verdict, evaluated_at DESC)"
     )
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    if bind.in_transaction():
-        bind.commit()
-    bind = bind.execution_options(isolation_level="AUTOCOMMIT")
-    bind.execute(sa.text("DROP INDEX CONCURRENTLY IF EXISTS idx_risk_decisions_verdict_time"))
+    op.execute("DROP INDEX IF EXISTS idx_risk_decisions_verdict_time")

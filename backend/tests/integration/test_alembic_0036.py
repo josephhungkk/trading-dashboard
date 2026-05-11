@@ -195,9 +195,10 @@ async def test_0036_account_kill_switch_history_trigger(
 async def test_0036_creates_intraday_pnl_view(db_session: AsyncSession) -> None:
     """B3 [M2]: v_account_intraday_pnl exists and yields the contract columns.
 
-    Stub view returns zeros until Phase 10a.5 wires sidecar PnL into the
-    fills/positions tables. The structural shape (account_id, day_start_utc,
-    realized, unrealized) is the contract _check_max_daily_loss queries.
+    Phase 10a.5 0037 rewrote the view to read from pnl_intraday and added
+    summary_updated_at + staleness_s. The Phase 10a stub (zero realized /
+    unrealized for every account) is gone; the view only returns rows where
+    pnl_intraday has an entry for the current UTC day.
     """
     cols = (
         (
@@ -212,13 +213,11 @@ async def test_0036_creates_intraday_pnl_view(db_session: AsyncSession) -> None:
         .scalars()
         .all()
     )
-    assert cols == ["account_id", "day_start_utc", "realized", "unrealized"]
-    # Stub returns zero realized/unrealized for any account that exists.
-    sample = (
-        await db_session.execute(
-            text("SELECT realized, unrealized FROM v_account_intraday_pnl LIMIT 1")
-        )
-    ).first()
-    if sample is not None:  # dev DB has accounts seeded; CI clean DB may not
-        assert sample[0] == 0
-        assert sample[1] == 0
+    assert cols == [
+        "account_id",
+        "day_start_utc",
+        "realized",
+        "unrealized",
+        "summary_updated_at",
+        "staleness_s",
+    ]
