@@ -37,13 +37,20 @@ class _ConfigProto(Protocol):
 
 
 class _RedisProto(Protocol):
-    """Minimal protocol for the Redis dependency this service needs."""
+    """Minimal protocol for the Redis dependency this service needs.
+
+    ``incrbyfloat`` widens to ``Decimal | float`` because the project uses
+    Decimal for money everywhere; the counter module passes a Decimal-cast
+    float at the wire boundary.
+    """
 
     async def get(self, key: str) -> Any: ...
-    async def set(self, key: str, value: str, *, ex: int | None = None) -> Any: ...
+    async def set(
+        self, key: str, value: str, *, ex: int | None = None, nx: bool = False
+    ) -> Any: ...
     async def decr(self, key: str) -> Any: ...
     async def incr(self, key: str) -> Any: ...
-    async def incrbyfloat(self, key: str, amount: float) -> Any: ...
+    async def incrbyfloat(self, key: str, amount: Decimal | float) -> Any: ...
 
 
 class _SidecarProto(Protocol):
@@ -254,7 +261,7 @@ class RiskService:
 
         summary = await self._sidecar.get_account_summary(ctx.account_id)
         nlv = Decimal(summary.nlv_currency_base)
-        if nlv == 0:
+        if nlv == Decimal("0"):
             return None  # cannot compute % when NLV unknown / zero
 
         sign = Decimal("1") if ctx.side == "buy" else Decimal("-1")
@@ -324,7 +331,22 @@ class RiskService:
 
         summary = await self._sidecar.get_account_summary(ctx.account_id)
         bp_base = Decimal(summary.buying_power)
-        committed = Decimal(str(await inflight_bp_committed(self._redis, ctx.account_id)))
+        try:
+            committed = await inflight_bp_committed(self._redis, ctx.account_id)
+        except ConnectionError, OSError:
+            # Spec §4: Redis unreachable -> WARN; treat committed as broker
+            # truth (i.e. assume zero in-flight) rather than fail-CLOSED on
+            # operational hiccup. Counter is best-effort; broker BP is
+            # authoritative.
+            return (
+                None,
+                GateWarningEntry(
+                    check="buying_power",
+                    message="BP in-flight tracking degraded (Redis unreachable)",
+                    value=0.0,
+                    threshold=0.0,
+                ),
+            )
         effective_bp = bp_base - committed
 
         if order_notional > effective_bp:
@@ -373,7 +395,21 @@ class RiskService:
         if cap is None:
             return None
 
-        current = await inflight_pdt_remaining(self._redis, ctx.account_id)
+        try:
+            current = await inflight_pdt_remaining(self._redis, ctx.account_id)
+        except ConnectionError, OSError:
+            # Spec §4: Redis unreachable -> WARN "PDT/BP in-flight tracking
+            # degraded", broker truth is authoritative. Don't fail-CLOSED on
+            # operational Redis hiccup.
+            return (
+                None,
+                GateWarningEntry(
+                    check="pdt",
+                    message="PDT in-flight tracking degraded (Redis unreachable)",
+                    value=0.0,
+                    threshold=0.0,
+                ),
+            )
         if current is None:
             summary = await self._sidecar.get_account_summary(ctx.account_id)
             current = int(summary.day_trades_remaining)
@@ -518,7 +554,13 @@ class RiskService:
         warnings: list[GateWarningEntry] = []
         for r in [*fast_results, margin_result]:
             if isinstance(r, BaseException):
-                log.exception("risk.check_raised", exc_info=r)
+                # Re-raise into a live exception frame so structlog's
+                # log.exception captures the traceback (passing exc_info=r
+                # as a kwarg without a live frame yields no stack trace).
+                try:
+                    raise r
+                except BaseException:
+                    log.exception("risk.check_raised")
                 blockers.append(
                     GateBlockerEntry(
                         check="evaluator",

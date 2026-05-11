@@ -15,6 +15,7 @@ locking before scaling out.
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -81,3 +82,102 @@ async def test_reconcile_pdt_writes_with_120s_ttl(account_id: uuid.UUID) -> None
     redis.set = AsyncMock(return_value=True)
     await reconcile_pdt(redis, account_id, broker_reported=4)
     redis.set.assert_awaited_once_with(f"risk:pdt:{account_id}", "4", ex=120)
+
+
+# ─── B9 reviewer findings: PDT cold-cache SETNX + BP counter tests ──────
+
+
+async def test_decrement_pdt_seeds_cold_cache_via_setnx(account_id: uuid.UUID) -> None:
+    """Cold cache + broker_reported -> SET NX EX 86400 then DECR.
+
+    Without the SETNX seed, Redis DECR auto-initialises the key to 0 then
+    decrements to -1, which would falsely BLOCK every trade until reconcile.
+    """
+    from app.services.risk_inflight_counters import _PDT_TTL_SEC, decrement_pdt
+
+    redis = AsyncMock()
+    redis.set = AsyncMock(return_value=True)
+    redis.decr = AsyncMock(return_value=2)
+    got = await decrement_pdt(redis, account_id, broker_reported=3)
+    assert got == 2
+    redis.set.assert_awaited_once_with(f"risk:pdt:{account_id}", "3", ex=_PDT_TTL_SEC, nx=True)
+    redis.decr.assert_awaited_once_with(f"risk:pdt:{account_id}")
+
+
+async def test_decrement_pdt_without_broker_reported_skips_seed(account_id: uuid.UUID) -> None:
+    """No broker_reported -> no SETNX (caller is responsible for reconcile-first)."""
+    from app.services.risk_inflight_counters import decrement_pdt
+
+    redis = AsyncMock()
+    redis.set = AsyncMock(return_value=True)
+    redis.decr = AsyncMock(return_value=-1)
+    got = await decrement_pdt(redis, account_id)
+    assert got == -1
+    redis.set.assert_not_awaited()
+
+
+# ─── BP counter tests (B9 finding: zero coverage on commit_bp/revert_bp/etc.)
+
+
+async def test_commit_bp_returns_decimal_post_commit(account_id: uuid.UUID) -> None:
+    """``commit_bp`` adds notional via INCRBYFLOAT and returns Decimal."""
+
+    from app.services.risk_inflight_counters import commit_bp
+
+    redis = AsyncMock()
+    redis.incrbyfloat = AsyncMock(return_value=15000.0)
+    got = await commit_bp(redis, account_id, Decimal("15000"))
+    assert got == Decimal("15000")
+    assert isinstance(got, Decimal)
+    redis.incrbyfloat.assert_awaited_once_with(f"risk:bp_committed:{account_id}", 15000.0)
+
+
+async def test_revert_bp_subtracts_via_negative_incrbyfloat(account_id: uuid.UUID) -> None:
+    """``revert_bp`` passes -notional to INCRBYFLOAT (subtraction idiom)."""
+
+    from app.services.risk_inflight_counters import revert_bp
+
+    redis = AsyncMock()
+    redis.incrbyfloat = AsyncMock(return_value=0.0)
+    got = await revert_bp(redis, account_id, Decimal("15000"))
+    assert got == Decimal("0")
+    assert isinstance(got, Decimal)
+    # Critical: the wire arg must be NEGATIVE.
+    redis.incrbyfloat.assert_awaited_once_with(f"risk:bp_committed:{account_id}", -15000.0)
+
+
+async def test_inflight_bp_committed_returns_decimal_zero_when_unset(
+    account_id: uuid.UUID,
+) -> None:
+    """Cold cache -> Decimal('0') (not None, not float 0.0)."""
+
+    from app.services.risk_inflight_counters import inflight_bp_committed
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    got = await inflight_bp_committed(redis, account_id)
+    assert got == Decimal("0")
+    assert isinstance(got, Decimal)
+
+
+async def test_inflight_bp_committed_returns_decimal_when_set(account_id: uuid.UUID) -> None:
+    """Set value -> Decimal(stringified value)."""
+
+    from app.services.risk_inflight_counters import inflight_bp_committed
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value="40000.50")
+    got = await inflight_bp_committed(redis, account_id)
+    assert got == Decimal("40000.50")
+    assert isinstance(got, Decimal)
+
+
+async def test_reconcile_bp_committed_writes_with_120s_ttl(account_id: uuid.UUID) -> None:
+    """``reconcile_bp_committed`` SETs broker BP with 120s TTL."""
+
+    from app.services.risk_inflight_counters import reconcile_bp_committed
+
+    redis = AsyncMock()
+    redis.set = AsyncMock(return_value=True)
+    await reconcile_bp_committed(redis, account_id, broker_reported=Decimal("12345.67"))
+    redis.set.assert_awaited_once_with(f"risk:bp_committed:{account_id}", "12345.67", ex=120)

@@ -480,7 +480,14 @@ def _mock_session_for_concentration(
         session.execute = AsyncMock(side_effect=[none_result, none_result, none_result])
         return session
     cap_result = MagicMock(scalar_one_or_none=MagicMock(return_value=cap_row))
-    sum_result = MagicMock(scalar=MagicMock(return_value=sum_value or Decimal("0")))
+    # Note: positions SUM uses .scalar() (single-row aggregate via COALESCE),
+    # NOT .scalar_one_or_none() like the cap-resolver lookups. Mock both
+    # accessors so a future change to the production call site doesn't
+    # silently pass while breaking in production.
+    sum_result = MagicMock(
+        scalar=MagicMock(return_value=sum_value or Decimal("0")),
+        scalar_one_or_none=MagicMock(return_value=sum_value or Decimal("0")),
+    )
     session.execute = AsyncMock(side_effect=[cap_result, sum_result])
     return session
 
@@ -859,6 +866,110 @@ async def test_margin_unimplemented_warns_either_mode(evaluation_ctx) -> None:
         assert warning is not None
         assert warning.check == "margin"
         assert "unavailable" in warning.message.lower()
+
+
+async def test_margin_non_unimplemented_grpc_raises(evaluation_ctx) -> None:
+    """gRPC error other than UNIMPLEMENTED (e.g. UNAVAILABLE) is re-raised by
+    _check_margin so the aggregator can convert it to evaluator_error."""
+    import grpc
+
+    from app.services.risk_service import RiskService
+
+    class _UnavailableErr(grpc.aio.AioRpcError):  # type: ignore[misc]
+        def __init__(self) -> None:
+            # Skip parent __init__ (demands real Status objects); stub the
+            # accessors the gate code touches.
+            pass
+
+        def code(self) -> grpc.StatusCode:
+            return grpc.StatusCode.UNAVAILABLE
+
+        def details(self) -> str:
+            return "broker connection lost"
+
+        def __str__(self) -> str:
+            return "AioRpcError(UNAVAILABLE): broker connection lost"
+
+    sidecar = AsyncMock()
+    sidecar.preview_order = AsyncMock(side_effect=_UnavailableErr())
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    with pytest.raises(grpc.aio.AioRpcError):
+        await svc._check_margin(evaluation_ctx, mode="preview")
+
+
+async def test_evaluate_non_unimplemented_grpc_becomes_evaluator_error(evaluation_ctx) -> None:
+    """The aggregator catches re-raised gRPC errors via except BaseException."""
+    import grpc
+
+    from app.services.risk_service import RiskService
+
+    class _UnavailableErr(grpc.aio.AioRpcError):  # type: ignore[misc]
+        def __init__(self) -> None:
+            # Skip parent __init__ (demands real Status objects); stub the
+            # accessors the gate code touches.
+            pass
+
+        def code(self) -> grpc.StatusCode:
+            return grpc.StatusCode.UNAVAILABLE
+
+        def details(self) -> str:
+            return "broker connection lost"
+
+        def __str__(self) -> str:
+            return "AioRpcError(UNAVAILABLE): broker connection lost"
+
+    sidecar = AsyncMock()
+    sidecar.preview_order = AsyncMock(side_effect=_UnavailableErr())
+    sidecar.get_account_summary = AsyncMock(
+        return_value=MagicMock(buying_power="100000", nlv_currency_base="200000")
+    )
+    svc = RiskService(
+        db=_all_checks_allow_session(),
+        redis=AsyncMock(),
+        config=AsyncMock(get_bool=AsyncMock(return_value=False)),
+        sidecar=sidecar,
+    )
+    verdict = await svc.evaluate(evaluation_ctx, mode="preview")
+    assert verdict.final_verdict == "block"
+    assert any(b.code == "evaluator_error" for b in verdict.blockers)
+    assert any("AioRpcError" in b.message or "Unavailable" in b.message for b in verdict.blockers)
+
+
+# ─── B9 reviewer findings: PDT/BP Redis-error WARN paths ────────────────
+
+
+async def test_pdt_redis_unreachable_warns(evaluation_ctx) -> None:
+    """Spec §4: Redis ConnectionError -> WARN, not BLOCK (operational hiccup)."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_pdt(cap_row=_pdt_warn_limit(warn_remaining="2"))
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=ConnectionError("redis down"))
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_pdt(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "pdt"
+    assert "degraded" in warning.message.lower()
+
+
+async def test_bp_redis_unreachable_warns(evaluation_ctx) -> None:
+    """Spec §4: Redis ConnectionError -> WARN, not BLOCK."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_bp(cap_row=_bp_buffer_limit(value="10"))
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=OSError("connection reset"))
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=_sidecar_with_bp("100000"))
+    res = await svc._check_buying_power(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "buying_power"
+    assert "degraded" in warning.message.lower()
 
 
 # ─── B8: evaluate() aggregator (verdict precedence) ─────────────────────
