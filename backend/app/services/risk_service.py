@@ -29,6 +29,9 @@ from app.services.risk_inflight_counters import inflight_bp_committed, inflight_
 
 CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
 
+# Phase 10a.5 A3.1 (CRIT-2): 3x the 30s discoverer cycle (brokers.py:1036).
+_STALENESS_WARN_SECONDS = 90.0
+
 
 class _ConfigProto(Protocol):
     """Minimal protocol for the ConfigService dependency this service needs."""
@@ -172,9 +175,10 @@ class RiskService:
 
         Spec §1 #3. Cap kind ``max_daily_loss_currency_base`` resolved via the
         account → broker → global walk. View ``v_account_intraday_pnl`` returns
-        a ``(realized, unrealized)`` row per account; until Phase 10a.5 wires
-        sidecar PnL into ``fills`` / ``positions`` the view yields zeros (see
-        migration 0036 comment block).
+        a ``(realized, unrealized, summary_updated_at, staleness)`` row per
+        account when fresh data exists. Phase 10a.5 §4 CRIT-2: missing row OR
+        staleness > 90s (3x discoverer cycle) -> WARN with code
+        ``max_daily_loss_pnl_stale`` — informational only, not silent ALLOW.
 
         Sign convention: realized + unrealized are signed (negative = loss).
         ``loss_today = -(realized + unrealized)``; positive when underwater.
@@ -189,14 +193,32 @@ class RiskService:
         row = (
             await self._db.execute(
                 text(
-                    "SELECT realized, unrealized FROM v_account_intraday_pnl "
+                    "SELECT realized, unrealized, "
+                    "       EXTRACT(EPOCH FROM staleness)::float AS staleness_s "
+                    "FROM v_account_intraday_pnl "
                     "WHERE account_id = :account_id"
                 ),
                 {"account_id": ctx.account_id},
             )
         ).first()
-        realized = Decimal(row[0]) if row is not None else Decimal("0")
-        unrealized = Decimal(row[1]) if row is not None else Decimal("0")
+
+        # Phase 10a.5 A3.1 (CRIT-2): row-missing OR staleness > 90s -> WARN.
+        # check="max_daily_loss_pnl_stale" distinguishes this WARN from the
+        # normal value/threshold WARN (which uses check="max_daily_loss").
+        if row is None or row.staleness_s > _STALENESS_WARN_SECONDS:
+            return (
+                None,
+                GateWarningEntry(
+                    check="max_daily_loss_pnl_stale",
+                    message=(
+                        "intraday PnL data is stale or absent; "
+                        "max-daily-loss check is informational only"
+                    ),
+                ),
+            )
+
+        realized = Decimal(row[0])
+        unrealized = Decimal(row[1])
         loss_today = -(realized + unrealized)
 
         cap_value = Decimal(cap.limit_value)

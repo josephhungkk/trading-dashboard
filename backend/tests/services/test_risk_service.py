@@ -209,12 +209,21 @@ async def test_broker_kill_switch_on_blocks(evaluation_ctx) -> None:
 
 
 def _mock_session_for_max_loss(
-    *, cap_row: object | None, view_row: tuple[Decimal, Decimal] | None
+    *,
+    cap_row: object | None,
+    view_row: tuple[Decimal, Decimal] | None,
+    staleness_s: float = 0.0,
 ) -> AsyncMock:
     """Build a session whose execute() yields cap-resolver result then view result.
 
     When cap_row is None, the resolver walks all 3 scopes (account → broker →
     global), so execute is called 3x and the view is never queried.
+
+    Phase 10a.5 A3.1: the view now returns (realized, unrealized, staleness_s).
+    Tests pass realized + unrealized as ``view_row``; ``staleness_s`` defaults
+    to 0.0 (fresh) and can be overridden to drive the staleness-WARN branch.
+    The mock row exposes ``staleness_s`` as an attribute AND keeps tuple
+    indexing for ``row[0]`` / ``row[1]`` reads in the service.
     """
     session = AsyncMock(spec=AsyncSession)
     if cap_row is None:
@@ -222,7 +231,15 @@ def _mock_session_for_max_loss(
         session.execute = AsyncMock(side_effect=[none_result, none_result, none_result])
         return session
     cap_result = MagicMock(scalar_one_or_none=MagicMock(return_value=cap_row))
-    view_result = MagicMock(first=MagicMock(return_value=view_row))
+    if view_row is None:
+        view_row_obj: object | None = None
+    else:
+        realized, unrealized = view_row
+        tup = (realized, unrealized, staleness_s)
+        view_row_obj = MagicMock()
+        view_row_obj.__getitem__ = lambda self, idx: tup[idx]
+        view_row_obj.staleness_s = staleness_s
+    view_result = MagicMock(first=MagicMock(return_value=view_row_obj))
     session.execute = AsyncMock(side_effect=[cap_result, view_result])
     return session
 
@@ -323,6 +340,61 @@ async def test_max_daily_loss_realized_plus_unrealized_blocks(evaluation_ctx) ->
     blocker, warning = res
     assert warning is None
     assert blocker is not None
+    assert blocker.code == "max_daily_loss_exceeded"
+
+
+async def test_max_daily_loss_missing_row_warns_stale(evaluation_ctx) -> None:
+    """Phase 10a.5 A3.1 (CRIT-2): no row in v_account_intraday_pnl → WARN, not ALLOW."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(
+        cap_row=_max_loss_limit(value="1000", warn_at_pct="80"),
+        view_row=None,
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "max_daily_loss_pnl_stale"
+    assert "stale" in warning.message.lower() or "absent" in warning.message.lower()
+
+
+async def test_max_daily_loss_stale_row_warns(evaluation_ctx) -> None:
+    """Phase 10a.5 A3.1 (CRIT-2): staleness > 90s → WARN (not silent ALLOW)."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(
+        cap_row=_max_loss_limit(value="1000", warn_at_pct="80"),
+        view_row=(Decimal("-500"), Decimal("-200")),
+        staleness_s=120.0,  # > 90s threshold (3x the 30s discoverer cycle)
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "max_daily_loss_pnl_stale"
+
+
+async def test_max_daily_loss_fresh_row_evaluates_normally(evaluation_ctx) -> None:
+    """Phase 10a.5 A3.1: staleness <= 90s does NOT short-circuit; cap still evaluated."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_max_loss(
+        cap_row=_max_loss_limit(value="1000", warn_at_pct="80"),
+        view_row=(Decimal("-1500"), Decimal("0")),
+        staleness_s=45.0,  # within freshness window
+    )
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    res = await svc._check_max_daily_loss(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.check == "max_daily_loss"
     assert blocker.code == "max_daily_loss_exceeded"
 
 
