@@ -335,6 +335,24 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         await self._abort_unimplemented(context, "Alpaca SearchContracts lands in C1")
         return broker_pb2.SearchContractsResponse()
 
+    async def PreviewOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PreviewOrderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PreviewOrderResponse:
+        """Phase 10a C4: alpaca-py has no pre-trade margin preview API.
+
+        Spec §5: gate's _check_margin catches UNIMPLEMENTED and falls back
+        to cached BP per the asymmetric WARN policy (spec §4 H4 row 4).
+        """
+        del request
+        await self._abort_unimplemented(
+            context,
+            "alpaca-py does not provide pre-trade margin preview; "
+            "gate falls back to cached BP per Phase 10a",
+        )
+        return broker_pb2.PreviewOrderResponse()
+
     async def GetHistoricalBars(  # noqa: N802
         self,
         request: broker_pb2.GetHistoricalBarsRequest,
