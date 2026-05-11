@@ -11,12 +11,14 @@ sidecar). Returns a ``GateVerdict``.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 
+import grpc  # type: ignore[import-untyped]
 import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -397,6 +399,87 @@ class RiskService:
                     value=float(current),
                     threshold=float(warn_remaining),
                 ),
+            )
+
+        return None
+
+    async def _check_margin(self, ctx: EvaluationContext, mode: EvalMode) -> CheckResult:
+        """B7: sidecar margin preview with asymmetric preview/place_order policy (C3, H4).
+
+        Wraps the broker PreviewOrder RPC in ``asyncio.wait_for``. Timeout is
+        500ms in preview mode (UX must not block on broker hiccup -> WARN
+        pending) and 3s in place_order/modify (margin-violating order must
+        not slip through -> BLOCK fail-CLOSED). gRPC UNIMPLEMENTED (Alpaca
+        and any future stub) always WARNs with the documented BP-cache-only
+        fallback. ``response.accepted=False`` is an authoritative broker
+        rejection -> BLOCK regardless of mode.
+        """
+        timeout = 0.5 if mode == "preview" else 3.0
+        try:
+            response = await asyncio.wait_for(
+                self._sidecar.preview_order(
+                    account_id=ctx.account_id,
+                    broker_id=ctx.broker_id,
+                    instrument_id=ctx.instrument_id,
+                    side=ctx.side,
+                    qty=str(ctx.qty),
+                    price=str(ctx.price) if ctx.price is not None else None,
+                    order_type=ctx.order_type,
+                    time_in_force=ctx.time_in_force,
+                    request_id=ctx.request_id,
+                ),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            if mode == "preview":
+                return (
+                    None,
+                    GateWarningEntry(
+                        check="margin",
+                        message=(
+                            f"margin check pending: {ctx.broker_id} preview "
+                            f"exceeded {timeout}s soft-deadline"
+                        ),
+                        value=float(timeout),
+                        threshold=float(timeout),
+                    ),
+                )
+            return (
+                GateBlockerEntry(
+                    check="margin",
+                    message=(
+                        f"margin check unavailable: {ctx.broker_id} preview "
+                        f"exceeded {timeout}s deadline (fail-CLOSED for {mode})"
+                    ),
+                    code="margin_check_unavailable",
+                ),
+                None,
+            )
+        except grpc.aio.AioRpcError as exc:
+            if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+                return (
+                    None,
+                    GateWarningEntry(
+                        check="margin",
+                        message=(f"{ctx.broker_id} margin preview unavailable, BP cache only"),
+                        value=0.0,
+                        threshold=0.0,
+                    ),
+                )
+            raise
+
+        if response.accepted is False:
+            return (
+                GateBlockerEntry(
+                    check="margin",
+                    message=(
+                        f"broker rejected: {response.reject_reason}"
+                        if response.reject_reason
+                        else f"{ctx.broker_id} broker rejected the order"
+                    ),
+                    code="margin_rejected_by_broker",
+                ),
+                None,
             )
 
         return None

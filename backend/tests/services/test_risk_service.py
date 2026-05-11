@@ -748,3 +748,132 @@ async def test_bp_sell_skips(evaluation_ctx) -> None:
     assert await svc._check_buying_power(sell_ctx) is None
     db.execute.assert_not_awaited()
     sidecar.get_account_summary.assert_not_awaited()
+
+
+# ─── B7: sidecar margin preview (asymmetric preview vs place_order) ─────
+
+
+def _grpc_err_unimplemented() -> Exception:
+    """Build a real grpc.aio.AioRpcError with code UNIMPLEMENTED.
+
+    AioRpcError is a real exception class but its constructor demands
+    Status + initial_metadata + trailing_metadata. We subclass it and
+    stub the .code() / .details() methods so the gate's exception filter
+    sees a true AioRpcError without us having to spin up a real RPC.
+    """
+    import grpc
+
+    class _StubAioRpcError(grpc.aio.AioRpcError):  # type: ignore[misc]
+        def __init__(self) -> None:
+            # Skip parent __init__ — we only need .code()/.details() to work.
+            pass
+
+        def code(self) -> grpc.StatusCode:
+            return grpc.StatusCode.UNIMPLEMENTED
+
+        def details(self) -> str:
+            return "alpaca preview unimplemented"
+
+    return _StubAioRpcError()
+
+
+async def test_margin_preview_accepted_allows(evaluation_ctx) -> None:
+    """Sidecar returns accepted=True; both modes ALLOW."""
+    from app.services.risk_service import RiskService
+
+    sidecar = AsyncMock()
+    sidecar.preview_order = AsyncMock(
+        return_value=MagicMock(accepted=True, reject_reason="", initial_margin="500")
+    )
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    assert await svc._check_margin(evaluation_ctx, mode="preview") is None
+    assert await svc._check_margin(evaluation_ctx, mode="place_order") is None
+
+
+async def test_margin_preview_timeout_warns(evaluation_ctx) -> None:
+    """Preview mode + timeout > 500ms → WARN (do not block UX)."""
+    import asyncio
+
+    from app.services.risk_service import RiskService
+
+    async def slow_preview(**kwargs: object) -> object:
+        await asyncio.sleep(5)  # well past 0.5s preview deadline
+        return MagicMock(accepted=True)
+
+    sidecar = AsyncMock()
+    sidecar.preview_order = slow_preview  # type: ignore[method-assign]
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_margin(evaluation_ctx, mode="preview")
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "margin"
+    assert "pending" in warning.message  # H4 preview soft-fail surfaces pending state
+
+
+async def test_margin_place_order_timeout_blocks(evaluation_ctx) -> None:
+    """place_order timeout (>3s) → BLOCK with margin_check_unavailable (H4 fail-CLOSED)."""
+    import asyncio
+
+    from app.services.risk_service import RiskService
+
+    async def slow_preview(**kwargs: object) -> object:
+        await asyncio.sleep(5)
+        return MagicMock(accepted=True)
+
+    sidecar = AsyncMock()
+    sidecar.preview_order = slow_preview  # type: ignore[method-assign]
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    # Patch asyncio.wait_for to raise immediately to avoid 3s test latency.
+    import unittest.mock
+
+    with unittest.mock.patch(
+        "app.services.risk_service.asyncio.wait_for",
+        side_effect=TimeoutError(),
+    ):
+        res = await svc._check_margin(evaluation_ctx, mode="place_order")
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.check == "margin"
+    assert blocker.code == "margin_check_unavailable"
+
+
+async def test_margin_unimplemented_warns_either_mode(evaluation_ctx) -> None:
+    """Sidecar UNIMPLEMENTED (Alpaca) → WARN regardless of mode."""
+    from app.services.risk_service import RiskService
+
+    sidecar = AsyncMock()
+    sidecar.preview_order = AsyncMock(side_effect=_grpc_err_unimplemented())
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    for mode in ("preview", "place_order"):
+        res = await svc._check_margin(evaluation_ctx, mode=mode)  # type: ignore[arg-type]
+        assert res is not None
+        blocker, warning = res
+        assert blocker is None
+        assert warning is not None
+        assert warning.check == "margin"
+        assert "unavailable" in warning.message.lower()
+
+
+async def test_margin_rejected_by_broker_blocks(evaluation_ctx) -> None:
+    """accepted=False with a reject_reason → BLOCK both modes."""
+    from app.services.risk_service import RiskService
+
+    sidecar = AsyncMock()
+    sidecar.preview_order = AsyncMock(
+        return_value=MagicMock(
+            accepted=False, reject_reason="insufficient maintenance margin", initial_margin=None
+        )
+    )
+    svc = RiskService(db=AsyncMock(), redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    for mode in ("preview", "place_order"):
+        res = await svc._check_margin(evaluation_ctx, mode=mode)  # type: ignore[arg-type]
+        assert res is not None
+        blocker, warning = res
+        assert warning is None
+        assert blocker is not None
+        assert blocker.code == "margin_rejected_by_broker"
+        assert "insufficient maintenance margin" in blocker.message
