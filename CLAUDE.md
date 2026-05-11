@@ -84,19 +84,43 @@ Phase 7 → v1.0.0 locked in [`docs/ROADMAP.md`](docs/ROADMAP.md). End-state: ev
 
 Every phase: brainstorm → spec self-review → **architect review (apply CRIT+HIGH+MED inline)** → user approval → plan → impl (subagent-driven) → close-out (CLAUDE.md/CHANGELOG.md/TASKS.md, tag, push). Per-commit reviewer chain (spec-compliance + code-quality + lang-reviewer minimum + others when triggered). Full workflow + tooling list + reviewer table: [`docs/PHASE-WORKFLOW.md`](docs/PHASE-WORKFLOW.md). Catalog: memory `project_tooling_inventory.md`.
 
-### Subagent model routing (locked 2026-05-04)
+### Subagent model routing (updated 2026-05-11, Phase 10a.5)
 
-**Coding goes to Codex.** Codex writes source AND tests in one delegation; Opus main thread reviews, verifies, commits. Anthropic subagents do **not** write production code — they review.
+**Coding is split between Codex and local Qwen.** Anthropic subagents do **not** write production code — they review.
 
-| Stage | Who | Model |
+**By task character (primary decision axis):**
+
+| Task character | Route to | Why |
 |---|---|---|
-| Implementation (source + tests) | **Codex** | `gpt-5-codex` |
-| Main-thread orchestrate / Write / lint / test / commit | Opus | `claude-opus-4-7` |
-| spec-compliance / `python-reviewer` / `typescript-reviewer` | subagent | `haiku` |
-| `code-reviewer` / `security-reviewer` / `database-reviewer` / `silent-failure-hunter` | subagent | `sonnet` |
-| `ARCHITECT-REVIEW` (once-per-phase, skill) | skill | `opus` |
+| Multi-file refactors (≥3 files, cross-cutting renames, file splits) | **Codex** | Maintains coherent context across many files |
+| Lua scripts / Redis atomics / narrow vendor-API specifics | **Codex** | Broader training-set coverage of API edges |
+| Long-context analysis (full spec + plan + repo) | **Codex** | 256K context utilized fully |
+| Self-contained module writes (new file, single class, well-specified) | **Qwen** (local) | Greenfield from focused prompts — 27 t/s, 0-3 small patches per task |
+| TDD test writers (tests matching a known spec) | **Qwen** | Mechanical, structured output |
+| Schema-driven SQL / Alembic migrations | **Qwen** | Highly structured form |
+| Existing-code integration / multi-site judgment in one file | **Opus direct** | Holistic pattern matching; preserves orchestration context |
 
-Pass `model: "haiku"`/`"sonnet"` to the `Agent` tool for per-call override. Codex fallback (`feedback_codex_fallback.md`): on rate-limit, Claude main-thread takes over; user overrides "use codex" / "claude take over" honor the named model.
+**By availability (fallback ladder when the primary is unavailable):**
+
+| Priority | Provider | Endpoint | Trigger |
+|---|---|---|---|
+| 1 | Codex via `codex exec` | OpenAI API | Default for "Codex tasks" above |
+| 2 | Local Qwen3-Coder-Next via llama.cpp | `http://192.168.50.30:11435/v1/completions` (UD-Q3_K_XL, ~27 t/s) | Default for "Qwen tasks"; or Codex rate-limit |
+| 3 | Qwen3.6-35B-A3B general-purpose | same endpoint, model `qwen3.6:35b` | Qwen3-Coder-Next misbehaves (rare; > 2 unusable outputs in a row) |
+| 4 | Qwen2.5-Coder-14B (LKG) | Ollama `:11434`, `qwen2.5-coder:14b` | All Qwen3.x fail |
+| 5 | Opus main thread takes the task | — | Both Codex AND Qwen ladder exhausted |
+
+**Reviewer dispatches (unchanged):**
+
+| Reviewer | Model |
+|---|---|
+| spec-compliance / `python-reviewer` / `typescript-reviewer` | `haiku` |
+| `code-reviewer` / `security-reviewer` / `database-reviewer` / `silent-failure-hunter` | `sonnet` |
+| `ARCHITECT-REVIEW` (once-per-phase, skill) | `opus` |
+
+Pass `model: "haiku"`/`"sonnet"` to the `Agent` tool for per-call override.
+
+**User overrides** ("use codex", "use qwen", "claude take over") honor the named model. Phase 10a.5 history: Codex rate-limit window forced Qwen-first for 5 tasks; resumes 2026-05-12 14:11. Memory: `feedback_codex_fallback.md`, `feedback_qwen_protocol`, `phase10a5_runtime_notes.md`.
 
 ## When Claude makes changes
 
