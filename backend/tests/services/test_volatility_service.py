@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
 
 import fakeredis.aioredis
 import pytest
@@ -14,7 +13,7 @@ from app.services.volatility_service import VolatilityService
 @pytest.mark.asyncio
 async def test_returns_none_when_insufficient_bars() -> None:
     """Less than 15 closes in bars_1d → service returns None (caller raises 422)."""
-    instrument_id = uuid4()
+    instrument_id = 12345
     redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
 
     rows = [

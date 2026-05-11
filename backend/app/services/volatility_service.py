@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Any, Protocol
-from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,7 +49,7 @@ class VolatilityService:
 
     async def compute(
         self,
-        instrument_id: UUID,
+        instrument_id: int,
         asof_date: date,
     ) -> VolatilityEstimate | None:
         key = _CACHE_KEY.format(instrument_id=instrument_id, asof_date=asof_date.isoformat())
@@ -68,7 +67,7 @@ class VolatilityService:
         return estimate
 
     async def _load_bars(
-        self, db: AsyncSession, instrument_id: UUID, asof_date: date
+        self, db: AsyncSession, instrument_id: int, asof_date: date
     ) -> list[tuple[date, Decimal, Decimal, Decimal]]:
         """Return up to 15 most-recent (date, high, low, close) rows ending at asof_date."""
         stmt = text(
