@@ -33,9 +33,12 @@ Primary + fallback ladder (try in order; rotate when the current rung produces n
 | Runtime | Generation tok/s | Prompt tok/s | Wall-clock (A1.1) |
 |---|---|---|---|
 | Ollama UD-Q3_K_XL | 7.7 | 66.9 | 220.7 s |
-| **llama.cpp UD-Q3_K_XL** | **26.9** | **202.8** | **38.6 s** |
+| llama.cpp UD-Q3_K_XL (mmap) | 26.9 | 202.8 | 38.6 s |
+| **llama.cpp UD-Q3_K_XL `--no-mmap`** ← locked | **33.7** | **68.6** | **26.2 s** |
+| llama.cpp UD-IQ4_XS (mmap) | 9.6 | 64.0 | 84.8 s |
+| llama.cpp UD-Q3_K_XL `--n-cpu-moe 24` | 18.9 | 41.9 | 46.2 s |
 
-3.5× generation, 3× prompt eval, 5.7× wall-clock. Ollama's 7.7 t/s matched the [llama.cpp issue #19480](https://github.com/ggml-org/llama.cpp/issues/19480) prediction exactly; llama.cpp recovered the bandwidth-bound speed. `llama-server` launch on the heavy box: `--n-gpu-layers 99 --cpu-moe --flash-attn on --ctx-size 32768 --threads 8`. LM Studio + LocalAI evaluated and rejected.
+Locked config (4.4× over Ollama baseline): `llama-server --model Qwen3-Coder-Next-UD-Q3_K_XL.gguf --host 0.0.0.0 --port 11435 --ctx-size 32768 --n-gpu-layers 99 --cpu-moe --no-mmap --flash-attn on --threads 8 --batch-size 2048 --ubatch-size 512`. Key learnings: (a) **`--no-mmap` is mandatory** when `--cpu-moe` is set — the loader warns "tensor overrides to CPU are used with mmap enabled" and mmap thrashes page cache for those override tensors, costing ~25% decode; (b) `--n-cpu-moe N` (partial offload) is *worse* than `--cpu-moe` (all-MoE-CPU) on 16 GB VRAM because per-layer activations bounce GPU↔CPU at every boundary; (c) UD-IQ4_XS i-quants run ~3× slower than UD-Q3_K_XL K-quants on this rig — quality gain doesn't justify the speed hit. LM Studio + LocalAI evaluated and rejected at the runtime-selection stage.
 
 Main-thread orchestrate / lint / test / commit always stays on **Opus** (`claude-opus-4-7`).
 

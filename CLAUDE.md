@@ -95,7 +95,7 @@ Every phase: brainstorm → spec self-review → **architect review (apply CRIT+
 | Multi-file refactors (≥3 files, cross-cutting renames, file splits) | **Codex** | Maintains coherent context across many files |
 | Lua scripts / Redis atomics / narrow vendor-API specifics | **Codex** | Broader training-set coverage of API edges |
 | Long-context analysis (full spec + plan + repo) | **Codex** | 256K context utilized fully |
-| Self-contained module writes (new file, single class, well-specified) | **Qwen** (local) | Greenfield from focused prompts — 27 t/s, 0-3 small patches per task |
+| Self-contained module writes (new file, single class, well-specified) | **Qwen** (local) | Greenfield from focused prompts — 34 t/s, 0-3 small patches per task |
 | TDD test writers (tests matching a known spec) | **Qwen** | Mechanical, structured output |
 | Schema-driven SQL / Alembic migrations | **Qwen** | Highly structured form |
 | Existing-code integration / multi-site judgment in one file | **Opus direct** | Holistic pattern matching; preserves orchestration context |
@@ -105,7 +105,7 @@ Every phase: brainstorm → spec self-review → **architect review (apply CRIT+
 | Priority | Provider | Endpoint | Trigger |
 |---|---|---|---|
 | 1 | Codex via `codex exec` | OpenAI API | Default for "Codex tasks" above |
-| 2 | Local Qwen3-Coder-Next via llama.cpp | `http://192.168.50.30:11435/v1/completions` (UD-Q3_K_XL, ~27 t/s) | Default for "Qwen tasks"; or Codex rate-limit |
+| 2 | Local Qwen3-Coder-Next via llama.cpp | `http://192.168.50.30:11435/v1/completions` (UD-Q3_K_XL + `--cpu-moe --no-mmap`, ~34 t/s) | Default for "Qwen tasks"; or Codex rate-limit |
 | 3 | Qwen3.6-35B-A3B general-purpose | same endpoint, model `qwen3.6:35b` | Qwen3-Coder-Next misbehaves (rare; > 2 unusable outputs in a row) |
 | 4 | Qwen2.5-Coder-14B (LKG) | Ollama `:11434`, `qwen2.5-coder:14b` | All Qwen3.x fail |
 | 5 | Opus main thread takes the task | — | Both Codex AND Qwen ladder exhausted |
