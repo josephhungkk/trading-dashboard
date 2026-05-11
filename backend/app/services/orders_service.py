@@ -44,6 +44,14 @@ from app.services.config import ConfigService
 from app.services.ibkr_maintenance import BrokerMaintenance, compute_broker_maintenance
 from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 from app.services.orders_policy import get_account_policy, is_kill_switch_active
+from app.services.risk_inflight_counters import (
+    commit_bp,
+    commit_bp_finalize,
+    commit_pdt,
+    decrement_pdt,
+    revert_bp,
+    revert_pdt,
+)
 
 _MODIFY_REPLAY_TTL_SECONDS = 300
 
@@ -684,6 +692,53 @@ async def place_order(
         return _order_response_from_mapping(existing, submission_state="idempotent_retry")
     await db.commit()
 
+    # Phase 10a.5 A4.4: token-bearing risk-counter mutation around dispatch.
+    # Decrement PDT + commit BP before SubmitOrder so the gate sees the
+    # in-flight value on a concurrent submission; revert both on broker
+    # exception, commit-finalize on broker ACK. Gated on isinstance(db,
+    # AsyncSession) for parity with the risk gate above (D2 stub-test gate).
+    pdt_token: str | None = None
+    bp_token: str | None = None
+    if isinstance(db, AsyncSession):
+        try:
+            _, pdt_token = await decrement_pdt(redis, request.account_id)
+        except (Exception,) as _exc:  # noqa: B013
+            log.warning("risk_counter_decrement_pdt_failed", err=str(_exc))
+            metrics.risk_counter_cleanup_failures_total.inc()
+        try:
+            _, bp_token = await commit_bp(redis, request.account_id, notional)
+        except (Exception,) as _exc:  # noqa: B013
+            log.warning("risk_counter_commit_bp_failed", err=str(_exc))
+            metrics.risk_counter_cleanup_failures_total.inc()
+
+    async def _revert_counters() -> None:
+        if pdt_token is not None:
+            try:
+                await revert_pdt(redis, request.account_id, pdt_token)
+            except (Exception,) as exc:  # noqa: B013
+                log.warning("risk_counter_revert_pdt_failed", err=str(exc))
+                metrics.risk_counter_cleanup_failures_total.inc()
+        if bp_token is not None:
+            try:
+                await revert_bp(redis, request.account_id, bp_token)
+            except (Exception,) as exc:  # noqa: B013
+                log.warning("risk_counter_revert_bp_failed", err=str(exc))
+                metrics.risk_counter_cleanup_failures_total.inc()
+
+    async def _finalize_counters() -> None:
+        if pdt_token is not None:
+            try:
+                await commit_pdt(redis, request.account_id, pdt_token)
+            except (Exception,) as exc:  # noqa: B013
+                log.warning("risk_counter_commit_pdt_failed", err=str(exc))
+                metrics.risk_counter_cleanup_failures_total.inc()
+        if bp_token is not None:
+            try:
+                await commit_bp_finalize(redis, request.account_id, bp_token)
+            except (Exception,) as exc:  # noqa: B013
+                log.warning("risk_counter_finalize_bp_failed", err=str(exc))
+                metrics.risk_counter_cleanup_failures_total.inc()
+
     order_client = as_order_sidecar_client(client)
     try:
         sidecar_result = await order_client.place_order(
@@ -705,6 +760,8 @@ async def place_order(
         # Phase 9.7 G2: timeout class — broker reachability failed.
         # contextlib.suppress so an internal Prometheus error doesn't shadow
         # the original broker exception (silent-failure-hunter HIGH-3).
+        # Phase 10a.5: counters STAY decremented on timeout — broker may
+        # still have accepted the order. Reconcile resolves the state.
         with contextlib.suppress(Exception):
             metrics.broker_order_place_total.labels(
                 label=account.gateway_label, result="timeout"
@@ -712,10 +769,12 @@ async def place_order(
         return _order_response_from_mapping(row, submission_state="pending_unknown")
     except Exception:
         # Phase 9.7 G2: error class — broker rejected or transport blew up.
+        # Phase 10a.5 A4.4: explicit broker REJECT — release counters.
         with contextlib.suppress(Exception):
             metrics.broker_order_place_total.labels(
                 label=account.gateway_label, result="error"
             ).inc()
+        await _revert_counters()
         await db.execute(
             text(
                 """
@@ -736,6 +795,7 @@ async def place_order(
         broker_order_id=sidecar_result.broker_order_id,
     )
     await db.commit()
+    await _finalize_counters()
     # Phase 9.7 G2: success class — emit AFTER _mark_order_submitted commits.
     metrics.broker_order_place_total.labels(label=account.gateway_label, result="success").inc()
 
@@ -890,6 +950,11 @@ async def modify_order(
                 },
             )
 
+    # Phase 10a.5 A4.4 (modify path): NO counter mutation here. The original
+    # place_order already committed PDT + BP; modify only changes price/qty
+    # in-place and does not re-spend a day-trade. BP-delta semantics for a
+    # partial-fill + modify-remaining sequence require position-state tracking
+    # that the gate doesn't have today — Phase 24 will revisit.
     await _check_trade_policy(
         config,
         account.gateway_label,
