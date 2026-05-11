@@ -255,33 +255,31 @@ async def preview_order(
     # because PreviewRequest carries conid not instrument_id; concentration
     # check (which is the only one that consults instrument_id) skips on None
     # per its own contract. Wiring conid -> instrument_id is deferred to
-    # Phase 10a.5 (needs InstrumentResolver round-trip). Gated on
-    # isinstance(db, AsyncSession) so the many existing stub-Session tests
-    # stay green; production always uses a real AsyncSession.
-    risk_warnings: list[dict[str, Any]] = []
-    risk_blockers: list[dict[str, Any]] = []
-    if isinstance(db, AsyncSession):
-        # Phase 10a.5 B2: resolve instrument_id once for both the gate ctx
-        # and audit row. preview path passes client=None — must NOT author
-        # instruments at evaluation time.
-        instrument_id = await _resolve_instrument_id(
-            db,
-            broker_id=capability_broker_id(account.gateway_label),
-            conid=request.conid,
-            client=None,
-        )
-        risk_verdict = await _evaluate_risk_for_preview(
-            cfg=cfg,
-            db=db,
-            redis=redis,
-            client=client,
-            request=request,
-            account=account,
-            qty=qty,
-            instrument_id=instrument_id,
-        )
-        risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
-        risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
+    # Phase 10a.5.1 C2.1: isinstance(db, AsyncSession) guard removed. Tests
+    # that use stub Sessions monkeypatch _resolve_instrument_id +
+    # _evaluate_risk_for_preview (see backend/tests/api/test_orders_preview.py
+    # fixture). Production always passes a real AsyncSession.
+    # Phase 10a.5 B2: resolve instrument_id once for both the gate ctx
+    # and audit row. preview path passes client=None — must NOT author
+    # instruments at evaluation time.
+    instrument_id = await _resolve_instrument_id(
+        db,
+        broker_id=capability_broker_id(account.gateway_label),
+        conid=request.conid,
+        client=None,
+    )
+    risk_verdict = await _evaluate_risk_for_preview(
+        cfg=cfg,
+        db=db,
+        redis=redis,
+        client=client,
+        request=request,
+        account=account,
+        qty=qty,
+        instrument_id=instrument_id,
+    )
+    risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
+    risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
 
     return PreviewResponse(
         nonce=nonce,
@@ -799,54 +797,54 @@ async def place_order(
     # nonce / dispatch). Asymmetric per spec: gate BLOCK -> 422 with structured
     # blockers payload; ALLOW/WARN -> proceed (warnings live on the
     # RiskDecision audit row but don't surface in the response shape today).
-    # Gated on isinstance(db, AsyncSession) so the many existing stub-Session
-    # tests stay green; production always uses a real AsyncSession.
-    if isinstance(db, AsyncSession):
-        risk_request_id = str(uuid4())
-        # Phase 10a.5 B2: resolve instrument_id once. place_order is the
-        # write path — pass the broker client so a cold alias is created
-        # at the same time the order is sent (eager-create).
-        instrument_id = await _resolve_instrument_id(
-            db,
-            broker_id=capability_broker_id(account.gateway_label),
-            conid=request.conid,
-            client=client,
+    # Phase 10a.5.1 C2.1: isinstance(db, AsyncSession) guard removed.
+    # Stub-Session tests monkeypatch _resolve_instrument_id +
+    # _evaluate_risk_for_place_order + _audit_risk_decision_with_dedupe.
+    risk_request_id = str(uuid4())
+    # Phase 10a.5 B2: resolve instrument_id once. place_order is the
+    # write path — pass the broker client so a cold alias is created
+    # at the same time the order is sent (eager-create).
+    instrument_id = await _resolve_instrument_id(
+        db,
+        broker_id=capability_broker_id(account.gateway_label),
+        conid=request.conid,
+        client=client,
+    )
+    risk_verdict = await _evaluate_risk_for_place_order(
+        cfg=cfg,
+        db=db,
+        redis=redis,
+        client=client,
+        request=request,
+        account=account,
+        qty=qty,
+        request_id=risk_request_id,
+        instrument_id=instrument_id,
+    )
+    # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
+    # for place_order/modify_order. preview_order does NOT audit ALLOW
+    # (HIGH-4 volume control). ALLOW emissions are deduped via 30s
+    # SETNX keyed by (account, conid, side, qty) to bound volume.
+    await _audit_risk_decision_with_dedupe(
+        db=db,
+        redis=redis,
+        account_id=request.account_id,
+        request=request,
+        qty=qty,
+        verdict=risk_verdict,
+        request_id=risk_request_id,
+        attempt_kind="place_order",
+        order_id=None,
+        instrument_id=instrument_id,
+    )
+    if risk_verdict.final_verdict == "block":
+        raise PreviewUnavailable(
+            422,
+            {
+                "error": "risk_gate_blocked",
+                "blockers": [b.model_dump(mode="json") for b in risk_verdict.blockers],
+            },
         )
-        risk_verdict = await _evaluate_risk_for_place_order(
-            cfg=cfg,
-            db=db,
-            redis=redis,
-            client=client,
-            request=request,
-            account=account,
-            qty=qty,
-            request_id=risk_request_id,
-            instrument_id=instrument_id,
-        )
-        # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
-        # for place_order/modify_order. preview_order does NOT audit ALLOW
-        # (HIGH-4 volume control). ALLOW emissions are deduped via 30s
-        # SETNX keyed by (account, conid, side, qty) to bound volume.
-        await _audit_risk_decision_with_dedupe(
-            db=db,
-            redis=redis,
-            account_id=request.account_id,
-            request=request,
-            qty=qty,
-            verdict=risk_verdict,
-            request_id=risk_request_id,
-            attempt_kind="place_order",
-            order_id=None,
-            instrument_id=instrument_id,
-        )
-        if risk_verdict.final_verdict == "block":
-            raise PreviewUnavailable(
-                422,
-                {
-                    "error": "risk_gate_blocked",
-                    "blockers": [b.model_dump(mode="json") for b in risk_verdict.blockers],
-                },
-            )
 
     policy = await get_account_policy(cfg, gateway_label=account.gateway_label, mode=account.mode)
     filled_today = await _notional_filled_today(db, request.account_id)
@@ -885,21 +883,21 @@ async def place_order(
     # Phase 10a.5 A4.4: token-bearing risk-counter mutation around dispatch.
     # Decrement PDT + commit BP before SubmitOrder so the gate sees the
     # in-flight value on a concurrent submission; revert both on broker
-    # exception, commit-finalize on broker ACK. Gated on isinstance(db,
-    # AsyncSession) for parity with the risk gate above (D2 stub-test gate).
+    # exception, commit-finalize on broker ACK. Phase 10a.5.1 C2.1:
+    # isinstance(db, AsyncSession) guard removed — fakeredis handles
+    # SET/DECR/EVAL fine in stub-Session tests.
     pdt_token: str | None = None
     bp_token: str | None = None
-    if isinstance(db, AsyncSession):
-        try:
-            _, pdt_token = await decrement_pdt(redis, request.account_id)
-        except (Exception,) as _exc:  # noqa: B013
-            log.warning("risk_counter_decrement_pdt_failed", err=str(_exc))
-            metrics.risk_counter_cleanup_failures_total.inc()
-        try:
-            _, bp_token = await commit_bp(redis, request.account_id, notional)
-        except (Exception,) as _exc:  # noqa: B013
-            log.warning("risk_counter_commit_bp_failed", err=str(_exc))
-            metrics.risk_counter_cleanup_failures_total.inc()
+    try:
+        _, pdt_token = await decrement_pdt(redis, request.account_id)
+    except (Exception,) as _exc:  # noqa: B013
+        log.warning("risk_counter_decrement_pdt_failed", err=str(_exc))
+        metrics.risk_counter_cleanup_failures_total.inc()
+    try:
+        _, bp_token = await commit_bp(redis, request.account_id, notional)
+    except (Exception,) as _exc:  # noqa: B013
+        log.warning("risk_counter_commit_bp_failed", err=str(_exc))
+        metrics.risk_counter_cleanup_failures_total.inc()
 
     async def _revert_counters() -> None:
         if pdt_token is not None:
@@ -1101,59 +1099,58 @@ async def modify_order(
     # Phase 10a D5: risk gate at station 4 for modify_order. Mirrors D4 in
     # place_order: BLOCK -> 422 + audit row; ALLOW/WARN -> proceed. Counter
     # decrement on increase-of-notional deferred (consistent with D4
-    # deferral). Gated on isinstance(db, AsyncSession) so the modify tests
-    # with stub Sessions stay green; production always uses AsyncSession.
-    if isinstance(db, AsyncSession):
-        risk_request_id = str(uuid4())
-        # Phase 10a.5 B2: resolve instrument_id once. modify is the write
-        # path — pass the broker client for eager-create on cold alias miss.
-        instrument_id = await _resolve_instrument_id(
-            db,
-            broker_id=capability_broker_id(account.gateway_label),
-            conid=str(row["conid"]),
-            client=client,
+    # deferral). Phase 10a.5.1 C2.1: isinstance(db, AsyncSession) guard
+    # removed; stub-Session tests monkeypatch the three risk-gate helpers.
+    risk_request_id = str(uuid4())
+    # Phase 10a.5 B2: resolve instrument_id once. modify is the write
+    # path — pass the broker client for eager-create on cold alias miss.
+    instrument_id = await _resolve_instrument_id(
+        db,
+        broker_id=capability_broker_id(account.gateway_label),
+        conid=str(row["conid"]),
+        client=client,
+    )
+    risk_verdict = await _evaluate_risk_for_modify_order(
+        cfg=config,
+        db=db,
+        redis=redis,
+        client=client,
+        account_id=row["account_id"],
+        account=account,
+        side=str(row["side"]),
+        qty=Decimal(qty_text),
+        limit_price=new_limit_price,
+        order_type=str(row["order_type"]),
+        tif=request.tif,
+        request_id=risk_request_id,
+        instrument_id=instrument_id,
+    )
+    # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
+    # for modify_order. ALLOW path is deduped via 30s SETNX.
+    await _audit_risk_decision_modify_with_dedupe(
+        db=db,
+        redis=redis,
+        account_id=row["account_id"],
+        side=str(row["side"]),
+        qty=Decimal(qty_text),
+        limit_price=new_limit_price,
+        order_type=str(row["order_type"]),
+        tif=request.tif,
+        verdict=risk_verdict,
+        request_id=risk_request_id,
+        order_id=order_id,
+        conid=str(row["conid"]),
+        attempt_kind="modify_order",
+        instrument_id=instrument_id,
+    )
+    if risk_verdict.final_verdict == "block":
+        raise PreviewUnavailable(
+            422,
+            {
+                "error": "risk_gate_blocked",
+                "blockers": [b.model_dump(mode="json") for b in risk_verdict.blockers],
+            },
         )
-        risk_verdict = await _evaluate_risk_for_modify_order(
-            cfg=config,
-            db=db,
-            redis=redis,
-            client=client,
-            account_id=row["account_id"],
-            account=account,
-            side=str(row["side"]),
-            qty=Decimal(qty_text),
-            limit_price=new_limit_price,
-            order_type=str(row["order_type"]),
-            tif=request.tif,
-            request_id=risk_request_id,
-            instrument_id=instrument_id,
-        )
-        # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
-        # for modify_order. ALLOW path is deduped via 30s SETNX.
-        await _audit_risk_decision_modify_with_dedupe(
-            db=db,
-            redis=redis,
-            account_id=row["account_id"],
-            side=str(row["side"]),
-            qty=Decimal(qty_text),
-            limit_price=new_limit_price,
-            order_type=str(row["order_type"]),
-            tif=request.tif,
-            verdict=risk_verdict,
-            request_id=risk_request_id,
-            order_id=order_id,
-            conid=str(row["conid"]),
-            attempt_kind="modify_order",
-            instrument_id=instrument_id,
-        )
-        if risk_verdict.final_verdict == "block":
-            raise PreviewUnavailable(
-                422,
-                {
-                    "error": "risk_gate_blocked",
-                    "blockers": [b.model_dump(mode="json") for b in risk_verdict.blockers],
-                },
-            )
 
     # Phase 10a.5 A4.4 (modify path): NO counter mutation here. The original
     # place_order already committed PDT + BP; modify only changes price/qty

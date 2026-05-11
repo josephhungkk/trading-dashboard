@@ -250,6 +250,25 @@ async def place_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[st
         lambda: datetime(2026, 4, 27, 14, 45, tzinfo=UTC),
     )
 
+    # Phase 10a.5.1 C1.3: bypass risk gate for stub-Session tests.
+    # See test_orders_preview.py for the rationale + C2.1 for guard drop.
+    from app.schemas.risk import GateVerdict
+
+    async def _allow_verdict(*_args: Any, **_kwargs: Any) -> GateVerdict:
+        return GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=1)
+
+    async def _none_instrument_id(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(orders_api.orders_service, "_evaluate_risk_for_place_order", _allow_verdict)
+    monkeypatch.setattr(orders_api.orders_service, "_resolve_instrument_id", _none_instrument_id)
+    # Also stub the dedupe audit so we don't try to write to a real DB.
+
+    async def _noop_audit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(orders_api.orders_service, "_audit_risk_decision_with_dedupe", _noop_audit)
+
     async def override_db() -> AsyncIterator[_Session]:
         yield session
 

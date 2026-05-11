@@ -176,6 +176,23 @@ async def preview_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[
         lambda _now: BrokerMaintenance(active=False, window=None, until=None),
     )
 
+    # Phase 10a.5.1 C1.2: bypass the risk gate's DB-bound checks for stub-Session
+    # tests. The gate's value (audit row + warning/blocker plumbing) is tested
+    # in tests/integration/test_risk_decisions_audit.py + test_risk_service.py
+    # with real AsyncSession; here we just want the order-write path through.
+    # Together these mocks replace the isinstance(db, AsyncSession) short-circuit
+    # in orders_service.preview_order — see C2.1 for the guard drop.
+    from app.schemas.risk import GateVerdict
+
+    async def _allow_verdict(*_args: Any, **_kwargs: Any) -> GateVerdict:
+        return GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=1)
+
+    async def _none_instrument_id(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(orders_api.orders_service, "_evaluate_risk_for_preview", _allow_verdict)
+    monkeypatch.setattr(orders_api.orders_service, "_resolve_instrument_id", _none_instrument_id)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield {
             "client": client,

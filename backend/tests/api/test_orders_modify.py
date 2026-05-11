@@ -283,7 +283,7 @@ def _seed_order(account_id: UUID, **overrides: Any) -> _OrderRow:
 
 
 @pytest.fixture
-async def modify_client() -> AsyncIterator[dict[str, Any]]:
+async def modify_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[str, Any]]:
     account = _seed_account()
     order = _seed_order(account.account_id)
     session = _Session(account, order)
@@ -301,6 +301,27 @@ async def modify_client() -> AsyncIterator[dict[str, Any]]:
     )
 
     from app.api import orders as orders_api
+
+    # Phase 10a.5.1 C1.4: bypass risk gate for stub-Session tests.
+    # See test_orders_preview.py for rationale + C2.1 for guard drop.
+    from app.schemas.risk import GateVerdict
+
+    async def _allow_verdict(*_args: Any, **_kwargs: Any) -> GateVerdict:
+        return GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=1)
+
+    async def _none_instrument_id(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def _noop_audit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        orders_api.orders_service, "_evaluate_risk_for_modify_order", _allow_verdict
+    )
+    monkeypatch.setattr(orders_api.orders_service, "_resolve_instrument_id", _none_instrument_id)
+    monkeypatch.setattr(
+        orders_api.orders_service, "_audit_risk_decision_modify_with_dedupe", _noop_audit
+    )
 
     async def override_db() -> AsyncIterator[_Session]:
         yield session
