@@ -1050,6 +1050,10 @@ class BrokerDiscoverer:
         # last successful position fetch. Feeds broker_poller_drift_seconds
         # gauge (BrokerPollerDriftHigh alert fires at >60s sustained 2m).
         self._last_position_tick_at: dict[tuple[str, str], float] = {}
+        # Phase 10a.5 A2: per-account monotonic timestamp of the last
+        # successful pnl_intraday upsert. Feeds pnl_intraday_last_update_seconds
+        # gauge (alert fires when drift > 90s during market hours).
+        self._last_pnl_tick_at: dict[UUID, float] = {}
         # Phase 10a.5 A4.3: redis injected for orphan-token UNLINK sweep +
         # BP counter reconcile. Optional (None) so existing tests that
         # build a BrokerDiscoverer without redis still construct.
@@ -1081,33 +1085,55 @@ class BrokerDiscoverer:
             except TimeoutError:
                 pass
 
-    async def _unlink_risk_counter_orphans(self) -> int:
-        """Phase 10a.5 A4.3: reap orphan risk-counter tokens before reconcile.
+    _ORPHAN_SWEEP_MAX_ITERATIONS = 200
 
-        A token whose ``decrement_pdt`` / ``commit_bp`` fired but whose dispatch
-        never completed (process crash, network drop between Redis write and
-        broker SubmitOrder) would otherwise leak past its 86400s TTL. Sweeping
-        every tick bounds the leak window to one discoverer cycle (~30s).
+    async def _unlink_risk_counter_orphans(self, account_id: UUID) -> int:
+        """Phase 10a.5 A4.3 (CRIT-1 fix): reap orphan tokens for a specific account.
+
+        Scopes the SCAN MATCH to ``risk:pdt:tok:{account_id}:*`` and
+        ``risk:bp:tok:{account_id}:*`` so in-flight tokens belonging to other
+        accounts are never touched. The old blanket ``risk:pdt:tok:*`` sweep
+        deleted live tokens from concurrent dispatches on other accounts,
+        making their ``revert_pdt``/``revert_bp`` a silent no-op — counter
+        stayed permanently decremented for 86400s.
+
+        Capped at _ORPHAN_SWEEP_MAX_ITERATIONS SCAN iterations per pattern to
+        bound worst-case Redis round-trip time per tick (MED-3).
 
         Returns the total number of orphan token keys unlinked.
         """
         if self._redis is None:
             return 0
         total = 0
-        for pattern in ("risk:pdt:tok:*", "risk:bp:tok:*"):
+        aid_str = str(account_id)
+        for pattern in (
+            f"risk:pdt:tok:{aid_str}:*",
+            f"risk:bp:tok:{aid_str}:*",
+        ):
             cursor: int | bytes = 0
+            iterations = 0
             try:
                 while True:
                     cursor, keys = await self._redis.scan(cursor=cursor, match=pattern, count=100)
                     if keys:
                         await self._redis.unlink(*keys)
                         total += len(keys)
+                    iterations += 1
                     if cursor in (0, b"0"):
+                        break
+                    if iterations >= self._ORPHAN_SWEEP_MAX_ITERATIONS:
+                        log.warning(
+                            "risk_counter_orphan_sweep_truncated",
+                            pattern=pattern,
+                            account_id=aid_str,
+                            iterations=iterations,
+                        )
                         break
             except (Exception,) as exc:  # noqa: B013
                 log.warning(
                     "risk_counter_orphan_sweep_failed",
                     pattern=pattern,
+                    account_id=aid_str,
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
@@ -1123,12 +1149,9 @@ class BrokerDiscoverer:
 
         log.info("broker_discover_iteration_start", healthy_labels=healthy_labels)
 
-        # Phase 10a.5 A4.3: reap orphan tokens BEFORE this tick's reconciles
-        # so a stale token cannot survive the counter overwrite below.
-        try:
-            await self._unlink_risk_counter_orphans()
-        except (Exception,) as _exc:  # noqa: B013
-            log.warning("risk_counter_orphan_sweep_outer_failed", error=str(_exc))
+        # Phase 10a.5 A4.3 (CRIT-1 fix): per-account orphan sweep + reconcile
+        # are now wired inside _discover_positions alongside account_id resolution.
+        # The old blanket _unlink_risk_counter_orphans() call was removed here.
 
         account_results = await asyncio.gather(
             *(client.list_managed_accounts() for client, _label in healthy),
@@ -1595,9 +1618,10 @@ class BrokerDiscoverer:
                                 summary_updated_at=datetime.now(UTC),
                                 source_label=label,
                             )
-                            metrics.pnl_intraday_last_update_seconds.labels(
-                                account_id=str(account_id),
-                            ).set(0.0)
+                            # Phase 10a.5 A2: record monotonic tick; drift
+                            # loop below converts to elapsed seconds each cycle
+                            # so the gauge ages correctly between upserts.
+                            self._last_pnl_tick_at[account_id] = time.monotonic()
                 except DBAPIError as exc:
                     metrics.pnl_intraday_upsert_failures_total.inc()
                     log.warning(
@@ -1623,6 +1647,14 @@ class BrokerDiscoverer:
             metrics.broker_poller_drift_seconds.labels(
                 gateway_label=label, account_id=account_number
             ).set(now - last_at)
+
+        # Phase 10a.5 A2: refresh pnl_intraday_last_update_seconds for every
+        # account that has had a successful upsert. Gauge grows between cycles
+        # so the '>90s' alert can fire on stale accounts.
+        for account_id, last_at in self._last_pnl_tick_at.items():
+            metrics.pnl_intraday_last_update_seconds.labels(account_id=str(account_id)).set(
+                now - last_at
+            )
 
         metrics.broker_discover_positions_update_duration_ms.observe(
             (time.monotonic() - t_start) * 1000
