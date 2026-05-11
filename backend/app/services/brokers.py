@@ -26,6 +26,7 @@ from app.core import metrics
 from app.services.ibkr_maintenance import compute_broker_maintenance
 from app.services.pnl_intraday_writer import PnlIntradayWriter
 from app.services.quotes.base import canonical_id_components, country_for_exchange
+from app.services.risk_inflight_counters import reconcile_bp_committed
 
 log = structlog.get_logger(__name__)
 
@@ -1565,6 +1566,29 @@ class BrokerDiscoverer:
                         label=label,
                         account_number=account_number,
                     )
+
+                # Phase 10a.5 CRIT-1 fix: per-account orphan sweep + reconcile.
+                # Sweep BEFORE reconcile so stale tokens are reaped before the
+                # counter is overwritten with broker truth (spec §5 A4).
+                # reconcile_pdt is NOT called here: base.Summary carries no
+                # day_trades_remaining; PDT truth requires a separate sidecar
+                # get_account_summary() call which is out of scope for this fan-out.
+                # reconcile_bp_committed resets committed-BP to 0 — correct since
+                # any in-flight BP from prior dispatches must have resolved within
+                # the ~30s cycle window.
+                if self._redis is not None:
+                    try:
+                        await self._unlink_risk_counter_orphans(account_id)
+                        await reconcile_bp_committed(
+                            self._redis, account_id, broker_reported=Decimal("0")
+                        )
+                    except (Exception,) as _exc:  # noqa: B013
+                        log.warning(
+                            "risk_counter_reconcile_failed",
+                            account_id=str(account_id),
+                            error=str(_exc),
+                            error_type=type(_exc).__name__,
+                        )
 
                 # Phase 10a.5 A2.3: pnl_intraday fan-in.
                 # Source-field invariant (CRIT-1): realized_today MUST come from
