@@ -266,6 +266,66 @@ class BrokerSidecarClient:
             status=response.status,
         )
 
+    async def preview_order(
+        self,
+        *,
+        account_id: str,
+        side: str,
+        symbol: str,
+        asset_class: str,
+        order_type: str,
+        time_in_force: str,
+        qty: str,
+        limit_price: str | None = None,
+        stop_price: str | None = None,
+    ) -> broker_pb2.PreviewOrderResponse:
+        """Phase 10a C5 (M6): pre-trade margin/risk preview.
+
+        ``idempotency_key`` is a content-hash (blake2b 16-byte digest) of the
+        canonical request payload (sorted keys + compact JSON, excluding the
+        key itself). Identical requests collapse to one whatIf round-trip in
+        the sidecar's LRU cache. Spec §5 [M6].
+        """
+        import hashlib
+        import json as _json
+
+        canonical = _json.dumps(
+            {
+                "account_hash": account_id,
+                "side": side,
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "order_type": order_type,
+                "time_in_force": time_in_force,
+                "qty": qty,
+                "limit_price": limit_price,
+                "stop_price": stop_price,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        idem = "preview:" + hashlib.blake2b(canonical.encode(), digest_size=16).hexdigest()
+        request = broker_pb2.PreviewOrderRequest(
+            account_hash=account_id,
+            side=side,
+            symbol=symbol,
+            asset_class=asset_class,
+            order_type=order_type,
+            time_in_force=time_in_force,
+            qty=qty,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            idempotency_key=idem,
+        )
+        return await self._call(
+            method="PreviewOrder",
+            rpc=cast(
+                "_UnaryUnary[broker_pb2.PreviewOrderRequest, broker_pb2.PreviewOrderResponse]",
+                self.stub.PreviewOrder,
+            ),
+            request=request,
+        )
+
     async def modify_order(
         self,
         *,
