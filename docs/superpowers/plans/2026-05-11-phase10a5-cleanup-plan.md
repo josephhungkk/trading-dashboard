@@ -14,16 +14,23 @@
 
 ## Model routing for implementation
 
-Codex is **rate-limited** for this phase; production-code writes go to **qwen2.5-coder:14b** on the heavy AI box (memory `feedback_codex_fallback.md` + `phase10a_shipped.md` precedent at commits `d26c265`, `6fe883c`). Claude main thread (Opus) reviews, verifies, commits. Anthropic subagents are reviewers only — no production-code authorship.
+Codex is **rate-limited** for this phase; production-code writes go to the **Qwen 3.6 family** on the heavy AI box (Ollama API at `192.168.50.30:11434`). Claude main thread (Opus) reviews, verifies, commits. Anthropic subagents are reviewers only — no production-code authorship.
 
-| Stage | Who | Model |
-|---|---|---|
-| Coding (production source + tests) | qwen2.5-coder:14b (Ollama, heavy AI box) | `qwen2.5-coder:14b` |
-| Main-thread orchestrate / Write / lint / test / commit | Opus | `claude-opus-4-7` |
-| Codex fallback (only if qwen output is unusable) | Codex | `gpt-5-codex` |
-| Reviewer dispatch (per chunk, see "Reviewer cadence" below) | Anthropic subagents | per table |
+Primary + fallback ladder (try in order; rotate when the current rung produces non-mergeable output two tasks in a row or fails the `feedback_qwen_protocol` body-only check):
 
-If qwen produces broken/non-mergeable output (memory `feedback_qwen_protocol`: body-only output, Edit splice), Opus takes over the same task directly; do NOT rotate to Codex unless qwen + Opus both fail.
+| # | Stage | Who | Model | When |
+|---|---|---|---|---|
+| 1 | Coding default | Qwen3.6-35B-A3B (MoE, 3B active, 256K ctx) | `qwen3.6:35b` | All coding tasks unless 2's strengths are needed |
+| 2 | Quality-sensitive coding | Qwen3.6-27B (dense, slower but +15.5 SkillsBench, +7.8 Terminal-Bench vs the MoE) | `qwen3.6:27b-q4_K_M` | A2 (savepoint isolation), A4 (atomic Lua scripts), B1+B2 (resolver wiring) — tasks where quality > speed |
+| 3 | Last-known-good fallback | Qwen2.5-Coder-14B (what 10a shipped on) | `qwen2.5-coder:14b` | Both Qwen3.6 models produce non-mergeable output |
+| 4 | Codex fallback | Codex | `gpt-5-codex` | Only if Qwen ladder exhausts AND Codex rate-limit window has reset |
+| 5 | Final fallback | Opus main thread takes the task | `claude-opus-4-7` | All above fail |
+
+Main-thread orchestrate / lint / test / commit always stays on **Opus** (`claude-opus-4-7`).
+
+Reviewer dispatch (per chunk) follows the "Reviewer cadence" table below — Anthropic subagents only, never production code authors.
+
+**Operational note:** the heavy-box-side benchmark uplift is substantial — Qwen3.6-35B-A3B scored 73.4% on SWE-bench Verified per the Apr-2026 Qwen3.6 release, vs ~38% for the prior `qwen2.5-coder:14b`. Independent Aider Polyglot run measured 78.67% (16:1 progression-to-regression ratio over the prior generation). For Phase 10a.5 specifically — TDD + small-file edits + reviewer-fix loops — this fits the model's strengths.
 
 ## Reviewer cadence — per chunk, not per task
 
