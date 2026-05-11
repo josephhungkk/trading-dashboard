@@ -50,6 +50,18 @@ SCHWAB_PLACE_ORDER_DURATION_MS = Histogram(
     buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
 )
 
+# Phase 10a M8: separate token bucket for previewOrder so preview spam
+# can never starve actual placeOrder capacity. Spec §5 alerts at 5/min.
+SCHWAB_PREVIEW_RATE_LIMITED_TOTAL = Counter(
+    "schwab_preview_rate_limited_total",
+    "Schwab PreviewOrder calls rejected by sidecar token bucket.",
+)
+SCHWAB_PREVIEW_ORDER_DURATION_MS = Histogram(
+    "schwab_preview_order_duration_ms",
+    "Schwab PreviewOrder REST call duration in milliseconds.",
+    buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000),
+)
+
 SCHWAB_CANCEL_ORDER_DURATION_MS = Histogram(
     "schwab_cancel_order_duration_ms",
     "Schwab CancelOrder REST call duration in milliseconds.",

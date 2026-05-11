@@ -22,6 +22,7 @@ import asyncio
 import logging
 import random
 import re
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -85,6 +86,13 @@ class SchwabClient:
         self._tokens = token_cache
         self._sem = asyncio.Semaphore(_HTTP_CONCURRENCY)
         self._account_hashes: dict[str, str] = {}
+        # Phase 10a M8: separate token bucket for previewOrder (60 req/min,
+        # half of the documented 120 req/min Schwab trade-endpoint budget)
+        # so preview spam can never starve actual placeOrder capacity.
+        # Sliding-window deque of monotonic timestamps; capacity 60 over 60s.
+        self._preview_window_seconds: float = 60.0
+        self._preview_capacity: int = 60
+        self._preview_timestamps: deque[float] = deque()
 
     @classmethod
     def _seed_schwabdev_tokens_db(
@@ -242,6 +250,46 @@ class SchwabClient:
             lambda: self._client.place_order(accountHash=account_hash, order=payload),
         )
         return {"broker_order_id": _extract_broker_order_id(resp.headers)}
+
+    async def preview_token_bucket(self) -> bool:
+        """Phase 10a M8: sliding-window 60 req/min check for previewOrder.
+
+        Drops timestamps older than the window before deciding capacity.
+        Returns True (token granted, append now) or False (rate-limited;
+        caller should respond RESOURCE_EXHAUSTED + bump rate-limited metric).
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        cutoff = now - self._preview_window_seconds
+        while self._preview_timestamps and self._preview_timestamps[0] < cutoff:
+            self._preview_timestamps.popleft()
+        if len(self._preview_timestamps) >= self._preview_capacity:
+            return False
+        self._preview_timestamps.append(now)
+        return True
+
+    async def preview_order(
+        self,
+        *,
+        account_hash: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """POST /trader/v1/accounts/{hash}/previewOrder.
+
+        Returns the parsed JSON body (Schwab returns a structured response
+        with orderStrategy, orderActivityCollection, accountActivityRecord,
+        commissionAndFee, etc.). Caller (handler) translates into proto.
+        """
+        resp = await self._call_raw(
+            "/accounts.orders.preview",
+            lambda: self._client.preview_order(accountHash=account_hash, order=payload),
+        )
+        # _call_raw returns the raw response; try to parse JSON body.
+        body = await resp.json() if hasattr(resp, "json") else {}
+        if asyncio.iscoroutine(body):
+            body = await body
+        return body if isinstance(body, dict) else {}
 
     async def cancel_order(self, *, account_hash: str, order_id: str) -> None:
         """DELETE /trader/v1/accounts/{hash}/orders/{orderId}."""

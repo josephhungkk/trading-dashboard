@@ -410,6 +410,137 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         else:
             await context.abort(grpc.StatusCode.UNAVAILABLE, body)
 
+    async def PreviewOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PreviewOrderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PreviewOrderResponse:
+        """Phase 10a C3 (M8): Schwab REST previewOrder + 60req/min token bucket.
+
+        Spec §5: separate from placeOrder budget so preview spam can never
+        starve actual placeOrder capacity. Token bucket exhaustion ->
+        RESOURCE_EXHAUSTED (gate translates per spec §4 H4 fail policy).
+        """
+        import time as _time
+
+        from sidecar_schwab.client import SchwabHTTPError
+        from sidecar_schwab.metrics import (
+            SCHWAB_PREVIEW_ORDER_DURATION_MS,
+            SCHWAB_PREVIEW_RATE_LIMITED_TOTAL,
+        )
+
+        if self._client is None:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "schwab sidecar not configured",
+            )
+            return broker_pb2.PreviewOrderResponse()
+
+        # M8 token bucket — check before any auth/REST work so spam is cheap.
+        if not await self._client.preview_token_bucket():
+            SCHWAB_PREVIEW_RATE_LIMITED_TOTAL.inc()
+            await context.abort(
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "schwab preview rate-limited (60 req/min sidecar bucket)",
+            )
+            return broker_pb2.PreviewOrderResponse()
+
+        account_hash = request.account_hash
+        if not account_hash:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "preview_order: account_hash is required",
+            )
+            return broker_pb2.PreviewOrderResponse()
+
+        await self._client.ensure_fresh_token()
+
+        payload = self._build_preview_payload(request)
+        t0 = _time.monotonic()
+        try:
+            schwab_resp = await self._client.preview_order(
+                account_hash=account_hash, payload=payload
+            )
+        except SchwabHTTPError as exc:
+            SCHWAB_PREVIEW_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await self._abort_for_http(context, exc)
+            return broker_pb2.PreviewOrderResponse()
+        except (OSError, TimeoutError) as exc:
+            SCHWAB_PREVIEW_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                f"schwab preview transport error: {exc}",
+            )
+            return broker_pb2.PreviewOrderResponse()
+        SCHWAB_PREVIEW_ORDER_DURATION_MS.observe((_time.monotonic() - t0) * 1000)
+
+        return self._translate_preview_response(schwab_resp)
+
+    @staticmethod
+    def _build_preview_payload(request: broker_pb2.PreviewOrderRequest) -> dict[str, object]:
+        """Build a Schwab orderStrategyType=SINGLE payload from PreviewOrderRequest."""
+        side = "BUY" if request.side.lower() == "buy" else "SELL"
+        order_type_map = {
+            "MKT": "MARKET",
+            "LMT": "LIMIT",
+            "STP": "STOP",
+            "STP_LMT": "STOP_LIMIT",
+        }
+        schwab_order_type = order_type_map.get(request.order_type, "LIMIT")
+        leg: dict[str, object] = {
+            "instruction": side,
+            "quantity": float(request.qty),
+            "instrument": {
+                "symbol": request.symbol,
+                "assetType": "EQUITY",
+            },
+        }
+        payload: dict[str, object] = {
+            "orderType": schwab_order_type,
+            "session": "NORMAL",
+            "duration": request.time_in_force or "DAY",
+            "orderStrategyType": "SINGLE",
+            "orderLegCollection": [leg],
+        }
+        if request.limit_price:
+            payload["price"] = request.limit_price
+        if request.stop_price:
+            payload["stopPrice"] = request.stop_price
+        return payload
+
+    @staticmethod
+    def _translate_preview_response(
+        body: dict[str, object],
+    ) -> broker_pb2.PreviewOrderResponse:
+        """Translate Schwab JSON previewOrder body to PreviewOrderResponse."""
+        import json as _json
+
+        rejects = (body.get("orderValidationResult") or {}).get("rejects") or []  # type: ignore[union-attr]
+        alerts = (body.get("orderValidationResult") or {}).get("alerts") or []  # type: ignore[union-attr]
+        accepted = not bool(rejects)
+        reject_reason = ""
+        if rejects:
+            first = rejects[0] if isinstance(rejects, list) else {}
+            reject_reason = (
+                first.get("message", "") if isinstance(first, dict) else str(first)
+            )
+        commission_obj = (body.get("commissionAndFee") or {}).get("commission") or {}  # type: ignore[union-attr]
+        commission = ""
+        if isinstance(commission_obj, dict):
+            commission = str(commission_obj.get("value", "")) or ""
+
+        return broker_pb2.PreviewOrderResponse(
+            accepted=accepted,
+            reject_reason=reject_reason,
+            commission=commission or None,
+            available_funds_after=str(body.get("projectedAvailableFund") or "") or None,
+            buying_power_after=str(body.get("projectedBuyingPower") or "") or None,
+            warnings=[
+                a.get("message", "") if isinstance(a, dict) else str(a) for a in alerts
+            ],
+            raw_provider_payload=_json.dumps(body)[:8192],
+        )
+
     async def CancelOrder(self, request, context):  # noqa: N802
         import time as _time
 
