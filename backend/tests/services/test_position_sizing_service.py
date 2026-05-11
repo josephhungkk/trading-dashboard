@@ -102,3 +102,105 @@ def test_fixed_fractional_floors_not_rounds() -> None:
         risk_pct=Decimal("3"),
     )
     assert qty == Decimal("90")
+
+
+# ── Orchestrator tests ──────────────────────────────────────────────────────
+
+
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+import fakeredis.aioredis  # noqa: E402
+
+from app.schemas.risk import GateVerdict  # noqa: E402
+from app.schemas.sizing import (  # noqa: E402
+    FixedFractionalInputs,
+    SizingMethod,
+)
+from app.services.position_sizing_service import PositionSizingService  # noqa: E402
+
+
+class _SizingSession:
+    """In-memory stub: route SELECTs to canned rows by SQL substring."""
+
+    def __init__(self, account_id, instrument_id):
+        self._account_id = account_id
+        self._instrument_id = instrument_id
+
+    async def execute(self, stmt, params=None):
+        sql = str(stmt)
+
+        class _Mappings:
+            def __init__(self, row):
+                self._row = row
+
+            def first(self):
+                return self._row
+
+        class _Result:
+            def __init__(self, row):
+                self._row = row
+
+            def mappings(self):
+                return _Mappings(self._row)
+
+        if "FROM broker_accounts" in sql:
+            return _Result(
+                {
+                    "id": self._account_id,
+                    "gateway_label": "ibkr-paper",
+                    "mode": "paper",
+                    "currency_base": "USD",
+                    "last_nlv": Decimal("100000"),
+                    "last_nlv_currency": "USD",
+                }
+            )
+        if "FROM instruments" in sql:
+            return _Result(
+                {
+                    "id": self._instrument_id,
+                    "display_name": "AAPL",
+                    "currency": "USD",
+                }
+            )
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_fixed_fractional_happy_path() -> None:
+    """compute() loads NLV, FX-converts, runs math, calls gate, returns result."""
+    account_id = uuid4()
+    instrument_id = 67890
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    await redis.set("fx:USD:USD", "1.0")
+
+    gate = MagicMock()
+    gate.evaluate = AsyncMock(
+        return_value=GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=5)
+    )
+    vol_service = MagicMock()
+
+    svc = PositionSizingService(
+        db=_SizingSession(account_id, instrument_id),
+        redis=redis,
+        risk_service=gate,
+        vol_service=vol_service,
+    )
+    result = await svc.compute(
+        account_id=account_id,
+        instrument_id=instrument_id,
+        method=SizingMethod.fixed_fractional,
+        inputs=FixedFractionalInputs(risk_pct=Decimal("2"), price=Decimal("50")),
+        side="buy",
+    )
+
+    assert result.suggested_qty == Decimal("40")
+    assert result.base_currency_notional == Decimal("2000")
+    assert result.risk_verdict.final_verdict == "allow"
+    assert result.breakdown.fx_rate == Decimal("1.0")
+    # Verify gate was called with concentration-enabled instrument_id (not None)
+    gate.evaluate.assert_awaited_once()
+    ctx_arg = gate.evaluate.call_args.args[0]
+    assert ctx_arg.instrument_id == instrument_id
+    assert ctx_arg.broker_id == "ibkr"  # capability_broker_id("ibkr-paper") → "ibkr"

@@ -130,6 +130,12 @@ async def lifespan(_app: FastAPI) -> Any:
     _app.state.capability_svc = capability_svc
     listener_capability: asyncio.Task[None] = asyncio.create_task(capability_svc.run_listener())
 
+    # Phase 10b.1 H2: VolatilityService singleton (Redis-cached realized-vol + ATR).
+    from app.services.volatility_service import VolatilityService
+
+    vol_svc = VolatilityService(db_factory=session_factory, redis=redis)  # type: ignore[arg-type]
+    _app.state.vol_service = vol_svc
+
     broker_registry: BrokerRegistry | None = None
     broker_discoverer: BrokerDiscoverer | None = None
     broker_health_task: asyncio.Task[None] | None = None
