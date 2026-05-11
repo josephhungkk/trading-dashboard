@@ -24,17 +24,21 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           python-version: "3.14"
-      - name: Install backend deps
+      - name: Install backend deps (parent project — proto-stub gen needs it)
         working-directory: backend
         run: uv sync --frozen
       - name: Generate proto stubs
         working-directory: backend
         run: uv run python scripts/generate_proto_stubs.py
+      # Phase 10a.5.1 C4: real_broker is a standalone uv project.
+      - name: Install real-broker test deps
+        working-directory: backend/tests/real_broker
+        run: uv sync --frozen
       - name: Run real IBKR trade E2E (${{ matrix.case }})
-        working-directory: backend
+        working-directory: backend/tests/real_broker
         shell: powershell
         run: |
-          uv run pytest tests/real_broker/test_real_ibkr_e2e.py `
+          uv run pytest test_real_ibkr_e2e.py `
             -m real_ibkr `
             --case ${{ matrix.case }} `
             -v --tb=short --no-header

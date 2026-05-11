@@ -49,15 +49,20 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           python-version: "3.14"
-      - name: Install backend deps
+      - name: Install backend deps (parent project — proto-stub gen needs it)
         working-directory: backend
-        run: uv sync --frozen --group real-broker
+        run: uv sync --frozen
       - name: Generate proto stubs
         working-directory: backend
         run: uv run python scripts/generate_proto_stubs.py
+      # Phase 10a.5.1 C4: real_broker is now a standalone uv project at
+      # backend/tests/real_broker/. Sync there for alpaca-py + schwabdev.
+      - name: Install real-broker test deps
+        working-directory: backend/tests/real_broker
+        run: uv sync --frozen
       - name: Run real Alpaca paper equity E2E
-        working-directory: backend
-        run: uv run pytest tests/real_broker/test_real_alpaca_equity_e2e.py -m real_alpaca_equity --case ${{ matrix.case }} -v
+        working-directory: backend/tests/real_broker
+        run: uv run pytest test_real_alpaca_equity_e2e.py -m real_alpaca_equity --case ${{ matrix.case }} -v
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

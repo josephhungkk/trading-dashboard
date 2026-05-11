@@ -5,13 +5,23 @@ sandbox access. They are gated behind pytest markers (``real_schwab``,
 ``real_futu``, ``real_ibkr``, ``real_alpaca_equity``) and auto-skip when env
 vars are missing — local ``pytest`` runs stay green even without secrets
 configured.
+
+Phase 10a.5.1 C4: this directory is a standalone uv project (see
+``pyproject.toml`` here). The sys.path insert below makes ``app.*`` imports
+resolve to ``backend/app/`` when this project is invoked from
+``backend/tests/real_broker/`` (nightly workflows; local pytest from
+``backend/`` works without this).
 """
 
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
-import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+import pytest  # sys.path insert must precede app.* imports
 
 _REQUIRED_SCHWAB_ENV = ("SCHWAB_APP_KEY", "SCHWAB_APP_SECRET", "SCHWAB_PAPER_ACCOUNT_HASH")
 _REQUIRED_FUTU_ENV = ("FUTU_HOST", "FUTU_PORT")

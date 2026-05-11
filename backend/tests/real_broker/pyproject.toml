@@ -1,0 +1,31 @@
+[project]
+name = "trading-dashboard-real-broker-tests"
+version = "0.0.0"
+description = "Nightly real-broker E2E tests (separate uv project — Phase 10a.5.1 C4)."
+requires-python = "==3.14.*"
+dependencies = [
+    "alpaca-py>=0.30",
+    "schwabdev==3.0.3",
+    "pytest>=9",
+    "pytest-asyncio>=0.25",
+    "httpx>=0.27",
+    "structlog>=24",
+]
+
+[tool.uv.sources]
+# Editable install of the parent backend project so app.* imports resolve.
+app = { path = "../../", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["."]
+markers = [
+    "real_broker: nightly real-broker E2E test",
+    "real_ibkr: requires IBKR_PAPER_ACCOUNT + CF_ACCESS_* env vars",
+    "real_futu: requires FUTU_HOST/FUTU_PORT env vars",
+    "real_alpaca_equity: requires ALPACA_PAPER_API_KEY + ALPACA_PAPER_API_SECRET",
+    "real_alpaca_crypto: real Alpaca paper crypto E2E",
+    "real_schwab: requires SCHWAB_APP_KEY/SCHWAB_APP_SECRET/SCHWAB_PAPER_ACCOUNT_HASH",
+    "real_schwab_trade: schwabdev OAuth stdin token-store seeded in CI",
+    "no_db: no DB connection required",
+]

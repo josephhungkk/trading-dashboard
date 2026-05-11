@@ -41,14 +41,10 @@ dev = [
     "ruff>=0.15.11",
     "syrupy>=5.1.0",
 ]
-# Broker SDKs needed only by tests/real_broker/* (nightly real-broker workflows).
-# Mirrors the pins in sidecar_alpaca/ + sidecar_schwab/ pyproject.toml so the
-# tests use the same client versions production runs. Excluded from main +
-# dev installs because the SDKs are large and pull C extensions.
-real-broker = [
-    "alpaca-py>=0.30",
-    "schwabdev==3.0.3",
-]
+# Phase 10a.5.1 C4: broker SDKs (alpaca-py, schwabdev) split into a standalone
+# uv project at backend/tests/real_broker/pyproject.toml. Nightly workflows
+# point at that path. The split keeps the main `uv sync` lean (the SDKs pull
+# large C extensions) and isolates schwabdev's dependency pins.
 
 [tool.ruff]
 line-length = 100
