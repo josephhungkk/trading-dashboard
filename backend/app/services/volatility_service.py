@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 _CACHE_KEY = "vol14:{instrument_id}:{asof_date}"
 _CACHE_TTL_SECONDS = 6 * 60 * 60
+_MIN_BARS = 15  # 15 closes → 14 log returns for the realized-vol window
 
 
 class _RedisLike(Protocol):
@@ -63,7 +64,7 @@ class VolatilityService:
 
         async with self._db_factory() as db:
             rows = await self._load_bars(db, instrument_id, asof_date)
-        if len(rows) < 15:
+        if len(rows) < _MIN_BARS:
             return None
 
         estimate = _compute_estimate(rows, asof_date)
@@ -73,14 +74,14 @@ class VolatilityService:
     async def _load_bars(
         self, db: AsyncSession, instrument_id: int, asof_date: date
     ) -> list[tuple[date, Decimal, Decimal, Decimal]]:
-        """Return up to 15 most-recent (date, high, low, close) rows ending at asof_date."""
+        """Return up to ``_MIN_BARS`` most-recent rows ending at asof_date."""
         stmt = text(
-            """
+            f"""
             SELECT bar_date, high, low, close
             FROM bars_1d
             WHERE instrument_id = :iid AND bar_date <= :asof
             ORDER BY bar_date DESC
-            LIMIT 15
+            LIMIT {_MIN_BARS}
             """
         )
         result = await db.execute(stmt, {"iid": instrument_id, "asof": asof_date})
@@ -94,20 +95,22 @@ def _compute_estimate(
     asof_date: date,
 ) -> VolatilityEstimate:
     closes = [r[3] for r in rows]
-    # 14 log returns from 15 closes (oldest..newest order).
     log_returns: list[Decimal] = []
     for i in range(1, len(closes)):
         prev, curr = closes[i - 1], closes[i]
         if prev <= 0 or curr <= 0:
-            raise ValueError(f"non-positive close in bars_1d: prev={prev} curr={curr}")
+            # Sanitized at the API layer — see api/sizing.py catch-all 422.
+            raise ValueError("non_positive_close")
+        # float() unavoidable: math.log only accepts float. Reboxing as
+        # Decimal keeps the downstream arithmetic precision-stable.
         log_returns.append(Decimal(math.log(float(curr / prev))))
 
     mean = sum(log_returns, Decimal(0)) / Decimal(len(log_returns))
     variance = sum((lr - mean) ** 2 for lr in log_returns) / Decimal(len(log_returns))
+    # float() unavoidable: math.sqrt only accepts float (same rationale as log above).
     daily_stddev = Decimal(math.sqrt(float(variance)))
     realized_vol_annualized = (daily_stddev * Decimal(math.sqrt(252))).quantize(Decimal("1e-8"))
 
-    # ATR(14): SMA of true range over the last 14 bars.
     true_ranges: list[Decimal] = []
     for i in range(1, len(rows)):
         prev_close = rows[i - 1][3]

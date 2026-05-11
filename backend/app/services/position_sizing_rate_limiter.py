@@ -53,3 +53,22 @@ class SlidingWindowRateLimiter:
                 f"position_sizing rate limit exceeded (burst={self._burst}, window={self._window}s)"
             )
         bucket.append(now)
+
+    def evict_stale(self, jwt_subject: str, account_id: str) -> None:
+        """Drop the bucket if it's empty after the window-cutoff sweep.
+
+        Caller-driven eviction so the buckets dict doesn't accumulate
+        entries per unique (jwt_subject, account_id) over a long-running
+        process — flagged by Chunk A+B security review. Periodic callers
+        (or the next ``check`` for the same key) can use this to free
+        memory for idle keys.
+        """
+        key = (jwt_subject, account_id)
+        if key not in self._buckets:
+            return
+        cutoff = self._now() - self._window
+        bucket = self._buckets[key]
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if not bucket:
+            del self._buckets[key]

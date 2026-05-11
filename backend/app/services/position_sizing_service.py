@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, assert_never, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -139,7 +139,10 @@ class PositionSizingService:
         account_currency: str,
     ) -> tuple[Decimal, Decimal, MethodBreakdown]:
         if method == SizingMethod.fixed_fractional:
-            assert isinstance(inputs, FixedFractionalInputs)
+            if not isinstance(inputs, FixedFractionalInputs):
+                raise TypeError(
+                    f"expected FixedFractionalInputs for {method}, got {type(inputs).__name__}"
+                )
             price_base = (inputs.price * fx_rate).quantize(Decimal("1e-8"))
             qty, notional = compute_fixed_fractional(
                 nlv_base=nlv_base, price_base=price_base, risk_pct=inputs.risk_pct
@@ -156,7 +159,10 @@ class PositionSizingService:
             )
 
         if method == SizingMethod.risk_per_trade:
-            assert isinstance(inputs, RiskPerTradeInputs)
+            if not isinstance(inputs, RiskPerTradeInputs):
+                raise TypeError(
+                    f"expected RiskPerTradeInputs for {method}, got {type(inputs).__name__}"
+                )
             entry_base = (inputs.entry * fx_rate).quantize(Decimal("1e-8"))
             stop_base = (inputs.stop * fx_rate).quantize(Decimal("1e-8"))
             qty, notional, risk_per_share = compute_risk_per_trade(
@@ -179,9 +185,12 @@ class PositionSizingService:
             )
 
         if method == SizingMethod.vol_targeted:
-            assert isinstance(inputs, VolTargetedInputs)
+            if not isinstance(inputs, VolTargetedInputs):
+                raise TypeError(
+                    f"expected VolTargetedInputs for {method}, got {type(inputs).__name__}"
+                )
             price_base = (inputs.price * fx_rate).quantize(Decimal("1e-8"))
-            vol_source: str = "n/a"
+            vol_source: Literal["realized", "override", "n/a"] = "n/a"
             atr14: Decimal | None = None
             realized_vol: Decimal | None = None
             if inputs.vol_override_pct is not None:
@@ -214,11 +223,12 @@ class PositionSizingService:
                     account_currency=account_currency,
                     atr14=atr14,
                     realized_vol14_annualized=realized_vol,
-                    vol_source=vol_source,  # type: ignore[arg-type]
+                    vol_source=vol_source,
                 ),
             )
 
-        raise ValueError(f"unknown method: {method}")
+        # Exhaustive on SizingMethod — mypy flags missing branches at compile time.
+        assert_never(method)
 
     async def _load_account(self, account_id: UUID) -> dict[str, Any]:
         stmt = text(

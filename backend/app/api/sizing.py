@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,12 +43,22 @@ from app.services.position_sizing_rate_limiter import (
 )
 from app.services.position_sizing_service import PositionSizingService
 
+log = structlog.get_logger(__name__)
+
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 RedisDep = Annotated[Any, Depends(get_redis)]
 ConfigDep = Annotated[ConfigService, Depends(get_config)]
 RegistryDep = Annotated[BrokerRegistry, Depends(get_broker_registry)]
 
-_POSITION_SIZE_LIMITER = SlidingWindowRateLimiter(burst=20, sustained_per_sec=5, window_seconds=1)
+# Rate-limit policy for POST /api/risk/position-size, per spec §3.4 H3.
+_SIZING_BURST = 20
+_SIZING_SUSTAINED_PER_SEC = 5
+_SIZING_WINDOW_SECONDS = 1
+_POSITION_SIZE_LIMITER = SlidingWindowRateLimiter(
+    burst=_SIZING_BURST,
+    sustained_per_sec=_SIZING_SUSTAINED_PER_SEC,
+    window_seconds=_SIZING_WINDOW_SECONDS,
+)
 
 router = APIRouter(prefix="/api", tags=["sizing"])
 
@@ -99,9 +110,18 @@ async def compute_position_size(
                 ) from exc
             if "zero_volatility" in msg:
                 raise HTTPException(status_code=422, detail={"error": "zero_volatility"}) from exc
-            if "account not found" in msg or "instrument not found" in msg:
-                raise HTTPException(status_code=404, detail=msg) from exc
-            raise HTTPException(status_code=422, detail=msg) from exc
+            if "account not found" in msg:
+                # Don't echo the account_id back — would oracle valid IDs.
+                raise HTTPException(status_code=404, detail={"error": "account_not_found"}) from exc
+            if "instrument not found" in msg:
+                raise HTTPException(
+                    status_code=404, detail={"error": "instrument_not_found"}
+                ) from exc
+            # Catch-all: log internally, return sanitized 422. Prevents leaking
+            # raw exception strings like "non-positive close in bars_1d" or
+            # "account ... has no last_nlv" to the caller.
+            log.warning("sizing.value_error", error=msg, method=method_label)
+            raise HTTPException(status_code=422, detail={"error": "sizing_error"}) from exc
 
     metrics.position_sizing_compute_total.labels(
         method=method_label,

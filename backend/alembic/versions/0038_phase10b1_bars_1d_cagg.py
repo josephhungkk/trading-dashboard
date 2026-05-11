@@ -13,11 +13,12 @@ Pattern: time-bucketed to UTC days (00:00–23:59), OHLC composed via
 ``last(close, bucket_start)``. Volume aggregated when present.
 
 Refresh policy:
-  - Refresh window: 1d behind / 1h ahead (avoids partial-day bias on the
-    trailing edge while keeping yesterday's bar fresh after late ticks)
+  - Refresh window: 3 days behind / 1h ahead (re-covers late ticks)
   - Schedule: every 1 hour
-  - Initial materialization is triggered on ``add_continuous_aggregate_policy``
-    invocation; backfill happens automatically from existing bars_1m rows.
+  - Initial backfill is **synchronous** via ``refresh_continuous_aggregate``
+    with NULL start (covers full bars_1m retention). Without this the CAGG
+    sits empty until the first scheduled policy fire, breaking vol-targeted
+    sizing for up to an hour after deploy (Chunk A+B database-reviewer HIGH).
 
 Retention: 2 years on the aggregate; bars_1m only keeps 6 months, so once
 1m chunks are retention-purged the daily aggregate becomes the long-history
@@ -67,7 +68,7 @@ def upgrade() -> None:
         """
         SELECT add_continuous_aggregate_policy(
             'bars_1d',
-            start_offset      => INTERVAL '90 days',
+            start_offset      => INTERVAL '3 days',
             end_offset        => INTERVAL '1 hour',
             schedule_interval => INTERVAL '1 hour'
         )
@@ -81,10 +82,16 @@ def upgrade() -> None:
         """
     )
 
+    # Synchronous backfill of the full bars_1m history. NULL start means
+    # "use the hypertable's earliest data". Blocks during migration so
+    # vol-targeted sizing is immediately usable after deploy. Tens of
+    # seconds for a fresh system; only what's already in bars_1m anyway.
+    op.execute("CALL refresh_continuous_aggregate('bars_1d', NULL, NULL)")
+
 
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS bars_1d_inst_date_idx")
     op.execute(
         "SELECT remove_continuous_aggregate_policy('bars_1d', if_exists => true)"
     )
-    op.execute("DROP MATERIALIZED VIEW IF EXISTS bars_1d")
+    op.execute("DROP MATERIALIZED VIEW IF EXISTS bars_1d CASCADE")

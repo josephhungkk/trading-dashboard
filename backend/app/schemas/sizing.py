@@ -21,7 +21,12 @@ class SizingMethod(StrEnum):
     vol_targeted = "vol_targeted"
 
 
+_STRICT = ConfigDict(extra="forbid")
+
+
 class FixedFractionalInputs(BaseModel):
+    model_config = _STRICT
+
     kind: Literal["fixed_fractional"] = "fixed_fractional"
     risk_pct: Annotated[
         Decimal,
@@ -31,6 +36,8 @@ class FixedFractionalInputs(BaseModel):
 
 
 class RiskPerTradeInputs(BaseModel):
+    model_config = _STRICT
+
     kind: Literal["risk_per_trade"] = "risk_per_trade"
     risk_pct: Annotated[
         Decimal,
@@ -41,6 +48,8 @@ class RiskPerTradeInputs(BaseModel):
 
 
 class VolTargetedInputs(BaseModel):
+    model_config = _STRICT
+
     kind: Literal["vol_targeted"] = "vol_targeted"
     target_vol_pct: Annotated[
         Decimal,
@@ -60,6 +69,8 @@ SizingInputs = Annotated[
 
 
 class SizingRequest(BaseModel):
+    model_config = _STRICT
+
     account_id: UUID
     instrument_id: int  # BIGINT — matches EvaluationContext.instrument_id + instruments.id
     method: SizingMethod
@@ -100,7 +111,18 @@ class SizingDefaults(BaseModel):
 class SizingDefaultsUpdate(BaseModel):
     """PUT payload — full body (PUT semantics), CSRF nonce on the endpoint."""
 
+    model_config = _STRICT
+
     method: SizingMethod
-    fixed_fractional_risk_pct: Annotated[Decimal, Field(gt=Decimal("0"), lt=Decimal("100"))]
-    risk_per_trade_risk_pct: Annotated[Decimal, Field(gt=Decimal("0"), lt=Decimal("100"))]
-    vol_targeted_target_vol_pct: Annotated[Decimal, Field(gt=Decimal("0"), lt=Decimal("200"))]
+    fixed_fractional_risk_pct: Annotated[
+        Decimal,
+        Field(gt=Decimal("0"), lt=Decimal("100"), max_digits=10, decimal_places=4),
+    ]
+    risk_per_trade_risk_pct: Annotated[
+        Decimal,
+        Field(gt=Decimal("0"), lt=Decimal("100"), max_digits=10, decimal_places=4),
+    ]
+    vol_targeted_target_vol_pct: Annotated[
+        Decimal,
+        Field(gt=Decimal("0"), lt=Decimal("200"), max_digits=10, decimal_places=4),
+    ]
