@@ -261,6 +261,15 @@ async def preview_order(
     risk_warnings: list[dict[str, Any]] = []
     risk_blockers: list[dict[str, Any]] = []
     if isinstance(db, AsyncSession):
+        # Phase 10a.5 B2: resolve instrument_id once for both the gate ctx
+        # and audit row. preview path passes client=None — must NOT author
+        # instruments at evaluation time.
+        instrument_id = await _resolve_instrument_id(
+            db,
+            broker_id=capability_broker_id(account.gateway_label),
+            conid=request.conid,
+            client=None,
+        )
         risk_verdict = await _evaluate_risk_for_preview(
             cfg=cfg,
             db=db,
@@ -269,6 +278,7 @@ async def preview_order(
             request=request,
             account=account,
             qty=qty,
+            instrument_id=instrument_id,
         )
         risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
         risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
@@ -303,12 +313,12 @@ async def _evaluate_risk_for_preview(
     request: PreviewRequest,
     account: _Account,
     qty: Decimal,
+    instrument_id: int | None,
 ) -> GateVerdict:
     """Phase 10a D3: build EvaluationContext + run RiskService gate (preview mode).
 
-    instrument_id=None until 10a.5 wires the conid->instrument_id round-trip
-    (position concentration check is the only one that consults it; it
-    skips cleanly on None per its own contract).
+    Phase 10a.5 B2: instrument_id resolved via _resolve_instrument_id at the
+    call site (gate must NOT author instruments — client=None on preview).
     """
     from app.services.risk_service import EvaluationContext, RiskService
 
@@ -321,7 +331,7 @@ async def _evaluate_risk_for_preview(
     ctx = EvaluationContext(
         account_id=request.account_id,
         broker_id=capability_broker_id(account.gateway_label),
-        instrument_id=None,
+        instrument_id=instrument_id,
         side=cast(Any, request.side),
         qty=qty,
         price=Decimal(request.limit_price) if request.limit_price else None,
@@ -353,11 +363,15 @@ async def _evaluate_risk_for_place_order(
     account: _Account,
     qty: Decimal,
     request_id: str,
+    instrument_id: int | None,
 ) -> GateVerdict:
     """Phase 10a D4: gate evaluation for place_order path.
 
     Same shape as preview evaluator but mode="place_order" so _check_margin
     fails CLOSED on sidecar timeout / UNIMPLEMENTED (per spec §4 H4).
+
+    Phase 10a.5 B2: instrument_id resolved at the call site so it can be
+    threaded into the audit row too (single resolve per order).
     """
     from app.services.risk_service import EvaluationContext, RiskService
 
@@ -370,7 +384,7 @@ async def _evaluate_risk_for_place_order(
     ctx = EvaluationContext(
         account_id=request.account_id,
         broker_id=capability_broker_id(account.gateway_label),
-        instrument_id=None,  # 10a.5: wire conid -> instrument_id
+        instrument_id=instrument_id,
         side=cast(Any, request.side),
         qty=qty,
         price=Decimal(request.limit_price) if request.limit_price else None,
@@ -402,6 +416,7 @@ async def _audit_risk_decision(
     request_id: str,
     attempt_kind: str,
     order_id: UUID | None,
+    instrument_id: int | None = None,
 ) -> None:
     """Phase 10a D4: write a risk_decisions audit row.
 
@@ -433,7 +448,10 @@ async def _audit_risk_decision(
         async with SessionLocal() as audit_db:
             decision = RiskDecision(
                 account_id=account_id,
-                instrument_id=None,
+                # Phase 10a.5 B2: resolved via _resolve_instrument_id at the
+                # gate evaluator. None still possible when alias is uncreated
+                # and broker get_contract miss in cold path.
+                instrument_id=instrument_id,
                 # D7: side is lowercased to satisfy the
                 # risk_decisions_side_check CHECK constraint (alembic 0036
                 # enforces ('buy', 'sell')). PlaceOrderRequest.side is the
@@ -525,6 +543,7 @@ async def _audit_risk_decision_with_dedupe(
     request_id: str,
     attempt_kind: str,
     order_id: UUID | None,
+    instrument_id: int | None = None,
 ) -> None:
     """Phase 10a.5 A5.1: audit emission with ALLOW-tier 30s SETNX dedupe.
 
@@ -556,6 +575,7 @@ async def _audit_risk_decision_with_dedupe(
         request_id=request_id,
         attempt_kind=attempt_kind,
         order_id=order_id,
+        instrument_id=instrument_id,
     )
 
 
@@ -574,6 +594,7 @@ async def _audit_risk_decision_modify_with_dedupe(
     order_id: UUID,
     conid: str,
     attempt_kind: str,
+    instrument_id: int | None = None,
 ) -> None:
     """Phase 10a.5 A5.1: modify-path mirror of the place-path dedupe helper."""
     if verdict.final_verdict == "allow":
@@ -598,6 +619,7 @@ async def _audit_risk_decision_modify_with_dedupe(
         verdict=verdict,
         request_id=request_id,
         order_id=order_id,
+        instrument_id=instrument_id,
     )
 
 
@@ -615,6 +637,7 @@ async def _evaluate_risk_for_modify_order(
     order_type: str,
     tif: str,
     request_id: str,
+    instrument_id: int | None,
 ) -> GateVerdict:
     """Phase 10a D5: gate evaluation for modify_order path.
 
@@ -622,6 +645,9 @@ async def _evaluate_risk_for_modify_order(
     (account_id, side) from the orders row instead of a PlaceOrderRequest,
     since OrderModifyRequest doesn't carry them. mode="place_order" so the
     margin check still fails CLOSED on sidecar timeout (spec §4 H4).
+
+    Phase 10a.5 B2: instrument_id resolved at the call site so it threads
+    into the audit row too.
     """
     from app.services.risk_service import EvaluationContext, RiskService
 
@@ -634,7 +660,7 @@ async def _evaluate_risk_for_modify_order(
     ctx = EvaluationContext(
         account_id=account_id,
         broker_id=capability_broker_id(account.gateway_label),
-        instrument_id=None,  # 10a.5: wire conid -> instrument_id
+        instrument_id=instrument_id,
         side=cast(Any, side),
         qty=qty,
         price=Decimal(limit_price) if limit_price else None,
@@ -668,6 +694,7 @@ async def _audit_risk_decision_modify(
     verdict: GateVerdict,
     request_id: str,
     order_id: UUID,
+    instrument_id: int | None = None,
 ) -> None:
     """Phase 10a D5: write a risk_decisions audit row for modify_order.
 
@@ -685,7 +712,9 @@ async def _audit_risk_decision_modify(
         async with SessionLocal() as audit_db:
             decision = RiskDecision(
                 account_id=account_id,
-                instrument_id=None,
+                # Phase 10a.5 B2: resolved via _resolve_instrument_id at the
+                # modify-order gate evaluator.
+                instrument_id=instrument_id,
                 # D7: lowercase side to satisfy risk_decisions_side_check.
                 side=side.lower(),
                 qty=qty,
@@ -765,6 +794,15 @@ async def place_order(
     # tests stay green; production always uses a real AsyncSession.
     if isinstance(db, AsyncSession):
         risk_request_id = str(uuid4())
+        # Phase 10a.5 B2: resolve instrument_id once. place_order is the
+        # write path — pass the broker client so a cold alias is created
+        # at the same time the order is sent (eager-create).
+        instrument_id = await _resolve_instrument_id(
+            db,
+            broker_id=capability_broker_id(account.gateway_label),
+            conid=request.conid,
+            client=client,
+        )
         risk_verdict = await _evaluate_risk_for_place_order(
             cfg=cfg,
             db=db,
@@ -774,6 +812,7 @@ async def place_order(
             account=account,
             qty=qty,
             request_id=risk_request_id,
+            instrument_id=instrument_id,
         )
         # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
         # for place_order/modify_order. preview_order does NOT audit ALLOW
@@ -789,6 +828,7 @@ async def place_order(
             request_id=risk_request_id,
             attempt_kind="place_order",
             order_id=None,
+            instrument_id=instrument_id,
         )
         if risk_verdict.final_verdict == "block":
             raise PreviewUnavailable(
@@ -1056,6 +1096,14 @@ async def modify_order(
     # with stub Sessions stay green; production always uses AsyncSession.
     if isinstance(db, AsyncSession):
         risk_request_id = str(uuid4())
+        # Phase 10a.5 B2: resolve instrument_id once. modify is the write
+        # path — pass the broker client for eager-create on cold alias miss.
+        instrument_id = await _resolve_instrument_id(
+            db,
+            broker_id=capability_broker_id(account.gateway_label),
+            conid=str(row["conid"]),
+            client=client,
+        )
         risk_verdict = await _evaluate_risk_for_modify_order(
             cfg=config,
             db=db,
@@ -1069,6 +1117,7 @@ async def modify_order(
             order_type=str(row["order_type"]),
             tif=request.tif,
             request_id=risk_request_id,
+            instrument_id=instrument_id,
         )
         # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
         # for modify_order. ALLOW path is deduped via 30s SETNX.
@@ -1086,6 +1135,7 @@ async def modify_order(
             order_id=order_id,
             conid=str(row["conid"]),
             attempt_kind="modify_order",
+            instrument_id=instrument_id,
         )
         if risk_verdict.final_verdict == "block":
             raise PreviewUnavailable(
