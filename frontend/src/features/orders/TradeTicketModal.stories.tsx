@@ -118,11 +118,12 @@ function schwabCapabilities(): BrokerCapabilitiesResponse {
     })),
     combos: [
       ...supportedOrderTypes.flatMap((order_type) => (
-        supportedTifs.map((time_in_force) => ({ broker_id: 'schwab', order_type, time_in_force, supported: true, notes: '' }))
+        supportedTifs.map((time_in_force) => ({ broker_id: 'schwab', asset_class: 'STOCK', order_type, time_in_force, supported: true, notes: '' }))
       )),
       ...unsupportedOrderTypes.flatMap((order_type) => (
         supportedTifs.map((time_in_force) => ({
           broker_id: 'schwab',
+          asset_class: 'STOCK',
           order_type,
           time_in_force,
           supported: false,

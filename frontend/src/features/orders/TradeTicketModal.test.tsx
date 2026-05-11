@@ -121,12 +121,12 @@ function schwabCapabilities(): BrokerCapabilitiesResponse {
     })),
     combos: [
       ...supportedOrderTypes.flatMap((order_type) => (
-        supportedTifs.map((time_in_force) => ({ broker_id: 'schwab', order_type, time_in_force, supported: true, notes: '' }))
+        supportedTifs.map((time_in_force) => ({ broker_id: 'schwab', asset_class: 'STOCK', order_type, time_in_force, supported: true, notes: '' }))
       )),
-      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'DAY', supported: false, notes: 'Not supported for this broker' },
-      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'GTC', supported: false, notes: 'Not supported for this broker' },
-      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'IOC', supported: false, notes: 'Not supported for this broker' },
-      { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'FOK', supported: false, notes: 'Not supported for this broker' },
+      { broker_id: 'schwab', asset_class: 'STOCK', order_type: 'TRAIL', time_in_force: 'DAY', supported: false, notes: 'Not supported for this broker' },
+      { broker_id: 'schwab', asset_class: 'STOCK', order_type: 'TRAIL', time_in_force: 'GTC', supported: false, notes: 'Not supported for this broker' },
+      { broker_id: 'schwab', asset_class: 'STOCK', order_type: 'TRAIL', time_in_force: 'IOC', supported: false, notes: 'Not supported for this broker' },
+      { broker_id: 'schwab', asset_class: 'STOCK', order_type: 'TRAIL', time_in_force: 'FOK', supported: false, notes: 'Not supported for this broker' },
     ],
   };
 }

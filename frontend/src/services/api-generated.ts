@@ -453,7 +453,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Broker Capabilities */
+        /**
+         * Get Broker Capabilities
+         * @description Phase 10a D6: canonical structured response shape.
+         *
+         *     Returns BrokerCapabilitiesResponse (broker_id + order_types[] +
+         *     time_in_force[] + combos[]) — single shape regardless of how many
+         *     asset_classes the broker supports. Replaces the prior polymorphic
+         *     return (flat list OR grouped dict) which the FE could not consume
+         *     safely (KNOWN ISSUE removed alongside this change).
+         */
         get: operations["get_broker_capabilities_api_brokers__broker_id__capabilities_get"];
         put?: never;
         post?: never;
@@ -928,6 +937,17 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /** BrokerCapabilitiesResponse */
+        BrokerCapabilitiesResponse: {
+            /** Broker Id */
+            broker_id: string;
+            /** Combos */
+            combos: components["schemas"]["CapabilityComboRow"][];
+            /** Order Types */
+            order_types: components["schemas"]["OrderTypeRow"][];
+            /** Time In Force */
+            time_in_force: components["schemas"]["TimeInForceRow"][];
+        };
         /**
          * BrokerMaintenance
          * @description Maintenance-window envelope. Single source of truth for both the
@@ -963,6 +983,21 @@ export interface components {
         BrokerSidecarStatusList: {
             /** Accounts */
             accounts: components["schemas"]["BrokerSidecarStatus"][];
+        };
+        /** CapabilityComboRow */
+        CapabilityComboRow: {
+            /** Asset Class */
+            asset_class: string;
+            /** Broker Id */
+            broker_id: string;
+            /** Notes */
+            notes: string;
+            /** Order Type */
+            order_type: string;
+            /** Supported */
+            supported: boolean;
+            /** Time In Force */
+            time_in_force: string;
         };
         /**
          * ChartLayoutPayload
@@ -1385,6 +1420,17 @@ export interface components {
              */
             updated_at: string;
         };
+        /** OrderTypeRow */
+        OrderTypeRow: {
+            /** Code */
+            code: string;
+            /** Description */
+            description: string;
+            /** Label */
+            label: string;
+            /** Sort Order */
+            sort_order: number;
+        };
         /** PolicyResponse */
         PolicyResponse: {
             /**
@@ -1532,6 +1578,20 @@ export interface components {
             /** Notional Filled Today */
             notional_filled_today: string;
             position_sanity: components["schemas"]["PositionSanityResult"];
+            /**
+             * Risk Blockers
+             * @default []
+             */
+            risk_blockers: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Risk Warnings
+             * @default []
+             */
+            risk_warnings: {
+                [key: string]: unknown;
+            }[];
             /** Warnings */
             warnings: string[];
         };
@@ -1609,6 +1669,19 @@ export interface components {
         Tier2HeartbeatIn: {
             /** Last Run Seconds */
             last_run_seconds: number;
+        };
+        /** TimeInForceRow */
+        TimeInForceRow: {
+            /** Code */
+            code: string;
+            /** Description */
+            description: string;
+            /** Label */
+            label: string;
+            /** Requires Expiry */
+            requires_expiry: boolean;
+            /** Sort Order */
+            sort_order: number;
         };
         /** ValidationError */
         ValidationError: {
@@ -2631,13 +2704,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: {
-                            [key: string]: unknown;
-                        }[];
-                    } | {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["BrokerCapabilitiesResponse"];
                 };
             };
             /** @description Validation Error */

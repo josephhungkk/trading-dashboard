@@ -46,9 +46,9 @@ const capabilities: BrokerCapabilitiesResponse = {
     { code: 'GTC', label: 'GTC', description: 'Good til canceled', requires_expiry: false, sort_order: 20 },
   ],
   combos: [
-    { broker_id: 'schwab', order_type: 'MARKET', time_in_force: 'DAY', supported: true, notes: '' },
-    { broker_id: 'schwab', order_type: 'LIMIT', time_in_force: 'GTC', supported: true, notes: '' },
-    { broker_id: 'schwab', order_type: 'TRAIL', time_in_force: 'DAY', supported: false, notes: 'Not supported by Schwab' },
+    { broker_id: 'schwab', asset_class: 'STOCK', order_type: 'MARKET', time_in_force: 'DAY', supported: true, notes: '' },
+    { broker_id: 'schwab', asset_class: 'STOCK', order_type: 'LIMIT', time_in_force: 'GTC', supported: true, notes: '' },
+    { broker_id: 'schwab', asset_class: 'STOCK', order_type: 'TRAIL', time_in_force: 'DAY', supported: false, notes: 'Not supported by Schwab' },
   ],
 };
 

@@ -174,6 +174,40 @@ class OrderCapabilityService:
             grouped.setdefault(str(row["asset_class"]), []).append(row)
         return grouped
 
+    async def list_lookups(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Phase 10a D6: return (order_types, time_in_force) lookup rows.
+
+        Both lists are ORDER BY sort_order so the FE renders them in the
+        same UX order the seed migration intended. Used by the
+        capabilities endpoint to construct the structured
+        BrokerCapabilitiesResponse (broker_id + order_types +
+        time_in_force + combos).
+        """
+        async with self._session() as db:
+            order_types_result = await db.execute(
+                text(
+                    """
+                    SELECT code, label, description, sort_order
+                    FROM order_types
+                    ORDER BY sort_order, code
+                    """
+                )
+            )
+            order_types = [dict(row) for row in order_types_result.mappings().all()]
+            tif_result = await db.execute(
+                text(
+                    """
+                    SELECT code, label, description, requires_expiry, sort_order
+                    FROM time_in_force
+                    ORDER BY sort_order, code
+                    """
+                )
+            )
+            time_in_force = [dict(row) for row in tif_result.mappings().all()]
+        return order_types, time_in_force
+
     def invalidate(self, broker_id: str) -> None:
         for key in list(self._cache):
             if key[0] == broker_id:
