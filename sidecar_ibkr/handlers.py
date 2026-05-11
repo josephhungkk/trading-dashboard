@@ -258,6 +258,11 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         # OrderEvent gRPC stream's per-account queue list. Keyed by account_number.
         self._order_event_queues: dict[str, list[asyncio.Queue[broker_pb2.OrderEventMessage]]] = {}
         self._pacing_bucket: _PacingTokenBucket = _PacingTokenBucket()
+        # Phase 10a C2: PreviewOrder LRU cache (key = idempotency_key,
+        # value = (timestamp_seconds, PreviewOrderResponse)). 60s TTL,
+        # 1000-entry cap. Spec §5 [M6]: identical preview requests collapse
+        # to one whatIf round-trip via content-hash idempotency.
+        self._preview_lru: dict[str, tuple[float, broker_pb2.PreviewOrderResponse]] = {}
 
     async def Health(  # noqa: N802 — gRPC servicer methods mirror proto rpc names
         self,
@@ -588,6 +593,91 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 broker_order_id=str(trade.order.permId),
                 status=str(trade.orderStatus.status),
             )
+
+    async def PreviewOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PreviewOrderRequest,
+        context: object,
+    ) -> broker_pb2.PreviewOrderResponse:
+        """Phase 10a C2 (M7): pre-trade margin/risk preview via WhatIf.
+
+        Caches by content-hash idempotency_key (60s TTL, 1000-entry cap)
+        so repeated preview requests for the same payload don't re-issue
+        whatIf round-trips. On filledEvent timeout (>2.5s, leaving 500ms
+        for serialization to caller), aborts with DEADLINE_EXCEEDED so
+        the gate's _check_margin can translate per the asymmetric fail
+        policy (spec §4 [H4]).
+        """
+        logger.debug(
+            "preview_order_received",
+            idempotency_key=request.idempotency_key,
+            symbol=request.symbol,
+            side=request.side,
+            qty=request.qty,
+        )
+
+        key = request.idempotency_key
+        if key in self._preview_lru:
+            timestamp, cached_response = self._preview_lru[key]
+            if time.time() - timestamp < 60:
+                logger.debug("preview_order_cache_hit", idempotency_key=key)
+                return cached_response
+
+        contract = await self._resolve_contract(request.symbol)
+        what_if_order = self._build_what_if_order(request)
+        trade = self.ib.placeOrder(contract, what_if_order)  # type: ignore[attr-defined]
+
+        try:
+            await asyncio.wait_for(trade.filledEvent.wait(), timeout=2.5)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "preview_order_whatif_timeout",
+                idempotency_key=key,
+                symbol=request.symbol,
+            )
+            await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "WhatIf timeout (2.5s)")
+            return broker_pb2.PreviewOrderResponse()  # unreachable; mypy needs return
+
+        response = broker_pb2.PreviewOrderResponse(
+            accepted=True,
+            reject_reason="",
+            initial_margin=str(trade.orderStatus.initMarginAfter or "0"),
+            maintenance_margin=str(trade.orderStatus.maintMarginAfter or "0"),
+            commission=str(trade.orderStatus.commission or "0"),
+            available_funds_after=str(trade.orderStatus.equityWithLoanAfter or "0"),
+            buying_power_after=str(trade.orderStatus.equityWithLoanAfter or "0"),
+            warnings=[],
+            raw_provider_payload=json.dumps(
+                {
+                    "warningText": trade.orderStatus.warningText or "",
+                    "status": trade.orderStatus.status,
+                }
+            ),
+        )
+
+        if len(self._preview_lru) >= 1000:
+            oldest_key = min(self._preview_lru, key=lambda k: self._preview_lru[k][0])
+            del self._preview_lru[oldest_key]
+        self._preview_lru[key] = (time.time(), response)
+        return response
+
+    def _build_what_if_order(self, request: broker_pb2.PreviewOrderRequest) -> object:
+        """Build an ib_async Order with whatIf=True from a PreviewOrderRequest."""
+        from ib_async import LimitOrder, MarketOrder, StopOrder
+
+        side = "BUY" if request.side == "buy" else "SELL"
+        qty = float(request.qty)
+        if request.order_type == "MKT":
+            order = MarketOrder(side, qty)
+        elif request.order_type == "LMT":
+            order = LimitOrder(side, qty, float(request.limit_price or "0"))
+        elif request.order_type in ("STP", "STOP"):
+            order = StopOrder(side, qty, float(request.stop_price or "0"))
+        else:
+            order = LimitOrder(side, qty, float(request.limit_price or "0"))
+        order.whatIf = True
+        order.account = request.account_hash
+        return order
 
     async def CancelOrder(  # noqa: N802
         self,
