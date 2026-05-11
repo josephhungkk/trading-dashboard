@@ -236,6 +236,26 @@ class InstrumentResolver:
         )
         return list(result.scalars().all())
 
+    async def find_by_alias(
+        self,
+        *,
+        source: str,
+        raw_symbol: str,
+    ) -> int | None:
+        """Pure SELECT over ``symbol_aliases``; no upsert, no lock.
+
+        Returns the resolved ``instruments.id`` or ``None`` when no alias
+        row exists. Use this from the risk gate — the gate must NOT author
+        instruments at evaluation time.
+        """
+        result = await self._session.execute(
+            select(SymbolAlias.instrument_id)
+            .where(SymbolAlias.source == source)
+            .where(SymbolAlias.raw_symbol == raw_symbol)
+        )
+        row = result.first()
+        return int(row[0]) if row is not None else None
+
     async def from_legacy(
         self,
         broker_id: str,
