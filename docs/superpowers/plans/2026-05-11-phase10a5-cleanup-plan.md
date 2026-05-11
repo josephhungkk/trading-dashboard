@@ -28,7 +28,14 @@ Primary + fallback ladder (try in order; rotate when the current rung produces n
 | 6 | Codex fallback | Codex | `gpt-5-codex` | Only if Qwen ladder exhausts AND Codex rate-limit window has reset |
 | 7 | Final fallback | Opus main thread takes the task | `claude-opus-4-7` | All above fail |
 
-**Runtime choice — Path B (Ollama-first with switch-out option):** Phase 10a.5 begins on Ollama (`192.168.50.30:11434`). After Task A1.1, measure observed tokens/sec; if <20 t/s on UD-Q3_K_XL, switch to `llama-server` from llama.cpp at the end of Chunk A (clean boundary). Expected: Ollama 15-30 t/s on this MoE+spillover config; llama.cpp 50-80 t/s under the same hardware per [llama.cpp issue #19480](https://github.com/ggml-org/llama.cpp/issues/19480) and [Ollama issue #14579](https://github.com/ollama/ollama/issues/14579) data on Qwen3.5-35B-A3B (5× gap reported). LM Studio + LocalAI evaluated and rejected — LM Studio's `llmster` is CPU-only on x86 in 2026; LocalAI is an orchestration layer on top of llama.cpp (no speed benefit).
+**Runtime — llama.cpp (switched 2026-05-11 after A1.1):** Phase 10a.5 runs against `llama-server` on the heavy box at `http://192.168.50.30:11435`, using OpenAI-compat `/v1/completions`. Path B measurement on Task A1.1:
+
+| Runtime | Generation tok/s | Prompt tok/s | Wall-clock (A1.1) |
+|---|---|---|---|
+| Ollama UD-Q3_K_XL | 7.7 | 66.9 | 220.7 s |
+| **llama.cpp UD-Q3_K_XL** | **26.9** | **202.8** | **38.6 s** |
+
+3.5× generation, 3× prompt eval, 5.7× wall-clock. Ollama's 7.7 t/s matched the [llama.cpp issue #19480](https://github.com/ggml-org/llama.cpp/issues/19480) prediction exactly; llama.cpp recovered the bandwidth-bound speed. `llama-server` launch on the heavy box: `--n-gpu-layers 99 --cpu-moe --flash-attn on --ctx-size 32768 --threads 8`. LM Studio + LocalAI evaluated and rejected.
 
 Main-thread orchestrate / lint / test / commit always stays on **Opus** (`claude-opus-4-7`).
 
