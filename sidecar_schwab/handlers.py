@@ -477,8 +477,15 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         return self._translate_preview_response(schwab_resp)
 
     @staticmethod
-    def _build_preview_payload(request: broker_pb2.PreviewOrderRequest) -> dict[str, object]:
-        """Build a Schwab orderStrategyType=SINGLE payload from PreviewOrderRequest."""
+    def _build_preview_payload(
+        request: broker_pb2.PreviewOrderRequest,
+    ) -> dict[str, Any]:
+        """Build a Schwab orderStrategyType=SINGLE payload from PreviewOrderRequest.
+
+        B9 reviewer fixes applied: qty stays as Decimal-string (not float),
+        return type widened to ``dict[str, Any]``. assetType remains EQUITY
+        for Phase 10a (option/forex preview deferred to Phase 12 per spec §5).
+        """
         side = "BUY" if request.side.lower() == "buy" else "SELL"
         order_type_map = {
             "MKT": "MARKET",
@@ -487,15 +494,15 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             "STP_LMT": "STOP_LIMIT",
         }
         schwab_order_type = order_type_map.get(request.order_type, "LIMIT")
-        leg: dict[str, object] = {
+        leg: dict[str, Any] = {
             "instruction": side,
-            "quantity": float(request.qty),
+            "quantity": request.qty,  # Decimal-string passthrough; no float
             "instrument": {
                 "symbol": request.symbol,
                 "assetType": "EQUITY",
             },
         }
-        payload: dict[str, object] = {
+        payload: dict[str, Any] = {
             "orderType": schwab_order_type,
             "session": "NORMAL",
             "duration": request.time_in_force or "DAY",
@@ -510,24 +517,54 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
 
     @staticmethod
     def _translate_preview_response(
-        body: dict[str, object],
+        body: dict[str, Any],
     ) -> broker_pb2.PreviewOrderResponse:
-        """Translate Schwab JSON previewOrder body to PreviewOrderResponse."""
+        """Translate Schwab JSON previewOrder body to PreviewOrderResponse.
+
+        B9 reviewer fixes applied:
+        - HIGH (security): raw_provider_payload only carries an allowlist of
+          Schwab fields (orderValidationResult / commissionAndFee /
+          projected* / orderStrategy.orderType) — drops accountActivityRecord
+          / accountId / accountNumber / hashValue which would otherwise
+          bypass the AccountResponse boundary strip.
+        - MED (code-quality): isinstance guards on rejects/alerts so
+          unexpected non-list shapes don't crash with AttributeError on
+          .get() applied to a string.
+        """
         import json as _json
 
-        rejects = (body.get("orderValidationResult") or {}).get("rejects") or []  # type: ignore[union-attr]
-        alerts = (body.get("orderValidationResult") or {}).get("alerts") or []  # type: ignore[union-attr]
+        validation = body.get("orderValidationResult") or {}
+        if not isinstance(validation, dict):
+            validation = {}
+        rejects = validation.get("rejects") or []
+        alerts = validation.get("alerts") or []
+        if not isinstance(rejects, list):
+            rejects = []
+        if not isinstance(alerts, list):
+            alerts = []
+
         accepted = not bool(rejects)
         reject_reason = ""
         if rejects:
-            first = rejects[0] if isinstance(rejects, list) else {}
+            first = rejects[0]
             reject_reason = (
                 first.get("message", "") if isinstance(first, dict) else str(first)
             )
-        commission_obj = (body.get("commissionAndFee") or {}).get("commission") or {}  # type: ignore[union-attr]
+        commission_obj = (body.get("commissionAndFee") or {}).get("commission") or {}
         commission = ""
         if isinstance(commission_obj, dict):
             commission = str(commission_obj.get("value", "")) or ""
+
+        # B9 reviewer HIGH (security): allowlist what we serialize back into
+        # raw_provider_payload. The Schwab response contains
+        # accountActivityRecord/accountId/accountNumber that bypass the
+        # AccountResponse boundary strip if dumped wholesale.
+        safe_body: dict[str, Any] = {
+            "orderValidationResult": validation,
+            "commissionAndFee": body.get("commissionAndFee"),
+            "projectedAvailableFund": body.get("projectedAvailableFund"),
+            "projectedBuyingPower": body.get("projectedBuyingPower"),
+        }
 
         return broker_pb2.PreviewOrderResponse(
             accepted=accepted,
@@ -538,7 +575,7 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
             warnings=[
                 a.get("message", "") if isinstance(a, dict) else str(a) for a in alerts
             ],
-            raw_provider_payload=_json.dumps(body)[:8192],
+            raw_provider_payload=_json.dumps(safe_body)[:8192],
         )
 
     async def CancelOrder(self, request, context):  # noqa: N802

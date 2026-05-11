@@ -97,6 +97,26 @@ async def test_preview_order_idempotency_lru_dedups(mock_ib: MagicMock) -> None:
     assert h._resolve_contract.await_count == 1
 
 
+async def test_preview_order_tws_rejected_status_maps_to_accepted_false(
+    mock_ib: MagicMock,
+) -> None:
+    """B9 reviewer MED fix: orderStatus.status='Rejected' -> accepted=False.
+
+    Backend gate then BLOCKs with margin_rejected_by_broker (spec §4 H4 row 3).
+    Without this mapping, a TWS-level reject would silently pass as accepted=True.
+    """
+    rejected_trade = _whatif_trade()
+    rejected_trade.orderStatus.status = "Rejected"
+    rejected_trade.orderStatus.warningText = "insufficient margin"
+    mock_ib.placeOrder.return_value = rejected_trade
+
+    h = _make_handler(mock_ib)
+    h._resolve_contract = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+    response = await h.PreviewOrder(_make_request(idempotency_key="r1"), context=MagicMock())
+    assert response.accepted is False
+    assert "insufficient margin" in response.reject_reason
+
+
 async def test_preview_order_filled_event_timeout_returns_deadline_exceeded(
     mock_ib: MagicMock,
 ) -> None:

@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import json
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -144,6 +145,17 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+def _ib_decimal_str(value: object) -> str:
+    """Phase 10a B9 reviewer fix: explicit None-check on ib_async Decimal-or-None.
+
+    ``or "0"`` is unsafe because Decimal("0") is falsy and would also fall
+    through to "0" - which happens to be the intended default but is the
+    wrong reason. Use ``is not None`` so a real zero stays as "0" and a
+    missing field also becomes "0", but the intent is explicit.
+    """
+    return "0" if value is None else str(value)
+
+
 async def _abort_rpc(context: object, code: grpc.StatusCode, details: str) -> None:
     abort = getattr(context, "abort", None)
     if abort is not None:
@@ -262,7 +274,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         # value = (timestamp_seconds, PreviewOrderResponse)). 60s TTL,
         # 1000-entry cap. Spec §5 [M6]: identical preview requests collapse
         # to one whatIf round-trip via content-hash idempotency.
-        self._preview_lru: dict[str, tuple[float, broker_pb2.PreviewOrderResponse]] = {}
+        # B9 reviewer fix: OrderedDict + move_to_end for O(1) LRU eviction
+        # (was O(n) dict + min() scan). Per-key asyncio.Lock prevents two
+        # concurrent same-key calls from both missing the cache and both
+        # issuing whatIf round-trips (HIGH finding from code-quality reviewer).
+        self._preview_lru: OrderedDict[
+            str, tuple[float, broker_pb2.PreviewOrderResponse]
+        ] = OrderedDict()
+        self._preview_key_locks: dict[str, asyncio.Lock] = {}
 
     async def Health(  # noqa: N802 — gRPC servicer methods mirror proto rpc names
         self,
@@ -617,49 +636,66 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         )
 
         key = request.idempotency_key
-        if key in self._preview_lru:
-            timestamp, cached_response = self._preview_lru[key]
-            if time.time() - timestamp < 60:
-                logger.debug("preview_order_cache_hit", idempotency_key=key)
-                return cached_response
+        # Per-key lock: B9 reviewer HIGH fix - two concurrent same-key calls
+        # would both miss the cache + both whatIf at IBKR.
+        lock = self._preview_key_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._preview_lru.get(key)
+            if cached is not None:
+                timestamp, cached_response = cached
+                if time.time() - timestamp < 60:
+                    self._preview_lru.move_to_end(key)  # LRU touch
+                    logger.debug("preview_order_cache_hit", idempotency_key=key)
+                    return cached_response
 
-        contract = await self._resolve_contract(request.symbol)
-        what_if_order = self._build_what_if_order(request)
-        trade = self.ib.placeOrder(contract, what_if_order)  # type: ignore[attr-defined]
+            contract = await self._resolve_contract(request.symbol)
+            what_if_order = self._build_what_if_order(request)
+            trade = self.ib.placeOrder(contract, what_if_order)  # type: ignore[attr-defined]
 
-        try:
-            await asyncio.wait_for(trade.filledEvent.wait(), timeout=2.5)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "preview_order_whatif_timeout",
-                idempotency_key=key,
-                symbol=request.symbol,
+            try:
+                await asyncio.wait_for(trade.filledEvent.wait(), timeout=2.5)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "preview_order_whatif_timeout",
+                    idempotency_key=key,
+                    symbol=request.symbol,
+                )
+                await context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "WhatIf timeout (2.5s)",
+                )
+                return broker_pb2.PreviewOrderResponse()  # unreachable
+
+            # B9 reviewer MED fix: TWS-level rejection signals via
+            # orderStatus.status="Rejected" or non-empty warningText.
+            # Map authoritative broker reject -> accepted=False so the
+            # backend gate's _check_margin can BLOCK with margin_rejected.
+            status_str = str(getattr(trade.orderStatus, "status", "") or "")
+            warning_text = str(getattr(trade.orderStatus, "warningText", "") or "")
+            tws_rejected = status_str == "Rejected"
+            response = broker_pb2.PreviewOrderResponse(
+                accepted=not tws_rejected,
+                reject_reason=warning_text if tws_rejected else "",
+                initial_margin=_ib_decimal_str(trade.orderStatus.initMarginAfter),
+                maintenance_margin=_ib_decimal_str(trade.orderStatus.maintMarginAfter),
+                commission=_ib_decimal_str(trade.orderStatus.commission),
+                available_funds_after=_ib_decimal_str(
+                    trade.orderStatus.equityWithLoanAfter
+                ),
+                buying_power_after=_ib_decimal_str(trade.orderStatus.equityWithLoanAfter),
+                warnings=[warning_text] if warning_text and not tws_rejected else [],
+                raw_provider_payload=json.dumps(
+                    {"warningText": warning_text, "status": status_str}
+                ),
             )
-            await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "WhatIf timeout (2.5s)")
-            return broker_pb2.PreviewOrderResponse()  # unreachable; mypy needs return
 
-        response = broker_pb2.PreviewOrderResponse(
-            accepted=True,
-            reject_reason="",
-            initial_margin=str(trade.orderStatus.initMarginAfter or "0"),
-            maintenance_margin=str(trade.orderStatus.maintMarginAfter or "0"),
-            commission=str(trade.orderStatus.commission or "0"),
-            available_funds_after=str(trade.orderStatus.equityWithLoanAfter or "0"),
-            buying_power_after=str(trade.orderStatus.equityWithLoanAfter or "0"),
-            warnings=[],
-            raw_provider_payload=json.dumps(
-                {
-                    "warningText": trade.orderStatus.warningText or "",
-                    "status": trade.orderStatus.status,
-                }
-            ),
-        )
-
-        if len(self._preview_lru) >= 1000:
-            oldest_key = min(self._preview_lru, key=lambda k: self._preview_lru[k][0])
-            del self._preview_lru[oldest_key]
-        self._preview_lru[key] = (time.time(), response)
-        return response
+            # B9 reviewer HIGH fix: OrderedDict + popitem(last=False) for
+            # O(1) LRU eviction (was O(n) min() scan).
+            if len(self._preview_lru) >= 1000:
+                self._preview_lru.popitem(last=False)
+            self._preview_lru[key] = (time.time(), response)
+            self._preview_lru.move_to_end(key)
+            return response
 
     def _build_what_if_order(self, request: broker_pb2.PreviewOrderRequest) -> object:
         """Build an ib_async Order with whatIf=True from a PreviewOrderRequest."""

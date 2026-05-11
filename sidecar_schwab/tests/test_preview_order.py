@@ -90,6 +90,59 @@ async def test_preview_order_blocks_on_rate_limit() -> None:
     client.preview_order.assert_not_awaited()
 
 
+async def test_preview_response_raw_payload_strips_account_fields() -> None:
+    """B9 reviewer HIGH fix (security): allowlist response fields so
+    Schwab's accountActivityRecord/accountId/accountNumber/hashValue
+    don't bypass the AccountResponse boundary strip via
+    raw_provider_payload.
+    """
+    schwab_body = {
+        "orderValidationResult": {"rejects": [], "alerts": []},
+        "commissionAndFee": {"commission": {"value": "1.50"}},
+        "projectedAvailableFund": "12345.67",
+        "projectedBuyingPower": "23456.78",
+        # These MUST NOT appear in raw_provider_payload:
+        "accountActivityRecord": {"accountNumber": "12345-leak", "accountId": "67890"},
+        "hashValue": "EXAMPLE_HASH_LEAK",
+    }
+    client = AsyncMock()
+    client.preview_token_bucket = AsyncMock(return_value=True)
+    client.ensure_fresh_token = AsyncMock(return_value=None)
+    client.preview_order = AsyncMock(return_value=schwab_body)
+
+    h = _make_servicer(client)
+    response = await h.PreviewOrder(_make_request(), context=AsyncMock())
+    assert "12345-leak" not in response.raw_provider_payload
+    assert "67890" not in response.raw_provider_payload
+    assert "EXAMPLE_HASH_LEAK" not in response.raw_provider_payload
+    assert "accountActivityRecord" not in response.raw_provider_payload
+    assert "accountNumber" not in response.raw_provider_payload
+    assert "hashValue" not in response.raw_provider_payload
+    # But the safe fields are preserved:
+    assert "12345.67" in response.raw_provider_payload  # projectedAvailableFund
+    assert "23456.78" in response.raw_provider_payload  # projectedBuyingPower
+
+
+async def test_preview_response_handles_non_list_alerts_safely() -> None:
+    """B9 reviewer MED fix: unexpected non-list rejects/alerts shape doesn't crash."""
+    schwab_body = {
+        "orderValidationResult": {
+            "rejects": "unexpected_string_shape",
+            "alerts": "another_string",
+        },
+    }
+    client = AsyncMock()
+    client.preview_token_bucket = AsyncMock(return_value=True)
+    client.ensure_fresh_token = AsyncMock(return_value=None)
+    client.preview_order = AsyncMock(return_value=schwab_body)
+
+    h = _make_servicer(client)
+    # Must not raise AttributeError on rejects[0] or alerts iteration:
+    response = await h.PreviewOrder(_make_request(), context=AsyncMock())
+    assert response.accepted is True  # rejects coerced to []
+    assert response.warnings == []  # alerts coerced to []
+
+
 async def test_preview_token_bucket_sliding_window() -> None:
     """SchwabClient.preview_token_bucket: 60 capacity over 60s sliding window."""
     from sidecar_schwab.client import SchwabClient

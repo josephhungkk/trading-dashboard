@@ -93,6 +93,10 @@ class SchwabClient:
         self._preview_window_seconds: float = 60.0
         self._preview_capacity: int = 60
         self._preview_timestamps: deque[float] = deque()
+        # Phase 10a B9 reviewer fix (CRIT): asyncio.Lock around read-then-act
+        # on the deque; otherwise concurrent gRPC calls can each see the deque
+        # under capacity, both append, and exceed the 60req/min budget.
+        self._preview_bucket_lock: asyncio.Lock = asyncio.Lock()
 
     @classmethod
     def _seed_schwabdev_tokens_db(
@@ -254,20 +258,25 @@ class SchwabClient:
     async def preview_token_bucket(self) -> bool:
         """Phase 10a M8: sliding-window 60 req/min check for previewOrder.
 
+        Lock-protected (B9 reviewer CRIT fix): otherwise two concurrent
+        callers can both see capacity under the limit and both append,
+        exceeding the documented 60req/min budget that protects placeOrder.
+
         Drops timestamps older than the window before deciding capacity.
         Returns True (token granted, append now) or False (rate-limited;
         caller should respond RESOURCE_EXHAUSTED + bump rate-limited metric).
         """
         import time as _time
 
-        now = _time.monotonic()
-        cutoff = now - self._preview_window_seconds
-        while self._preview_timestamps and self._preview_timestamps[0] < cutoff:
-            self._preview_timestamps.popleft()
-        if len(self._preview_timestamps) >= self._preview_capacity:
-            return False
-        self._preview_timestamps.append(now)
-        return True
+        async with self._preview_bucket_lock:
+            now = _time.monotonic()
+            cutoff = now - self._preview_window_seconds
+            while self._preview_timestamps and self._preview_timestamps[0] < cutoff:
+                self._preview_timestamps.popleft()
+            if len(self._preview_timestamps) >= self._preview_capacity:
+                return False
+            self._preview_timestamps.append(now)
+            return True
 
     async def preview_order(
         self,
