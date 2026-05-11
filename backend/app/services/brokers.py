@@ -1653,7 +1653,18 @@ class BrokerDiscoverer:
                             # loop below converts to elapsed seconds each cycle
                             # so the gauge ages correctly between upserts.
                             self._last_pnl_tick_at[account_id] = time.monotonic()
-                except DBAPIError as exc:
+                except (DBAPIError, InvalidOperation, ValueError) as exc:
+                    # InvalidOperation: Decimal() on a corrupt proto string (e.g.
+                    # "" or "NaN") escapes the begin_nested() savepoint and rolls
+                    # back the OUTER transaction, discarding all previously-
+                    # committed savepoints in this tick (HIGH-1).
+                    # ValueError: int()/float() on non-numeric strings (same risk).
+                    # Re-raise non-22003 DBAPIErrors (FK, CHECK violations) so
+                    # they surface rather than being silently swallowed.
+                    if isinstance(exc, DBAPIError) and (
+                        getattr(exc.orig, "sqlstate", None) != "22003"
+                    ):
+                        raise
                     metrics.pnl_intraday_upsert_failures_total.inc()
                     log.warning(
                         "pnl_intraday_upsert_failed",
