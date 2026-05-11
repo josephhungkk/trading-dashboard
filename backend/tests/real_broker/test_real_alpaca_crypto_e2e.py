@@ -46,4 +46,13 @@ async def test_real_alpaca_crypto_notional_market_order() -> None:
     )
 
     assert order.id
-    await asyncio.to_thread(client.cancel_order_by_id, order.id)
+    # Crypto markets are 24/7 so this can fill before our cancel arrives;
+    # treat "already in filled state" as functional success (matches the
+    # equity-side _cancel() tolerance in test_real_alpaca_equity_e2e.py).
+    try:
+        await asyncio.to_thread(client.cancel_order_by_id, order.id)
+    except Exception as exc:  # alpaca.common.exceptions.APIError lacks public type
+        msg = str(exc).lower()
+        if "filled" in msg or "canceled" in msg or "expired" in msg:
+            return
+        raise
