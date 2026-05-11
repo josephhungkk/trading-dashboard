@@ -213,6 +213,86 @@ class RiskService:
 
         return None
 
+    async def _check_position_concentration(self, ctx: EvaluationContext) -> CheckResult:
+        """B5: cross-broker position concentration as % of NLV.
+
+        Spec §1 #5 + H2. Cap kind ``max_position_concentration_pct`` resolved
+        via the account → broker → global walk. The positions SUM is taken
+        **without an account filter** — single-user dashboard aggregates the
+        same ``instrument_id`` across every broker so an AAPL position split
+        IBKR/Schwab caps as one. Skip when ``ctx.instrument_id is None``
+        (cash trades have no concentration risk).
+
+        Sign convention: ``buy`` adds notional, ``sell`` subtracts; we take
+        ``abs()`` because shorts concentrate just as much as longs. Market
+        orders (``ctx.price is None``) treat the new clip as zero notional —
+        post-trade exposure equals current exposure for this check.
+        """
+        if ctx.instrument_id is None:
+            return None
+
+        cap = await self._resolve_limit(
+            ctx.account_id, ctx.broker_id, "max_position_concentration_pct"
+        )
+        if cap is None:
+            return None
+
+        current = Decimal(
+            (
+                await self._db.execute(
+                    text(
+                        "SELECT COALESCE(SUM(market_value_base), 0) FROM positions "
+                        "WHERE instrument_id = :iid"
+                    ),
+                    {"iid": ctx.instrument_id},
+                )
+            ).scalar()
+            or 0
+        )
+
+        summary = await self._sidecar.get_account_summary(ctx.account_id)
+        nlv = Decimal(summary.nlv_currency_base)
+        if nlv == 0:
+            return None  # cannot compute % when NLV unknown / zero
+
+        sign = Decimal("1") if ctx.side == "buy" else Decimal("-1")
+        price = ctx.price if ctx.price is not None else Decimal("0")
+        delta = ctx.qty * price * sign
+        post_exposure = abs(current + delta)
+        post_pct = post_exposure / nlv * Decimal("100")
+
+        cap_value = Decimal(cap.limit_value)
+        if post_pct >= cap_value:
+            return (
+                GateBlockerEntry(
+                    check="position_concentration",
+                    message=(
+                        f"instrument {ctx.instrument_id} post-trade concentration "
+                        f"{post_pct:.2f}% ≥ cap {cap_value}%"
+                    ),
+                    code="position_concentration_exceeded",
+                ),
+                None,
+            )
+
+        if cap.warn_at_pct is not None:
+            warn_threshold = cap_value * Decimal(cap.warn_at_pct) / Decimal("100")
+            if post_pct >= warn_threshold:
+                return (
+                    None,
+                    GateWarningEntry(
+                        check="position_concentration",
+                        message=(
+                            f"instrument {ctx.instrument_id} post-trade concentration "
+                            f"{post_pct:.2f}% at {cap.warn_at_pct}% of cap {cap_value}%"
+                        ),
+                        value=float(post_pct),
+                        threshold=float(cap_value),
+                    ),
+                )
+
+        return None
+
     async def _check_pdt(self, ctx: EvaluationContext) -> CheckResult:
         """B4: PDT remaining = in-flight Redis counter, fall back to broker.
 

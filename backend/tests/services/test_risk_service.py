@@ -441,3 +441,158 @@ async def test_pdt_inflight_unset_falls_back_to_broker_reported(evaluation_ctx) 
     assert warning.check == "pdt"
     assert warning.value == 1.0
     sidecar.get_account_summary.assert_awaited_once_with(evaluation_ctx.account_id)
+
+
+# ─── B5: position concentration (cross-broker by instrument_id) ─────────
+
+
+def _concentration_limit(*, value: str, warn_at_pct: str | None) -> object:
+    """Build a RiskLimit row for ``max_position_concentration_pct`` cap kind."""
+    from app.models.risk import RiskLimit
+
+    return RiskLimit(
+        id=30,
+        scope_type="account",
+        scope_id="acct-id",
+        limit_kind="max_position_concentration_pct",
+        limit_value=Decimal(value),
+        warn_at_pct=Decimal(warn_at_pct) if warn_at_pct is not None else None,
+        is_active=True,
+        notes="",
+        updated_by="op",
+    )
+
+
+def _mock_session_for_concentration(
+    *, cap_row: object | None, sum_value: Decimal | None
+) -> AsyncMock:
+    """Cap-resolver result then SUM(market_value_base) result.
+
+    ``sum_value=None`` is interpreted as the COALESCE returning Decimal("0"),
+    which is what Postgres returns when no positions exist for the instrument.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    if cap_row is None:
+        none_result = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        session.execute = AsyncMock(side_effect=[none_result, none_result, none_result])
+        return session
+    cap_result = MagicMock(scalar_one_or_none=MagicMock(return_value=cap_row))
+    sum_result = MagicMock(scalar=MagicMock(return_value=sum_value or Decimal("0")))
+    session.execute = AsyncMock(side_effect=[cap_result, sum_result])
+    return session
+
+
+def _sidecar_with_nlv(nlv: str) -> AsyncMock:
+    sidecar = AsyncMock()
+    sidecar.get_account_summary = AsyncMock(return_value=MagicMock(nlv_currency_base=nlv))
+    return sidecar
+
+
+async def test_concentration_no_instrument_id_skips(evaluation_ctx) -> None:
+    """``ctx.instrument_id is None`` (e.g. cash trade) → no check → ALLOW."""
+    from app.services.risk_service import EvaluationContext, RiskService
+
+    ctx_no_inst = EvaluationContext(
+        account_id=evaluation_ctx.account_id,
+        broker_id=evaluation_ctx.broker_id,
+        instrument_id=None,
+        side=evaluation_ctx.side,
+        qty=evaluation_ctx.qty,
+        price=evaluation_ctx.price,
+        order_type=evaluation_ctx.order_type,
+        time_in_force=evaluation_ctx.time_in_force,
+        request_id=evaluation_ctx.request_id,
+        currency_base=evaluation_ctx.currency_base,
+    )
+    db = AsyncMock(spec=AsyncSession)  # never consulted
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
+    assert await svc._check_position_concentration(ctx_no_inst) is None
+    db.execute.assert_not_awaited()
+
+
+async def test_concentration_no_cap_allows(evaluation_ctx) -> None:
+    """No active cap at any scope → ALLOW; sidecar never queried."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_concentration(cap_row=None, sum_value=None)
+    sidecar = AsyncMock()
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    assert await svc._check_position_concentration(evaluation_ctx) is None
+    sidecar.get_account_summary.assert_not_awaited()
+    assert db.execute.await_count == 3  # walked all 3 scopes; positions never queried
+
+
+async def test_concentration_under_cap_allows(evaluation_ctx) -> None:
+    """Buy 100 @ 150 = 15 000 added to current 5 000 = 20 000 / 200 000 NLV
+    = 10% < cap 25% (warn at 80% of cap = 20%) → ALLOW."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_concentration(
+        cap_row=_concentration_limit(value="25", warn_at_pct="80"),
+        sum_value=Decimal("5000"),
+    )
+    sidecar = _sidecar_with_nlv("200000")
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    assert await svc._check_position_concentration(evaluation_ctx) is None
+
+
+async def test_concentration_at_warn_warns(evaluation_ctx) -> None:
+    """current 30 000 + buy 15 000 = 45 000 / 200 000 = 22.5%; cap 25%, warn 80% (=20%) → WARN."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_concentration(
+        cap_row=_concentration_limit(value="25", warn_at_pct="80"),
+        sum_value=Decimal("30000"),
+    )
+    sidecar = _sidecar_with_nlv("200000")
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_position_concentration(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "position_concentration"
+    assert warning.value == 22.5
+    assert warning.threshold == 25.0
+
+
+async def test_concentration_over_cap_blocks(evaluation_ctx) -> None:
+    """current 50 000 + buy 15 000 = 65 000 / 200 000 = 32.5%; cap 25% → BLOCK."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_concentration(
+        cap_row=_concentration_limit(value="25", warn_at_pct="80"),
+        sum_value=Decimal("50000"),
+    )
+    sidecar = _sidecar_with_nlv("200000")
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_position_concentration(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.check == "position_concentration"
+    assert blocker.code == "position_concentration_exceeded"
+
+
+async def test_concentration_sql_aggregates_cross_broker(evaluation_ctx) -> None:
+    """Documents H2 invariant: SQL must NOT filter by account_id.
+
+    Concrete behavior assertion: the parameterised SQL submitted to execute()
+    contains ``WHERE instrument_id`` and does NOT contain ``account_id``. This
+    catches accidental same-broker scoping in future refactors.
+    """
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_concentration(
+        cap_row=_concentration_limit(value="50", warn_at_pct=None),
+        sum_value=Decimal("0"),
+    )
+    sidecar = _sidecar_with_nlv("200000")
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    await svc._check_position_concentration(evaluation_ctx)
+    # The 2nd execute() call is the positions SUM; inspect its `text()` payload.
+    positions_call = db.execute.await_args_list[1]
+    sql_text = str(positions_call.args[0])
+    assert "instrument_id" in sql_text
+    assert "account_id" not in sql_text  # cross-broker H2 invariant
