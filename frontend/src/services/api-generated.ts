@@ -2163,17 +2163,28 @@ export interface components {
          * @enum {string}
          */
         SizingMethod: "fixed_fractional" | "risk_per_trade" | "vol_targeted";
-        /** SizingRequest */
+        /**
+         * SizingRequest
+         * @description Sizing request. Caller supplies EITHER ``instrument_id`` (when known —
+         *     e.g., the /trade/sizing page after selecting from the instrument
+         *     selector) OR ``conid`` + ``broker_id`` (when working in broker-symbol
+         *     space — e.g., TradeTicketModal). The service resolves
+         *     conid→instrument_id internally via InstrumentResolver.
+         */
         SizingRequest: {
             /**
              * Account Id
              * Format: uuid
              */
             account_id: string;
+            /** Broker Id */
+            broker_id?: string | null;
+            /** Conid */
+            conid?: string | null;
             /** Inputs */
             inputs: components["schemas"]["FixedFractionalInputs"] | components["schemas"]["RiskPerTradeInputs"] | components["schemas"]["VolTargetedInputs"];
             /** Instrument Id */
-            instrument_id: number;
+            instrument_id?: number | null;
             method: components["schemas"]["SizingMethod"];
             /**
              * Side

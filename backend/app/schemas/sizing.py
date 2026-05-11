@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.risk import GateVerdict, Side
 
@@ -69,13 +69,27 @@ SizingInputs = Annotated[
 
 
 class SizingRequest(BaseModel):
+    """Sizing request. Caller supplies EITHER ``instrument_id`` (when known —
+    e.g., the /trade/sizing page after selecting from the instrument
+    selector) OR ``conid`` + ``broker_id`` (when working in broker-symbol
+    space — e.g., TradeTicketModal). The service resolves
+    conid→instrument_id internally via InstrumentResolver."""
+
     model_config = _STRICT
 
     account_id: UUID
-    instrument_id: int  # BIGINT — matches EvaluationContext.instrument_id + instruments.id
+    instrument_id: int | None = None
+    conid: str | None = None
+    broker_id: str | None = None
     method: SizingMethod
     side: Side
     inputs: SizingInputs
+
+    @model_validator(mode="after")
+    def _check_instrument_identity(self) -> SizingRequest:
+        if self.instrument_id is None and (self.conid is None or self.broker_id is None):
+            raise ValueError("either instrument_id OR (conid + broker_id) must be provided")
+        return self
 
 
 class MethodBreakdown(BaseModel):

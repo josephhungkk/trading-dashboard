@@ -87,12 +87,28 @@ async def compute_position_size(
         vol_service=vol_svc,
     )
 
+    instrument_id = payload.instrument_id
+    if instrument_id is None:
+        # The schema validator already ensured (conid, broker_id) is set
+        # when instrument_id is None.
+        from app.services.quotes.instrument_resolver import InstrumentResolver
+
+        resolver = InstrumentResolver(db)
+        assert payload.conid is not None and payload.broker_id is not None
+        resolved = await resolver.find_by_alias(source=payload.broker_id, raw_symbol=payload.conid)
+        if resolved is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "instrument_not_found_by_conid"},
+            )
+        instrument_id = resolved
+
     method_label = payload.method.value
     with metrics.position_sizing_latency_seconds.labels(method=method_label).time():
         try:
             result = await sizer.compute(
                 account_id=payload.account_id,
-                instrument_id=payload.instrument_id,
+                instrument_id=instrument_id,
                 method=payload.method,
                 inputs=payload.inputs,
                 side=payload.side,

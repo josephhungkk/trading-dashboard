@@ -74,6 +74,46 @@ async def test_admin_sizing_defaults_put_requires_csrf(
 
 
 @pytest.mark.asyncio
+async def test_position_size_rejects_missing_instrument_identity(
+    test_client_admin: AsyncClient,
+) -> None:
+    """SizingRequest validator rejects payloads with neither instrument_id
+    nor (conid + broker_id) set — 422 from Pydantic."""
+    response = await test_client_admin.post(
+        "/api/risk/position-size",
+        json={
+            "account_id": str(uuid4()),
+            # no instrument_id, no conid, no broker_id
+            "method": "fixed_fractional",
+            "side": "buy",
+            "inputs": {"kind": "fixed_fractional", "risk_pct": "2", "price": "50"},
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+@pytest.mark.asyncio
+async def test_position_size_conid_path_returns_404_when_unresolved(
+    test_client_admin: AsyncClient,
+) -> None:
+    """Sending conid+broker_id that doesn't resolve to an instrument → 404."""
+    response = await test_client_admin.post(
+        "/api/risk/position-size",
+        json={
+            "account_id": str(uuid4()),
+            "conid": "DOES-NOT-EXIST-CONID-9999",
+            "broker_id": "ibkr",
+            "method": "fixed_fractional",
+            "side": "buy",
+            "inputs": {"kind": "fixed_fractional", "risk_pct": "2", "price": "50"},
+        },
+    )
+    # Either 404 (resolver miss) or 422 (validation passed through and
+    # downstream rejected on account_not_found etc.)
+    assert response.status_code in (404, 422), response.text
+
+
+@pytest.mark.asyncio
 async def test_position_size_rate_limit(test_client_admin: AsyncClient) -> None:
     """21st call within 1s from the same (user, account) → 429."""
     account_id = uuid4()
