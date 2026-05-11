@@ -56,5 +56,19 @@ jobs:
           path: backend/test-results/
           retention-days: 30
       - if: failure()
-        run: Write-Host "::error::Nightly real-IBKR ${{ matrix.case }} failed. Check paper Gateway 4002 on the NUC."
         shell: powershell
+        run: |
+          Write-Host "::error::Nightly real-IBKR ${{ matrix.case }} failed."
+          Write-Host "::group::Recovery runbook"
+          Write-Host "If backend returned '503 broker layer not yet configured':"
+          Write-Host "  1. On the NUC, run: deploy\nuc\provision-and-publish.ps1"
+          Write-Host "  2. Restart all 4 sidecars:"
+          Write-Host "       schtasks /Run /TN 'sidecar-ibkr-isa-paper'"
+          Write-Host "       schtasks /Run /TN 'sidecar-ibkr-isa-live'"
+          Write-Host "       schtasks /Run /TN 'sidecar-ibkr-trading-paper'"
+          Write-Host "       schtasks /Run /TN 'sidecar-ibkr-trading-live'"
+          Write-Host "  3. docker compose restart backend"
+          Write-Host "  Reason: ConfigService pubsub does not re-trigger lifespan on broker secret changes; backend must be bounced."
+          Write-Host "  See memory/feedback_post_deploy_broker_recovery.md for full procedure."
+          Write-Host "Otherwise: check paper Gateway 4002 on the NUC (IBC may need a manual restart during a daily-reset window)."
+          Write-Host "::endgroup::"
