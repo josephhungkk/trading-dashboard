@@ -112,7 +112,20 @@ def test_real_schwab_place_then_cancel(case: str) -> None:
     acct_hash = os.environ["SCHWAB_PAPER_ACCOUNT_HASH"]
     symbol = os.environ.get("SCHWAB_PAPER_SYMBOL", "SPY")
 
-    client = schwabdev.Client(app_key, app_secret, tokens_db="/tmp/nightly_tokens.db")
+    # Phase 10a.5.1: token DB path is now configurable per matrix case so
+    # parallel runs don't share a SQLite file (concurrent refresh on a
+    # single file produced "database is locked" + occasional refresh-token
+    # revocation by Schwab when 3 jobs raced for the same refresh).
+    # The CI seeds this path from SCHWAB_TOKENS_DB_B64; absent that, skip
+    # rather than blocking on schwabdev's interactive OAuth stdin prompt.
+    tokens_db = os.environ.get("SCHWAB_TOKENS_DB", "/tmp/nightly_tokens.db")
+    if not os.path.exists(tokens_db):
+        pytest.skip(
+            f"Schwab tokens DB at {tokens_db} not seeded; set "
+            "SCHWAB_TOKENS_DB_B64 secret in CI or pre-seed locally via "
+            "schwabdev's interactive auth flow."
+        )
+    client = schwabdev.Client(app_key, app_secret, tokens_db=tokens_db)
     client_order_id = f"NIGHTLY-{case}-{int(time.time())}"
 
     if case == "market_spy":

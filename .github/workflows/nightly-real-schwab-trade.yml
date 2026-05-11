@@ -61,8 +61,31 @@ jobs:
       - name: Install real-broker test deps
         working-directory: backend/tests/real_broker
         run: uv sync --frozen
+      # Phase 10a.5.1 ops debt fix: seed schwabdev's SQLite token DB from a
+      # base64 secret BEFORE pytest invokes schwabdev.Client(). Without this,
+      # schwabdev triggers an interactive OAuth flow that prints the
+      # authorization URL to stdin and blocks waiting for the operator to
+      # paste the redirected URL — in CI that hangs until job timeout.
+      # Each matrix case gets its own copy of the seed so concurrent token-
+      # refresh writes don't collide ("database is locked") and Schwab
+      # doesn't revoke the refresh-token from 3 parallel refresh requests.
+      # If SCHWAB_TOKENS_DB_B64 is unset the tests skip gracefully (see
+      # test_real_schwab_e2e_*.py for the skip branch).
+      - name: Seed schwabdev token DB
+        env:
+          SCHWAB_TOKENS_DB_B64: ${{ secrets.SCHWAB_TOKENS_DB_B64 }}
+        run: |
+          if [ -z "$SCHWAB_TOKENS_DB_B64" ]; then
+            echo "::warning::SCHWAB_TOKENS_DB_B64 secret unset — tests will skip."
+            exit 0
+          fi
+          mkdir -p /tmp
+          echo "$SCHWAB_TOKENS_DB_B64" | base64 -d > "/tmp/nightly_tokens_${{ matrix.case }}.db"
+          echo "Seeded /tmp/nightly_tokens_${{ matrix.case }}.db ($(wc -c < /tmp/nightly_tokens_${{ matrix.case }}.db) bytes)"
       - name: Run real Schwab trade E2E (Phase 8a place + cancel + modify)
         working-directory: backend/tests/real_broker
+        env:
+          SCHWAB_TOKENS_DB: /tmp/nightly_tokens_${{ matrix.case }}.db
         run: uv run pytest . -m real_schwab -v --tb=short --no-header -q --case ${{ matrix.case }}
       - name: Upload test results
         if: always()

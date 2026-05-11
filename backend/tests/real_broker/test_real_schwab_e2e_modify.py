@@ -17,10 +17,18 @@ pytestmark = pytest.mark.real_schwab
 def test_real_schwab_modify_creates_replacement() -> None:
     import schwabdev
 
+    # Phase 10a.5.1: token DB path configurable per case (see place_cancel
+    # for the full rationale on parallel refresh races + skip behavior).
+    tokens_db = os.environ.get("SCHWAB_TOKENS_DB", "/tmp/nightly_tokens.db")
+    if not os.path.exists(tokens_db):
+        pytest.skip(
+            f"Schwab tokens DB at {tokens_db} not seeded; set "
+            "SCHWAB_TOKENS_DB_B64 secret in CI or pre-seed locally."
+        )
     client = schwabdev.Client(
         os.environ["SCHWAB_APP_KEY"],
         os.environ["SCHWAB_APP_SECRET"],
-        tokens_db="/tmp/nightly_tokens.db",
+        tokens_db=tokens_db,
     )
     acct_hash = os.environ["SCHWAB_PAPER_ACCOUNT_HASH"]
     symbol = os.environ.get("SCHWAB_PAPER_SYMBOL", "F")
