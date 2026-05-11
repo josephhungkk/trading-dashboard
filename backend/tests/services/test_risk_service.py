@@ -596,3 +596,155 @@ async def test_concentration_sql_aggregates_cross_broker(evaluation_ctx) -> None
     sql_text = str(positions_call.args[0])
     assert "instrument_id" in sql_text
     assert "account_id" not in sql_text  # cross-broker H2 invariant
+
+
+# ─── B6: buying-power buffer with in-flight commitments ──────────────────
+
+
+def _bp_buffer_limit(*, value: str) -> object:
+    """Build a RiskLimit row for ``min_buying_power_buffer_pct`` cap kind.
+
+    Spec §1 #6 + §3 ENUM: ``limit_value`` is the *required headroom %* below
+    which the gate WARNs (e.g. 10 = require 10% of effective_bp left over
+    after the trade). BLOCK is unconditional when notional exceeds BP.
+    """
+    from app.models.risk import RiskLimit
+
+    return RiskLimit(
+        id=40,
+        scope_type="account",
+        scope_id="acct-id",
+        limit_kind="min_buying_power_buffer_pct",
+        limit_value=Decimal(value),
+        warn_at_pct=None,
+        is_active=True,
+        notes="",
+        updated_by="op",
+    )
+
+
+def _mock_session_for_bp(*, cap_row: object | None) -> AsyncMock:
+    """Session whose execute() yields the cap-resolver result; no other DB calls."""
+    session = AsyncMock(spec=AsyncSession)
+    if cap_row is None:
+        none_result = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        session.execute = AsyncMock(side_effect=[none_result, none_result, none_result])
+        return session
+    cap_result = MagicMock(scalar_one_or_none=MagicMock(return_value=cap_row))
+    session.execute = AsyncMock(side_effect=[cap_result])
+    return session
+
+
+def _sidecar_with_bp(bp: str) -> AsyncMock:
+    sidecar = AsyncMock()
+    sidecar.get_account_summary = AsyncMock(return_value=MagicMock(buying_power=bp))
+    return sidecar
+
+
+def _redis_with_bp_committed(committed: str | None) -> AsyncMock:
+    """Build an AsyncMock Redis whose .get returns the inflight BP value (or None)."""
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=committed)
+    return redis
+
+
+async def test_bp_no_cap_allows(evaluation_ctx) -> None:
+    """No active ``min_buying_power_buffer_pct`` cap → ALLOW; sidecar untouched."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_bp(cap_row=None)
+    sidecar = AsyncMock()
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    assert await svc._check_buying_power(evaluation_ctx) is None
+    sidecar.get_account_summary.assert_not_awaited()
+    assert db.execute.await_count == 3
+
+
+async def test_bp_sufficient_no_warn_allows(evaluation_ctx) -> None:
+    """notional 15 000, bp 100 000, committed 0 → effective 100 000;
+    remaining 85 000 ≥ buffer (10% of 100 000 = 10 000) → ALLOW."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_bp(cap_row=_bp_buffer_limit(value="10"))
+    sidecar = _sidecar_with_bp("100000")
+    redis = _redis_with_bp_committed(None)
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=sidecar)
+    assert await svc._check_buying_power(evaluation_ctx) is None
+
+
+async def test_bp_buffer_warn(evaluation_ctx) -> None:
+    """notional 15 000, bp 20 000, committed 0; remaining 5 000 < 50% buffer (10 000) → WARN."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_bp(cap_row=_bp_buffer_limit(value="50"))
+    sidecar = _sidecar_with_bp("20000")
+    redis = _redis_with_bp_committed(None)
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_buying_power(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert blocker is None
+    assert warning is not None
+    assert warning.check == "buying_power"
+    assert warning.value == 5000.0
+    assert warning.threshold == 10000.0
+
+
+async def test_bp_insufficient_blocks(evaluation_ctx) -> None:
+    """notional 15 000 > effective_bp 10 000 → BLOCK."""
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_bp(cap_row=_bp_buffer_limit(value="10"))
+    sidecar = _sidecar_with_bp("10000")
+    redis = _redis_with_bp_committed(None)
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_buying_power(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.code == "buying_power_insufficient"
+
+
+async def test_bp_inflight_gobbles_blocks(evaluation_ctx) -> None:
+    """bp 50 000 but committed 40 000 → effective 10 000 < notional 15 000 → BLOCK.
+
+    Demonstrates H3: in-flight commitments must subtract from BP **before**
+    the buffer check so a fast double-buy can't both be approved.
+    """
+    from app.services.risk_service import RiskService
+
+    db = _mock_session_for_bp(cap_row=_bp_buffer_limit(value="10"))
+    sidecar = _sidecar_with_bp("50000")
+    redis = _redis_with_bp_committed("40000")
+    svc = RiskService(db=db, redis=redis, config=AsyncMock(), sidecar=sidecar)
+    res = await svc._check_buying_power(evaluation_ctx)
+    assert res is not None
+    blocker, warning = res
+    assert warning is None
+    assert blocker is not None
+    assert blocker.code == "buying_power_insufficient"
+
+
+async def test_bp_sell_skips(evaluation_ctx) -> None:
+    """Sell orders reduce BP usage → check inapplicable → ALLOW."""
+    from app.services.risk_service import EvaluationContext, RiskService
+
+    sell_ctx = EvaluationContext(
+        account_id=evaluation_ctx.account_id,
+        broker_id=evaluation_ctx.broker_id,
+        instrument_id=evaluation_ctx.instrument_id,
+        side="sell",
+        qty=evaluation_ctx.qty,
+        price=evaluation_ctx.price,
+        order_type=evaluation_ctx.order_type,
+        time_in_force=evaluation_ctx.time_in_force,
+        request_id=evaluation_ctx.request_id,
+        currency_base=evaluation_ctx.currency_base,
+    )
+    db = AsyncMock(spec=AsyncSession)
+    sidecar = AsyncMock()
+    svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=sidecar)
+    assert await svc._check_buying_power(sell_ctx) is None
+    db.execute.assert_not_awaited()
+    sidecar.get_account_summary.assert_not_awaited()

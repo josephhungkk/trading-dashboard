@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.risk import AccountKillSwitch, RiskLimit
 from app.schemas.risk import GateBlockerEntry, GateVerdict, GateWarningEntry
-from app.services.risk_inflight_counters import inflight_pdt_remaining
+from app.services.risk_inflight_counters import inflight_bp_committed, inflight_pdt_remaining
 
 CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
 
@@ -290,6 +290,71 @@ class RiskService:
                         threshold=float(cap_value),
                     ),
                 )
+
+        return None
+
+    async def _check_buying_power(self, ctx: EvaluationContext) -> CheckResult:
+        """B6: buying-power buffer with in-flight commitment subtract (H3).
+
+        Spec §1 #6. Cap kind ``min_buying_power_buffer_pct.limit_value`` is
+        the *required headroom %* — WARN if remaining BP after this trade
+        falls below ``effective_bp * cap_pct / 100``. BLOCK is unconditional
+        when notional already exceeds ``effective_bp = bp_base - committed``.
+
+        H3 invariant: ``committed`` is the in-flight Redis counter built by
+        Task D4 at place_order time and zeroed by reconcile after broker
+        ACK; subtracting it here closes the staleness window so a fast
+        double-buy can't both clear the gate. Sells reduce BP usage so the
+        check is skipped. Market orders skip too (no notional to compare).
+        """
+        if ctx.side == "sell":
+            return None
+
+        cap = await self._resolve_limit(
+            ctx.account_id, ctx.broker_id, "min_buying_power_buffer_pct"
+        )
+        if cap is None:
+            return None
+
+        if ctx.price is None:
+            return None
+        order_notional = ctx.qty * ctx.price
+
+        summary = await self._sidecar.get_account_summary(ctx.account_id)
+        bp_base = Decimal(summary.buying_power)
+        committed = Decimal(str(await inflight_bp_committed(self._redis, ctx.account_id)))
+        effective_bp = bp_base - committed
+
+        if order_notional > effective_bp:
+            return (
+                GateBlockerEntry(
+                    check="buying_power",
+                    message=(
+                        f"order notional {order_notional} {ctx.currency_base} > "
+                        f"effective BP {effective_bp} {ctx.currency_base} "
+                        f"(bp_base={bp_base}, committed={committed})"
+                    ),
+                    code="buying_power_insufficient",
+                ),
+                None,
+            )
+
+        remaining_after_order = effective_bp - order_notional
+        buffer_required = effective_bp * Decimal(cap.limit_value) / Decimal("100")
+        if remaining_after_order < buffer_required:
+            return (
+                None,
+                GateWarningEntry(
+                    check="buying_power",
+                    message=(
+                        f"remaining BP {remaining_after_order} {ctx.currency_base} < "
+                        f"required buffer {buffer_required} {ctx.currency_base} "
+                        f"({cap.limit_value}% of effective BP)"
+                    ),
+                    value=float(remaining_after_order),
+                    threshold=float(buffer_required),
+                ),
+            )
 
         return None
 
