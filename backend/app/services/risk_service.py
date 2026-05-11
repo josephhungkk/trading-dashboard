@@ -364,11 +364,16 @@ class RiskService:
         bp_base = Decimal(summary.buying_power)
         try:
             committed = await inflight_bp_committed(self._redis, ctx.account_id)
-        except ConnectionError, OSError:
+        except (ConnectionError, OSError) as exc:
             # Spec §4: Redis unreachable -> WARN; treat committed as broker
             # truth (i.e. assume zero in-flight) rather than fail-CLOSED on
             # operational hiccup. Counter is best-effort; broker BP is
             # authoritative.
+            log.warning(
+                "bp_inflight_redis_unreachable",
+                account_id=str(ctx.account_id),
+                error=str(exc),
+            )
             return (
                 None,
                 GateWarningEntry(
@@ -428,10 +433,15 @@ class RiskService:
 
         try:
             current = await inflight_pdt_remaining(self._redis, ctx.account_id)
-        except ConnectionError, OSError:
+        except (ConnectionError, OSError) as exc:
             # Spec §4: Redis unreachable -> WARN "PDT/BP in-flight tracking
             # degraded", broker truth is authoritative. Don't fail-CLOSED on
             # operational Redis hiccup.
+            log.warning(
+                "pdt_inflight_redis_unreachable",
+                account_id=str(ctx.account_id),
+                error=str(exc),
+            )
             return (
                 None,
                 GateWarningEntry(
