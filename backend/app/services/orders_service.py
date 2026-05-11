@@ -408,7 +408,13 @@ async def _audit_risk_decision(
         decision = RiskDecision(
             account_id=account_id,
             instrument_id=None,
-            side=str(request.side),
+            # D7: side is lowercased to satisfy the risk_decisions_side_check
+            # CHECK constraint (alembic 0036 enforces ('buy', 'sell')).
+            # PlaceOrderRequest.side is the uppercase OrderSide literal
+            # ('BUY'|'SELL'); without this normalize the BLOCK-path INSERT
+            # would fail silently in production (swallowed by the except
+            # below and tracked only as risk_audit_insert_failures_total).
+            side=str(request.side).lower(),
             qty=qty,
             price=Decimal(request.limit_price) if request.limit_price else None,
             order_type=str(request.order_type),
@@ -516,7 +522,10 @@ async def _audit_risk_decision_modify(
         decision = RiskDecision(
             account_id=account_id,
             instrument_id=None,
-            side=side,
+            # D7: lowercase side to satisfy risk_decisions_side_check
+            # (alembic 0036 enforces ('buy', 'sell')); mirrors the same
+            # fix in _audit_risk_decision.
+            side=side.lower(),
             qty=qty,
             price=Decimal(limit_price) if limit_price else None,
             order_type=order_type,
