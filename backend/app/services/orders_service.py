@@ -465,6 +465,92 @@ async def _audit_risk_decision(
             metrics.risk_audit_insert_failures_total.labels(attempt_kind=attempt_kind).inc()
 
 
+async def _audit_risk_decision_with_dedupe(
+    *,
+    db: AsyncSession,
+    redis: RedisLike,
+    account_id: UUID,
+    request: PlaceOrderRequest,
+    qty: Decimal,
+    verdict: GateVerdict,
+    request_id: str,
+    attempt_kind: str,
+    order_id: UUID | None,
+) -> None:
+    """Phase 10a.5 A5.1: audit emission with ALLOW-tier 30s SETNX dedupe.
+
+    Volume control (HIGH-4): a chatty client previewing+placing dozens of
+    identical orders shouldn't flood risk_decisions with redundant ALLOW
+    rows. WARN + BLOCK always emit (operator visibility outweighs volume).
+    Dedupe key: (account, conid, side, qty_int) — qty is normalised to
+    int because exact-Decimal repeats are the practical case.
+    """
+    if verdict.final_verdict == "allow":
+        dedupe_key = (
+            f"risk_audit_dedupe:{account_id}:{request.conid}:{str(request.side).lower()}:{int(qty)}"
+        )
+        try:
+            was_set = await redis.set(dedupe_key, "1", ex=30, nx=True)
+        except (Exception,) as exc:  # noqa: B013
+            log.warning("risk_audit_dedupe_redis_failed", err=str(exc))
+            was_set = True  # fail-open: emit when dedupe lookup fails
+        if not was_set:
+            with contextlib.suppress(Exception):
+                metrics.risk_audit_dedupe_skipped_total.labels(attempt_kind=attempt_kind).inc()
+            return
+    await _audit_risk_decision(
+        db=db,
+        account_id=account_id,
+        request=request,
+        qty=qty,
+        verdict=verdict,
+        request_id=request_id,
+        attempt_kind=attempt_kind,
+        order_id=order_id,
+    )
+
+
+async def _audit_risk_decision_modify_with_dedupe(
+    *,
+    db: AsyncSession,
+    redis: RedisLike,
+    account_id: UUID,
+    side: str,
+    qty: Decimal,
+    limit_price: str | None,
+    order_type: str,
+    tif: str,
+    verdict: GateVerdict,
+    request_id: str,
+    order_id: UUID,
+    conid: str,
+) -> None:
+    """Phase 10a.5 A5.1: modify-path mirror of the place-path dedupe helper."""
+    if verdict.final_verdict == "allow":
+        dedupe_key = f"risk_audit_dedupe:{account_id}:{conid}:{str(side).lower()}:{int(qty)}:modify"
+        try:
+            was_set = await redis.set(dedupe_key, "1", ex=30, nx=True)
+        except (Exception,) as exc:  # noqa: B013
+            log.warning("risk_audit_dedupe_redis_failed", err=str(exc))
+            was_set = True
+        if not was_set:
+            with contextlib.suppress(Exception):
+                metrics.risk_audit_dedupe_skipped_total.labels(attempt_kind="modify_order").inc()
+            return
+    await _audit_risk_decision_modify(
+        db=db,
+        account_id=account_id,
+        side=side,
+        qty=qty,
+        limit_price=limit_price,
+        order_type=order_type,
+        tif=tif,
+        verdict=verdict,
+        request_id=request_id,
+        order_id=order_id,
+    )
+
+
 async def _evaluate_risk_for_modify_order(
     *,
     cfg: ConfigService,
@@ -639,17 +725,22 @@ async def place_order(
             qty=qty,
             request_id=risk_request_id,
         )
+        # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
+        # for place_order/modify_order. preview_order does NOT audit ALLOW
+        # (HIGH-4 volume control). ALLOW emissions are deduped via 30s
+        # SETNX keyed by (account, conid, side, qty) to bound volume.
+        await _audit_risk_decision_with_dedupe(
+            db=db,
+            redis=redis,
+            account_id=request.account_id,
+            request=request,
+            qty=qty,
+            verdict=risk_verdict,
+            request_id=risk_request_id,
+            attempt_kind="place_order",
+            order_id=None,
+        )
         if risk_verdict.final_verdict == "block":
-            await _audit_risk_decision(
-                db=db,
-                account_id=request.account_id,
-                request=request,
-                qty=qty,
-                verdict=risk_verdict,
-                request_id=risk_request_id,
-                attempt_kind="place_order",
-                order_id=None,
-            )
             raise PreviewUnavailable(
                 422,
                 {
@@ -929,19 +1020,23 @@ async def modify_order(
             tif=request.tif,
             request_id=risk_request_id,
         )
+        # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
+        # for modify_order. ALLOW path is deduped via 30s SETNX.
+        await _audit_risk_decision_modify_with_dedupe(
+            db=db,
+            redis=redis,
+            account_id=row["account_id"],
+            side=str(row["side"]),
+            qty=Decimal(qty_text),
+            limit_price=new_limit_price,
+            order_type=str(row["order_type"]),
+            tif=request.tif,
+            verdict=risk_verdict,
+            request_id=risk_request_id,
+            order_id=order_id,
+            conid=str(row["conid"]),
+        )
         if risk_verdict.final_verdict == "block":
-            await _audit_risk_decision_modify(
-                db=db,
-                account_id=row["account_id"],
-                side=str(row["side"]),
-                qty=Decimal(qty_text),
-                limit_price=new_limit_price,
-                order_type=str(row["order_type"]),
-                tif=request.tif,
-                verdict=risk_verdict,
-                request_id=risk_request_id,
-                order_id=order_id,
-            )
             raise PreviewUnavailable(
                 422,
                 {

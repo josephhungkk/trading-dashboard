@@ -652,6 +652,16 @@ pnl_intraday_writer_source_drift_seconds = Gauge(
 )
 
 
+# ─── Phase 10a.5 A5 metrics — audit dedupe ──────────────────────────────
+
+risk_audit_dedupe_skipped_total = Counter(
+    "risk_audit_dedupe_skipped_total",
+    "ALLOW audit rows skipped due to 30s SETNX dedupe at place/modify path.",
+    labelnames=["attempt_kind"],
+    registry=registry,
+)
+
+
 # ─── Phase 10a.5 A4 metrics — risk-counter tokens ───────────────────────
 
 risk_counter_orphan_tokens_total = Gauge(
