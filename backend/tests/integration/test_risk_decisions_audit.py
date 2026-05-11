@@ -255,3 +255,209 @@ async def test_audit_insert_fires_pg_notify_trigger() -> None:
     finally:
         await listener_conn.remove_listener("risk_decision", _on_notify)
         await listener_conn.close()
+
+
+# ─── Phase 10a.5 A5.2: dedupe-helper widening tests ─────────────────────
+
+
+def _allow_verdict() -> GateVerdict:
+    return GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=12)
+
+
+def _warn_verdict() -> GateVerdict:
+    return GateVerdict(
+        final_verdict="warn",
+        blockers=[],
+        warnings=[
+            GateWarningEntry(
+                check="max_daily_loss",
+                message="80% of cap",
+                value=800.0,
+                threshold=1000.0,
+            )
+        ],
+        latency_ms=15,
+    )
+
+
+async def _count_decisions_by_request_id(request_id: str) -> int:
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text("SELECT COUNT(*) FROM risk_decisions WHERE request_id = :rid"),
+            {"rid": request_id},
+        )
+        return int(result.scalar_one())
+
+
+@pytest.mark.asyncio
+async def test_dedupe_helper_emits_allow_row_first_call() -> None:
+    """A5.1: first ALLOW invocation passes the dedupe -> row written."""
+    from types import SimpleNamespace
+
+    import fakeredis.aioredis
+
+    from app.services.orders_service import _audit_risk_decision_with_dedupe
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    account_id = await _existing_account_id()
+    request_id = f"a5-allow-1-{uuid.uuid4()}"
+    stub_request = SimpleNamespace(
+        side="BUY",
+        limit_price="100.00",
+        order_type="LIMIT",
+        tif="DAY",
+        conid="TEST-CONID-A5-1",
+        account_id=account_id,
+    )
+
+    async with SessionLocal() as db:
+        try:
+            await _audit_risk_decision_with_dedupe(
+                db=db,
+                redis=redis,
+                account_id=account_id,
+                request=stub_request,  # type: ignore[arg-type]
+                qty=Decimal("1"),
+                verdict=_allow_verdict(),
+                request_id=request_id,
+                attempt_kind="place_order",
+                order_id=None,
+            )
+            assert await _count_decisions_by_request_id(request_id) == 1
+        finally:
+            await _delete_decisions_by_request_id(request_id)
+
+
+@pytest.mark.asyncio
+async def test_dedupe_helper_skips_duplicate_allow_within_30s() -> None:
+    """A5.1 HIGH-4: second identical ALLOW within 30s is suppressed."""
+    from types import SimpleNamespace
+
+    import fakeredis.aioredis
+
+    from app.services.orders_service import _audit_risk_decision_with_dedupe
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    account_id = await _existing_account_id()
+    request_id_a = f"a5-allow-dup-a-{uuid.uuid4()}"
+    request_id_b = f"a5-allow-dup-b-{uuid.uuid4()}"
+    stub_request = SimpleNamespace(
+        side="BUY",
+        limit_price="100.00",
+        order_type="LIMIT",
+        tif="DAY",
+        conid="TEST-CONID-A5-DUP",
+        account_id=account_id,
+    )
+
+    async with SessionLocal() as db:
+        try:
+            await _audit_risk_decision_with_dedupe(
+                db=db,
+                redis=redis,
+                account_id=account_id,
+                request=stub_request,  # type: ignore[arg-type]
+                qty=Decimal("1"),
+                verdict=_allow_verdict(),
+                request_id=request_id_a,
+                attempt_kind="place_order",
+                order_id=None,
+            )
+            await _audit_risk_decision_with_dedupe(
+                db=db,
+                redis=redis,
+                account_id=account_id,
+                request=stub_request,  # type: ignore[arg-type]
+                qty=Decimal("1"),
+                verdict=_allow_verdict(),
+                request_id=request_id_b,
+                attempt_kind="place_order",
+                order_id=None,
+            )
+            assert await _count_decisions_by_request_id(request_id_a) == 1
+            assert await _count_decisions_by_request_id(request_id_b) == 0
+        finally:
+            await _delete_decisions_by_request_id(request_id_a)
+            await _delete_decisions_by_request_id(request_id_b)
+
+
+@pytest.mark.asyncio
+async def test_dedupe_helper_warn_bypasses_dedupe() -> None:
+    """A5.1: WARN verdicts always emit (operator visibility > volume control)."""
+    from types import SimpleNamespace
+
+    import fakeredis.aioredis
+
+    from app.services.orders_service import _audit_risk_decision_with_dedupe
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    account_id = await _existing_account_id()
+    request_id_a = f"a5-warn-a-{uuid.uuid4()}"
+    request_id_b = f"a5-warn-b-{uuid.uuid4()}"
+    stub_request = SimpleNamespace(
+        side="BUY",
+        limit_price="100.00",
+        order_type="LIMIT",
+        tif="DAY",
+        conid="TEST-CONID-A5-WARN",
+        account_id=account_id,
+    )
+
+    async with SessionLocal() as db:
+        try:
+            for rid in (request_id_a, request_id_b):
+                await _audit_risk_decision_with_dedupe(
+                    db=db,
+                    redis=redis,
+                    account_id=account_id,
+                    request=stub_request,  # type: ignore[arg-type]
+                    qty=Decimal("1"),
+                    verdict=_warn_verdict(),
+                    request_id=rid,
+                    attempt_kind="place_order",
+                    order_id=None,
+                )
+            assert await _count_decisions_by_request_id(request_id_a) == 1
+            assert await _count_decisions_by_request_id(request_id_b) == 1
+        finally:
+            await _delete_decisions_by_request_id(request_id_a)
+            await _delete_decisions_by_request_id(request_id_b)
+
+
+@pytest.mark.asyncio
+async def test_dedupe_helper_redis_failure_fails_open() -> None:
+    """A5.1: redis SETNX raising does NOT suppress emission (fail-open)."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.services.orders_service import _audit_risk_decision_with_dedupe
+
+    redis = AsyncMock()
+    redis.set = AsyncMock(side_effect=ConnectionError("redis down"))
+    account_id = await _existing_account_id()
+    request_id = f"a5-redis-fail-{uuid.uuid4()}"
+    stub_request = SimpleNamespace(
+        side="BUY",
+        limit_price="100.00",
+        order_type="LIMIT",
+        tif="DAY",
+        conid="TEST-CONID-A5-FAIL",
+        account_id=account_id,
+    )
+
+    async with SessionLocal() as db:
+        try:
+            await _audit_risk_decision_with_dedupe(
+                db=db,
+                redis=redis,
+                account_id=account_id,
+                request=stub_request,  # type: ignore[arg-type]
+                qty=Decimal("1"),
+                verdict=_allow_verdict(),
+                request_id=request_id,
+                attempt_kind="place_order",
+                order_id=None,
+            )
+            assert await _count_decisions_by_request_id(request_id) == 1
+        finally:
+            await _delete_decisions_by_request_id(request_id)
