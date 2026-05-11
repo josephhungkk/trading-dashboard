@@ -132,6 +132,20 @@ export interface PositionSanityResult {
   requires_extra_attestation: boolean;
 }
 
+// Phase 10a E2 — risk-gate verdict entries surfaced inside PreviewResponse.
+export interface RiskWarningEntry {
+  check: string;
+  message: string;
+  value?: number | null;
+  threshold?: number | null;
+}
+
+export interface RiskBlockerEntry {
+  check: string;
+  message: string;
+  code: string;
+}
+
 export interface PreviewResponse {
   nonce: string;
   notional: DecimalString;
@@ -144,6 +158,9 @@ export interface PreviewResponse {
   position_sanity: PositionSanityResult;
   contract_summary: ContractSummary;
   warnings: string[];
+  // Phase 10a D3 — structured risk-gate verdict.
+  risk_warnings?: RiskWarningEntry[];
+  risk_blockers?: RiskBlockerEntry[];
 }
 
 export type OrderSubmissionState = 'submitted' | 'pending_unknown' | 'idempotent_retry';

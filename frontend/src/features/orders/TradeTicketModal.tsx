@@ -118,6 +118,9 @@ function TradeTicketModalContent({
   const focusedSymbol = form.contract.symbol.trim() || defaultSymbol || null;
   useFocusedSymbol(focusedSymbol);
   const [attestedExtreme, setAttestedExtreme] = React.useState(false);
+  // Phase 10a E2: separate acknowledgement for risk-gate WARN verdicts; reset
+  // on every preview so a fresh acknowledgement is required per quote refresh.
+  const [acknowledgedRiskWarnings, setAcknowledgedRiskWarnings] = React.useState(false);
   const [banner, setBanner] = React.useState<BlockingBanner | null>(storyBanner);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
 
@@ -178,6 +181,7 @@ function TradeTicketModalContent({
     const response = await previewOrder(request);
     tradeTicketStore.getState().setPreview(response);
     setAttestedExtreme(false);
+    setAcknowledgedRiskWarnings(false);
   }
 
   async function handleConfirm(): Promise<void> {
@@ -297,6 +301,8 @@ function TradeTicketModalContent({
               preview={preview}
               attestedExtreme={attestedExtreme}
               setAttestedExtreme={setAttestedExtreme}
+              acknowledgedRiskWarnings={acknowledgedRiskWarnings}
+              setAcknowledgedRiskWarnings={setAcknowledgedRiskWarnings}
               confirmDisabled={confirmDisabled}
               inFlight={inFlight}
               onBack={() => tradeTicketStore.getState().setPreview(null)}
@@ -493,6 +499,8 @@ function PreviewStep({
   preview,
   attestedExtreme,
   setAttestedExtreme,
+  acknowledgedRiskWarnings,
+  setAcknowledgedRiskWarnings,
   confirmDisabled,
   inFlight,
   onBack,
@@ -501,11 +509,19 @@ function PreviewStep({
   preview: PreviewResponse;
   attestedExtreme: boolean;
   setAttestedExtreme: (value: boolean) => void;
+  acknowledgedRiskWarnings: boolean;
+  setAcknowledgedRiskWarnings: (value: boolean) => void;
   confirmDisabled: boolean;
   inFlight: boolean;
   onBack: () => void;
   onConfirm: () => void;
 }): React.JSX.Element {
+  // Phase 10a E2: structured risk-gate verdict surfaces.
+  const riskWarnings = preview.risk_warnings ?? [];
+  const riskBlockers = preview.risk_blockers ?? [];
+  const hasRiskWarnings = riskWarnings.length > 0;
+  const hasRiskBlockers = riskBlockers.length > 0;
+
   return (
     <section className="flex flex-col gap-4">
       <dl className="grid grid-cols-2 gap-3 rounded-md border border-border p-3 text-sm">
@@ -523,6 +539,50 @@ function PreviewStep({
         </ul>
       ) : null}
 
+      {hasRiskBlockers ? (
+        <div
+          className="rounded-md border border-destructive/60 bg-destructive/10 p-3 text-sm text-destructive"
+          role="alert"
+          aria-label="Risk gate blockers"
+        >
+          <p className="font-semibold">Order blocked by the risk gate.</p>
+          <ul className="mt-2 list-inside list-disc">
+            {riskBlockers.map((blocker) => (
+              <li key={`${blocker.check}:${blocker.code}`}>
+                <span className="font-medium">{blocker.message}</span>
+                <span className="ml-2 font-mono text-xs opacity-70">({blocker.code})</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {hasRiskWarnings && !hasRiskBlockers ? (
+        <div
+          className="rounded-md border border-warning/60 bg-warning/10 p-3 text-sm"
+          role="alert"
+          aria-label="Risk gate warnings"
+        >
+          <p className="font-semibold">Risk warnings — review before confirming.</p>
+          <ul className="mt-2 list-inside list-disc">
+            {riskWarnings.map((warning) => (
+              <li key={`${warning.check}:${warning.message}`}>{warning.message}</li>
+            ))}
+          </ul>
+          <label className="mt-3 flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={acknowledgedRiskWarnings}
+              onChange={(event) =>
+                setAcknowledgedRiskWarnings(event.currentTarget.checked)
+              }
+              aria-label="Acknowledge risk warnings"
+            />
+            I understand these warnings
+          </label>
+        </div>
+      ) : null}
+
       {preview.position_sanity.status === 'extreme' ? (
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -536,7 +596,11 @@ function PreviewStep({
 
       <div className="mt-2 flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onBack}>Back</Button>
-        <Button type="button" onClick={onConfirm} disabled={confirmDisabled}>
+        <Button
+          type="button"
+          onClick={onConfirm}
+          disabled={confirmDisabled || hasRiskBlockers || (hasRiskWarnings && !acknowledgedRiskWarnings)}
+        >
           {inFlight ? 'Confirming' : 'Confirm'}
         </Button>
       </div>
