@@ -133,6 +133,21 @@ class _Session:
         # App calls .scalar_one_or_none() so populate the scalar field.
         if "SUM(notional_filled)" in sql:
             return _Result(scalar=Decimal("0"))
+        # Phase 10a.5.1 C1.3: OrderCapabilityService binds to this stub
+        # via app.state.capability_svc override in the fixture; widen
+        # execute() so the (broker_id, asset_class, order_type, tif)
+        # lookup returns a happy-path row without hitting real PG.
+        if "FROM broker_order_capability" in sql:
+            return _Result(
+                row={
+                    "broker_id": params.get("broker_id", ""),
+                    "asset_class": params.get("asset_class", ""),
+                    "order_type": params.get("order_type", ""),
+                    "time_in_force": params.get("time_in_force", ""),
+                    "is_supported": True,
+                    "notes": "",
+                }
+            )
         raise AssertionError(f"unexpected SQL: {sql}")
 
     async def commit(self) -> None:
@@ -289,6 +304,14 @@ async def place_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[st
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_broker_registry] = override_registry
     app.dependency_overrides[orders_api.get_orders_redis] = override_redis
+
+    # Phase 10a.5.1 C1.3: replace the autouse _app_state capability service
+    # (built with db_factory=engine pointing at real PG) with one bound to
+    # this test's _Session stub. Same rationale as test_orders_preview.py
+    # C1.2 — see that file for the full explanation.
+    from app.services.order_capability_service import OrderCapabilityService
+
+    app.state.capability_svc = OrderCapabilityService(redis=redis, db=session)  # type: ignore[arg-type]
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield {

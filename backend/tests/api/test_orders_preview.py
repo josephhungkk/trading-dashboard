@@ -44,6 +44,12 @@ class _Result:
     def one_or_none(self) -> dict[str, Any] | None:
         return self._row
 
+    def first(self) -> dict[str, Any] | None:
+        # Phase 10a.5.1 C1.2: OrderCapabilityService._fetch_capability uses
+        # result.mappings().first(), not one_or_none(). Both return the
+        # single row or None for our stub purposes.
+        return self._row
+
     def scalar_one_or_none(self) -> Any:
         return self._scalar
 
@@ -55,10 +61,12 @@ class _Session:
         *,
         filled_today: Decimal = Decimal("0"),
         position_qty: Decimal = Decimal("0"),
+        capability_supported: bool = True,
     ) -> None:
         self.account = account
         self.filled_today = filled_today
         self.position_qty = position_qty
+        self.capability_supported = capability_supported
 
     async def execute(self, stmt: Any, params: dict[str, Any]) -> _Result:
         sql = str(stmt)
@@ -78,6 +86,21 @@ class _Session:
             return _Result(scalar="public.positions")
         if "FROM positions" in sql:
             return _Result(scalar=self.position_qty)
+        # Phase 10a.5.1 C1.2: OrderCapabilityService binds to this stub
+        # via app.state.capability_svc override in the fixture; widen
+        # execute() so the (broker_id, asset_class, order_type, tif) lookup
+        # returns a happy-path row without hitting real PG.
+        if "FROM broker_order_capability" in sql:
+            return _Result(
+                {
+                    "broker_id": params.get("broker_id", ""),
+                    "asset_class": params.get("asset_class", ""),
+                    "order_type": params.get("order_type", ""),
+                    "time_in_force": params.get("time_in_force", ""),
+                    "is_supported": self.capability_supported,
+                    "notes": "",
+                }
+            )
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
@@ -169,6 +192,18 @@ async def preview_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict[
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_broker_registry] = override_registry
     app.dependency_overrides[orders_api.get_orders_redis] = override_redis
+
+    # Phase 10a.5.1 C1.2: replace the autouse _app_state capability service
+    # (built with db_factory=engine pointing at real PG) with one bound to
+    # this test's _Session stub. Per-request mode (db=session) means the
+    # service's _fetch_capability hits _Session.execute() instead of
+    # opening a real connection. Required since the order preview/place/
+    # modify path calls OrderCapabilityService.is_supported() before the
+    # broker dispatch — without this swap, tests get ConnectionRefused
+    # on local runs that lack a postgres sidecar.
+    from app.services.order_capability_service import OrderCapabilityService
+
+    app.state.capability_svc = OrderCapabilityService(redis=redis, db=session)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
         orders_api.orders_service,
