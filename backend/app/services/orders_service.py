@@ -281,6 +281,43 @@ async def preview_order(
     risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
     risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
 
+    # Phase 10a.5.1: preview WARN+BLOCK audit (no ALLOW — HIGH-4 volume
+    # control). Mirrors _audit_risk_decision's session-isolation + fail-OPEN
+    # pattern. Generated via Qwen3-Coder-Next with sibling-mimic prompt.
+    if risk_verdict.final_verdict != "allow":
+        try:
+            from app.models.risk import RiskDecision
+
+            async with SessionLocal() as audit_db:
+                decision = RiskDecision(
+                    account_id=request.account_id,
+                    instrument_id=instrument_id,
+                    side=str(request.side).lower(),
+                    qty=qty,
+                    price=Decimal(request.limit_price) if request.limit_price else None,
+                    order_type=str(request.order_type),
+                    time_in_force=str(request.tif),
+                    verdict=risk_verdict.final_verdict,
+                    blockers=risk_blockers,
+                    warnings=risk_warnings,
+                    latency_ms=risk_verdict.latency_ms,
+                    attempt_kind="preview",
+                    request_id=str(uuid4()),
+                    order_id=None,
+                )
+                audit_db.add(decision)
+                await audit_db.commit()
+        except Exception as exc:
+            log.exception(
+                "risk.audit_insert_failed",
+                account_id=str(request.account_id),
+                attempt_kind="preview",
+                verdict=risk_verdict.final_verdict,
+                error=str(exc),
+            )
+            with contextlib.suppress(Exception):
+                metrics.risk_audit_insert_failures_total.labels(attempt_kind="preview").inc()
+
     return PreviewResponse(
         nonce=nonce,
         notional=_format_decimal_8(notional),
