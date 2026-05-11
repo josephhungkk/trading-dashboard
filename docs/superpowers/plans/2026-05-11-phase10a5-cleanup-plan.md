@@ -18,15 +18,17 @@ Codex is **rate-limited** for this phase; production-code writes go to **Qwen3-C
 
 Primary + fallback ladder (try in order; rotate when the current rung produces non-mergeable output two tasks in a row or fails the `feedback_qwen_protocol` body-only check):
 
-| # | Stage | Who | Model | Tag | When |
-|---|---|---|---|---|---|
-| 1 | Coding default | Qwen3-Coder-Next (80B/3B active, hybrid attention + MoE, agentically trained on 800k GitHub PR tasks, 256K ctx) | `qwen3-coder-next:latest` | All coding tasks (Phase 10a.5's TDD + tool-use + fix-loop flow matches the model's training distribution exactly) |
-| 2 | Hardest tasks — higher-fidelity quant | Qwen3-Coder-Next at Q8 | `qwen3-coder-next:q8_0` | A4 atomic Lua scripts, A2 savepoint isolation logic — quality > throughput |
-| 3 | General-purpose fallback (non-coder) | Qwen3.6-35B-A3B (MoE, 3B active) | `qwen3.6:35b` | When the coder-specialized model over-fits to coding idioms (rare — would show as flaky doc/YAML output) |
-| 4 | Quality-sensitive dense fallback | Qwen3.6-27B (dense, slower) | `qwen3.6:27b-q4_K_M` | When MoE routing produces unstable output across tasks |
+| # | Stage | Who | Tag | When |
+|---|---|---|---|---|
+| 1 | Coding default | Qwen3-Coder-Next UD-Q3_K_XL (Unsloth dynamic 3-bit XL, 36 GB, ~95% BF16, ~36 t/s on RTX 4080) | `hf.co/unsloth/Qwen3-Coder-Next-GGUF:UD-Q3_K_XL` | All coding tasks |
+| 2 | Hard tasks — higher fidelity | Qwen3-Coder-Next UD-IQ4_XS (38 GB, ~97% BF16, ~30 t/s, CUDA-optimized i-quant) | `hf.co/unsloth/Qwen3-Coder-Next-GGUF:UD-IQ4_XS` | A4 atomic Lua scripts, A2 savepoint isolation logic — quality > throughput. (q8_0 doesn't fit on 16 GB VRAM + 64 GB RAM combined.) |
+| 3 | General-purpose fallback | Qwen3.6-35B-A3B (MoE, 3B active) | `qwen3.6:35b` | When coder-specialized model over-fits to coding idioms (rare — would show as flaky doc/YAML output) |
+| 4 | Quality-sensitive dense fallback | Qwen3.6-27B (dense) | `qwen3.6:27b-q4_K_M` | When MoE routing produces unstable output across tasks |
 | 5 | Last-known-good | Qwen2.5-Coder-14B (what 10a shipped on) | `qwen2.5-coder:14b` | All Qwen3.x models produce non-mergeable output |
 | 6 | Codex fallback | Codex | `gpt-5-codex` | Only if Qwen ladder exhausts AND Codex rate-limit window has reset |
 | 7 | Final fallback | Opus main thread takes the task | `claude-opus-4-7` | All above fail |
+
+**Runtime choice — Path B (Ollama-first with switch-out option):** Phase 10a.5 begins on Ollama (`192.168.50.30:11434`). After Task A1.1, measure observed tokens/sec; if <20 t/s on UD-Q3_K_XL, switch to `llama-server` from llama.cpp at the end of Chunk A (clean boundary). Expected: Ollama 15-30 t/s on this MoE+spillover config; llama.cpp 50-80 t/s under the same hardware per [llama.cpp issue #19480](https://github.com/ggml-org/llama.cpp/issues/19480) and [Ollama issue #14579](https://github.com/ollama/ollama/issues/14579) data on Qwen3.5-35B-A3B (5× gap reported). LM Studio + LocalAI evaluated and rejected — LM Studio's `llmster` is CPU-only on x86 in 2026; LocalAI is an orchestration layer on top of llama.cpp (no speed benefit).
 
 Main-thread orchestrate / lint / test / commit always stays on **Opus** (`claude-opus-4-7`).
 
