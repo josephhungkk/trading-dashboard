@@ -159,6 +159,13 @@ class PreviewResponse(BaseModel):
     position_sanity: PositionSanityResult
     contract_summary: ContractSummary
     warnings: list[str]
+    # Phase 10a D3: structured risk-gate verdict surfaces. risk_warnings and
+    # risk_blockers carry the GateVerdict.warnings/blockers lists from
+    # RiskService.evaluate (mode='preview'). FE renders blockers as a red
+    # banner that prevents submit; warnings as a yellow banner that still
+    # allows submit. Empty lists when no risk caps configured.
+    risk_warnings: list[dict[str, object]] = []
+    risk_blockers: list[dict[str, object]] = []
 
     @field_validator(
         "notional",

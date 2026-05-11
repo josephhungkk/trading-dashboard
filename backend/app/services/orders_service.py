@@ -9,7 +9,10 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+
+if TYPE_CHECKING:
+    from app.schemas.risk import GateVerdict
 from uuid import UUID, uuid4
 
 import asyncpg  # type: ignore[import-untyped]
@@ -238,6 +241,24 @@ async def preview_order(
     )
     await redis.set(nonce_key, nonce_value, ex=30, nx=True)
 
+    # Phase 10a D3: insert risk gate at station 4 (after capability/maintenance
+    # checks; before response shaping). instrument_id is None at this surface
+    # because PreviewRequest carries conid not instrument_id; concentration
+    # check (which is the only one that consults instrument_id) skips on None
+    # per its own contract. Wiring conid -> instrument_id is deferred to
+    # Phase 10a.5 (needs InstrumentResolver round-trip).
+    risk_verdict = await _evaluate_risk_for_preview(
+        cfg=cfg,
+        db=db,
+        redis=redis,
+        client=client,
+        request=request,
+        account=account,
+        qty=qty,
+    )
+    risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
+    risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
+
     return PreviewResponse(
         nonce=nonce,
         notional=_format_decimal_8(notional),
@@ -254,7 +275,58 @@ async def preview_order(
             description=_contract_description(contract),
         ),
         warnings=[],
+        risk_warnings=risk_warnings,
+        risk_blockers=risk_blockers,
     )
+
+
+async def _evaluate_risk_for_preview(
+    *,
+    cfg: ConfigService,
+    db: AsyncSession,
+    redis: RedisLike,
+    client: object,
+    request: PreviewRequest,
+    account: _Account,
+    qty: Decimal,
+) -> GateVerdict:
+    """Phase 10a D3: build EvaluationContext + run RiskService gate (preview mode).
+
+    instrument_id=None until 10a.5 wires the conid->instrument_id round-trip
+    (position concentration check is the only one that consults it; it
+    skips cleanly on None per its own contract).
+    """
+    from app.services.risk_service import EvaluationContext, RiskService
+
+    svc = RiskService(
+        db=db,
+        redis=cast(Any, redis),
+        config=cast(Any, cfg),
+        sidecar=cast(Any, client),
+    )
+    ctx = EvaluationContext(
+        account_id=request.account_id,
+        broker_id=capability_broker_id(account.gateway_label),
+        instrument_id=None,
+        side=cast(Any, request.side),
+        qty=qty,
+        price=Decimal(request.limit_price) if request.limit_price else None,
+        order_type=str(request.order_type),
+        time_in_force=str(request.tif),
+        request_id=str(uuid4()),
+        currency_base=account.currency_base,
+    )
+    verdict = await svc.evaluate(ctx, mode="preview")
+    log.info(
+        "risk.evaluated",
+        verdict=verdict.final_verdict,
+        kind="preview",
+        account_id=str(request.account_id),
+        lat_ms=verdict.latency_ms,
+        blockers=len(verdict.blockers),
+        warnings=len(verdict.warnings),
+    )
+    return verdict
 
 
 async def place_order(
