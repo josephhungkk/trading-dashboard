@@ -26,10 +26,11 @@ Spec: `docs/superpowers/specs/2026-05-11-phase10a5-cleanup-design.md`. Plan: `do
 - 6-site swap in orders_service.py: `_evaluate_risk_for_preview` / `_evaluate_risk_for_place_order` / `_evaluate_risk_for_modify_order` now accept `instrument_id` param; `_audit_risk_decision` / `_audit_risk_decision_modify` accept + write `instrument_id` to the `risk_decisions` row. Dedupe wrappers thread it through. Each call site resolves once and passes the value to both evaluator and audit (single round-trip per order).
 - `_check_position_concentration` SUM query fixed: was `SUM(market_value_base)` (nonexistent column — DB-CRIT-1 from chunk-B review); now `SUM(qty * avg_cost * multiplier)`.
 
-**Chunk C — Test infrastructure (1 commit, rest deferred)**
+**Chunk C — Test infrastructure (2 commits in 10a.5, more in 10a.5.1)**
 
 - `@pytest.mark.no_risk_gate` opt-out marker registered in pyproject.toml + documented in conftest.py.
-- C1.2-C1.6 (per-file stub upgrades), C2 (drop `isinstance(db, AsyncSession)` guard), C3 (Playwright E2E suite, 9 specs + CI workflow), C4 (real_broker pyproject.toml + nightly workflow path updates) **deferred to Phase 10a.5.1**. The deferred items are pure test/CI hygiene; the in-scope effectivity work (Chunks A + B) is complete.
+- C1.2-C1.6 (per-file stub upgrades) + C2.1 (drop `isinstance(db, AsyncSession)` guards) shipped via 10a.5.1 (`58e8063`): each of the 4 order-write test fixtures (preview/place/modify/bracket) now monkeypatches the risk-gate entry points (`_evaluate_risk_for_*`, `_resolve_instrument_id`, `_audit_risk_decision_*_with_dedupe`) to return ALLOW + None. Replaces the stub `_Session` short-circuit with explicit mocking. Production code is now linear (no test-only `isinstance` branches); stub-Session tests explicitly opt out via fixture-scoped monkeypatch.
+- C3 (Playwright E2E suite, 9 specs + CI workflow), C4 (real_broker pyproject.toml + nightly workflow path updates) deferred to a later 10a.5.x patch. The deferred items are pure test/CI hygiene; the in-scope effectivity work (Chunks A + B) is complete.
 
 ### Added
 - `pnl_intraday` table + `v_account_intraday_pnl` view rewrite (Alembic 0037)
