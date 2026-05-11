@@ -568,9 +568,25 @@ item shipped as its own `feat(phaseN-followup):` or `fix(phaseN-
 followup):` commit; close-out memo `phase9_7_shipped.md` lists the
 delivered subset and the deferred-blocked subset with reason per row.
 
-## Phase 10 — Risk engine + position-sizing + multi-account rollup
+## Phase 10 — Risk engine + position-sizing + multi-account rollup  *(partial — 10a done, 10a.5 + 10b pending)*
 
 PDT counter, buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly / fixed-fractional / vol-target). Multi-account portfolio rollup. Pre-trade gate becomes mandatory chokepoint.
+
+**Roadmap-vs-shipped scoreboard** (from `docs/ROADMAP.md` Phase 10 deliverable list):
+
+| # | Deliverable | Status |
+|---|---|---|
+| 1 | PDT counter (US accts) | ✅ 10a B4 |
+| 2 | Buying-power calc | ✅ 10a B6 |
+| 3 | Position concentration limits | ⚠️ 10a B5 — wired but conid→instrument_id is no-op (10a.5) |
+| 4 | Pre-trade margin check | ✅ 10a B7 + C3 (asymmetric preview/place_order policy) |
+| 5 | Max daily loss | ⚠️ 10a B3 — wired but `v_account_intraday_pnl` is zero-stub (10a.5) |
+| 6 | Account-level kill switch | ✅ 10a B2 + D8 (admin CRUD) |
+| 7 | Pre-trade gate as chokepoint | ✅ 10a D3-D5 (preview / place_order / modify_order at station 4) |
+| 8 | **Position-sizing calculator (Kelly / fixed-fractional / vol-target)** | ❌ **Phase 10b** (not started) |
+| 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ❌ **Phase 10b** (not started) |
+
+**Versioning note:** v0.12.0 was tagged for Phase 10a but ROADMAP.md reserved v0.10.0 for full Phase 10 (and v0.12.0 for Phase 12 / Options single-leg). The natural roadmap version numbering was lapped. Phase 10a.5 and Phase 10b will pick non-conflicting tags — confirm with user before tagging.
 
 ### Phase 10a — Risk gate at station 4  *(complete · 2026-05-08 → 2026-05-11 · v0.12.0 · 38 commits since v0.11.0.1)*
 
@@ -631,6 +647,39 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 **Phase 10a final test posture (v0.12.0):** backend 1054 pass + 8 wall-clock-dependent fails (IBKR daily maintenance window — not a regression); FE Vitest green for new risk hooks + TradeTicketModal + AccountKillSwitchRow; sidecar suites unchanged; mypy --strict + ruff clean across new/modified surfaces.
 
 **Phase 10a.5 backlog:** conid → instrument_id resolver wiring (concentration check no-op until then); test stub `_Sidecar`/`_Session` upgrades (drops the `isinstance(db, AsyncSession)` gate); counter decrement on gate-pass + revert on dispatch failure; audit row on ALLOW/WARN paths (BLOCK-only today); v_account_intraday_pnl backed by sidecar PnL pipeline (currently zero-stub); Playwright E2E for the 4 risk-gate + admin-risk scenarios; RiskLimitsPage migration to Phase 3 DataTable + ColumnCustomizerDialog; per-endpoint CSRF nonce scoping; AdminAccountsPage multi-mode kill-switch fetch; orders_service.py file-split refactor; multi-worker uvicorn with Redis Lua locks (Phase 24).
+
+### Phase 10a.5 — Risk-gate cleanup + technical debt  *(not started)*
+
+Bundle of the deferred items from Phase 10a + the CI cleanup surfaced post-v0.12.0. Distinct from Phase 10b (new features) because every item here is "make existing 10a-shipped surfaces actually effective in production." Brainstorm not yet run.
+
+**Effectivity blockers** (10a-shipped surfaces that are wired but no-op until these land):
+- conid → instrument_id resolver wiring (concentration check)
+- `v_account_intraday_pnl` backed by sidecar PnL pipeline (max-daily-loss check)
+- counter decrement on gate-pass + revert on dispatch failure (PDT + BP self-heal currently relies on 120s discoverer poll)
+- audit row on ALLOW/WARN paths (BLOCK-only today)
+
+**Test infrastructure:**
+- Test stub `_Sidecar`/`_Session` upgrades to support full RiskService deps (drops `isinstance(db, AsyncSession)` gate in orders_service.py)
+- Playwright E2E for the 4 risk-gate + admin-risk scenarios (no `frontend/tests/e2e/` infra today)
+- Real-broker test dependency group migration: `alpaca-py` + `schwabdev` currently in `backend/pyproject.toml [dependency-groups]` `real-broker` — confirm if that lives long-term or moves to a `tests/real_broker/`-scoped extras pattern
+
+**Refactors:**
+- RiskLimitsPage migration to Phase 3 `DataTable` + `ColumnCustomizerDialog` (currently raw `<table>`)
+- per-endpoint CSRF nonce scoping (currently shares `csrf:order-cap:` prefix)
+- AdminAccountsPage multi-mode kill-switch fetch (paper+live, not paper-only)
+- orders_service.py file-split refactor (D2 was skipped during Phase 10a per "no abstractions beyond what task requires")
+
+**Ops + nightly debt:**
+- nightly-real-ibkr `503 broker layer not yet configured` — operator runs `provision-and-publish.ps1` + `schtasks /Run` 4 sidecars + `docker compose restart backend` per `memory/feedback_post_deploy_broker_recovery.md`
+- nightly-real-schwab-trade schwabdev OAuth stdin prompt + sqlite token-store DB locked — needs token-store seeded in CI sandbox
+- VPS Docker BuildKit cache prune-on-deploy step (67 GB filled root volume during Phase 10a close-out; one-shot cleanup done 2026-05-11)
+
+### Phase 10b — Position sizing + multi-account rollup  *(not started)*
+
+The two ROADMAP.md Phase 10 deliverables NOT covered by Phase 10a. Brainstorm not yet run.
+
+- **Position-sizing calculator** (deliverable #8): Kelly criterion, fixed-fractional, vol-targeting. Backend service exposing `compute_position_size(strategy_id, risk_pct, account_equity, vol_estimate)` plus a FE widget in `TradeTicketModal` that pre-fills `qty` from the chosen method. Integrates with the risk gate so suggested sizes are pre-validated against caps.
+- **Multi-account portfolio rollup** (deliverable #9): cross-broker aggregate NLV, exposure-by-asset-class, P&L attribution per broker/account/strategy. Backend view (likely TimescaleDB continuous aggregate over `account_balances` + `positions`) + FE page (likely `/portfolio/rollup` or extension of `/admin/accounts`).
 
 ## Phase 11 — AI router + Alerts + Telegram
 
