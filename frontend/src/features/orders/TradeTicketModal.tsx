@@ -11,6 +11,9 @@ import { previewOrder, placeOrder, RiskGateBlockedError, type RiskBlocker } from
 import type { DecimalString, PreviewRequest, PreviewResponse } from '@/services/types';
 import { useOrdersStore, type OrderResponse as StoredOrderResponse } from '@/stores/global/orders';
 import { useActiveStores } from '@/stores/registry';
+import type { SizingMethod, SizingRequest } from '@/services/sizing/types';
+import { usePositionSizing } from '@/services/sizing/usePositionSizing';
+import { useSizingDefaults } from '@/services/sizing/useSizingDefaults';
 import { ContractSearchInput, type ContractSearchInputValue } from './ContractSearchInput';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 
@@ -302,6 +305,7 @@ function TradeTicketModalContent({
                 void handlePreview().catch(() => setPreviewError('Preview failed'));
               }}
               previewDisabled={previewDisabled}
+              accountId={accountId}
               brokerId={effectiveBrokerId}
               capabilities={capabilities}
               {...(activeBroker === 'ibkr' || activeBroker === 'futu'
@@ -333,6 +337,7 @@ function TradeTicketForm({
   setForm,
   onPreview,
   previewDisabled,
+  accountId,
   broker,
   brokerId,
   capabilities,
@@ -341,6 +346,7 @@ function TradeTicketForm({
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
   onPreview: () => void;
   previewDisabled: boolean;
+  accountId: string | null;
   broker?: 'ibkr' | 'futu';
   brokerId: string | null;
   capabilities: ReturnType<typeof useBrokerCapabilities>;
@@ -372,6 +378,64 @@ function TradeTicketForm({
       setForm((s) => ({ ...s, orderType: 'LIMIT' }));
     }
   }, [stopDisabled, form.orderType, setForm]);
+
+  // ── Phase 10b.1 — position-sizing section state ──────────────────────────
+  const [sizingOpen, setSizingOpen] = React.useState(false);
+  const sizingDefaults = useSizingDefaults(accountId ?? undefined);
+  const [sizingMethodOverride, setSizingMethodOverride] =
+    React.useState<SizingMethod | null>(null);
+  const [sizingPctOverride, setSizingPctOverride] = React.useState<string | null>(null);
+
+  // Derived: prefer the operator's in-modal override, else the per-account
+  // default from /api/risk/sizing-defaults, else a sensible static fallback.
+  // Computed during render avoids the react-hooks/set-state-in-effect smell.
+  const sizingMethod: SizingMethod =
+    sizingMethodOverride ?? sizingDefaults.data?.method ?? 'fixed_fractional';
+  const sizingPct =
+    sizingPctOverride
+    ?? (sizingDefaults.data
+      ? sizingMethod === 'fixed_fractional'
+        ? String(sizingDefaults.data.fixed_fractional_risk_pct)
+        : sizingMethod === 'risk_per_trade'
+          ? String(sizingDefaults.data.risk_per_trade_risk_pct)
+          : String(sizingDefaults.data.vol_targeted_target_vol_pct)
+      : '2.00');
+
+  // Build the sizing request when the section is open and we have enough
+  // inputs to compute. conid is the broker-side identifier; the BE
+  // resolves it to instrument_id via InstrumentResolver (10b1-d0).
+  const sizingPriceInput = form.limitPrice.trim() || form.qty.trim();
+  const conid = form.contract.conid.trim() || form.contract.symbol.trim();
+  const sizingRequest: SizingRequest | null =
+    sizingOpen && accountId && brokerId && conid && sizingPriceInput
+      ? {
+          account_id: accountId,
+          conid,
+          broker_id: brokerId,
+          method: sizingMethod,
+          side: form.side.toLowerCase() as 'buy' | 'sell',
+          inputs:
+            sizingMethod === 'fixed_fractional'
+              ? {
+                  kind: 'fixed_fractional',
+                  risk_pct: sizingPct,
+                  price: sizingPriceInput,
+                }
+              : sizingMethod === 'risk_per_trade'
+                ? {
+                    kind: 'risk_per_trade',
+                    risk_pct: sizingPct,
+                    entry: sizingPriceInput,
+                    stop: form.stopPrice.trim() || '0',
+                  }
+                : {
+                    kind: 'vol_targeted',
+                    target_vol_pct: sizingPct,
+                    price: sizingPriceInput,
+                  },
+        }
+      : null;
+  const sizing = usePositionSizing(sizingRequest);
 
   return (
     <form
@@ -502,6 +566,130 @@ function TradeTicketForm({
           }) : null}
         </select>
       </label>
+
+      {/* ── Phase 10b.1 — position-sizing section ─────────────────────── */}
+      <details
+        open={sizingOpen}
+        onToggle={(e) =>
+          setSizingOpen((e.currentTarget as HTMLDetailsElement).open)
+        }
+        className="rounded-md border border-border p-3"
+        data-testid="sizing-section"
+      >
+        <summary className="cursor-pointer text-sm font-medium">
+          Position sizing
+        </summary>
+        <div className="mt-3 space-y-3">
+          <div className="flex items-center gap-2">
+            <label className="text-xs" htmlFor="sizing-method">
+              Method:
+            </label>
+            <select
+              id="sizing-method"
+              value={sizingMethod}
+              onChange={(e) => {
+                setSizingMethodOverride(e.currentTarget.value as SizingMethod);
+                setSizingPctOverride(null); // re-derive pct for the new method
+              }}
+              className="rounded-md border border-border bg-panel p-1 text-sm"
+              data-testid="sizing-method-select"
+            >
+              <option value="fixed_fractional">Fixed-fractional</option>
+              <option value="risk_per_trade">Fixed-risk-per-trade</option>
+              <option value="vol_targeted">Vol-targeted</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs" htmlFor="sizing-pct">
+              {sizingMethod === 'vol_targeted' ? 'Target vol %' : 'Risk %'}:
+            </label>
+            <input
+              id="sizing-pct"
+              type="text"
+              inputMode="decimal"
+              value={sizingPct}
+              onChange={(e) => setSizingPctOverride(e.currentTarget.value)}
+              className="w-24 rounded-md border border-border bg-panel p-1 text-sm"
+              data-testid="sizing-risk-pct"
+            />
+          </div>
+          {sizing.loading ? (
+            <div className="text-xs text-muted-foreground">Computing…</div>
+          ) : null}
+          {sizing.result ? (
+            <div className="text-sm">
+              <div>
+                <span className="font-medium">Suggested qty:</span>{' '}
+                <span data-testid="sizing-suggested-qty">
+                  {sizing.result.suggested_qty}
+                </span>{' '}
+                <span className="text-xs text-muted-foreground">
+                  ({sizing.result.base_currency_notional}{' '}
+                  {sizing.result.breakdown.account_currency})
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                className="mt-2"
+                onClick={() => {
+                  const suggested = sizing.result?.suggested_qty;
+                  if (suggested) {
+                    setForm((s) => ({ ...s, qty: suggested }));
+                  }
+                }}
+                disabled={sizing.result.risk_verdict.final_verdict === 'block'}
+                data-testid="sizing-use-button"
+              >
+                Use this size
+              </Button>
+            </div>
+          ) : null}
+          {(sizing.result?.risk_verdict.blockers?.length ?? 0) > 0 ? (
+            <div
+              className="rounded-md border border-destructive/60 bg-destructive/10 p-2 text-xs text-destructive"
+              role="alert"
+              aria-label="Risk gate blockers (sizing)"
+            >
+              <p className="font-semibold">
+                Risk gate at suggestion time — BLOCK
+              </p>
+              <ul className="mt-1 list-inside list-disc">
+                {(sizing.result?.risk_verdict.blockers ?? []).map((b) => (
+                  <li key={`${b.check}:${b.code}`}>
+                    {b.message}{' '}
+                    <span className="font-mono opacity-70">({b.code})</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {(sizing.result?.risk_verdict.warnings?.length ?? 0) > 0 ? (
+            <div
+              className="rounded-md border border-warning/60 bg-warning/10 p-2 text-xs"
+              role="alert"
+              aria-label="Risk gate warnings (sizing)"
+            >
+              <p className="font-semibold">
+                Risk gate at suggestion time — WARN
+              </p>
+              <ul className="mt-1 list-inside list-disc">
+                {(sizing.result?.risk_verdict.warnings ?? []).map((w) => (
+                  <li key={`${w.check}:${w.message}`}>{w.message}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {sizing.error ? (
+            <div
+              className="text-xs text-destructive"
+              data-testid="sizing-error"
+            >
+              {sizing.error.message}
+            </div>
+          ) : null}
+        </div>
+      </details>
 
       <Button type="submit" disabled={!canPreview}>Preview</Button>
     </form>

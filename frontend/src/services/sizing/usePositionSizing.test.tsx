@@ -98,7 +98,7 @@ describe('usePositionSizing', () => {
         expect(result.current.result?.risk_verdict.final_verdict).toBe('block'),
       { timeout: 1000 },
     );
-    expect(result.current.result?.risk_verdict.blockers[0]?.code).toBe('bp_buffer');
+    expect(result.current.result?.risk_verdict.blockers?.[0]?.code).toBe('bp_buffer');
   });
 
   it('returns null result + null error when req is null', () => {
