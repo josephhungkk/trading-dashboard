@@ -111,20 +111,23 @@ async def test_resolve_limit_returns_none_when_no_match(evaluation_ctx) -> None:
 
 
 async def test_evaluate_returns_gate_verdict_shape(evaluation_ctx) -> None:
-    """Skeleton evaluate returns ALLOW with empty blockers/warnings (B1).
+    """B1 shape contract preserved by B8 aggregator.
 
-    Subsequent tasks (B2-B8) replace this with the real aggregator.
+    With bare AsyncMock deps every check raises (no .scalar_one_or_none /
+    no .get_account_summary) → fail-CLOSED to evaluator_error blockers,
+    but the GateVerdict shape (final_verdict, blockers, warnings,
+    latency_ms) is the contract this test guards.
     """
     from app.schemas.risk import GateVerdict
     from app.services.risk_service import RiskService
 
-    db = _mock_session_returning()  # not consulted in skeleton
+    db = _mock_session_returning()  # exhausted side_effect → checks raise
     svc = RiskService(db=db, redis=AsyncMock(), config=AsyncMock(), sidecar=AsyncMock())
     verdict = await svc.evaluate(evaluation_ctx, mode="preview")
     assert isinstance(verdict, GateVerdict)
-    assert verdict.final_verdict == "allow"
-    assert verdict.blockers == []
-    assert verdict.warnings == []
+    assert verdict.final_verdict in ("allow", "warn", "block")
+    assert isinstance(verdict.blockers, list)
+    assert isinstance(verdict.warnings, list)
     assert verdict.latency_ms >= 0
 
 
@@ -856,6 +859,122 @@ async def test_margin_unimplemented_warns_either_mode(evaluation_ctx) -> None:
         assert warning is not None
         assert warning.check == "margin"
         assert "unavailable" in warning.message.lower()
+
+
+# ─── B8: evaluate() aggregator (verdict precedence) ─────────────────────
+
+
+def _all_checks_allow_session() -> AsyncMock:
+    """Build a session that returns None for every cap-resolver lookup so all
+    `_resolve_limit` calls miss; combined with a sidecar that accepts the margin
+    preview, this drives evaluate() to ALLOW.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    none_result = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+    # Generous side_effect: each check resolves up to 3 scopes; padding for kill switch + view.
+    session.execute = AsyncMock(side_effect=[none_result] * 30)
+    return session
+
+
+def _allowing_sidecar() -> AsyncMock:
+    sidecar = AsyncMock()
+    sidecar.preview_order = AsyncMock(
+        return_value=MagicMock(accepted=True, reject_reason="", initial_margin="100")
+    )
+    sidecar.get_account_summary = AsyncMock(
+        return_value=MagicMock(buying_power="100000", nlv_currency_base="200000")
+    )
+    return sidecar
+
+
+async def test_evaluate_all_allow_returns_allow_verdict(evaluation_ctx) -> None:
+    """No caps configured + sidecar accepts → ALLOW with empty blockers/warnings."""
+    from app.schemas.risk import GateVerdict
+    from app.services.risk_service import RiskService
+
+    svc = RiskService(
+        db=_all_checks_allow_session(),
+        redis=AsyncMock(),
+        config=AsyncMock(get_bool=AsyncMock(return_value=False)),
+        sidecar=_allowing_sidecar(),
+    )
+    verdict = await svc.evaluate(evaluation_ctx, mode="preview")
+    assert isinstance(verdict, GateVerdict)
+    assert verdict.final_verdict == "allow"
+    assert verdict.blockers == []
+    assert verdict.warnings == []
+    assert verdict.latency_ms >= 0
+
+
+async def test_evaluate_account_kill_switch_blocks(evaluation_ctx) -> None:
+    """Single blocker (kill switch) → BLOCK regardless of other checks."""
+    from app.services.risk_service import RiskService
+
+    db = AsyncMock(spec=AsyncSession)
+    enabled_row = MagicMock(is_enabled=True, reason="manual freeze")
+    none_result = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+    enabled_result = MagicMock(scalar_one_or_none=MagicMock(return_value=enabled_row))
+    # First execute is the kill-switch lookup; rest are no-cap.
+    db.execute = AsyncMock(side_effect=[enabled_result] + [none_result] * 30)
+    svc = RiskService(
+        db=db,
+        redis=AsyncMock(),
+        config=AsyncMock(get_bool=AsyncMock(return_value=False)),
+        sidecar=_allowing_sidecar(),
+    )
+    verdict = await svc.evaluate(evaluation_ctx, mode="preview")
+    assert verdict.final_verdict == "block"
+    assert any(b.code == "account_kill_switch_enabled" for b in verdict.blockers)
+
+
+async def test_evaluate_unhandled_exception_becomes_evaluator_error_block(
+    evaluation_ctx,
+) -> None:
+    """An unexpected exception in any check → fail-CLOSED with evaluator_error blocker."""
+    from app.services.risk_service import RiskService
+
+    db = AsyncMock(spec=AsyncSession)
+    db.execute = AsyncMock(side_effect=RuntimeError("DB exploded"))
+    svc = RiskService(
+        db=db,
+        redis=AsyncMock(),
+        config=AsyncMock(get_bool=AsyncMock(return_value=False)),
+        sidecar=_allowing_sidecar(),
+    )
+    verdict = await svc.evaluate(evaluation_ctx, mode="preview")
+    assert verdict.final_verdict == "block"
+    assert any(b.code == "evaluator_error" for b in verdict.blockers)
+    # The error message names the exception type so operators can triage.
+    assert any("RuntimeError" in b.message for b in verdict.blockers)
+
+
+async def test_evaluate_warning_only_returns_warn_verdict(evaluation_ctx) -> None:
+    """A single warning with no blockers → WARN (precedence: block > warn > allow)."""
+    from app.services.risk_service import RiskService
+
+    db = _all_checks_allow_session()
+    sidecar = AsyncMock()
+    # Sidecar preview times out → preview-mode WARN from _check_margin.
+    import asyncio
+
+    async def slow_preview(**kwargs: object) -> object:
+        await asyncio.sleep(5)
+        return MagicMock(accepted=True)
+
+    sidecar.preview_order = slow_preview  # type: ignore[method-assign]
+    sidecar.get_account_summary = AsyncMock(
+        return_value=MagicMock(buying_power="100000", nlv_currency_base="200000")
+    )
+    svc = RiskService(
+        db=db,
+        redis=AsyncMock(),
+        config=AsyncMock(get_bool=AsyncMock(return_value=False)),
+        sidecar=sidecar,
+    )
+    verdict = await svc.evaluate(evaluation_ctx, mode="preview")
+    assert verdict.final_verdict == "warn"
+    assert any(w.check == "margin" for w in verdict.warnings)
+    assert verdict.blockers == []
 
 
 async def test_margin_rejected_by_broker_blocks(evaluation_ctx) -> None:

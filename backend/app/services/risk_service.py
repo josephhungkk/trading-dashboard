@@ -485,16 +485,62 @@ class RiskService:
         return None
 
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
-        """Run all 7 checks; aggregate to GateVerdict.
+        """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).
 
-        B1: skeleton returns ALLOW. B2-B7 add per-check methods. B8 wires
-        the asyncio.gather aggregator + asymmetric margin policy.
+        Spec §1, §4 [C3]. The 6 fast checks run concurrently via
+        ``asyncio.gather(return_exceptions=True)`` so one slow DB query never
+        gates the others. The margin check (variable timeout, asymmetric
+        fail policy per mode) is awaited separately so its mode-dependent
+        WARN/BLOCK semantics aren't flattened into the gather. Any check
+        that raises an unhandled exception becomes an ``evaluator_error``
+        blocker — degraded gate is still a closed gate (fail-CLOSED on
+        unknown failure).
+
+        Verdict precedence: any blocker => "block"; else any warning =>
+        "warn"; else "allow".
         """
         t0 = time.perf_counter()
-        latency_ms = int((time.perf_counter() - t0) * 1000)
+        fast_results = await asyncio.gather(
+            self._check_account_kill_switch(ctx),
+            self._check_broker_kill_switch(ctx),
+            self._check_max_daily_loss(ctx),
+            self._check_pdt(ctx),
+            self._check_position_concentration(ctx),
+            self._check_buying_power(ctx),
+            return_exceptions=True,
+        )
+        try:
+            margin_result: CheckResult | BaseException = await self._check_margin(ctx, mode)
+        except BaseException as exc:
+            margin_result = exc
+
+        blockers: list[GateBlockerEntry] = []
+        warnings: list[GateWarningEntry] = []
+        for r in [*fast_results, margin_result]:
+            if isinstance(r, BaseException):
+                log.exception("risk.check_raised", exc_info=r)
+                blockers.append(
+                    GateBlockerEntry(
+                        check="evaluator",
+                        message=f"check raised: {type(r).__name__}: {r}",
+                        code="evaluator_error",
+                    )
+                )
+                continue
+            if r is None:
+                continue
+            blocker, warning = r
+            if blocker is not None:
+                blockers.append(blocker)
+            if warning is not None:
+                warnings.append(warning)
+
+        verdict_str: Literal["allow", "warn", "block"] = (
+            "block" if blockers else ("warn" if warnings else "allow")
+        )
         return GateVerdict(
-            final_verdict="allow",
-            blockers=[],
-            warnings=[],
-            latency_ms=latency_ms,
+            final_verdict=verdict_str,
+            blockers=blockers,
+            warnings=warnings,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
         )
