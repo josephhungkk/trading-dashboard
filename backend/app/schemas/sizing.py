@@ -71,6 +71,7 @@ class MethodBreakdown(BaseModel):
     nlv_base: Decimal
     fx_rate: Decimal
     price_base: Decimal
+    account_currency: str
     atr14: Decimal | None = None
     realized_vol14_annualized: Decimal | None = None
     risk_per_share_base: Decimal | None = None

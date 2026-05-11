@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.admin import consume_confirmation_nonce
+from app.core import metrics
 from app.core.cf_access import AdminIdentity
 from app.core.deps import (
     get_broker_registry,
@@ -75,29 +76,39 @@ async def compute_position_size(
         vol_service=vol_svc,
     )
 
-    try:
-        return await sizer.compute(
-            account_id=payload.account_id,
-            instrument_id=payload.instrument_id,
-            method=payload.method,
-            inputs=payload.inputs,
-            side=payload.side,
-        )
-    except ValueError as exc:
-        msg = str(exc)
-        if msg == "realized_vol_unavailable":
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "realized_vol_unavailable",
-                    "hint": "enter manual vol or pick a different method",
-                },
-            ) from exc
-        if "zero_volatility" in msg:
-            raise HTTPException(status_code=422, detail={"error": "zero_volatility"}) from exc
-        if "account not found" in msg or "instrument not found" in msg:
-            raise HTTPException(status_code=404, detail=msg) from exc
-        raise HTTPException(status_code=422, detail=msg) from exc
+    method_label = payload.method.value
+    with metrics.position_sizing_latency_seconds.labels(method=method_label).time():
+        try:
+            result = await sizer.compute(
+                account_id=payload.account_id,
+                instrument_id=payload.instrument_id,
+                method=payload.method,
+                inputs=payload.inputs,
+                side=payload.side,
+            )
+        except ValueError as exc:
+            msg = str(exc)
+            if msg == "realized_vol_unavailable":
+                metrics.position_sizing_vol_unavailable_total.inc()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "realized_vol_unavailable",
+                        "hint": "enter manual vol or pick a different method",
+                    },
+                ) from exc
+            if "zero_volatility" in msg:
+                raise HTTPException(status_code=422, detail={"error": "zero_volatility"}) from exc
+            if "account not found" in msg or "instrument not found" in msg:
+                raise HTTPException(status_code=404, detail=msg) from exc
+            raise HTTPException(status_code=422, detail=msg) from exc
+
+    metrics.position_sizing_compute_total.labels(
+        method=method_label,
+        account_currency=result.breakdown.account_currency,
+        verdict=result.risk_verdict.final_verdict,
+    ).inc()
+    return result
 
 
 _NS = "risk_sizing"
@@ -134,21 +145,25 @@ async def put_sizing_defaults(
     cfg: ConfigDep,
 ) -> None:
     await cfg.set(_NS, _key(account_id, "method"), payload.method.value, value_type="str")
+    metrics.position_sizing_admin_writes_total.labels(field="method").inc()
     await cfg.set(
         _NS,
         _key(account_id, "fixed_fractional.risk_pct"),
         str(payload.fixed_fractional_risk_pct),
         value_type="str",
     )
+    metrics.position_sizing_admin_writes_total.labels(field="fixed_fractional_risk_pct").inc()
     await cfg.set(
         _NS,
         _key(account_id, "risk_per_trade.risk_pct"),
         str(payload.risk_per_trade_risk_pct),
         value_type="str",
     )
+    metrics.position_sizing_admin_writes_total.labels(field="risk_per_trade_risk_pct").inc()
     await cfg.set(
         _NS,
         _key(account_id, "vol_targeted.target_vol_pct"),
         str(payload.vol_targeted_target_vol_pct),
         value_type="str",
     )
+    metrics.position_sizing_admin_writes_total.labels(field="vol_targeted_target_vol_pct").inc()

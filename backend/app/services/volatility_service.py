@@ -52,10 +52,14 @@ class VolatilityService:
         instrument_id: int,
         asof_date: date,
     ) -> VolatilityEstimate | None:
+        from app.core import metrics
+
         key = _CACHE_KEY.format(instrument_id=instrument_id, asof_date=asof_date.isoformat())
         cached = await self._redis.get(key)
         if cached is not None:
+            metrics.volatility_cache_hits_total.inc()
             return _decode_cached(cached)
+        metrics.volatility_cache_misses_total.inc()
 
         async with self._db_factory() as db:
             rows = await self._load_bars(db, instrument_id, asof_date)

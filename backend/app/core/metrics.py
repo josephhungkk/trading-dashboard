@@ -672,3 +672,40 @@ risk_counter_cleanup_failures_total = Counter(
     "risk_counters commit/revert/orphan-sweep failure count. Alert on rate > 0.",
     registry=registry,
 )
+
+
+# ── Phase 10b.1 — position-sizing metrics ──────────────────────────────────
+position_sizing_compute_total = Counter(
+    "position_sizing_compute_total",
+    "Position-sizing requests, labelled by method, account currency, verdict.",
+    ["method", "account_currency", "verdict"],
+    registry=registry,
+)
+position_sizing_latency_seconds = Histogram(
+    "position_sizing_latency_seconds",
+    "End-to-end /api/risk/position-size latency including risk-gate eval.",
+    ["method"],
+    buckets=(0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0),
+    registry=registry,
+)
+position_sizing_vol_unavailable_total = Counter(
+    "position_sizing_vol_unavailable_total",
+    "vol-targeted requests rejected because realized_vol14 was unavailable and no override.",
+    registry=registry,
+)
+volatility_cache_hits_total = Counter(
+    "volatility_cache_hits_total",
+    "Redis vol14:* cache hits.",
+    registry=registry,
+)
+volatility_cache_misses_total = Counter(
+    "volatility_cache_misses_total",
+    "Redis vol14:* cache misses (fell through to bars_1d).",
+    registry=registry,
+)
+position_sizing_admin_writes_total = Counter(
+    "position_sizing_admin_writes_total",
+    "PUT /api/admin/sizing-defaults calls, labelled by edited field.",
+    ["field"],
+    registry=registry,
+)

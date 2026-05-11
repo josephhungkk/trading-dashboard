@@ -102,6 +102,7 @@ class PositionSizingService:
             instrument_id=instrument_id,
             nlv_base=nlv_base,
             fx_rate=fx_rate,
+            account_currency=base_currency,
         )
 
         ctx = EvaluationContext(
@@ -135,6 +136,7 @@ class PositionSizingService:
         instrument_id: int,
         nlv_base: Decimal,
         fx_rate: Decimal,
+        account_currency: str,
     ) -> tuple[Decimal, Decimal, MethodBreakdown]:
         if method == SizingMethod.fixed_fractional:
             assert isinstance(inputs, FixedFractionalInputs)
@@ -145,7 +147,12 @@ class PositionSizingService:
             return (
                 qty,
                 notional,
-                MethodBreakdown(nlv_base=nlv_base, fx_rate=fx_rate, price_base=price_base),
+                MethodBreakdown(
+                    nlv_base=nlv_base,
+                    fx_rate=fx_rate,
+                    price_base=price_base,
+                    account_currency=account_currency,
+                ),
             )
 
         if method == SizingMethod.risk_per_trade:
@@ -166,6 +173,7 @@ class PositionSizingService:
                     nlv_base=nlv_base,
                     fx_rate=fx_rate,
                     price_base=entry_base,
+                    account_currency=account_currency,
                     risk_per_share_base=risk_per_share,
                 ),
             )
@@ -203,6 +211,7 @@ class PositionSizingService:
                     nlv_base=nlv_base,
                     fx_rate=fx_rate,
                     price_base=price_base,
+                    account_currency=account_currency,
                     atr14=atr14,
                     realized_vol14_annualized=realized_vol,
                     vol_source=vol_source,  # type: ignore[arg-type]
