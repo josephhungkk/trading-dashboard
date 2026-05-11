@@ -674,7 +674,7 @@ Deferred from Phase 10a.5 for follow-up. Pure test/CI hygiene; the production ef
 **Ops + nightly debt** (still owed, can land alongside 10a.5.1):
 - nightly-real-ibkr `503 broker layer not yet configured` — operator runs `provision-and-publish.ps1` + `schtasks /Run` 4 sidecars + `docker compose restart backend` per `memory/feedback_post_deploy_broker_recovery.md`
 - nightly-real-schwab-trade schwabdev OAuth stdin prompt + sqlite token-store DB locked — needs token-store seeded in CI sandbox
-- VPS Docker BuildKit cache prune-on-deploy step (67 GB filled root volume during Phase 10a close-out; one-shot cleanup done 2026-05-11)
+- ~~VPS Docker BuildKit cache prune-on-deploy step (67 GB filled root volume during Phase 10a close-out; one-shot cleanup done 2026-05-11)~~ **done 2026-05-11** — `docker buildx prune --filter "until=168h"` injected into `scripts/deploy.sh` and `.github/workflows/deploy.yml` before each remote `docker compose build`
 
 ### Phase 10b — Position sizing + multi-account rollup  *(not started)*
 

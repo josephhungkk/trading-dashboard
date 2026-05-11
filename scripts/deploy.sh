@@ -28,6 +28,13 @@ echo "==> Remote build + up + nginx reload"
 ssh -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" <<EOF
   set -e
   cd "$VPS_PATH"
+  # Phase 10a.5.1 ops debt: prune dangling BuildKit cache before build.
+  # The VPS / volume filled at 67 GB during Phase 10a close-out; without
+  # this step every deploy accretes another generation of cache layers.
+  # --filter "until=168h" keeps the last week of warm cache; older
+  # layers are recoverable from registry anyway.
+  echo "--> Pruning BuildKit cache older than 7 days..."
+  docker buildx prune --force --filter "until=168h" || true
   docker compose -f docker-compose.prod.yml build
   docker compose -f docker-compose.prod.yml up -d
   # Post-recreate 502 storm fix: nginx caches backend IP; reload re-resolves.

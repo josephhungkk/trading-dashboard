@@ -95,6 +95,12 @@ jobs:
           ssh -p 2222 trader@88.208.197.219 <<'EOF'
             set -e
             cd /home/trader/trading-dashboard
+            # Phase 10a.5.1 ops debt: prune BuildKit cache > 7 days. The VPS
+            # root volume filled at 67 GB during Phase 10a close-out from
+            # accreted cache layers; this prevents that recurring. The 168h
+            # filter keeps the last week of warm layers; older layers refetch
+            # from the registry if needed.
+            docker buildx prune --force --filter "until=168h" || true
             docker compose -f docker-compose.prod.yml build
             docker compose -f docker-compose.prod.yml up -d
             docker compose -f docker-compose.prod.yml exec -T nginx nginx -s reload
