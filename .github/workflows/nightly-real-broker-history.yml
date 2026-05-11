@@ -21,11 +21,12 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           python-version: "3.14"
-      - run: cd backend && uv sync --frozen
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
       - name: Schwab history
-        run: |
-          uv run --directory backend python ../scripts/empirical/schwab_history_paper.py \
-            || echo "::warning::schwab_history_paper FAILED"
+        working-directory: backend
+        run: uv run python ../scripts/empirical/schwab_history_paper.py
 
   alpaca:
     runs-on: [self-hosted, nuc]
@@ -37,11 +38,12 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           python-version: "3.14"
-      - run: cd backend && uv sync --frozen
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
       - name: Alpaca history
-        run: |
-          uv run --directory backend python ../scripts/empirical/alpaca_history_paper.py \
-            || echo "::warning::alpaca_history_paper FAILED"
+        working-directory: backend
+        run: uv run python ../scripts/empirical/alpaca_history_paper.py
 
   ibkr:
     runs-on: [self-hosted, nuc]
@@ -53,11 +55,12 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           python-version: "3.14"
-      - run: cd backend && uv sync --frozen
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
       - name: IBKR history
-        run: |
-          uv run --directory backend python ../scripts/empirical/ibkr_history_paper.py \
-            || echo "::warning::ibkr_history_paper FAILED"
+        working-directory: backend
+        run: uv run python ../scripts/empirical/ibkr_history_paper.py
 
   futu:
     runs-on: [self-hosted, nuc]
@@ -69,8 +72,9 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           python-version: "3.14"
-      - run: cd backend && uv sync --frozen
+      - name: Install backend deps
+        working-directory: backend
+        run: uv sync --frozen
       - name: Futu history
-        run: |
-          uv run --directory backend python ../scripts/empirical/futu_history_paper.py \
-            || echo "::warning::futu_history_paper FAILED"
+        working-directory: backend
+        run: uv run python ../scripts/empirical/futu_history_paper.py

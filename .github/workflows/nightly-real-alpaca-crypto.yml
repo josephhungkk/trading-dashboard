@@ -25,5 +25,5 @@ jobs:
         working-directory: backend
         run: uv run python scripts/generate_proto_stubs.py
       - name: Run real Alpaca paper crypto E2E
-        run: |
-          cd backend && uv run python -m pytest tests/real_broker/test_real_alpaca_crypto_e2e.py -v -m real_broker
+        working-directory: backend
+        run: uv run python -m pytest tests/real_broker/test_real_alpaca_crypto_e2e.py -v -m real_broker
