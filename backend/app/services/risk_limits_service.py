@@ -14,16 +14,17 @@ Pattern mirrors OrderCapabilityService:
 from __future__ import annotations
 
 import contextlib
-import logging
+import json
 import time
 from collections.abc import AsyncGenerator, Callable
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 RISK_LIMITS_INVALIDATION_CHANNEL = "app_config:invalidate:risk_limits"
 _CACHE_TTL_SECONDS = 60.0
@@ -36,7 +37,16 @@ class RedisLike(Protocol):
 
 
 class RiskLimitsService:
-    """CRUD for risk_limits with TTL cache + pubsub invalidation."""
+    """CRUD for risk_limits with TTL cache + pubsub invalidation.
+
+    D9-fix: the cache is class-level so it survives across the per-request
+    instances FastAPI creates via dependency injection (the original
+    per-instance cache never hit). Single uvicorn worker today (Phase 24
+    multi-worker concern); a peer-worker pubsub listener will replace the
+    blunt invalidate-on-mutate model when that ships.
+    """
+
+    _cache: ClassVar[tuple[list[dict[str, Any]], float] | None] = None
 
     def __init__(
         self,
@@ -54,33 +64,54 @@ class RiskLimitsService:
         self._redis = redis
         self._ttl_seconds = ttl_seconds
         self._now = now
-        self._cache: tuple[list[dict[str, Any]], float] | None = None
 
     @contextlib.asynccontextmanager
     async def _session(self) -> AsyncGenerator[AsyncSession]:
         if self._db is not None:
             yield self._db
         else:
-            assert self._db_factory is not None
+            if self._db_factory is None:
+                raise RuntimeError("RiskLimitsService: neither db nor db_factory available")
             async with self._db_factory() as session:
                 yield session
 
-    def invalidate(self) -> None:
-        """Drop the in-process cache; safe to call from pubsub listener."""
-        self._cache = None
+    @classmethod
+    def invalidate(cls) -> None:
+        """Drop the class-level cache; safe to call from pubsub listener."""
+        cls._cache = None
 
-    async def publish_invalidation(self) -> None:
-        """Drop local cache + tell peer workers via Redis pubsub."""
+    async def publish_invalidation(
+        self,
+        *,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
+    ) -> None:
+        """Drop local cache + tell peer workers via Redis pubsub.
+
+        D9-fix: payload now carries {scope_type, scope_id} per spec §4 so
+        peer workers can do scoped cache invalidation when the Phase 24
+        listener arrives. None values omitted; an unscoped publish
+        (no kwargs) emits an empty object meaning "blanket-drop".
+        """
         self.invalidate()
+        payload: dict[str, Any] = {}
+        if scope_type is not None:
+            payload["scope_type"] = scope_type
+        if scope_id is not None:
+            payload["scope_id"] = scope_id
         try:
-            await self._redis.publish(RISK_LIMITS_INVALIDATION_CHANNEL, b"")
+            await self._redis.publish(
+                RISK_LIMITS_INVALIDATION_CHANNEL,
+                json.dumps(payload).encode(),
+            )
         except (ConnectionError, OSError, TimeoutError) as exc:
-            log.warning("risk_limits invalidation publish failed: err=%s", exc)
+            log.warning("risk_limits.invalidation_publish_failed", err=str(exc))
 
     async def list_all(self) -> list[dict[str, Any]]:
-        """Return every risk_limits row; cached for 60s."""
-        if self._cache is not None:
-            rows, deadline = self._cache
+        """Return every risk_limits row; cached for 60s at class level."""
+        cache = type(self)._cache
+        if cache is not None:
+            rows, deadline = cache
             if self._now() < deadline:
                 return rows
         async with self._session() as db:
@@ -97,7 +128,7 @@ class RiskLimitsService:
                 )
             )
             rows = [dict(row) for row in result.mappings().all()]
-        self._cache = (rows, self._now() + self._ttl_seconds)
+        type(self)._cache = (rows, self._now() + self._ttl_seconds)
         return rows
 
     async def create(
@@ -142,7 +173,7 @@ class RiskLimitsService:
             )
             row = dict(result.mappings().one())
             await db.commit()
-        await self.publish_invalidation()
+        await self.publish_invalidation(scope_type=scope_type, scope_id=scope_id)
         return row
 
     async def update(
@@ -197,21 +228,51 @@ class RiskLimitsService:
                 },
             )
             row = result.mappings().one_or_none()
+            if row is None:
+                # D9-fix: skip the commit + invalidation on no-match;
+                # the outer-tx fixture rolls back on context exit either way.
+                return None
             await db.commit()
-        if row is None:
-            return None
-        await self.publish_invalidation()
+        await self.publish_invalidation(scope_type=scope_type, scope_id=scope_id)
         return dict(row)
 
-    async def delete(self, limit_id: int) -> bool:
+    async def delete(self, limit_id: int, *, updated_by: str) -> dict[str, Any] | None:
+        """Soft-delete: flip is_active=false and stamp updated_by/updated_at.
+
+        D9-fix (spec §6): the endpoint is documented as "soft-delete
+        (is_active=false), idempotent". A hard DELETE leaves no
+        risk_limits_history row (the BEFORE UPDATE trigger doesn't fire
+        on DELETE) and no record of who removed the limit. Returning the
+        post-flip row lets the API decide whether to surface 204 (always)
+        or echo the deactivated row.
+
+        Returns None only when no row with that id exists; callers map
+        to 404. Already-inactive rows still UPDATE (idempotent per spec).
+        """
         async with self._session() as db:
             result = await db.execute(
-                text("DELETE FROM risk_limits WHERE id = :id RETURNING id"),
-                {"id": limit_id},
+                text(
+                    """
+                    UPDATE risk_limits
+                       SET is_active = false,
+                           updated_at = now(),
+                           updated_by = :updated_by
+                     WHERE id = :id
+                    RETURNING id, scope_type::text AS scope_type, scope_id,
+                              limit_kind::text AS limit_kind, limit_value,
+                              warn_at_pct, is_active, notes,
+                              created_at, updated_at, updated_by
+                    """
+                ),
+                {"id": limit_id, "updated_by": updated_by},
             )
-            deleted_row = result.scalar_one_or_none()
+            row = result.mappings().one_or_none()
+            if row is None:
+                return None
             await db.commit()
-        if deleted_row is None:
-            return False
-        await self.publish_invalidation()
-        return True
+        out = dict(row)
+        await self.publish_invalidation(
+            scope_type=out["scope_type"],
+            scope_id=out["scope_id"],
+        )
+        return out

@@ -14,14 +14,24 @@ the request side), so a stale caller can't slip an empty reason past.
 from __future__ import annotations
 
 import contextlib
+import json
 import uuid
 from collections.abc import AsyncGenerator, Callable
-from typing import Any
+from typing import Any, Protocol
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+log = structlog.get_logger(__name__)
+
+ACCOUNT_KILL_SWITCH_INVALIDATION_CHANNEL = "app_config:invalidate:kill_switch"
+
 _SessionFactory = Callable[[], Any]
+
+
+class RedisLike(Protocol):
+    async def publish(self, channel: str, message: bytes | str) -> int: ...
 
 
 class AccountKillSwitchService:
@@ -32,20 +42,40 @@ class AccountKillSwitchService:
         *,
         db: AsyncSession | None = None,
         db_factory: _SessionFactory | None = None,
+        redis: RedisLike | None = None,
     ) -> None:
         if db is None and db_factory is None:
             raise ValueError("AccountKillSwitchService requires either db or db_factory")
         self._db = db
         self._db_factory = db_factory
+        self._redis = redis
 
     @contextlib.asynccontextmanager
     async def _session(self) -> AsyncGenerator[AsyncSession]:
         if self._db is not None:
             yield self._db
         else:
-            assert self._db_factory is not None
+            if self._db_factory is None:
+                raise RuntimeError("AccountKillSwitchService: neither db nor db_factory available")
             async with self._db_factory() as session:
                 yield session
+
+    async def _publish_invalidation(self, account_id: uuid.UUID) -> None:
+        """D9-fix (spec §4 'kill-switch toggle propagates after pubsub').
+
+        Optional: redis arg is wired through the DI graph but tolerates
+        absence (legacy callers, unit tests). Best-effort publish; an
+        outage here doesn't fail the toggle.
+        """
+        if self._redis is None:
+            return
+        try:
+            await self._redis.publish(
+                ACCOUNT_KILL_SWITCH_INVALIDATION_CHANNEL,
+                json.dumps({"account_id": str(account_id)}).encode(),
+            )
+        except (ConnectionError, OSError, TimeoutError) as exc:
+            log.warning("kill_switch.invalidation_publish_failed", err=str(exc))
 
     async def get(self, account_id: uuid.UUID) -> dict[str, Any] | None:
         """Return the kill-switch row or None if no row exists (= switch off)."""
@@ -107,4 +137,5 @@ class AccountKillSwitchService:
             )
             row = dict(result.mappings().one())
             await db.commit()
+        await self._publish_invalidation(account_id)
         return row

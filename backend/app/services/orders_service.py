@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.brokers import base
 from app.core import metrics
+from app.core.db import SessionLocal
 from app.core.ids import uuid7
 from app.schemas.orders import (
     ContractSummary,
@@ -396,39 +397,54 @@ async def _audit_risk_decision(
 ) -> None:
     """Phase 10a D4: write a risk_decisions audit row.
 
-    Spec §6 [audit]: every place_order/modify_order attempt that reaches
-    the gate (whether BLOCKED or ALLOWED/WARNED) must leave a row. The
-    fail-OPEN policy on INSERT failure (spec §4) means we suppress
-    exceptions on the audit write so the trade isn't blocked by an audit
-    DB hiccup; metric covers visibility.
+    Implementation status (Phase 10a Chunk D): only BLOCK verdicts reach
+    this helper today (call sites in place_order/modify_order gate on
+    `if risk_verdict.final_verdict == "block"`). The spec §6 contract
+    requires every gate-reached attempt to leave a row regardless of
+    verdict; audit-on-ALLOW/WARN is deferred to Phase 10a.5 — see
+    `phase10a_in_progress.md` deviations block.
+
+    Fail-OPEN policy (spec §4): suppress exceptions on the audit write
+    so the trade isn't blocked by an audit DB hiccup; the
+    `risk_audit_insert_failures_total` metric covers visibility.
+
+    Session isolation (D9-fix): opens a dedicated SessionLocal() session
+    so the audit commit doesn't promote/discard pending state on the
+    caller's AsyncSession. Today the BLOCK call sites have no
+    uncommitted writes before the audit row, but the pattern protects
+    against future caller refactors silently corrupting the order's
+    transaction.
     """
+    # `db` is preserved in the signature for legacy stub-Session callers
+    # but unused — we open a dedicated SessionLocal() to avoid mutating
+    # the caller's transaction.
+    _ = db
     try:
         from app.models.risk import RiskDecision
 
-        decision = RiskDecision(
-            account_id=account_id,
-            instrument_id=None,
-            # D7: side is lowercased to satisfy the risk_decisions_side_check
-            # CHECK constraint (alembic 0036 enforces ('buy', 'sell')).
-            # PlaceOrderRequest.side is the uppercase OrderSide literal
-            # ('BUY'|'SELL'); without this normalize the BLOCK-path INSERT
-            # would fail silently in production (swallowed by the except
-            # below and tracked only as risk_audit_insert_failures_total).
-            side=str(request.side).lower(),
-            qty=qty,
-            price=Decimal(request.limit_price) if request.limit_price else None,
-            order_type=str(request.order_type),
-            time_in_force=str(request.tif),
-            verdict=verdict.final_verdict,
-            blockers=[b.model_dump(mode="json") for b in verdict.blockers],
-            warnings=[w.model_dump(mode="json") for w in verdict.warnings],
-            latency_ms=verdict.latency_ms,
-            attempt_kind=attempt_kind,
-            request_id=request_id,
-            order_id=order_id,
-        )
-        db.add(decision)
-        await db.commit()
+        async with SessionLocal() as audit_db:
+            decision = RiskDecision(
+                account_id=account_id,
+                instrument_id=None,
+                # D7: side is lowercased to satisfy the
+                # risk_decisions_side_check CHECK constraint (alembic 0036
+                # enforces ('buy', 'sell')). PlaceOrderRequest.side is the
+                # uppercase OrderSide literal ('BUY'|'SELL').
+                side=str(request.side).lower(),
+                qty=qty,
+                price=Decimal(request.limit_price) if request.limit_price else None,
+                order_type=str(request.order_type),
+                time_in_force=str(request.tif),
+                verdict=verdict.final_verdict,
+                blockers=[b.model_dump(mode="json") for b in verdict.blockers],
+                warnings=[w.model_dump(mode="json") for w in verdict.warnings],
+                latency_ms=verdict.latency_ms,
+                attempt_kind=attempt_kind,
+                request_id=request_id,
+                order_id=order_id,
+            )
+            audit_db.add(decision)
+            await audit_db.commit()
     except Exception as exc:
         log.exception(
             "risk.audit_insert_failed",
@@ -511,35 +527,37 @@ async def _audit_risk_decision_modify(
 ) -> None:
     """Phase 10a D5: write a risk_decisions audit row for modify_order.
 
-    Same fail-OPEN semantics as _audit_risk_decision (spec §4): suppress
-    exceptions on the audit write so a DB hiccup doesn't block the trade;
-    metric `risk_audit_insert_failures_total{attempt_kind="modify_order"}`
-    covers visibility.
+    Same fail-OPEN + isolated-session semantics as `_audit_risk_decision`
+    (spec §4); see that helper's docstring. Only BLOCK reaches this code
+    today; audit-on-ALLOW/WARN deferred to Phase 10a.5.
     """
+    # `db` is preserved in the signature for legacy stub-Session callers
+    # but unused — we open a dedicated SessionLocal() to avoid mutating
+    # the caller's transaction.
+    _ = db
     try:
         from app.models.risk import RiskDecision
 
-        decision = RiskDecision(
-            account_id=account_id,
-            instrument_id=None,
-            # D7: lowercase side to satisfy risk_decisions_side_check
-            # (alembic 0036 enforces ('buy', 'sell')); mirrors the same
-            # fix in _audit_risk_decision.
-            side=side.lower(),
-            qty=qty,
-            price=Decimal(limit_price) if limit_price else None,
-            order_type=order_type,
-            time_in_force=tif,
-            verdict=verdict.final_verdict,
-            blockers=[b.model_dump(mode="json") for b in verdict.blockers],
-            warnings=[w.model_dump(mode="json") for w in verdict.warnings],
-            latency_ms=verdict.latency_ms,
-            attempt_kind="modify_order",
-            request_id=request_id,
-            order_id=order_id,
-        )
-        db.add(decision)
-        await db.commit()
+        async with SessionLocal() as audit_db:
+            decision = RiskDecision(
+                account_id=account_id,
+                instrument_id=None,
+                # D7: lowercase side to satisfy risk_decisions_side_check.
+                side=side.lower(),
+                qty=qty,
+                price=Decimal(limit_price) if limit_price else None,
+                order_type=order_type,
+                time_in_force=tif,
+                verdict=verdict.final_verdict,
+                blockers=[b.model_dump(mode="json") for b in verdict.blockers],
+                warnings=[w.model_dump(mode="json") for w in verdict.warnings],
+                latency_ms=verdict.latency_ms,
+                attempt_kind="modify_order",
+                request_id=request_id,
+                order_id=order_id,
+            )
+            audit_db.add(decision)
+            await audit_db.commit()
     except Exception as exc:
         log.exception(
             "risk.audit_insert_failed",

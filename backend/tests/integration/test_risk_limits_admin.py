@@ -115,8 +115,12 @@ async def test_create_update_delete_roundtrip_with_csrf(
         assert created["limit_kind"] == "max_daily_loss_currency_base"
         assert created["updated_by"] == "d7@test.local"
 
-        # Pubsub fired on the spec-mandated channel.
-        publish_mock.assert_any_call("app_config:invalidate:risk_limits", b"")
+        # Pubsub fired on the spec-mandated channel with {scope_type, scope_id}
+        # payload (D9-fix per spec §4 cap-edit invalidation path).
+        publish_mock.assert_any_call(
+            "app_config:invalidate:risk_limits",
+            b'{"scope_type": "global"}',
+        )
 
         # UPDATE: bump limit_value + flip is_active -> assert history row.
         nonce_put = await _mint_nonce(client)

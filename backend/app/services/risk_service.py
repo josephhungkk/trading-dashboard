@@ -130,7 +130,16 @@ class RiskService:
         return None
 
     async def _check_account_kill_switch(self, ctx: EvaluationContext) -> CheckResult:
-        """B2: BLOCK when account_kill_switches.is_enabled=True for the account."""
+        """B2: BLOCK when account_kill_switches.is_enabled=True for the account.
+
+        D9-fix (security): the kill-switch reason text is operator
+        free-form (max 1000 chars) and would land in
+        risk_decisions.blockers JSONB if interpolated here, persisting
+        any PII the operator typed (e.g. "frozen — pending KYC for John
+        Smith, DOB 1982-01-01"). The message now carries a fixed code
+        only; UI consumers fetch the live reason from
+        GET /api/admin/accounts/{id}/kill-switch when displaying.
+        """
         stmt = select(AccountKillSwitch).where(AccountKillSwitch.account_id == ctx.account_id)
         row = (await self._db.execute(stmt)).scalar_one_or_none()
         if row is None or not row.is_enabled:
@@ -138,7 +147,7 @@ class RiskService:
         return (
             GateBlockerEntry(
                 check="account_kill_switch",
-                message=f"account kill switch enabled — reason: {row.reason}",
+                message="account kill switch enabled",
                 code="account_kill_switch_enabled",
             ),
             None,

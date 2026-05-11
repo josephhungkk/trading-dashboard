@@ -47,27 +47,28 @@ async def list_risk_decisions(
     Optional filters: account_id (UUID), verdict (allow|warn|block).
     The DB indexes idx_risk_decisions_account_time and
     idx_risk_decisions_blocked cover the two hot filter paths.
+
+    D9-fix: static SQL with `:param IS NULL OR col = :param` filters
+    instead of dynamic f-string WHERE composition — removes the
+    superficial injection-pattern that static analysers flag and
+    eliminates any future risk that a user-controllable string lands in
+    the SQL text body.
     """
-    where_clauses: list[str] = []
-    params: dict[str, Any] = {"limit": limit}
-    if account_id is not None:
-        where_clauses.append("account_id = :account_id")
-        params["account_id"] = account_id
-    if verdict is not None:
-        where_clauses.append("verdict = CAST(:verdict AS risk_verdict)")
-        params["verdict"] = verdict
-    where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-    # where_clauses is composed from a fixed-string allowlist; user-supplied
-    # values flow only through bound params, not the SQL text.
-    sql = f"""
-        SELECT id, account_id, instrument_id, side, qty, price,
-               order_type, time_in_force, verdict::text AS verdict,
-               blockers, warnings, evaluated_at, latency_ms,
-               attempt_kind, request_id, order_id
-          FROM risk_decisions
-          {where}
-         ORDER BY evaluated_at DESC
-         LIMIT :limit
-    """
-    result = await db.execute(text(sql), params)
+    result = await db.execute(
+        text(
+            """
+            SELECT id, account_id, instrument_id, side, qty, price,
+                   order_type, time_in_force, verdict::text AS verdict,
+                   blockers, warnings, evaluated_at, latency_ms,
+                   attempt_kind, request_id, order_id
+              FROM risk_decisions
+             WHERE (:account_id::uuid IS NULL OR account_id = :account_id)
+               AND (:verdict::text IS NULL
+                    OR verdict = CAST(:verdict AS risk_verdict))
+             ORDER BY evaluated_at DESC
+             LIMIT :limit
+            """
+        ),
+        {"account_id": account_id, "verdict": verdict, "limit": limit},
+    )
     return [RiskDecisionOut.model_validate(dict(row)) for row in result.mappings().all()]

@@ -102,14 +102,25 @@ async def update_risk_limit(
     status_code=204,
 )
 async def delete_risk_limit(
+    identity: IdentityDep,
     db: DbDep,
     redis: RedisDep,
     _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
     limit_id: Annotated[int, Path(ge=1)],
 ) -> None:
+    """Soft-delete a risk limit (spec §6: is_active=false, idempotent).
+
+    D9-fix: was a hard DELETE before; the BEFORE UPDATE trigger
+    fn_risk_limits_history doesn't fire on DELETE, so a hard-delete left
+    no audit trail of who removed the limit. Now flips is_active=false +
+    stamps updated_by from the JWT identity, which triggers the history
+    snapshot. Returns 204 on success, 404 only when the row doesn't
+    exist; re-deleting an already-inactive limit is idempotent (200/204
+    with another history row).
+    """
     svc = RiskLimitsService(redis=redis, db=db)
-    deleted = await svc.delete(limit_id)
-    if not deleted:
+    row = await svc.delete(limit_id, updated_by=identity.email)
+    if row is None:
         raise HTTPException(status_code=404, detail={"error": "risk_limit_not_found"})
 
 
@@ -118,10 +129,16 @@ async def delete_risk_limit(
     response_model=AccountKillSwitchOut,
 )
 async def get_account_kill_switch(
+    _identity: IdentityDep,
     db: DbDep,
     account_id: Annotated[uuid.UUID, Path(...)],
 ) -> AccountKillSwitchOut:
-    """Return the current kill-switch state; 404 when no row exists."""
+    """Return the current kill-switch state; 404 when no row exists.
+
+    D9-fix: IdentityDep added for parity with the write handlers; the
+    router-level require_admin_jwt already enforces auth but the
+    function-level dep makes the contract explicit at the signature.
+    """
     svc = AccountKillSwitchService(db=db)
     row = await svc.get(account_id)
     if row is None:
@@ -137,10 +154,15 @@ async def toggle_account_kill_switch(
     body: AccountKillSwitchToggleRequest,
     identity: IdentityDep,
     db: DbDep,
+    redis: RedisDep,
     _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
     account_id: Annotated[uuid.UUID, Path(...)],
 ) -> AccountKillSwitchOut:
-    svc = AccountKillSwitchService(db=db)
+    # D9-fix: redis injected so the service can publish on
+    # 'app_config:invalidate:kill_switch' per spec §4 (toggle propagates
+    # after pubsub). Single-worker today; the channel listener arrives
+    # with Phase 24 multi-worker.
+    svc = AccountKillSwitchService(db=db, redis=redis)
     try:
         row = await svc.toggle(
             account_id,
@@ -149,5 +171,8 @@ async def toggle_account_kill_switch(
             by=identity.email,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_kill_switch_request"},
+        ) from exc
     return AccountKillSwitchOut.model_validate(row)

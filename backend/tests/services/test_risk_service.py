@@ -172,7 +172,10 @@ async def test_account_kill_switch_on_blocks(evaluation_ctx) -> None:
     assert warning is None
     assert blocker is not None
     assert blocker.code == "account_kill_switch_enabled"
-    assert "risk freeze" in blocker.message
+    # D9-fix: reason text no longer interpolated into the JSONB-bound
+    # message (PII leak risk); UI fetches live reason from the admin
+    # kill-switch GET endpoint instead.
+    assert blocker.message == "account kill switch enabled"
 
 
 async def test_broker_kill_switch_off_allows(evaluation_ctx) -> None:
