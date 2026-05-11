@@ -1035,6 +1035,7 @@ class BrokerDiscoverer:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         interval_seconds: float = 30.0,
+        redis: Any = None,
     ) -> None:
         self._registry = registry
         self._session_factory = session_factory
@@ -1049,6 +1050,10 @@ class BrokerDiscoverer:
         # last successful position fetch. Feeds broker_poller_drift_seconds
         # gauge (BrokerPollerDriftHigh alert fires at >60s sustained 2m).
         self._last_position_tick_at: dict[tuple[str, str], float] = {}
+        # Phase 10a.5 A4.3: redis injected for orphan-token UNLINK sweep +
+        # BP counter reconcile. Optional (None) so existing tests that
+        # build a BrokerDiscoverer without redis still construct.
+        self._redis = redis
 
     async def discover_loop(self) -> None:
         # Single-consumer invariant: only this method calls _discover_once,
@@ -1076,12 +1081,54 @@ class BrokerDiscoverer:
             except TimeoutError:
                 pass
 
+    async def _unlink_risk_counter_orphans(self) -> int:
+        """Phase 10a.5 A4.3: reap orphan risk-counter tokens before reconcile.
+
+        A token whose ``decrement_pdt`` / ``commit_bp`` fired but whose dispatch
+        never completed (process crash, network drop between Redis write and
+        broker SubmitOrder) would otherwise leak past its 86400s TTL. Sweeping
+        every tick bounds the leak window to one discoverer cycle (~30s).
+
+        Returns the total number of orphan token keys unlinked.
+        """
+        if self._redis is None:
+            return 0
+        total = 0
+        for pattern in ("risk:pdt:tok:*", "risk:bp:tok:*"):
+            cursor: int | bytes = 0
+            try:
+                while True:
+                    cursor, keys = await self._redis.scan(cursor=cursor, match=pattern, count=100)
+                    if keys:
+                        await self._redis.unlink(*keys)
+                        total += len(keys)
+                    if cursor in (0, b"0"):
+                        break
+            except (Exception,) as exc:  # noqa: B013
+                log.warning(
+                    "risk_counter_orphan_sweep_failed",
+                    pattern=pattern,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                metrics.risk_counter_cleanup_failures_total.inc()
+                break
+        metrics.risk_counter_orphan_tokens_total.set(total)
+        return total
+
     async def _discover_once(self) -> None:
         healthy_clients = await self._registry.healthy_clients()
         healthy = [(client, client.label) for client in healthy_clients]
         healthy_labels = [label for _client, label in healthy]
 
         log.info("broker_discover_iteration_start", healthy_labels=healthy_labels)
+
+        # Phase 10a.5 A4.3: reap orphan tokens BEFORE this tick's reconciles
+        # so a stale token cannot survive the counter overwrite below.
+        try:
+            await self._unlink_risk_counter_orphans()
+        except (Exception,) as _exc:  # noqa: B013
+            log.warning("risk_counter_orphan_sweep_outer_failed", error=str(_exc))
 
         account_results = await asyncio.gather(
             *(client.list_managed_accounts() for client, _label in healthy),

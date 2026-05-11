@@ -650,3 +650,19 @@ pnl_intraday_writer_source_drift_seconds = Gauge(
     labelnames=["broker_id"],
     registry=registry,
 )
+
+
+# ─── Phase 10a.5 A4 metrics — risk-counter tokens ───────────────────────
+
+risk_counter_orphan_tokens_total = Gauge(
+    "risk_counter_orphan_tokens_total",
+    "Count of orphan risk-counter tokens unlinked at last discoverer sweep "
+    "(PDT + BP combined). Sustained non-zero indicates a leak.",
+    registry=registry,
+)
+
+risk_counter_cleanup_failures_total = Counter(
+    "risk_counter_cleanup_failures_total",
+    "risk_counters commit/revert/orphan-sweep failure count. Alert on rate > 0.",
+    registry=registry,
+)

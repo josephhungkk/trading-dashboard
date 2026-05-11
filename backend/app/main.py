@@ -149,7 +149,7 @@ async def lifespan(_app: FastAPI) -> Any:
             log.warning("instrument_seed.failed", exc=str(exc))
 
         broker_registry = await build_broker_registry(svc)
-        broker_discoverer = BrokerDiscoverer(broker_registry, session_factory)
+        broker_discoverer = BrokerDiscoverer(broker_registry, session_factory, redis=redis)
         broker_health_task = asyncio.create_task(broker_registry.health_probe_loop())
         broker_discover_task = asyncio.create_task(broker_discoverer.discover_loop())
         set_broker_registry(broker_registry)
