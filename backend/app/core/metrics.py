@@ -590,6 +590,15 @@ broker_order_place_total = Counter(
     registry=registry,
 )
 
+# Phase 10a D4: risk_decisions audit insert failures (fail-OPEN per spec §4
+# row "risk_decisions INSERT fails: fail-OPEN for the order, alert").
+risk_audit_insert_failures_total = Counter(
+    "risk_audit_insert_failures_total",
+    "Risk gate audit row insert failures by attempt_kind. fail-OPEN per spec §4.",
+    labelnames=["attempt_kind"],
+    registry=registry,
+)
+
 broker_order_cancel_total = Counter(
     "broker_order_cancel_total",
     "Cancel-order attempts by gateway label and result (success|error|timeout). "

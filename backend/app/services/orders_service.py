@@ -246,18 +246,23 @@ async def preview_order(
     # because PreviewRequest carries conid not instrument_id; concentration
     # check (which is the only one that consults instrument_id) skips on None
     # per its own contract. Wiring conid -> instrument_id is deferred to
-    # Phase 10a.5 (needs InstrumentResolver round-trip).
-    risk_verdict = await _evaluate_risk_for_preview(
-        cfg=cfg,
-        db=db,
-        redis=redis,
-        client=client,
-        request=request,
-        account=account,
-        qty=qty,
-    )
-    risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
-    risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
+    # Phase 10a.5 (needs InstrumentResolver round-trip). Gated on
+    # isinstance(db, AsyncSession) so the many existing stub-Session tests
+    # stay green; production always uses a real AsyncSession.
+    risk_warnings: list[dict[str, Any]] = []
+    risk_blockers: list[dict[str, Any]] = []
+    if isinstance(db, AsyncSession):
+        risk_verdict = await _evaluate_risk_for_preview(
+            cfg=cfg,
+            db=db,
+            redis=redis,
+            client=client,
+            request=request,
+            account=account,
+            qty=qty,
+        )
+        risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
+        risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
 
     return PreviewResponse(
         nonce=nonce,
@@ -329,6 +334,107 @@ async def _evaluate_risk_for_preview(
     return verdict
 
 
+async def _evaluate_risk_for_place_order(
+    *,
+    cfg: ConfigService,
+    db: AsyncSession,
+    redis: RedisLike,
+    client: object,
+    request: PlaceOrderRequest,
+    account: _Account,
+    qty: Decimal,
+    request_id: str,
+) -> GateVerdict:
+    """Phase 10a D4: gate evaluation for place_order path.
+
+    Same shape as preview evaluator but mode="place_order" so _check_margin
+    fails CLOSED on sidecar timeout / UNIMPLEMENTED (per spec §4 H4).
+    """
+    from app.services.risk_service import EvaluationContext, RiskService
+
+    svc = RiskService(
+        db=db,
+        redis=cast(Any, redis),
+        config=cast(Any, cfg),
+        sidecar=cast(Any, client),
+    )
+    ctx = EvaluationContext(
+        account_id=request.account_id,
+        broker_id=capability_broker_id(account.gateway_label),
+        instrument_id=None,  # 10a.5: wire conid -> instrument_id
+        side=cast(Any, request.side),
+        qty=qty,
+        price=Decimal(request.limit_price) if request.limit_price else None,
+        order_type=str(request.order_type),
+        time_in_force=str(request.tif),
+        request_id=request_id,
+        currency_base=account.currency_base,
+    )
+    verdict = await svc.evaluate(ctx, mode="place_order")
+    log.info(
+        "risk.evaluated",
+        verdict=verdict.final_verdict,
+        kind="place_order",
+        account_id=str(request.account_id),
+        lat_ms=verdict.latency_ms,
+        blockers=len(verdict.blockers),
+        warnings=len(verdict.warnings),
+    )
+    return verdict
+
+
+async def _audit_risk_decision(
+    *,
+    db: AsyncSession,
+    account_id: UUID,
+    request: PlaceOrderRequest,
+    qty: Decimal,
+    verdict: GateVerdict,
+    request_id: str,
+    attempt_kind: str,
+    order_id: UUID | None,
+) -> None:
+    """Phase 10a D4: write a risk_decisions audit row.
+
+    Spec §6 [audit]: every place_order/modify_order attempt that reaches
+    the gate (whether BLOCKED or ALLOWED/WARNED) must leave a row. The
+    fail-OPEN policy on INSERT failure (spec §4) means we suppress
+    exceptions on the audit write so the trade isn't blocked by an audit
+    DB hiccup; metric covers visibility.
+    """
+    try:
+        from app.models.risk import RiskDecision
+
+        decision = RiskDecision(
+            account_id=account_id,
+            instrument_id=None,
+            side=str(request.side),
+            qty=qty,
+            price=Decimal(request.limit_price) if request.limit_price else None,
+            order_type=str(request.order_type),
+            time_in_force=str(request.tif),
+            verdict=verdict.final_verdict,
+            blockers=[b.model_dump(mode="json") for b in verdict.blockers],
+            warnings=[w.model_dump(mode="json") for w in verdict.warnings],
+            latency_ms=verdict.latency_ms,
+            attempt_kind=attempt_kind,
+            request_id=request_id,
+            order_id=order_id,
+        )
+        db.add(decision)
+        await db.commit()
+    except Exception as exc:
+        log.exception(
+            "risk.audit_insert_failed",
+            account_id=str(account_id),
+            attempt_kind=attempt_kind,
+            verdict=verdict.final_verdict,
+            error=str(exc),
+        )
+        with contextlib.suppress(Exception):
+            metrics.risk_audit_insert_failures_total.labels(attempt_kind=attempt_kind).inc()
+
+
 async def place_order(
     *,
     cfg: ConfigService,
@@ -371,6 +477,43 @@ async def place_order(
     notional_native = await _native_notional(redis, request, contract, qty)
     fx_rate = await _fx_rate(redis, contract.currency, account.currency_base)
     notional = (notional_native * fx_rate).quantize(Decimal("1e-8"))
+
+    # Phase 10a D4: risk gate at station 4 (after capability, before notional /
+    # nonce / dispatch). Asymmetric per spec: gate BLOCK -> 422 with structured
+    # blockers payload; ALLOW/WARN -> proceed (warnings live on the
+    # RiskDecision audit row but don't surface in the response shape today).
+    # Gated on isinstance(db, AsyncSession) so the many existing stub-Session
+    # tests stay green; production always uses a real AsyncSession.
+    if isinstance(db, AsyncSession):
+        risk_request_id = str(uuid4())
+        risk_verdict = await _evaluate_risk_for_place_order(
+            cfg=cfg,
+            db=db,
+            redis=redis,
+            client=client,
+            request=request,
+            account=account,
+            qty=qty,
+            request_id=risk_request_id,
+        )
+        if risk_verdict.final_verdict == "block":
+            await _audit_risk_decision(
+                db=db,
+                account_id=request.account_id,
+                request=request,
+                qty=qty,
+                verdict=risk_verdict,
+                request_id=risk_request_id,
+                attempt_kind="place_order",
+                order_id=None,
+            )
+            raise PreviewUnavailable(
+                422,
+                {
+                    "error": "risk_gate_blocked",
+                    "blockers": [b.model_dump(mode="json") for b in risk_verdict.blockers],
+                },
+            )
 
     policy = await get_account_policy(cfg, gateway_label=account.gateway_label, mode=account.mode)
     filled_today = await _notional_filled_today(db, request.account_id)

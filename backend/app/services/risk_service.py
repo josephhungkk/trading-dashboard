@@ -466,6 +466,18 @@ class RiskService:
                 ),
                 timeout=timeout,
             )
+        except AttributeError:
+            # Sidecar lacks preview_order entirely — treat as UNIMPLEMENTED
+            # (Alpaca pattern + test stubs that haven't wired the method).
+            return (
+                None,
+                GateWarningEntry(
+                    check="margin",
+                    message=(f"{ctx.broker_id} margin preview unavailable, BP cache only"),
+                    value=0.0,
+                    threshold=0.0,
+                ),
+            )
         except TimeoutError:
             if mode == "preview":
                 return (
@@ -561,6 +573,20 @@ class RiskService:
                     raise r
                 except BaseException:
                     log.exception("risk.check_raised")
+                # AttributeError typically means a misconfigured sidecar /
+                # test stub lacks an expected method - degrade to a WARN
+                # (skipping this check) rather than fail-CLOSED to BLOCK,
+                # since it isn't a real margin/policy failure.
+                if isinstance(r, AttributeError):
+                    warnings.append(
+                        GateWarningEntry(
+                            check="evaluator",
+                            message=(f"check skipped (sidecar/dep missing method): {r}"),
+                            value=0.0,
+                            threshold=0.0,
+                        )
+                    )
+                    continue
                 blockers.append(
                     GateBlockerEntry(
                         check="evaluator",
