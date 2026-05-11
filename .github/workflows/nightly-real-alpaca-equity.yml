@@ -27,19 +27,7 @@ jobs:
         run: uv sync --frozen
       - name: Generate proto stubs
         working-directory: backend
-        run: |
-          mkdir -p app/_generated/broker/v1
-          : > app/_generated/__init__.py
-          : > app/_generated/broker/__init__.py
-          : > app/_generated/broker/v1/__init__.py
-          uv run python -m grpc_tools.protoc \
-            --proto_path=../proto \
-            --python_out=app/_generated \
-            --grpc_python_out=app/_generated \
-            --pyi_out=app/_generated \
-            broker/v1/broker.proto
-          sed -i 's|^from broker\.v1 import broker_pb2|from app._generated.broker.v1 import broker_pb2|' \
-            app/_generated/broker/v1/broker_pb2_grpc.py
+        run: uv run python scripts/generate_proto_stubs.py
       - name: Run real Alpaca paper equity E2E
         run: |
           cd backend && uv run pytest tests/real_broker/test_real_alpaca_equity_e2e.py -m real_alpaca_equity --case ${{ matrix.case }} -v
