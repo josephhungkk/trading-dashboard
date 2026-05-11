@@ -465,6 +465,55 @@ async def _audit_risk_decision(
             metrics.risk_audit_insert_failures_total.labels(attempt_kind=attempt_kind).inc()
 
 
+async def _resolve_instrument_id(
+    db: AsyncSession,
+    *,
+    broker_id: str,
+    conid: str,
+    client: object | None = None,
+) -> int | None:
+    """Phase 10a.5 B1: conid → instruments.id via read-only alias lookup.
+
+    Cold-path eager-create via ``resolve_or_create`` when ``client`` is given
+    and ``find_by_alias`` misses. ``None`` return tells the concentration
+    check to skip (with metric increment) rather than block on unresolved.
+
+    The risk gate calls this with ``client=None`` (gate must NOT author
+    instruments); the place_order write path passes the broker client so a
+    cold alias is created at the same time the order is sent.
+    """
+    from app.services.quotes.instrument_resolver import InstrumentResolver
+
+    resolver = InstrumentResolver(db)
+    instrument_id = await resolver.find_by_alias(source=broker_id, raw_symbol=conid)
+    if instrument_id is not None:
+        return instrument_id
+
+    if client is None:
+        metrics.risk_gate_concentration_skipped_unresolved_total.inc()
+        return None
+
+    try:
+        contract = await client.get_contract(conid=conid)  # type: ignore[attr-defined]
+    except Exception:
+        metrics.risk_gate_concentration_skipped_unresolved_total.inc()
+        return None
+
+    if contract is None:
+        metrics.risk_gate_concentration_skipped_unresolved_total.inc()
+        return None
+
+    result = await resolver.resolve_or_create(
+        source=broker_id,
+        raw_symbol=conid,
+        canonical_id=contract.canonical_id,
+        asset_class=contract.asset_class,
+        primary_exchange=contract.primary_exchange,
+        currency=contract.currency,
+    )
+    return int(result.id)
+
+
 async def _audit_risk_decision_with_dedupe(
     *,
     db: AsyncSession,
