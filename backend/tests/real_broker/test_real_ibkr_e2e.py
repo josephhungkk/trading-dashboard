@@ -22,7 +22,7 @@ import pytest
 # httpx is a backend dependency; skip the whole module if not importable.
 httpx = pytest.importorskip("httpx")
 
-pytestmark = pytest.mark.real_ibkr
+pytestmark = [pytest.mark.real_ibkr, pytest.mark.no_db]
 
 CF_BASE = "https://dashboard.kiusinghung.com"
 

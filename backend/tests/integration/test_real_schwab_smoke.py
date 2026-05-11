@@ -35,13 +35,20 @@ async def test_user_preference_endpoint_reachable():
 
 @pytest.mark.asyncio
 async def test_account_numbers_endpoint_reachable():
-    """GET /trader/v1/accountNumbers returns at least 1 account."""
+    """GET /trader/v1/accounts/accountNumbers returns at least 1 account.
+
+    Path corrected 2026-05-11: the live Schwab API uses
+    `/trader/v1/accounts/accountNumbers` (with `/accounts/` in the middle),
+    not `/trader/v1/accountNumbers`. The sidecar production path is via
+    schwabdev.linked_accounts() which gets the correct URL internally; this
+    test was a raw HTTP probe with the stale shorter form.
+    """
     import httpx
 
     access = os.environ["SCHWAB_TEST_ACCESS_TOKEN"]
     async with httpx.AsyncClient(timeout=15.0) as http:
         resp = await http.get(
-            "https://api.schwabapi.com/trader/v1/accountNumbers",
+            "https://api.schwabapi.com/trader/v1/accounts/accountNumbers",
             headers={"Authorization": f"Bearer {access}"},
         )
     assert resp.status_code == 200

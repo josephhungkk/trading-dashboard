@@ -40,6 +40,14 @@ dev = [
     "ruff>=0.15.11",
     "syrupy>=5.1.0",
 ]
+# Broker SDKs needed only by tests/real_broker/* (nightly real-broker workflows).
+# Mirrors the pins in sidecar_alpaca/ + sidecar_schwab/ pyproject.toml so the
+# tests use the same client versions production runs. Excluded from main +
+# dev installs because the SDKs are large and pull C extensions.
+real-broker = [
+    "alpaca-py>=0.30",
+    "schwabdev==3.0.3",
+]
 
 [tool.ruff]
 line-length = 100
