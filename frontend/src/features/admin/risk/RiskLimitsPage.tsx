@@ -13,6 +13,7 @@ import { Button } from '@/components/primitives/Button';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -100,6 +101,10 @@ export function RiskLimitsPage(): React.JSX.Element {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editId, setEditId] = React.useState<number | null>(null);
   const [form, setForm] = React.useState<FormState>(INITIAL_FORM);
+  // E7-fix (quality M3): replace window.confirm with a Dialog primitive
+  // so the confirm flow is testable (window.confirm returns false
+  // unconditionally in jsdom) and consistent with the kill-switch UX.
+  const [pendingDelete, setPendingDelete] = React.useState<RiskLimitOut | null>(null);
 
   const openCreate = (): void => {
     setEditId(null);
@@ -128,11 +133,14 @@ export function RiskLimitsPage(): React.JSX.Element {
   };
 
   const handleDelete = (row: RiskLimitOut): void => {
-    const ok = window.confirm(
-      `Deactivate risk limit #${row.id} (${row.limit_kind})?`,
-    );
-    if (!ok) return;
-    remove.mutate(row.id);
+    setPendingDelete(row);
+  };
+
+  const confirmDelete = (): void => {
+    if (pendingDelete === null) return;
+    remove.mutate(pendingDelete.id, {
+      onSuccess: () => setPendingDelete(null),
+    });
   };
 
   return (
@@ -195,6 +203,36 @@ export function RiskLimitsPage(): React.JSX.Element {
           </table>
         </div>
       )}
+
+      <Dialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Deactivate risk limit</DialogTitle>
+            <DialogDescription>
+              {pendingDelete
+                ? `Soft-delete risk limit #${pendingDelete.id} (${pendingDelete.limit_kind})? The row stays in history for audit; subsequent reads will only return active limits.`
+                : null}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setPendingDelete(null)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={confirmDelete}
+              disabled={remove.isPending}
+            >
+              {remove.isPending ? 'Deactivating…' : 'Deactivate'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>

@@ -1,9 +1,12 @@
-import * as React from 'react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { useRiskLimits, RISK_LIMITS_QUERY_KEY } from '@/hooks/useRiskLimits';
 import type { RiskLimitOut } from '@/services/risk/types';
+import {
+  jsonResponse,
+  makeWrapper,
+  noRetryQueryClient,
+} from '@/hooks/__test-utils__/riskTestUtils';
 
 const rowGlobal: RiskLimitOut = {
   id: 1,
@@ -19,22 +22,6 @@ const rowGlobal: RiskLimitOut = {
   updated_by: 'test@example.com',
 };
 
-interface WrapperProps {
-  children: React.ReactNode;
-}
-
-function makeWrapper(client: QueryClient): React.FC<WrapperProps> {
-  return function HookWrapper(props: WrapperProps) {
-    return <QueryClientProvider client={client}>{props.children}</QueryClientProvider>;
-  };
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
 
 describe('useRiskLimits', () => {
   beforeEach(() => {
@@ -48,9 +35,7 @@ describe('useRiskLimits', () => {
   it('list query returns the parsed RiskLimitOut[]', async () => {
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockResolvedValueOnce(jsonResponse([rowGlobal]));
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const { result } = renderHook(() => useRiskLimits(), {
       wrapper: makeWrapper(client),
     });
@@ -73,9 +58,7 @@ describe('useRiskLimits', () => {
     // 4) Refetch after invalidate
     fetchMock.mockResolvedValueOnce(jsonResponse([rowGlobal, { ...rowGlobal, id: 2 }]));
 
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
 
     const { result } = renderHook(() => useRiskLimits(), {
@@ -115,9 +98,7 @@ describe('useRiskLimits', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ ...rowGlobal, limit_value: '5000.00000000' }));
     fetchMock.mockResolvedValueOnce(jsonResponse([{ ...rowGlobal, limit_value: '5000.00000000' }]));
 
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
     const { result } = renderHook(() => useRiskLimits(), {
       wrapper: makeWrapper(client),
@@ -149,9 +130,7 @@ describe('useRiskLimits', () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
     fetchMock.mockResolvedValueOnce(jsonResponse([]));
 
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
     const { result } = renderHook(() => useRiskLimits(), {
       wrapper: makeWrapper(client),

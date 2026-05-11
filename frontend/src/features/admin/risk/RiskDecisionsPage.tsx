@@ -37,6 +37,15 @@ const VERDICT_CLASS: Record<RiskVerdict, string> = {
   block: 'border-destructive/60 bg-destructive/10 text-destructive',
 };
 
+const VERDICT_FALLBACK_CLASS = 'border-border bg-panel text-fg';
+
+function verdictClass(verdict: string): string {
+  if (verdict === 'allow' || verdict === 'warn' || verdict === 'block') {
+    return VERDICT_CLASS[verdict];
+  }
+  return VERDICT_FALLBACK_CLASS;
+}
+
 function formatEvaluatedAt(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
@@ -132,7 +141,7 @@ export function RiskDecisionsPage(): React.JSX.Element {
                   <td className="p-2 font-mono">{row.price ?? '—'}</td>
                   <td className="p-2">
                     <span
-                      className={`inline-block rounded border px-2 py-0.5 text-xs font-medium ${VERDICT_CLASS[row.verdict as RiskVerdict]}`}
+                      className={`inline-block rounded border px-2 py-0.5 text-xs font-medium ${verdictClass(row.verdict)}`}
                     >
                       {row.verdict}
                     </span>

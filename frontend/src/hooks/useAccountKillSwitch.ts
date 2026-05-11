@@ -16,8 +16,8 @@ import {
 } from '@tanstack/react-query';
 import {
   getAccountKillSwitch,
+  isRiskApiError,
   setAccountKillSwitch,
-  type RiskApiError,
 } from '@/services/risk/api';
 import type {
   AccountKillSwitchOut,
@@ -53,8 +53,10 @@ export function useAccountKillSwitch(
         // 404 = no row exists = switch is implicitly off. Surface as
         // `null` rather than an error so consumers render the off
         // state cleanly. Anything else (403, 500, network) propagates.
-        const err = caught as Partial<RiskApiError>;
-        if (err && typeof err.status === 'number' && err.status === 404) {
+        // E7-fix (ts HIGH): narrow via isRiskApiError type guard instead
+        // of `as Partial<>` cast — keeps strict mode happy without losing
+        // the unknown-error fallback.
+        if (isRiskApiError(caught) && caught.status === 404) {
           return null;
         }
         throw caught;
@@ -71,8 +73,14 @@ export function useAccountKillSwitch(
   >({
     mutationFn: (body) => setAccountKillSwitch(accountId, body),
     onSuccess: () => {
+      // E7-fix (code-quality M4): invalidate both the per-account
+      // detail key AND the parent list key, so AccountsPage's column
+      // refreshes when the toggle flips.
       void queryClient.invalidateQueries({
         queryKey: accountKillSwitchQueryKey(accountId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: [ACCOUNT_KILL_SWITCH_KEY],
       });
     },
   });

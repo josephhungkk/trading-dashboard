@@ -7,7 +7,7 @@ import { useFocusedSymbol } from '@/hooks/useFocusedSymbol';
 import { useToast } from '@/hooks/use-toast';
 import type { BrokerCapabilitiesResponse } from '@/services/capabilities/types';
 import { useBrokerCapabilities } from '@/services/capabilities/useBrokerCapabilities';
-import { previewOrder, placeOrder } from '@/services/orders';
+import { previewOrder, placeOrder, RiskGateBlockedError, type RiskBlocker } from '@/services/orders';
 import type { DecimalString, PreviewRequest, PreviewResponse } from '@/services/types';
 import { useOrdersStore, type OrderResponse as StoredOrderResponse } from '@/stores/global/orders';
 import { useActiveStores } from '@/stores/registry';
@@ -123,6 +123,11 @@ function TradeTicketModalContent({
   const [acknowledgedRiskWarnings, setAcknowledgedRiskWarnings] = React.useState(false);
   const [banner, setBanner] = React.useState<BlockingBanner | null>(storyBanner);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
+  // E7-fix (spec/quality H2): place_order can also return 422
+  // risk_gate_blocked AFTER a clean preview (e.g. a fresh kill switch
+  // flipped between preview and confirm). Surface those server-side
+  // blockers in the same banner shape preview uses.
+  const [placeOrderBlockers, setPlaceOrderBlockers] = React.useState<readonly RiskBlocker[]>([]);
 
   React.useEffect(() => {
     if (effectiveBrokerId === null || capabilities.data === undefined || capabilities.isError) return undefined;
@@ -178,6 +183,7 @@ function TradeTicketModalContent({
     if (request === null) return;
     setPreviewError(null);
     setBanner(null);
+    setPlaceOrderBlockers([]);
     const response = await previewOrder(request);
     tradeTicketStore.getState().setPreview(response);
     setAttestedExtreme(false);
@@ -203,6 +209,12 @@ function TradeTicketModalContent({
       const retryAfter = retryAfterSeconds(error);
       if (retryAfter !== null) {
         setBanner({ kind: 'maintenance', seconds: retryAfter });
+      } else if (error instanceof RiskGateBlockedError) {
+        // E7-fix (spec/quality H2): surface server-side risk blockers
+        // returned from place_order's 422 response. The PreviewStep
+        // renders them in the same banner shape as preview-time
+        // blockers (via the placeOrderBlockers state).
+        setPlaceOrderBlockers(error.blockers);
       } else {
         setBanner({ kind: 'kill-switch' });
       }
@@ -303,6 +315,7 @@ function TradeTicketModalContent({
               setAttestedExtreme={setAttestedExtreme}
               acknowledgedRiskWarnings={acknowledgedRiskWarnings}
               setAcknowledgedRiskWarnings={setAcknowledgedRiskWarnings}
+              placeOrderBlockers={placeOrderBlockers}
               confirmDisabled={confirmDisabled}
               inFlight={inFlight}
               onBack={() => tradeTicketStore.getState().setPreview(null)}
@@ -501,6 +514,7 @@ function PreviewStep({
   setAttestedExtreme,
   acknowledgedRiskWarnings,
   setAcknowledgedRiskWarnings,
+  placeOrderBlockers,
   confirmDisabled,
   inFlight,
   onBack,
@@ -511,6 +525,7 @@ function PreviewStep({
   setAttestedExtreme: (value: boolean) => void;
   acknowledgedRiskWarnings: boolean;
   setAcknowledgedRiskWarnings: (value: boolean) => void;
+  placeOrderBlockers: readonly RiskBlocker[];
   confirmDisabled: boolean;
   inFlight: boolean;
   onBack: () => void;
@@ -518,7 +533,10 @@ function PreviewStep({
 }): React.JSX.Element {
   // Phase 10a E2: structured risk-gate verdict surfaces.
   const riskWarnings = preview.risk_warnings ?? [];
-  const riskBlockers = preview.risk_blockers ?? [];
+  // E7-fix (spec/quality H2): merge place_order 422 blockers in with
+  // preview-time blockers so a freshly-flipped kill switch surfaces
+  // identically regardless of which station detected it.
+  const riskBlockers = [...(preview.risk_blockers ?? []), ...placeOrderBlockers];
   const hasRiskWarnings = riskWarnings.length > 0;
   const hasRiskBlockers = riskBlockers.length > 0;
 
@@ -543,6 +561,8 @@ function PreviewStep({
         <div
           className="rounded-md border border-destructive/60 bg-destructive/10 p-3 text-sm text-destructive"
           role="alert"
+          aria-live="assertive"
+          aria-atomic="true"
           aria-label="Risk gate blockers"
         >
           <p className="font-semibold">Order blocked by the risk gate.</p>
@@ -557,10 +577,16 @@ function PreviewStep({
         </div>
       ) : null}
 
-      {hasRiskWarnings && !hasRiskBlockers ? (
+      {hasRiskWarnings ? (
+        // E7-fix (quality H5): WARN list is now visible even when BLOCK
+        // is also set, so the operator sees every check the gate flagged.
+        // The acknowledgement checkbox only matters when BLOCK is absent
+        // (BLOCK supersedes WARN for the Confirm button gate).
         <div
           className="rounded-md border border-warning/60 bg-warning/10 p-3 text-sm"
           role="alert"
+          aria-live="polite"
+          aria-atomic="true"
           aria-label="Risk gate warnings"
         >
           <p className="font-semibold">Risk warnings — review before confirming.</p>
@@ -569,17 +595,18 @@ function PreviewStep({
               <li key={`${warning.check}:${warning.message}`}>{warning.message}</li>
             ))}
           </ul>
-          <label className="mt-3 flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={acknowledgedRiskWarnings}
-              onChange={(event) =>
-                setAcknowledgedRiskWarnings(event.currentTarget.checked)
-              }
-              aria-label="Acknowledge risk warnings"
-            />
-            I understand these warnings
-          </label>
+          {!hasRiskBlockers ? (
+            <label className="mt-3 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={acknowledgedRiskWarnings}
+                onChange={(event) =>
+                  setAcknowledgedRiskWarnings(event.currentTarget.checked)
+                }
+              />
+              I understand these warnings
+            </label>
+          ) : null}
         </div>
       ) : null}
 

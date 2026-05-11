@@ -20,6 +20,26 @@ import type {
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
+// E7-fix (security Sec-1): if VITE_API_URL is set, require it to be
+// same-origin before we'll send the CF Access cookie via `credentials:
+// include`. Cross-origin BASE returns the FE to a developer / staging
+// host where Cookie should NOT be forwarded automatically — fail
+// closed rather than leak the session.
+function isSameOriginBase(base: string): boolean {
+  if (base === '') return true;
+  try {
+    const url = new URL(base, typeof window === 'undefined' ? 'http://test' : window.location.href);
+    if (typeof window === 'undefined') return true;
+    return url.origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+const CREDENTIALS_POLICY: RequestCredentials = isSameOriginBase(BASE)
+  ? 'include'
+  : 'same-origin';
+
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has('Content-Type')) {
@@ -27,7 +47,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const response = await fetch(`${BASE}${path}`, {
     ...init,
-    credentials: 'include',
+    credentials: CREDENTIALS_POLICY,
     headers,
   });
   if (!response.ok) {
@@ -37,9 +57,38 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+/**
+ * Error thrown by the risk-surface fetch wrappers.
+ *
+ * SECURITY NOTE (D9-fix Sec-2): `payload` carries the raw BE JSON
+ * response — it may contain server-side detail such as field-validation
+ * errors, traceback fragments, or DB error strings. **Do NOT render
+ * `payload` to the DOM directly.** Consumers should display
+ * `error.message` (which buildError sanitises) or pick specific
+ * known-safe fields out of `payload`.
+ */
 export interface RiskApiError extends Error {
   status: number;
   payload: unknown;
+}
+
+export function isRiskApiError(err: unknown): err is RiskApiError {
+  return (
+    err instanceof Error
+    && 'status' in err
+    && typeof (err as { status: unknown }).status === 'number'
+  );
+}
+
+function extractDetail(payload: unknown): string | null {
+  if (payload === null || typeof payload !== 'object') return null;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object') {
+    const errField = (detail as { error?: unknown }).error;
+    if (typeof errField === 'string') return errField;
+  }
+  return null;
 }
 
 async function buildError(response: Response): Promise<RiskApiError> {
@@ -49,7 +98,12 @@ async function buildError(response: Response): Promise<RiskApiError> {
   } catch {
     payload = null;
   }
-  const err = new Error(`risk api ${response.status}`) as RiskApiError;
+  const detail = extractDetail(payload);
+  // E7-fix (code-quality H3): use BE-provided detail when available so
+  // FE error toasts/banners show 'risk_limit_not_found' rather than the
+  // bare 'risk api 404'.
+  const message = detail ?? `risk api ${response.status}`;
+  const err = new Error(message) as RiskApiError;
   err.status = response.status;
   err.payload = payload;
   return err;

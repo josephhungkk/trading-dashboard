@@ -1,12 +1,15 @@
-import * as React from 'react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import {
   useAccountKillSwitch,
   accountKillSwitchQueryKey,
 } from '@/hooks/useAccountKillSwitch';
 import type { AccountKillSwitchOut } from '@/services/risk/types';
+import {
+  jsonResponse,
+  makeWrapper,
+  noRetryQueryClient,
+} from '@/hooks/__test-utils__/riskTestUtils';
 
 const ACCOUNT_ID = '00000000-0000-4000-8000-000000000001';
 
@@ -19,22 +22,6 @@ const enabledRow: AccountKillSwitchOut = {
   updated_at: '2026-05-11T12:00:00Z',
 };
 
-interface WrapperProps {
-  children: React.ReactNode;
-}
-
-function makeWrapper(client: QueryClient): React.FC<WrapperProps> {
-  return function HookWrapper(props: WrapperProps) {
-    return <QueryClientProvider client={client}>{props.children}</QueryClientProvider>;
-  };
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
 
 describe('useAccountKillSwitch', () => {
   beforeEach(() => {
@@ -50,9 +37,7 @@ describe('useAccountKillSwitch', () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ detail: { error: 'kill_switch_not_set' } }, 404),
     );
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const { result } = renderHook(() => useAccountKillSwitch(ACCOUNT_ID), {
       wrapper: makeWrapper(client),
     });
@@ -63,9 +48,7 @@ describe('useAccountKillSwitch', () => {
   it('query returns the row when present', async () => {
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockResolvedValueOnce(jsonResponse(enabledRow));
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const { result } = renderHook(() => useAccountKillSwitch(ACCOUNT_ID), {
       wrapper: makeWrapper(client),
     });
@@ -84,9 +67,7 @@ describe('useAccountKillSwitch', () => {
     // 4) Refetch after invalidate
     fetchMock.mockResolvedValueOnce(jsonResponse(enabledRow));
 
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
 
     const { result } = renderHook(() => useAccountKillSwitch(ACCOUNT_ID), {
@@ -124,9 +105,7 @@ describe('useAccountKillSwitch', () => {
 
   it('query is disabled when accountId is empty', () => {
     const fetchMock = vi.mocked(globalThis.fetch);
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = noRetryQueryClient();
     const { result } = renderHook(() => useAccountKillSwitch(''), {
       wrapper: makeWrapper(client),
     });

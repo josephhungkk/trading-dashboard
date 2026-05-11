@@ -119,10 +119,57 @@ async function readOrThrow<T>(response: Response): Promise<T> {
   if (response.status === 409 && isOrderResponse(body) && body.submission_state === 'idempotent_retry') {
     return body as T;
   }
+  // Phase 10a E7-fix (spec/quality H2): surface the 422 risk_gate_blocked
+  // shape as a typed error so the UI can render per-blocker rows the
+  // same way it does for preview-time blockers.
+  if (response.status === 422) {
+    const blockers = extractRiskBlockers(body);
+    if (blockers !== null) {
+      throw new RiskGateBlockedError(blockers);
+    }
+  }
   if (!response.ok) {
     throw new Error(errorMessage(response.status, body));
   }
   return body as T;
+}
+
+export interface RiskBlocker {
+  check: string;
+  message: string;
+  code: string;
+}
+
+export class RiskGateBlockedError extends Error {
+  readonly blockers: readonly RiskBlocker[];
+  constructor(blockers: readonly RiskBlocker[]) {
+    super('risk_gate_blocked');
+    this.name = 'RiskGateBlockedError';
+    this.blockers = blockers;
+  }
+}
+
+function extractRiskBlockers(body: unknown): readonly RiskBlocker[] | null {
+  if (!isRecord(body)) return null;
+  // BE returns either {error: "risk_gate_blocked", blockers: [...]} OR
+  // {detail: {error: "risk_gate_blocked", blockers: [...]}} depending on
+  // whether HTTPException wrapping is in play. Handle both.
+  const candidate = isRecord(body.detail) ? body.detail : body;
+  if ((candidate as { error?: unknown }).error !== 'risk_gate_blocked') {
+    return null;
+  }
+  const rawBlockers = (candidate as { blockers?: unknown }).blockers;
+  if (!Array.isArray(rawBlockers)) return null;
+  return rawBlockers.filter(isRiskBlocker);
+}
+
+function isRiskBlocker(value: unknown): value is RiskBlocker {
+  return (
+    isRecord(value)
+    && typeof value.check === 'string'
+    && typeof value.message === 'string'
+    && typeof value.code === 'string'
+  );
 }
 
 function jsonHeaders(extra?: HeadersInit): HeadersInit {

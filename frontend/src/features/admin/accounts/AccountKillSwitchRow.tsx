@@ -23,23 +23,43 @@ import { Switch } from '@/components/primitives/Switch';
 
 export interface AccountKillSwitchRowProps {
   accountId: string;
+  /** Optional human-readable label for AT (e.g. account alias); falls
+   * back to the UUID so multi-row pages stay distinguishable. */
+  accountLabel?: string;
 }
 
 export function AccountKillSwitchRow({
   accountId,
+  accountLabel,
 }: AccountKillSwitchRowProps): React.JSX.Element {
   const { query, setKillSwitch } = useAccountKillSwitch(accountId);
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [reason, setReason] = React.useState('');
+  // E7-fix: per-row mutation error displayed inline so the operator
+  // can tell an enable failure from a slow network.
+  const mutationError = setKillSwitch.error;
 
   if (query.isLoading) {
     return <span className="text-sm text-fg-muted">Loading…</span>;
+  }
+
+  // E7-fix (code-quality MED): explicit error branch — without it the
+  // Switch renders in the off state over a failed fetch with no
+  // indication the read failed.
+  if (query.error) {
+    return (
+      <span role="alert" className="text-sm text-destructive">
+        Failed to load kill-switch state
+      </span>
+    );
   }
 
   const row = query.data ?? null;
   const isEnabled = row?.is_enabled === true;
   const enabledBy = row?.enabled_by ?? null;
   const isPending = setKillSwitch.isPending;
+  const switchLabel = accountLabel ?? accountId;
+  const textareaId = `kill-switch-reason-${accountId}`;
 
   const handleToggle = (next: boolean): void => {
     if (next) {
@@ -65,15 +85,22 @@ export function AccountKillSwitchRow({
   };
 
   return (
-    <div className="flex items-center gap-3">
-      <Switch
-        checked={isEnabled}
-        onCheckedChange={handleToggle}
-        disabled={isPending}
-        aria-label={`Account kill switch for ${accountId}`}
-      />
-      {isEnabled && enabledBy ? (
-        <span className="text-xs text-fg-muted">frozen by {enabledBy}</span>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-3">
+        <Switch
+          checked={isEnabled}
+          onCheckedChange={handleToggle}
+          disabled={isPending}
+          aria-label={`Account kill switch for ${switchLabel}`}
+        />
+        {isEnabled && enabledBy ? (
+          <span className="text-xs text-fg-muted">frozen by {enabledBy}</span>
+        ) : null}
+      </div>
+      {mutationError ? (
+        <span role="alert" className="text-xs text-destructive">
+          {mutationError.message}
+        </span>
       ) : null}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>
@@ -84,9 +111,10 @@ export function AccountKillSwitchRow({
               the switch is disabled. Reason is recorded in the audit trail.
             </DialogDescription>
           </DialogHeader>
-          <label className="flex flex-col gap-1 text-sm">
+          <label htmlFor={textareaId} className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Reason</span>
             <textarea
+              id={textareaId}
               value={reason}
               onChange={(event) => setReason(event.currentTarget.value)}
               maxLength={1000}
@@ -96,6 +124,11 @@ export function AccountKillSwitchRow({
               placeholder="Operator note — visible in admin history"
             />
           </label>
+          {mutationError ? (
+            <p role="alert" className="text-sm text-destructive">
+              {mutationError.message}
+            </p>
+          ) : null}
           <DialogFooter>
             <Button
               type="button"
