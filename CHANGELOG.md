@@ -5,6 +5,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-05-11
+
+### Phase 10a.5 — Risk-gate effectivity + tech-debt cleanup (34 commits since v0.12.0)
+
+Spec: `docs/superpowers/specs/2026-05-11-phase10a5-cleanup-design.md`. Plan: `docs/superpowers/plans/2026-05-11-phase10a5-cleanup-plan.md`. Phase 10a shipped the risk-gate machinery but several effectivity blockers stayed in the backlog: `risk_decisions.instrument_id` always NULL, intraday PnL view stubbed, in-flight counter race window unbounded, ALLOW/WARN audit emission gated to BLOCK-only, dead metric declarations. 10a.5 lands the closure items so the gate's decisions are observable and the counter is reconcilable.
+
+**Chunk A — BE backbone (16 commits)**
+
+- Alembic 0037: `pnl_intraday` table (DATE per-day key + UNIQUE(account_id, day_start_utc)), `v_account_intraday_pnl` view rewrite reading from pnl_intraday with `staleness_s` projected as float epoch directly, `idx_risk_decisions_verdict_time` index (CONCURRENTLY for prod safety), `prune_risk_decisions_allow(retain_days int)` plpgsql helper with retain_days>=1 guard.
+- `PnlIntradayWriter` + BrokerDiscoverer fan-in: per-account-per-day INSERT ... ON CONFLICT DO UPDATE wired into the existing Phase 5a NLV fan-out inside `_discover_once`. UPSERT WHERE clause guards against stale `summary_updated_at` clobbers (MED-6) and skips no-op writes (MED-1). Source-field invariant: `realized_today` comes from SUM(positions[*].realized_pnl_today), NEVER from Summary.realized_pnl (would invert the gate for IBKR). Currency-mismatch positions skipped with `pnl_intraday_currency_skip_total{broker_id}` counter. IBKR sidecar 503 / maintenance: `summary_result is None` → skip upsert (not write zero, which would fail-OPEN the gate). `pnl_intraday_last_update_seconds` is a monotonic drift gauge (set on each tick, not just on upsert).
+- `_check_max_daily_loss` staleness WARN branch (CRIT-2): row missing OR staleness_s > 90s → WARN with `check="max_daily_loss_pnl_stale"`, log line emitted for operator visibility. Replaces the previous "silent ALLOW on missing data" behavior.
+- Token-bearing counter API in `risk_inflight_counters.py`: `decrement_pdt` / `commit_bp` return `(value, token)`; `revert_pdt` / `revert_bp` / `commit_pdt` / `commit_bp_finalize` are atomic Lua scripts that consume the token. Double-revert is a no-op (Lua GETDEL + INCR). Token keys embed account_id (`risk:pdt:tok:{aid}:{uuid}`) so the discoverer's per-account orphan sweep can SCAN MATCH safely without deleting other accounts' in-flight tokens (CRIT-1 fix). Reconcile path runs inside the per-account fan-in loop. `commit_bp` passes Decimal as `str(notional)` to `INCRBYFLOAT` (precision preserved).
+- ALLOW/WARN audit emission (A5): the place_order/modify_order audit guards widened from "BLOCK only" to unconditional. 30s Redis SETNX dedupe on `(account, conid, side, qty)` keeps replayed orders from doubling audit volume. `preview_order` does NOT audit ALLOW (HIGH-4 volume control); WARN/BLOCK still audit. Dedupe failure fail-OPENs (the audit row is written when the dedupe Redis call errors). `attempt_kind` is parameterized through both place + modify dedupe helpers.
+
+**Chunk B — Resolver wiring (5 commits)**
+
+- `InstrumentResolver.find_by_alias(*, source, raw_symbol) -> int | None`: pure SELECT, no upsert, no lock. The risk gate must NOT author instruments at evaluation time; this is the read-only half. `resolve_or_create` remains for write-path callers.
+- `_resolve_instrument_id(db, *, broker_id, conid, client=None) -> int | None` in orders_service.py: alias lookup first; on miss + client given, eager-create via `client.get_contract` + `resolve_or_create`; on miss + client=None (preview), increment `risk_gate_concentration_skipped_unresolved_total{reason}` and return None. Reason labels: `alias_miss_preview` / `contract_fetch_failed` / `contract_not_found`.
+- 6-site swap in orders_service.py: `_evaluate_risk_for_preview` / `_evaluate_risk_for_place_order` / `_evaluate_risk_for_modify_order` now accept `instrument_id` param; `_audit_risk_decision` / `_audit_risk_decision_modify` accept + write `instrument_id` to the `risk_decisions` row. Dedupe wrappers thread it through. Each call site resolves once and passes the value to both evaluator and audit (single round-trip per order).
+- `_check_position_concentration` SUM query fixed: was `SUM(market_value_base)` (nonexistent column — DB-CRIT-1 from chunk-B review); now `SUM(qty * avg_cost * multiplier)`.
+
+**Chunk C — Test infrastructure (1 commit, rest deferred)**
+
+- `@pytest.mark.no_risk_gate` opt-out marker registered in pyproject.toml + documented in conftest.py.
+- C1.2-C1.6 (per-file stub upgrades), C2 (drop `isinstance(db, AsyncSession)` guard), C3 (Playwright E2E suite, 9 specs + CI workflow), C4 (real_broker pyproject.toml + nightly workflow path updates) **deferred to Phase 10a.5.1**. The deferred items are pure test/CI hygiene; the in-scope effectivity work (Chunks A + B) is complete.
+
+### Added
+- `pnl_intraday` table + `v_account_intraday_pnl` view rewrite (Alembic 0037)
+- `idx_risk_decisions_verdict_time` (CONCURRENTLY)
+- `prune_risk_decisions_allow(int)` plpgsql helper
+- `PnlIntradayWriter` service + BrokerDiscoverer fan-in
+- Token-bearing risk-counter API (`risk_inflight_counters.py`)
+- `risk_gate_concentration_skipped_unresolved_total{reason}` Counter
+- `risk_audit_dedupe_skipped_total{attempt_kind}` Counter
+- `risk_counter_orphan_tokens_total` Gauge
+- `risk_counter_cleanup_failures_total` Counter
+- `pnl_intraday_*` metric family (currency_skip, upsert_failures, last_update_seconds drift gauge)
+- `InstrumentResolver.find_by_alias` read-only SELECT method
+- `_resolve_instrument_id` helper in orders_service.py
+- `@pytest.mark.no_risk_gate` marker
+
+### Changed
+- `risk_decisions.instrument_id` now populated by gate (was always NULL since 10a)
+- ALLOW + WARN audit rows emitted by place_order + modify_order (was BLOCK-only)
+- In-flight counter sweep now per-account-scoped (was blanket — deleted live tokens)
+- `_check_max_daily_loss` WARNs on stale/missing data (was silent ALLOW)
+- View `v_account_intraday_pnl` reads from real pnl_intraday rows (was zero stub)
+
+### Fixed
+- DB H-1: `idx_risk_decisions_verdict_time` created with CONCURRENTLY (was AccessExclusiveLock blocker on the live audit table during upgrade)
+- DB H-2: `pnl_intraday.day_start_utc` is DATE not TIMESTAMPTZ (prevents microsecond-resolution conflict-key drift)
+- DB M-1: `commit_bp` passes `str(notional)` to INCRBYFLOAT (was `float()` — precision drift against the str-encoded token payload)
+- DB-CRIT-1 (chunk-B): `_check_position_concentration` SUM expression rewritten (was querying nonexistent `market_value_base` column)
+- HIGH-1 (silent-failure): pnl fan-in `try / except DBAPIError` widened to catch `InvalidOperation` from corrupt proto values + re-raise non-22003 DBAPIErrors (avoids outer-transaction rollback discarding all positions for the tick)
+- HIGH (code-review): dead metric declarations (`pnl_intraday_rows_total`, `pnl_intraday_writer_source_drift_seconds`) removed
+- HIGH (code-review): `pnl_intraday_last_update_seconds` now ages between ticks (was permanently 0.0 — alert `>90s` could never fire)
+- HIGH-1 (DB chunk-B): `risk_gate_concentration_skipped_unresolved_total` carries `reason` label (was unlabeled — operator couldn't distinguish cold-miss from contract-fetch-failure)
+- HIGH-2 (code chunk-B): test_find_by_alias_happy_path now uses try/finally to clean up after commit
+- MED (silent-failure): WARN branch logs added (`max_daily_loss_pnl_stale`, `pnl_intraday_currency_row_missing`, `bp_inflight_redis_unreachable`, `pdt_inflight_redis_unreachable`)
+
+### Deviations (deferred or descoped, with reason)
+- **CRIT-1 partial fix:** `reconcile_pdt` not wired into the discoverer fan-in — `base.Summary` doesn't carry `day_trades_remaining` (the IBKR-specific field hasn't been promoted to the cross-broker proto). The per-account orphan-sweep + scoped token keys fully fix the live-token-deletion bug; the missing reconcile means broker-authoritative PDT truth is one cycle behind. Tracked for Phase 10a.6 (proto extension).
+- **Per-mode preview audit:** spec §A5 per-mode table lists WARN+BLOCK audit for `preview_order`, but the §A5 prose scopes the change to place_order + modify_order only. Code matches the prose. Preview audits deferred to Phase 10a.5.1.
+- **Concentration check math:** uses `qty * avg_cost * multiplier` (approximate, no real-time market value). Phase 10b view will expose `market_value_base` properly.
+- **Test infrastructure:** C1.2-C1.6 stub upgrades, C2 isinstance guard removal, C3 Playwright E2E suite, C4 real_broker reorg deferred to 10a.5.1. The effectivity-fix work (A1-A5 + B1-B3) is complete and reviewed.
+
 ## [0.12.0] — 2026-05-11
 
 ### Phase 10a — Risk gate at station 4 (2026-05-08 → 2026-05-11, 38 commits, complete)

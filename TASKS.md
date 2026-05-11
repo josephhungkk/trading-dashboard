@@ -648,28 +648,30 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 
 **Phase 10a.5 backlog:** conid → instrument_id resolver wiring (concentration check no-op until then); test stub `_Sidecar`/`_Session` upgrades (drops the `isinstance(db, AsyncSession)` gate); counter decrement on gate-pass + revert on dispatch failure; audit row on ALLOW/WARN paths (BLOCK-only today); v_account_intraday_pnl backed by sidecar PnL pipeline (currently zero-stub); Playwright E2E for the 4 risk-gate + admin-risk scenarios; RiskLimitsPage migration to Phase 3 DataTable + ColumnCustomizerDialog; per-endpoint CSRF nonce scoping; AdminAccountsPage multi-mode kill-switch fetch; orders_service.py file-split refactor; multi-worker uvicorn with Redis Lua locks (Phase 24).
 
-### Phase 10a.5 — Risk-gate cleanup + technical debt  *(not started)*
+### Phase 10a.5 — Risk-gate effectivity + tech-debt cleanup  *(complete · 2026-05-11 · v0.12.1 · 34 commits since v0.12.0)*
 
-Bundle of the deferred items from Phase 10a + the CI cleanup surfaced post-v0.12.0. Distinct from Phase 10b (new features) because every item here is "make existing 10a-shipped surfaces actually effective in production." Brainstorm not yet run.
+Closed the effectivity blockers from Phase 10a's v0.12.0 ship. Spec: `docs/superpowers/specs/2026-05-11-phase10a5-cleanup-design.md`. Plan: `docs/superpowers/plans/2026-05-11-phase10a5-cleanup-plan.md`. Memory: `phase10a5_shipped.md`.
 
-**Effectivity blockers** (10a-shipped surfaces that are wired but no-op until these land):
-- conid → instrument_id resolver wiring (concentration check)
-- `v_account_intraday_pnl` backed by sidecar PnL pipeline (max-daily-loss check)
-- counter decrement on gate-pass + revert on dispatch failure (PDT + BP self-heal currently relies on 120s discoverer poll)
-- audit row on ALLOW/WARN paths (BLOCK-only today)
+**Chunks shipped:**
+- Chunk A (BE backbone, 16 commits): Alembic 0037 (`pnl_intraday` + view rewrite + risk_decisions index CONCURRENTLY + prune helper); `PnlIntradayWriter` + BrokerDiscoverer fan-in; max-daily-loss staleness WARN (CRIT-2); token-bearing counter API with per-account-scoped orphan sweep (CRIT-1); ALLOW/WARN audit widening + 30s SETNX dedupe
+- Chunk B (resolver wiring, 5 commits): `InstrumentResolver.find_by_alias` read-only SELECT; `_resolve_instrument_id` helper with reason-labeled skip metric; 6-site swap so `risk_decisions.instrument_id` is populated end-to-end; concentration math fix (was querying nonexistent `market_value_base` column)
+- Chunk C partial (1 commit): `@pytest.mark.no_risk_gate` marker registered
 
-**Test infrastructure:**
-- Test stub `_Sidecar`/`_Session` upgrades to support full RiskService deps (drops `isinstance(db, AsyncSession)` gate in orders_service.py)
-- Playwright E2E for the 4 risk-gate + admin-risk scenarios (no `frontend/tests/e2e/` infra today)
-- Real-broker test dependency group migration: `alpaca-py` + `schwabdev` currently in `backend/pyproject.toml [dependency-groups]` `real-broker` — confirm if that lives long-term or moves to a `tests/real_broker/`-scoped extras pattern
+**Reviewer-applied fixes:** 1 CRIT + 5 HIGH + 8 MED + 5 LOW landed inline through per-chunk reviewer chains (Chunk A: 5-reviewer haiku+sonnet mix; Chunk B: 4-reviewer haiku per token-flow rec A).
 
-**Refactors:**
-- RiskLimitsPage migration to Phase 3 `DataTable` + `ColumnCustomizerDialog` (currently raw `<table>`)
-- per-endpoint CSRF nonce scoping (currently shares `csrf:order-cap:` prefix)
-- AdminAccountsPage multi-mode kill-switch fetch (paper+live, not paper-only)
-- orders_service.py file-split refactor (D2 was skipped during Phase 10a per "no abstractions beyond what task requires")
+### Phase 10a.5.1 — Test infrastructure follow-up  *(not started)*
 
-**Ops + nightly debt:**
+Deferred from Phase 10a.5 for follow-up. Pure test/CI hygiene; the production effectivity work is complete.
+
+- C1.2-C1.6: per-file `_Session` stub upgrades (test_orders_preview/place/modify/bracket/cancel)
+- C2.1: drop `isinstance(db, AsyncSession)` guard at 3 sites in orders_service.py (depends on C1.x)
+- C3.1-C3.9: Playwright E2E suite (4 specs: risk-warn, risk-block, admin-risk-crud, kill-switch) + nightly workflow
+- C4.1-C4.2: real_broker reorg — `backend/tests/real_broker/pyproject.toml` + nightly workflow path updates
+- Preview WARN+BLOCK audit emission (spec table vs prose ambiguity from 10a.5 review)
+- Concentration `market_value_base` view (Phase 10b will expose proper view; 10a.5 uses `qty * avg_cost * multiplier` approximation)
+- `reconcile_pdt` proto extension (needs `Summary.day_trades_remaining` promoted cross-broker — likely Phase 10a.6)
+
+**Ops + nightly debt** (still owed, can land alongside 10a.5.1):
 - nightly-real-ibkr `503 broker layer not yet configured` — operator runs `provision-and-publish.ps1` + `schtasks /Run` 4 sidecars + `docker compose restart backend` per `memory/feedback_post_deploy_broker_recovery.md`
 - nightly-real-schwab-trade schwabdev OAuth stdin prompt + sqlite token-store DB locked — needs token-store seeded in CI sandbox
 - VPS Docker BuildKit cache prune-on-deploy step (67 GB filled root volume during Phase 10a close-out; one-shot cleanup done 2026-05-11)
