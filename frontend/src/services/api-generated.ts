@@ -456,6 +456,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/sizing-defaults/{account_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Put Sizing Defaults */
+        put: operations["put_sizing_defaults_api_admin_sizing_defaults__account_id__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/bars": {
         parameters: {
             query?: never;
@@ -936,6 +953,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/risk/position-size": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Compute Position Size */
+        post: operations["compute_position_size_api_risk_position_size_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/risk/sizing-defaults/{account_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Sizing Defaults */
+        get: operations["get_sizing_defaults_api_risk_sizing_defaults__account_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -1307,6 +1358,61 @@ export interface components {
             /** Qty */
             qty: string;
         };
+        /** FixedFractionalInputs */
+        FixedFractionalInputs: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "fixed_fractional";
+            /** Price */
+            price: number | string;
+            /** Risk Pct */
+            risk_pct: number | string;
+        };
+        /**
+         * GateBlockerEntry
+         * @description One reason the risk gate refused a place_order/modify attempt.
+         */
+        GateBlockerEntry: {
+            /** Check */
+            check: string;
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+        };
+        /**
+         * GateVerdict
+         * @description Aggregated verdict the risk gate returns from `RiskService.evaluate`.
+         */
+        GateVerdict: {
+            /** Blockers */
+            blockers?: components["schemas"]["GateBlockerEntry"][];
+            /**
+             * Final Verdict
+             * @enum {string}
+             */
+            final_verdict: "allow" | "warn" | "block";
+            /** Latency Ms */
+            latency_ms: number;
+            /** Warnings */
+            warnings?: components["schemas"]["GateWarningEntry"][];
+        };
+        /**
+         * GateWarningEntry
+         * @description One advisory emitted by the risk gate (does not block dispatch).
+         */
+        GateWarningEntry: {
+            /** Check */
+            check: string;
+            /** Message */
+            message: string;
+            /** Threshold */
+            threshold?: number | null;
+            /** Value */
+            value?: number | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1319,6 +1425,29 @@ export interface components {
         InstrumentIdResponse: {
             /** Instrument Id */
             instrument_id: number;
+        };
+        /** MethodBreakdown */
+        MethodBreakdown: {
+            /** Account Currency */
+            account_currency: string;
+            /** Atr14 */
+            atr14?: string | null;
+            /** Fx Rate */
+            fx_rate: string;
+            /** Nlv Base */
+            nlv_base: string;
+            /** Price Base */
+            price_base: string;
+            /** Realized Vol14 Annualized */
+            realized_vol14_annualized?: string | null;
+            /** Risk Per Share Base */
+            risk_per_share_base?: string | null;
+            /**
+             * Vol Source
+             * @default n/a
+             * @enum {string}
+             */
+            vol_source: "realized" | "override" | "n/a";
         };
         /**
          * ModifyNonceMintRequest
@@ -1919,6 +2048,20 @@ export interface components {
             /** Warn At Pct */
             warn_at_pct?: number | string | null;
         };
+        /** RiskPerTradeInputs */
+        RiskPerTradeInputs: {
+            /** Entry */
+            entry: number | string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "risk_per_trade";
+            /** Risk Pct */
+            risk_pct: number | string;
+            /** Stop */
+            stop: number | string;
+        };
         /** SecretIn */
         SecretIn: {
             /** Key */
@@ -1979,6 +2122,75 @@ export interface components {
             /** Value Type */
             value_type: string;
         };
+        /**
+         * SizingDefaults
+         * @description Per-account stored defaults retrieved from app_config namespace risk_sizing.
+         */
+        SizingDefaults: {
+            /**
+             * Fixed Fractional Risk Pct
+             * @default 2.00
+             */
+            fixed_fractional_risk_pct: string;
+            /** @default fixed_fractional */
+            method: components["schemas"]["SizingMethod"];
+            /**
+             * Risk Per Trade Risk Pct
+             * @default 1.00
+             */
+            risk_per_trade_risk_pct: string;
+            /**
+             * Vol Targeted Target Vol Pct
+             * @default 15.00
+             */
+            vol_targeted_target_vol_pct: string;
+        };
+        /**
+         * SizingDefaultsUpdate
+         * @description PUT payload — full body (PUT semantics), CSRF nonce on the endpoint.
+         */
+        SizingDefaultsUpdate: {
+            /** Fixed Fractional Risk Pct */
+            fixed_fractional_risk_pct: number | string;
+            method: components["schemas"]["SizingMethod"];
+            /** Risk Per Trade Risk Pct */
+            risk_per_trade_risk_pct: number | string;
+            /** Vol Targeted Target Vol Pct */
+            vol_targeted_target_vol_pct: number | string;
+        };
+        /**
+         * SizingMethod
+         * @enum {string}
+         */
+        SizingMethod: "fixed_fractional" | "risk_per_trade" | "vol_targeted";
+        /** SizingRequest */
+        SizingRequest: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Inputs */
+            inputs: components["schemas"]["FixedFractionalInputs"] | components["schemas"]["RiskPerTradeInputs"] | components["schemas"]["VolTargetedInputs"];
+            /** Instrument Id */
+            instrument_id: number;
+            method: components["schemas"]["SizingMethod"];
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+        };
+        /** SizingResult */
+        SizingResult: {
+            /** Base Currency Notional */
+            base_currency_notional: string;
+            breakdown: components["schemas"]["MethodBreakdown"];
+            method: components["schemas"]["SizingMethod"];
+            risk_verdict: components["schemas"]["GateVerdict"];
+            /** Suggested Qty */
+            suggested_qty: string;
+        };
         /** Summary */
         Summary: {
             buying_power: components["schemas"]["Money"];
@@ -2019,6 +2231,20 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** VolTargetedInputs */
+        VolTargetedInputs: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "vol_targeted";
+            /** Price */
+            price: number | string;
+            /** Target Vol Pct */
+            target_vol_pct: number | string;
+            /** Vol Override Pct */
+            vol_override_pct?: number | string | null;
         };
     };
     responses: never;
@@ -3124,6 +3350,41 @@ export interface operations {
             };
         };
     };
+    put_sizing_defaults_api_admin_sizing_defaults__account_id__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SizingDefaultsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_bars_api_bars_get: {
         parameters: {
             query: {
@@ -3870,6 +4131,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RiskLimitOut"][];
+                };
+            };
+        };
+    };
+    compute_position_size_api_risk_position_size_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SizingRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SizingResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sizing_defaults_api_risk_sizing_defaults__account_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SizingDefaults"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
