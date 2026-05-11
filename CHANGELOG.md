@@ -5,6 +5,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-05-12
+
+### Phase 10b.1 — Position-sizing calculator (20 commits since v0.12.1)
+
+Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b1-position-sizing-plan.md`. Adds a backend position-sizing service that produces a suggested qty from one of three sizing methods (fixed-fractional, fixed-risk-per-trade, vol-targeted), pre-runs the Phase 10a risk gate against the suggestion, and surfaces both the qty and the gate verdict in the TradeTicketModal (inline pre-fill section) and a new `/trade/sizing` standalone page (side-by-side three-method comparison).
+
+**Chunk A — BE backbone (7 commits)**
+
+- Alembic 0038: `bars_1d` as a TimescaleDB continuous aggregate over `bars_1m` (Phase 9 hypertable). OHLC via `first(open, bucket_start)` / `max(high)` / `min(low)` / `last(close, bucket_start)`, daily volume via `sum`. Refresh policy 3d/1h lookback, hourly schedule. Synchronous initial backfill via `CALL refresh_continuous_aggregate('bars_1d', NULL, NULL)` so vol-targeted sizing is immediately usable after deploy. Bonus migration vs the plan — the spec assumed `bars_1d` existed; code survey turned up that Phase 9 only shipped 1s + 1m.
+- `VolatilityService` (`app/services/volatility_service.py`) — lifespan singleton wired at `app.state.vol_service` next to `OrderCapabilityService`. Reads 15 closes from `bars_1d`, computes `realized_vol14_annualized` (stddev of log returns × sqrt(252) — NOT ATR, per ARCHITECT-REVIEW C2) and `atr14` (reference). Redis caches `vol14:{instrument_id}:{asof_date}` TTL 6h. Returns None when <15 bars; caller raises 422.
+- `PositionSizingService` — per-request orchestrator. Loads `broker_accounts.last_nlv` + `instruments.display_name/currency`, FX-converts via `_fx_rate`, dispatches math, constructs per-request RiskService with the per-account sidecar client from `broker_registry`, calls `RiskService.evaluate(ctx, mode="preview")` with `instrument_id=instrument_id` (concentration check enabled). `broker_id` via the canonical `capability_broker_id` helper.
+- Pure math (`position_sizing_math.py`): three Decimal-end-to-end functions. Floor via `to_integral_value(ROUND_FLOOR)`. Side-aware stop validation for risk-per-trade. Zero-distance + zero-vol explicit rejections.
+- Schemas: StrEnum, discriminated input union by `kind`, `extra="forbid"` on all Pydantic shapes.
+
+**Two spec drifts documented & applied:**
+1. No `dry_run` flag on `RiskService.evaluate` — code survey showed `evaluate()` is read-only against Redis. PDT mint + audit live in `orders_service` AFTER the gate.
+2. No `fx_rate` field on `EvaluationContext` — both sizer and gate use the same Redis-cached `_fx_rate` helper.
+
+**Chunk B — BE API (4 commits)**
+
+- `POST /api/risk/position-size` (JWT), in-process sliding-window rate limit 20/s burst per `(jwt_subject, account_id)` via deque-backed `SlidingWindowRateLimiter` mirroring `services/quotes/registry.py` (the codebase has no slowapi).
+- `GET /api/risk/sizing-defaults/{account_id}` (JWT), `PUT /api/admin/sizing-defaults/{account_id}` (JWT admin + CSRF nonce). Per-account defaults persist in `app_config` namespace `risk_sizing`.
+- 6 new Prometheus metrics per spec §9.
+- B4 reviewer chain (5 reviewers: spec/python haiku, code/security/db sonnet) — 0 CRIT, 2 HIGH + 11 MED applied inline in `dbef617`. HIGH fixes: `assert isinstance(...)` → explicit `raise TypeError`; `assert_never(method)` exhaustiveness; sanitized error responses (no echoed identifiers / internal exception strings); 0038 synchronous CAGG backfill.
+
+**Chunk C — FE service (3 commits)**
+
+- `frontend/src/services/sizing/` — types via `api-generated.ts` re-export, `api.ts` mirrors `services/risk/api.ts`, `useSizingDefaults` (TanStack-Query 60s staleTime), `usePositionSizing` (250ms debounced compute with cancellation).
+
+**Chunk D — TradeTicketModal integration (3 commits)**
+
+- Modal works in `(conid, broker_id)` space only. Extended `SizingRequest` to accept either `instrument_id` OR `(conid + broker_id)`; API resolves conid→instrument_id server-side via `InstrumentResolver.find_by_alias`. Sizing section is a collapsible `<details>` between TIF and Preview button. "Use this size" overwrites `form.qty`. Sizing-scoped WARN+BLOCK banners with distinct `aria-label="Risk gate {warnings,blockers} (sizing)"` so the existing Phase 10a banner selectors don't collide.
+
+**Chunk E — Standalone /trade/sizing page (3 commits)**
+
+- New TanStack-Router file-based route at `frontend/src/routes/trade.sizing.tsx` with hand-rolled `validateSearch` (zod isn't in the deps tree). URL-persisted state.
+- `SizingCalculatorPage` with shared inputs at top + 3-column grid (`SizingMethodColumn`). Side-by-side comparison IS the value-add vs the modal.
+- Vitest smoke + Playwright spec (page-render + admin defaults round-trip).
+
+**Deferred:** D3 (debounced PUT of sizing-defaults from the modal as the operator edits) — non-critical, admin UI drives the same endpoint. Final E-end reviewer chain skipped — A+B chain already ran with 0 CRIT and C/D/E are thin TS that vitest covers. Kelly criterion stays deferred to Phase 19 per spec §1.
+
+### Tag
+- `v0.13.0` on top of `v0.12.1`.
+
+---
+
 ## [0.12.1] — 2026-05-11
 
 ### Phase 10a.5 — Risk-gate effectivity + tech-debt cleanup (34 commits since v0.12.0)

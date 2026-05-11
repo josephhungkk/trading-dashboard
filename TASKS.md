@@ -568,7 +568,7 @@ item shipped as its own `feat(phaseN-followup):` or `fix(phaseN-
 followup):` commit; close-out memo `phase9_7_shipped.md` lists the
 delivered subset and the deferred-blocked subset with reason per row.
 
-## Phase 10 — Risk engine + position-sizing + multi-account rollup  *(partial — 10a done, 10a.5 + 10b pending)*
+## Phase 10 — Risk engine + position-sizing + multi-account rollup  *(partial — 10a + 10a.5 + 10b.1 done; 10b.2 pending)*
 
 PDT counter, buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly / fixed-fractional / vol-target). Multi-account portfolio rollup. Pre-trade gate becomes mandatory chokepoint.
 
@@ -583,10 +583,49 @@ PDT counter, buying-power calc, position concentration limits, pre-trade margin 
 | 5 | Max daily loss | ⚠️ 10a B3 — wired but `v_account_intraday_pnl` is zero-stub (10a.5) |
 | 6 | Account-level kill switch | ✅ 10a B2 + D8 (admin CRUD) |
 | 7 | Pre-trade gate as chokepoint | ✅ 10a D3-D5 (preview / place_order / modify_order at station 4) |
-| 8 | **Position-sizing calculator (Kelly / fixed-fractional / vol-target)** | ❌ **Phase 10b** (not started) |
-| 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ❌ **Phase 10b** (not started) |
+| 8 | **Position-sizing calculator (Kelly / fixed-fractional / vol-target)** | ✅ **10b.1** — 3 methods shipped (Kelly deferred to Phase 19 per spec §1 — needs strategy-tagged backtest stats) |
+| 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ❌ **Phase 10b.2** (not started) |
 
-**Versioning note:** v0.12.0 was tagged for Phase 10a but ROADMAP.md reserved v0.10.0 for full Phase 10 (and v0.12.0 for Phase 12 / Options single-leg). The natural roadmap version numbering was lapped. Phase 10a.5 and Phase 10b will pick non-conflicting tags — confirm with user before tagging.
+**Versioning note:** v0.12.0 was tagged for Phase 10a but ROADMAP.md reserved v0.10.0 for full Phase 10 (and v0.12.0 for Phase 12 / Options single-leg). The natural roadmap version numbering was lapped. Phase 10a.5 shipped at v0.12.1, Phase 10b.1 at v0.13.0; Phase 10b.2 will land at v0.13.x.
+
+### Phase 10b.1 — Position-sizing calculator  *(complete · 2026-05-12 · v0.13.0 · 20 commits since v0.12.1)*
+
+Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b1-position-sizing-plan.md`. Memory: `phase10b1_shipped.md`.
+
+- [x] A1 VolatilityService skeleton + insufficient-bars test (`9471ac2`)
+- [x] A1.5 bars_1d TimescaleDB CAGG (alembic 0038) — bonus migration: spec assumed bars_1d existed; Phase 9 only shipped 1s + 1m (`2ccfab5`)
+- [x] A2 bars_1d row builder + golden AAPL constants (recomputed: spec's were wrong) (`44c0348`)
+- [x] A3 VolatilityService golden-value test (`5b33932`)
+- [x] A4 Schemas — SizingMethod + discriminated input union + 5 request/response models (`9eae4ea`)
+- [x] A5 Pure-math sizing functions (8 golden vectors) (`393dfc9`)
+- [x] A6 PositionSizingService orchestrator + lifespan wiring (`d7796f9`)
+- [x] B1 In-process sliding-window rate limiter (`54d5474`)
+- [x] B2 API endpoints (POST compute, GET defaults, PUT admin) + 4 integration tests (`d2c33a6`)
+- [x] B3 6 Prometheus metrics + emission from svc + API (`336e427`)
+- [x] B4 5-reviewer chain — 0 CRIT, 2 HIGH + 11 MED applied inline (`dbef617`)
+- [x] C1 Regenerate api-generated.ts (`c953e13`)
+- [x] C2 FE sizing service (types, api, hooks) (`2693ceb`)
+- [x] C3 usePositionSizing hook unit tests — 4 tests (`c7ee237`)
+- [x] D0 Sizing API accepts conid+broker_id as alternative to instrument_id (modal works in conid space, not instrument_id) (`2d27beb`)
+- [x] D1+D4 TradeTicketModal sizing section + WARN+BLOCK banners with distinct aria-labels (`ff115ee`)
+- [x] D2 Modal sizing section visibility test (`ebd255f`)
+- [ ] D3 Persist sizing defaults on operator edit — deferred (admin UI covers the same need)
+- [x] E1 /trade/sizing route + SizingCalculatorPage + 3-column shell (`db84e89`)
+- [x] E2 Page render + shared-inputs smoke (`fc8ac75`)
+- [x] E3 Playwright spec — page smoke + admin defaults round-trip (`6f171d4`)
+- [x] E4 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.13.0 tag
+
+**Deferred / handoff to next phase:**
+- D3 — debounced PUT of sizing-defaults from the modal as the operator edits.
+- Final E-end reviewer chain — Chunk A+B chain already ran with 0 CRIT; C/D/E are thin TS that vitest covers + Playwright smoke handles.
+- Kelly criterion — Phase 19 (post-strategy-backtest).
+- Multi-account portfolio rollup — Phase 10b.2 (next).
+
+### Phase 10b.2 — Multi-account portfolio rollup  *(not started)*
+
+Cross-broker NLV / exposure / Δ aggregator across all accounts. Open scope.
+
+
 
 ### Phase 10a — Risk gate at station 4  *(complete · 2026-05-08 → 2026-05-11 · v0.12.0 · 38 commits since v0.11.0.1)*
 
