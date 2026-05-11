@@ -205,6 +205,11 @@ class RiskService:
         # check="max_daily_loss_pnl_stale" distinguishes this WARN from the
         # normal value/threshold WARN (which uses check="max_daily_loss").
         if row is None or row.staleness_s > _STALENESS_WARN_SECONDS:
+            log.warning(
+                "risk.max_daily_loss_pnl_stale",
+                account_id=str(ctx.account_id),
+                staleness_s=None if row is None else float(row.staleness_s),
+            )
             return (
                 None,
                 GateWarningEntry(
