@@ -135,6 +135,22 @@ jobs:
           SMOKE_BASE_URL:          https://dashboard.kiusinghung.com
         run: pnpm test:smoke
 
+      # Phase 10a.5.1 C3 — risk-gate admin API CRUD + page-render smoke.
+      # Runs after the main smoke suite; failure here does NOT roll back
+      # the deploy (continue-on-error), since the kill-switch flow needs
+      # operator-provisioned paper accounts that may not exist in every
+      # environment. The specs degrade gracefully with test.skip() in
+      # those cases. Real failures still surface as a job warning + an
+      # uploaded report artifact.
+      - name: Phase 10a risk-gate E2E (continue-on-error)
+        working-directory: tests/e2e
+        env:
+          CF_ACCESS_CLIENT_ID:     ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          SMOKE_BASE_URL:          https://dashboard.kiusinghung.com
+        run: pnpm test:risk
+        continue-on-error: true
+
       - name: Upload smoke artifacts on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

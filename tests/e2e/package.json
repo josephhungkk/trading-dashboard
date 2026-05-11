@@ -6,6 +6,7 @@
   "scripts": {
     "test": "playwright test",
     "test:smoke": "playwright test smoke.spec.ts",
+    "test:risk": "playwright test phase10a-risk.spec.ts",
     "install-browsers": "playwright install chromium --with-deps"
   },
   "devDependencies": {
