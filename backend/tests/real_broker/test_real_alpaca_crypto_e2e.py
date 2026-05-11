@@ -31,13 +31,15 @@ async def test_real_alpaca_crypto_notional_market_order() -> None:
     )
     # Wrap blocking SDK calls so the asyncio event loop stays responsive
     # (chunk-C python MED-3 / spec HIGH-1).
-    # Alpaca crypto rejects DAY (api error 42210000 "invalid crypto
-    # time_in_force"); only GTC and IOC are accepted. Equity uses DAY.
+    # Alpaca crypto constraints:
+    #   - time_in_force must be GTC or IOC (DAY → api error 42210000)
+    #   - notional must be >= $10 minimum cost basis (api error 40310000)
+    # Equity uses DAY + smaller notional; these are crypto-pair specifics.
     order = await asyncio.to_thread(
         client.submit_order,
         MarketOrderRequest(
             symbol="BTC/USD",
-            notional=Decimal("1.00"),
+            notional=Decimal("10.00"),
             side=OrderSide.BUY,
             time_in_force=TimeInForce.GTC,
         ),
