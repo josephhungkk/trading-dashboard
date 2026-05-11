@@ -435,6 +435,114 @@ async def _audit_risk_decision(
             metrics.risk_audit_insert_failures_total.labels(attempt_kind=attempt_kind).inc()
 
 
+async def _evaluate_risk_for_modify_order(
+    *,
+    cfg: ConfigService,
+    db: AsyncSession,
+    redis: RedisLike,
+    client: object,
+    account_id: UUID,
+    account: _Account,
+    side: str,
+    qty: Decimal,
+    limit_price: str | None,
+    order_type: str,
+    tif: str,
+    request_id: str,
+) -> GateVerdict:
+    """Phase 10a D5: gate evaluation for modify_order path.
+
+    Mirrors _evaluate_risk_for_place_order but accepts the immutable fields
+    (account_id, side) from the orders row instead of a PlaceOrderRequest,
+    since OrderModifyRequest doesn't carry them. mode="place_order" so the
+    margin check still fails CLOSED on sidecar timeout (spec §4 H4).
+    """
+    from app.services.risk_service import EvaluationContext, RiskService
+
+    svc = RiskService(
+        db=db,
+        redis=cast(Any, redis),
+        config=cast(Any, cfg),
+        sidecar=cast(Any, client),
+    )
+    ctx = EvaluationContext(
+        account_id=account_id,
+        broker_id=capability_broker_id(account.gateway_label),
+        instrument_id=None,  # 10a.5: wire conid -> instrument_id
+        side=cast(Any, side),
+        qty=qty,
+        price=Decimal(limit_price) if limit_price else None,
+        order_type=order_type,
+        time_in_force=tif,
+        request_id=request_id,
+        currency_base=account.currency_base,
+    )
+    verdict = await svc.evaluate(ctx, mode="place_order")
+    log.info(
+        "risk.evaluated",
+        verdict=verdict.final_verdict,
+        kind="modify_order",
+        account_id=str(account_id),
+        lat_ms=verdict.latency_ms,
+        blockers=len(verdict.blockers),
+        warnings=len(verdict.warnings),
+    )
+    return verdict
+
+
+async def _audit_risk_decision_modify(
+    *,
+    db: AsyncSession,
+    account_id: UUID,
+    side: str,
+    qty: Decimal,
+    limit_price: str | None,
+    order_type: str,
+    tif: str,
+    verdict: GateVerdict,
+    request_id: str,
+    order_id: UUID,
+) -> None:
+    """Phase 10a D5: write a risk_decisions audit row for modify_order.
+
+    Same fail-OPEN semantics as _audit_risk_decision (spec §4): suppress
+    exceptions on the audit write so a DB hiccup doesn't block the trade;
+    metric `risk_audit_insert_failures_total{attempt_kind="modify_order"}`
+    covers visibility.
+    """
+    try:
+        from app.models.risk import RiskDecision
+
+        decision = RiskDecision(
+            account_id=account_id,
+            instrument_id=None,
+            side=side,
+            qty=qty,
+            price=Decimal(limit_price) if limit_price else None,
+            order_type=order_type,
+            time_in_force=tif,
+            verdict=verdict.final_verdict,
+            blockers=[b.model_dump(mode="json") for b in verdict.blockers],
+            warnings=[w.model_dump(mode="json") for w in verdict.warnings],
+            latency_ms=verdict.latency_ms,
+            attempt_kind="modify_order",
+            request_id=request_id,
+            order_id=order_id,
+        )
+        db.add(decision)
+        await db.commit()
+    except Exception as exc:
+        log.exception(
+            "risk.audit_insert_failed",
+            account_id=str(account_id),
+            attempt_kind="modify_order",
+            verdict=verdict.final_verdict,
+            error=str(exc),
+        )
+        with contextlib.suppress(Exception):
+            metrics.risk_audit_insert_failures_total.labels(attempt_kind="modify_order").inc()
+
+
 async def place_order(
     *,
     cfg: ConfigService,
@@ -705,6 +813,56 @@ async def modify_order(
     existing_limit_price = str(row["limit_price"]) if row["limit_price"] is not None else None
     new_limit_price = request.limit_price or existing_limit_price
     new_notional = Decimal(qty_text) * Decimal(new_limit_price or "0")
+
+    # Phase 10a D5: hoist broker client fetch above the risk gate so the
+    # margin-preview sidecar call inside RiskService reuses the same client
+    # the post-DB-update modify dispatch will use. Single fetch, no
+    # double round-trip vs the prior 5c layout where client was lazily
+    # acquired right before the sidecar modify_order call.
+    client = await registry.get_client(account.gateway_label)
+
+    # Phase 10a D5: risk gate at station 4 for modify_order. Mirrors D4 in
+    # place_order: BLOCK -> 422 + audit row; ALLOW/WARN -> proceed. Counter
+    # decrement on increase-of-notional deferred (consistent with D4
+    # deferral). Gated on isinstance(db, AsyncSession) so the modify tests
+    # with stub Sessions stay green; production always uses AsyncSession.
+    if isinstance(db, AsyncSession):
+        risk_request_id = str(uuid4())
+        risk_verdict = await _evaluate_risk_for_modify_order(
+            cfg=config,
+            db=db,
+            redis=redis,
+            client=client,
+            account_id=row["account_id"],
+            account=account,
+            side=str(row["side"]),
+            qty=Decimal(qty_text),
+            limit_price=new_limit_price,
+            order_type=str(row["order_type"]),
+            tif=request.tif,
+            request_id=risk_request_id,
+        )
+        if risk_verdict.final_verdict == "block":
+            await _audit_risk_decision_modify(
+                db=db,
+                account_id=row["account_id"],
+                side=str(row["side"]),
+                qty=Decimal(qty_text),
+                limit_price=new_limit_price,
+                order_type=str(row["order_type"]),
+                tif=request.tif,
+                verdict=risk_verdict,
+                request_id=risk_request_id,
+                order_id=order_id,
+            )
+            raise PreviewUnavailable(
+                422,
+                {
+                    "error": "risk_gate_blocked",
+                    "blockers": [b.model_dump(mode="json") for b in risk_verdict.blockers],
+                },
+            )
+
     await _check_trade_policy(
         config,
         account.gateway_label,
@@ -767,7 +925,7 @@ async def modify_order(
     )
     await db.commit()
 
-    client = await registry.get_client(account.gateway_label)
+    # D5: client already fetched above for the risk gate; reuse it here.
     contract = await client.get_contract(str(row["conid"]))
     try:
         modify_result = await as_order_sidecar_client(client).modify_order(
