@@ -748,6 +748,24 @@
         "position_sanity": {
           "$ref": "#/components/schemas/PositionSanityResult"
         },
+        "risk_blockers": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Risk Blockers",
+          "type": "array"
+        },
+        "risk_warnings": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Risk Warnings",
+          "type": "array"
+        },
         "warnings": {
           "items": {
             "type": "string"
