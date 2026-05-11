@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -40,18 +40,30 @@ from app.services.position_sizing_math import (
 from app.services.risk_service import EvaluationContext, RiskService
 from app.services.volatility_service import VolatilityService
 
+if TYPE_CHECKING:
+    from app.services.brokers import BrokerRegistry
+    from app.services.config import ConfigService
+
 
 class PositionSizingService:
+    """Per-request orchestrator. Constructs RiskService internally after
+    loading the account, since the gate's margin check needs a per-account
+    sidecar client that we can only resolve from the broker_registry once
+    the account's ``gateway_label`` is known.
+    """
+
     def __init__(
         self,
         db: AsyncSession,
         redis: RedisLike,
-        risk_service: RiskService,
+        config: ConfigService,
+        broker_registry: BrokerRegistry,
         vol_service: VolatilityService,
     ) -> None:
         self._db = db
         self._redis = redis
-        self._risk = risk_service
+        self._config = config
+        self._registry = broker_registry
         self._vol = vol_service
 
     async def compute(
@@ -70,7 +82,18 @@ class PositionSizingService:
         base_currency = str(account["currency_base"])
         fx_rate = await _fx_rate(self._redis, asset_currency, base_currency)
         nlv_base = Decimal(account["last_nlv"])
-        broker_id = capability_broker_id(str(account["gateway_label"]))
+        gateway_label = str(account["gateway_label"])
+        broker_id = capability_broker_id(gateway_label)
+
+        # Build a per-request RiskService once we have the gateway_label so
+        # the gate's margin check can talk to the correct sidecar.
+        sidecar = await self._registry.get_client(gateway_label)
+        risk = RiskService(
+            db=self._db,
+            redis=cast(Any, self._redis),
+            config=cast(Any, self._config),
+            sidecar=cast(Any, sidecar),
+        )
 
         qty, notional_base, breakdown = await self._dispatch(
             method=method,
@@ -93,7 +116,7 @@ class PositionSizingService:
             request_id=f"sizer-{uuid4()}",
             currency_base=base_currency,
         )
-        verdict = await self._risk.evaluate(ctx, mode="preview")
+        verdict = await risk.evaluate(ctx, mode="preview")
 
         return SizingResult(
             suggested_qty=qty,

@@ -167,8 +167,12 @@ class _SizingSession:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_fixed_fractional_happy_path() -> None:
-    """compute() loads NLV, FX-converts, runs math, calls gate, returns result."""
+async def test_orchestrator_fixed_fractional_happy_path(monkeypatch) -> None:
+    """compute() loads NLV, FX-converts, runs math, calls gate, returns result.
+
+    Patches RiskService construction so we capture the EvaluationContext
+    fed into the gate without standing up a real risk_service + 7 checks.
+    """
     account_id = uuid4()
     instrument_id = 67890
 
@@ -179,12 +183,20 @@ async def test_orchestrator_fixed_fractional_happy_path() -> None:
     gate.evaluate = AsyncMock(
         return_value=GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=5)
     )
+    # Patch RiskService inside position_sizing_service so the orchestrator
+    # gets our mock back regardless of __init__ args.
+    monkeypatch.setattr("app.services.position_sizing_service.RiskService", lambda **_: gate)
+
+    registry = MagicMock()
+    registry.get_client = AsyncMock(return_value=MagicMock())
+    config_svc = MagicMock()
     vol_service = MagicMock()
 
     svc = PositionSizingService(
         db=_SizingSession(account_id, instrument_id),
         redis=redis,
-        risk_service=gate,
+        config=config_svc,
+        broker_registry=registry,
         vol_service=vol_service,
     )
     result = await svc.compute(
@@ -199,8 +211,8 @@ async def test_orchestrator_fixed_fractional_happy_path() -> None:
     assert result.base_currency_notional == Decimal("2000")
     assert result.risk_verdict.final_verdict == "allow"
     assert result.breakdown.fx_rate == Decimal("1.0")
-    # Verify gate was called with concentration-enabled instrument_id (not None)
     gate.evaluate.assert_awaited_once()
     ctx_arg = gate.evaluate.call_args.args[0]
     assert ctx_arg.instrument_id == instrument_id
     assert ctx_arg.broker_id == "ibkr"  # capability_broker_id("ibkr-paper") → "ibkr"
+    registry.get_client.assert_awaited_once_with("ibkr-paper")

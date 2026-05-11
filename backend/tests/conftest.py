@@ -148,6 +148,11 @@ async def _app_state(request: pytest.FixtureRequest) -> AsyncIterator[None]:
     app.state.redis = fake_r
     app.state.capability_svc = capability_svc
 
+    # Phase 10b.1: VolatilityService singleton — same pattern as capability_svc.
+    from app.services.volatility_service import VolatilityService
+
+    app.state.vol_service = VolatilityService(db_factory=factory, redis=fake_r)
+
     # Stub broker_registry + account_service so endpoint tests don't hit
     # "broker layer not yet configured" 503. Use spec= so attribute access
     # is constrained to real class surface — bare MagicMock returns Mock
