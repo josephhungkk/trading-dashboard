@@ -33,7 +33,7 @@ async def _existing_account_id() -> uuid.UUID:
         row = result.first()
     if row is None:
         pytest.skip("No broker_accounts rows; can't run concentration integration test")
-    return row[0]
+    return uuid.UUID(str(row[0]))
 
 
 async def _seed_instrument_and_alias(
@@ -141,11 +141,20 @@ async def test_find_by_alias_returns_none_for_unknown_conid() -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_instrument_id_increments_skip_metric_on_cold_miss() -> None:
-    """B1+B2 MED-7: cold conid + client=None increments unresolved metric."""
+    """B1+B2 MED-7: cold conid + client=None increments unresolved metric.
+
+    Per DB-review HIGH-1: metric now carries a `reason` label so operators
+    can distinguish preview cold-miss (no-eager-create) from broker fetch
+    failures (real concern). This test verifies the `alias_miss_preview`
+    label path is hit.
+    """
     from app.core import metrics
     from app.services.orders_service import _resolve_instrument_id
 
-    before = metrics.risk_gate_concentration_skipped_unresolved_total._value.get()
+    counter = metrics.risk_gate_concentration_skipped_unresolved_total.labels(
+        reason="alias_miss_preview"
+    )
+    before = counter._value.get()
     async with SessionLocal() as s:
         result = await _resolve_instrument_id(
             s,
@@ -153,7 +162,7 @@ async def test_resolve_instrument_id_increments_skip_metric_on_cold_miss() -> No
             conid=f"cold-{uuid.uuid4().hex}",
             client=None,
         )
-    after = metrics.risk_gate_concentration_skipped_unresolved_total._value.get()
+    after = counter._value.get()
     assert result is None
     assert after == before + 1
 

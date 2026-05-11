@@ -508,17 +508,26 @@ async def _resolve_instrument_id(
         return instrument_id
 
     if client is None:
-        metrics.risk_gate_concentration_skipped_unresolved_total.inc()
+        # Preview path: gate must not author instruments.
+        metrics.risk_gate_concentration_skipped_unresolved_total.labels(
+            reason="alias_miss_preview"
+        ).inc()
         return None
 
     try:
         contract = await client.get_contract(conid=conid)  # type: ignore[attr-defined]
     except Exception:
-        metrics.risk_gate_concentration_skipped_unresolved_total.inc()
+        # grpc.RpcError, asyncio.TimeoutError, sidecar protocol errors, etc.
+        # — fail-open: gate skips concentration, broker still validates.
+        metrics.risk_gate_concentration_skipped_unresolved_total.labels(
+            reason="contract_fetch_failed"
+        ).inc()
         return None
 
     if contract is None:
-        metrics.risk_gate_concentration_skipped_unresolved_total.inc()
+        metrics.risk_gate_concentration_skipped_unresolved_total.labels(
+            reason="contract_not_found"
+        ).inc()
         return None
 
     result = await resolver.resolve_or_create(

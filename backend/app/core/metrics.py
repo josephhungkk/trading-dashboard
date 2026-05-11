@@ -653,6 +653,7 @@ risk_audit_dedupe_skipped_total = Counter(
 risk_gate_concentration_skipped_unresolved_total = Counter(
     "risk_gate_concentration_skipped_unresolved_total",
     "Concentration check skipped due to unresolved instrument_id (B1 cold path).",
+    labelnames=["reason"],
     registry=registry,
 )
 

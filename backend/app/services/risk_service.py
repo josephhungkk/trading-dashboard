@@ -281,12 +281,17 @@ class RiskService:
         if cap is None:
             return None
 
+        # Phase 10a.5 B3 DB-CRIT-1 fix: positions table has no
+        # market_value_base column today (deferred to a Phase 10b view).
+        # Approximate exposure as (qty * avg_cost * multiplier) — close enough
+        # for concentration % math since we compare against current NLV
+        # which is itself a snapshot.
         current = Decimal(
             (
                 await self._db.execute(
                     text(
-                        "SELECT COALESCE(SUM(market_value_base), 0) FROM positions "
-                        "WHERE instrument_id = :iid"
+                        "SELECT COALESCE(SUM(qty * avg_cost * multiplier), 0) "
+                        "FROM positions WHERE instrument_id = :iid"
                     ),
                     {"iid": ctx.instrument_id},
                 )

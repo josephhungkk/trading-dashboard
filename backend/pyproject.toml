@@ -103,4 +103,5 @@ markers = [
     "real_alpaca_equity: real Alpaca paper equity E2E (requires ALPACA_PAPER_API_KEY + ALPACA_PAPER_API_SECRET)",
     "no_db: test does not require database migrations",
     "integration: integration tests that exercise HTTP endpoints end-to-end (no live broker)",
+    "no_risk_gate: opt-out marker for legacy stub-Session tests that should not run the full risk gate",
 ]
