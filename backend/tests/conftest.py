@@ -218,3 +218,8 @@ def mock_brokers(sidecar_stubs) -> dict[str, AsyncMock]:
 def mock_sidecar_configure(sidecar_stubs) -> AsyncMock:
     sidecar_stubs["schwab"].Configure = AsyncMock()
     return sidecar_stubs["schwab"].Configure
+
+
+# Phase 10a.5 C1: tests that explicitly want the legacy isinstance-short-
+# circuited behavior add @pytest.mark.no_risk_gate. Use sparingly; the
+# primary goal is to retire this marker via C1.2-C1.6 stub upgrades.
