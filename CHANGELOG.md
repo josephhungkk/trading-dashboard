@@ -68,6 +68,23 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 - AdminAccountsPage multi-mode kill-switch fetch (paper+live, not paper-only).
 - orders_service.py file-split refactor.
 - Multi-worker uvicorn with Redis Lua locks (Phase 24).
+- Real-broker test deps: `alpaca-py` + `schwabdev` live in `sidecar_*/pyproject.toml` only; `backend/tests/real_broker/test_real_{alpaca_*,schwab_*}_e2e.py` import them directly and fail at collection time in CI with `ModuleNotFoundError`. Either move the tests into the sidecar trees or add the SDKs as a `real-broker` dependency group in `backend/pyproject.toml`.
+- VPS Docker BuildKit cache discipline: 1956 stale layers totalling 67 GB filled the IONOS root volume during Phase 10a close-out. Prune-on-deploy step (`docker builder prune -f --filter "until=720h"`) belongs in `scripts/deploy.sh` or a separate `scripts/vps-prune-cache.sh` triggered nightly.
+
+**Phase 10a CI hardening (post-tag, 8 commits):** The v0.12.0 push surfaced a cluster of pre-existing CI debt in the nightly real-broker workflows that the per-phase reviewer chain wouldn't catch (these workflows never run during a normal PR). Cleaned up:
+
+- `00b4c2b` — proto stub generation step added to 7 nightly workflows + proto file reformatted with `buf format -w` to satisfy `buf format --diff --exit-code`
+- `6b90f9c` — extracted proto codegen into `backend/scripts/generate_proto_stubs.py` because the bash heredoc form crashed under PowerShell on the self-hosted Windows runners
+- `56a509b` — extracted Schwab refresh-token mint into `backend/scripts/mint_schwab_access_token.py` for the same cross-platform reason
+- `d0625d9` — dropped bash-only `&&` and `\`-continuation syntax from 4 Windows-runner workflows (PS 5.1 doesn't support `&&`)
+- `3269b7e` — re-blessed `frontend/src/services/api-generated.ts` to capture the D9 docstring updates that landed in `f99c816`
+- `17d4dd3` — added `services: postgres + redis` block + matching `env:` block to 4 ubuntu-latest nightlies so the autouse `_apply_migrations` fixture in `conftest.py` finds a DB
+- `9d051d0` — added `no_db` marker to `test_real_futu_e2e_modify.py` (the futu nightly runs on the NUC self-hosted Windows runner so it can't use `services:`)
+- a53c69c — also re-blessed the OpenAPI snapshot for the new `risk_warnings`/`risk_blockers` fields on `PreviewResponse`
+
+VPS side: 67 GB Docker BuildKit cache pruned (root volume went from 100% → 74% used; build cache count went from 1956 entries → 0). The "no space left on device" deploy failure is the single largest blocker resolved.
+
+CI state at phase end: main push pipeline (CI + Deploy + E2E Mock) green on the latest 3 consecutive commits. Nightlies are still red on the broker-SDK-import side (deferred to 10a.5) but the proto-build / shell-portability / DB-fixture issues are all resolved.
 
 **Tooling validated:** qwen2.5-coder:14b dispatched via remote Ollama (192.168.50.30:11434) for B6, B7, C2 method bodies (~6sec roundtrip on RTX 4080S; ~30-40% wall-time saved vs Claude-only on tasks in its sweet spot — well-spec'd async method bodies). Body-only protocol works; Claude main-thread reviews + corrects. Codex was rate-limited mid-phase, so Chunk D+E coding ran on Opus main thread with reviewer subagents split haiku (spec/typescript) and sonnet (code-quality/security).
 
