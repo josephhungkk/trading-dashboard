@@ -193,8 +193,7 @@ class RiskService:
         row = (
             await self._db.execute(
                 text(
-                    "SELECT realized, unrealized, "
-                    "       EXTRACT(EPOCH FROM staleness)::float AS staleness_s "
+                    "SELECT realized, unrealized, staleness_s "
                     "FROM v_account_intraday_pnl "
                     "WHERE account_id = :account_id"
                 ),

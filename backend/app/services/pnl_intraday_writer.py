@@ -41,7 +41,8 @@ class PnlIntradayWriter:
         fresh as the stored one AND the (realized_today, unrealized) tuple
         actually changed — eliminates dead-row churn (MED-1, MED-6).
         """
-        day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        # DB H-2: column is DATE, not TIMESTAMPTZ — use .date() not midnight.
+        day_start = datetime.now(UTC).date()
 
         sql = (
             "INSERT INTO pnl_intraday ("
@@ -78,8 +79,7 @@ class PnlIntradayWriter:
         Returns the number of rows deleted.
         """
         sql = (
-            "DELETE FROM pnl_intraday"
-            " WHERE day_start_utc < (now() AT TIME ZONE 'UTC') - make_interval(days => :d)"
+            "DELETE FROM pnl_intraday WHERE day_start_utc < ((now() AT TIME ZONE 'UTC')::date - :d)"
         )
 
         result = await self._session.execute(text(sql), {"d": days})

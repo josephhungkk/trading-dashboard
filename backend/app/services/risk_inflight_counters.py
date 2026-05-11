@@ -10,7 +10,10 @@ return a (value, token) tuple; ``revert_*`` and ``commit_*_finalize`` consume
 the token via atomic Lua scripts so a double-revert is a no-op (HIGH-2).
 
 Token contract
-- Key shape: ``risk:pdt:tok:{uuid}`` / ``risk:bp:tok:{uuid}``
+- Key shape: ``risk:pdt:tok:{account_id}:{uuid}`` / ``risk:bp:tok:{account_id}:{uuid}``
+  The account_id prefix enables the discoverer's per-account orphan sweep to
+  scope its SCAN MATCH to ``risk:pdt:tok:{account_id}:*`` and avoid touching
+  in-flight tokens belonging to other accounts (CRIT-1).
 - TTL: 86400s (matches counter TTL — crash-leak <= 1 trading session)
 - Idempotency: atomic Lua GETDEL+INCR / GETDEL+INCRBYFLOAT.
 
@@ -43,12 +46,14 @@ def _bp_key(account_id: uuid.UUID) -> str:
     return f"risk:bp_committed:{account_id}"
 
 
-def _pdt_token_key(token: str) -> str:
-    return f"risk:pdt:tok:{token}"
+def _pdt_token_key(account_id: uuid.UUID, token: str) -> str:
+    """Token key embeds account_id so the discoverer sweep can scope by account."""
+    return f"risk:pdt:tok:{account_id}:{token}"
 
 
-def _bp_token_key(token: str) -> str:
-    return f"risk:bp:tok:{token}"
+def _bp_token_key(account_id: uuid.UUID, token: str) -> str:
+    """Token key embeds account_id so the discoverer sweep can scope by account."""
+    return f"risk:bp:tok:{account_id}:{token}"
 
 
 # Lua: revert is GETDEL on token + INCR on counter when token still present.
@@ -108,7 +113,7 @@ async def decrement_pdt(
     token = uuid.uuid4().hex
     if broker_reported is not None:
         await redis.set(_pdt_key(account_id), str(broker_reported), ex=_PDT_TTL_SEC, nx=True)
-    await redis.set(_pdt_token_key(token), "1", ex=_PDT_TTL_SEC)
+    await redis.set(_pdt_token_key(account_id, token), "1", ex=_PDT_TTL_SEC)
     new_value = int(await redis.decr(_pdt_key(account_id)))
     return new_value, token
 
@@ -118,7 +123,7 @@ async def revert_pdt(redis: Any, account_id: uuid.UUID, token: str) -> int:
     result = await redis.eval(
         _REVERT_PDT_LUA,
         2,
-        _pdt_token_key(token),
+        _pdt_token_key(account_id, token),
         _pdt_key(account_id),
     )
     return int(result) if result is not None else 0
@@ -129,7 +134,7 @@ async def commit_pdt(redis: Any, account_id: uuid.UUID, token: str) -> None:
     await redis.eval(
         _COMMIT_PDT_LUA,
         2,
-        _pdt_token_key(token),
+        _pdt_token_key(account_id, token),
         _pdt_key(account_id),
     )
 
@@ -155,8 +160,11 @@ async def commit_bp(redis: Any, account_id: uuid.UUID, notional: Decimal) -> tup
     subtract the exact amount even if the caller no longer holds the value.
     """
     token = uuid.uuid4().hex
-    await redis.set(_bp_token_key(token), str(notional), ex=_BP_TTL_SEC)
-    new_total = Decimal(str(await redis.incrbyfloat(_bp_key(account_id), float(notional))))
+    await redis.set(_bp_token_key(account_id, token), str(notional), ex=_BP_TTL_SEC)
+    # DB M-1: pass Decimal as string so Redis parses exact precision; float()
+    # rounds at ~15 sig digits and creates persistent drift vs the str-encoded
+    # token payload that revert_bp uses to subtract.
+    new_total = Decimal(str(await redis.incrbyfloat(_bp_key(account_id), str(notional))))
     return new_total, token
 
 
@@ -165,7 +173,7 @@ async def revert_bp(redis: Any, account_id: uuid.UUID, token: str) -> Decimal:
     result = await redis.eval(
         _REVERT_BP_LUA,
         2,
-        _bp_token_key(token),
+        _bp_token_key(account_id, token),
         _bp_key(account_id),
     )
     return Decimal(str(result))
@@ -176,7 +184,7 @@ async def commit_bp_finalize(redis: Any, account_id: uuid.UUID, token: str) -> N
     await redis.eval(
         _COMMIT_BP_LUA,
         2,
-        _bp_token_key(token),
+        _bp_token_key(account_id, token),
         _bp_key(account_id),
     )
 
