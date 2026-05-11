@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-pytestmark = pytest.mark.real_futu
+pytestmark = [pytest.mark.real_futu, pytest.mark.no_db]
 
 _REQUIRED_FUTU_ENV = ("FUTU_HOST", "FUTU_PORT")
 
