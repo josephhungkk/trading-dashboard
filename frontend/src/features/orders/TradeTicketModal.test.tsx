@@ -353,4 +353,24 @@ describe('TradeTicketModal', () => {
       expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
     });
   });
+
+  it('renders the position-sizing section with method dropdown', async () => {
+    // Phase 10b.1 D2 — sizing section appears under the form, collapsed
+    // by default. Operator can open it and see the method select.
+    mockCapabilitiesFetch(Promise.resolve(capabilitiesResponse(schwabCapabilities())));
+    renderOpen('schwab');
+
+    const section = await screen.findByTestId('sizing-section');
+    expect(section).toBeInTheDocument();
+    // Closed by default — the inner select shouldn't be rendered visibly,
+    // but it's in the DOM since <details> only changes display.
+    // Open it via the summary toggle.
+    const summary = section.querySelector('summary');
+    expect(summary).not.toBeNull();
+    if (summary) summary.click();
+
+    const methodSelect = await screen.findByTestId('sizing-method-select');
+    expect(methodSelect).toBeInTheDocument();
+    expect(methodSelect).toHaveValue('fixed_fractional');
+  });
 });
