@@ -29,7 +29,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "fakeredis[asyncio]>=2.35.1",
+    "fakeredis[asyncio,lua]>=2.35.1",
     "mypy>=1.20.1",
     "pip-audit>=2.10.0",
     "pytest>=9.0.3",
