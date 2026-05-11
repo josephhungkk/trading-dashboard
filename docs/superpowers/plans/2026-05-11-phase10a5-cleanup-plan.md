@@ -14,23 +14,25 @@
 
 ## Model routing for implementation
 
-Codex is **rate-limited** for this phase; production-code writes go to the **Qwen 3.6 family** on the heavy AI box (Ollama API at `192.168.50.30:11434`). Claude main thread (Opus) reviews, verifies, commits. Anthropic subagents are reviewers only — no production-code authorship.
+Codex is **rate-limited** for this phase; production-code writes go to **Qwen3-Coder-Next** on the heavy AI box (Ollama API at `192.168.50.30:11434`) with the **Qwen3.6 family** as backup. Claude main thread (Opus) reviews, verifies, commits. Anthropic subagents are reviewers only — no production-code authorship.
 
 Primary + fallback ladder (try in order; rotate when the current rung produces non-mergeable output two tasks in a row or fails the `feedback_qwen_protocol` body-only check):
 
-| # | Stage | Who | Model | When |
-|---|---|---|---|---|
-| 1 | Coding default | Qwen3.6-35B-A3B (MoE, 3B active, 256K ctx) | `qwen3.6:35b` | All coding tasks unless 2's strengths are needed |
-| 2 | Quality-sensitive coding | Qwen3.6-27B (dense, slower but +15.5 SkillsBench, +7.8 Terminal-Bench vs the MoE) | `qwen3.6:27b-q4_K_M` | A2 (savepoint isolation), A4 (atomic Lua scripts), B1+B2 (resolver wiring) — tasks where quality > speed |
-| 3 | Last-known-good fallback | Qwen2.5-Coder-14B (what 10a shipped on) | `qwen2.5-coder:14b` | Both Qwen3.6 models produce non-mergeable output |
-| 4 | Codex fallback | Codex | `gpt-5-codex` | Only if Qwen ladder exhausts AND Codex rate-limit window has reset |
-| 5 | Final fallback | Opus main thread takes the task | `claude-opus-4-7` | All above fail |
+| # | Stage | Who | Model | Tag | When |
+|---|---|---|---|---|---|
+| 1 | Coding default | Qwen3-Coder-Next (80B/3B active, hybrid attention + MoE, agentically trained on 800k GitHub PR tasks, 256K ctx) | `qwen3-coder-next:latest` | All coding tasks (Phase 10a.5's TDD + tool-use + fix-loop flow matches the model's training distribution exactly) |
+| 2 | Hardest tasks — higher-fidelity quant | Qwen3-Coder-Next at Q8 | `qwen3-coder-next:q8_0` | A4 atomic Lua scripts, A2 savepoint isolation logic — quality > throughput |
+| 3 | General-purpose fallback (non-coder) | Qwen3.6-35B-A3B (MoE, 3B active) | `qwen3.6:35b` | When the coder-specialized model over-fits to coding idioms (rare — would show as flaky doc/YAML output) |
+| 4 | Quality-sensitive dense fallback | Qwen3.6-27B (dense, slower) | `qwen3.6:27b-q4_K_M` | When MoE routing produces unstable output across tasks |
+| 5 | Last-known-good | Qwen2.5-Coder-14B (what 10a shipped on) | `qwen2.5-coder:14b` | All Qwen3.x models produce non-mergeable output |
+| 6 | Codex fallback | Codex | `gpt-5-codex` | Only if Qwen ladder exhausts AND Codex rate-limit window has reset |
+| 7 | Final fallback | Opus main thread takes the task | `claude-opus-4-7` | All above fail |
 
 Main-thread orchestrate / lint / test / commit always stays on **Opus** (`claude-opus-4-7`).
 
 Reviewer dispatch (per chunk) follows the "Reviewer cadence" table below — Anthropic subagents only, never production code authors.
 
-**Operational note:** the heavy-box-side benchmark uplift is substantial — Qwen3.6-35B-A3B scored 73.4% on SWE-bench Verified per the Apr-2026 Qwen3.6 release, vs ~38% for the prior `qwen2.5-coder:14b`. Independent Aider Polyglot run measured 78.67% (16:1 progression-to-regression ratio over the prior generation). For Phase 10a.5 specifically — TDD + small-file edits + reviewer-fix loops — this fits the model's strengths.
+**Operational note:** Qwen3-Coder-Next scored **70.6-74.2% on SWE-bench Verified** ([Qwen blog](https://qwen.ai/blog?id=qwen3-coder-next), 2026), the best open-weight coding score available, vs ~38% for the prior `qwen2.5-coder:14b`. The 80B/3B-active architecture means same per-token latency as a 14B dense model on the heavy box. Trained specifically on real GitHub PRs with RL on tool-calling, test-running, and failure recovery — the exact flow Phase 10a.5 requires (TDD + reviewer-fix loops + small file edits). For tasks where general-purpose reasoning matters more than coding (D1 ROADMAP rewrite, memory file authoring), drop to rung 3 or main-thread.
 
 ## Reviewer cadence — per chunk, not per task
 
