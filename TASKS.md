@@ -572,7 +572,7 @@ delivered subset and the deferred-blocked subset with reason per row.
 
 PDT counter, buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly / fixed-fractional / vol-target). Multi-account portfolio rollup. Pre-trade gate becomes mandatory chokepoint.
 
-### Phase 10a — Risk gate at station 4  *(in-progress · 2026-05-08 → 2026-05-11 · 25/30 commits since v0.11.0.1)*
+### Phase 10a — Risk gate at station 4  *(complete · 2026-05-08 → 2026-05-11 · v0.12.0 · 38 commits since v0.11.0.1)*
 
 Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: `docs/superpowers/plans/2026-05-08-phase10a-risk-engine-plan.md`.
 
@@ -601,19 +601,36 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 - [x] C5 BrokerSidecarClient.preview_order with blake2b content-hash idempotency (M6) (`1c42b30`)
 - [x] C6 Chunk-C reviewer fixes: 1 CRIT + 7 HIGH + 4 MED inline (token bucket lock, raw_payload allowlist, OrderedDict LRU, per-key lock, accepted=False on TWS reject) (`72e7f41`)
 
-**Chunk D — orders_service gate insertion** *(2/9 done — load-bearing pieces shipped)*
+**Chunk D — orders_service gate insertion + admin surface** *(complete)*
 - [x] D3 RiskService.evaluate insert at station 4 in preview_order + PreviewResponse risk_warnings/risk_blockers fields (`03391b9`)
 - [x] D4 RiskService.evaluate insert at station 4 in place_order + audit row + risk_audit_insert_failures_total metric (`34a170e`)
-- D2 (orders_service.py file-split) **intentionally skipped** per "no abstractions beyond what the task requires" — high blast-radius refactor with 30+ importers; gate works inline.
-- D5-D8 **deferred to Phase 10a continuation session:** modify_order gate mirror; FE/BE BrokerCapabilities reconcile; integration tests (audit + admin + chaos); /api/risk read APIs + /api/admin/risk-limits CRUD with CSRF.
+- [x] D5 RiskService.evaluate insert at station 4 in modify_order + audit row (attempt_kind=modify_order); margin-preview client hoisted above gate (`15196dd`)
+- [x] D6 FE/BE BrokerCapabilities reconcile — pin response_model, drop polymorphic shape, add asset_class, regen api-generated.ts (`67a21d0`)
+- [x] D7-p1 test_risk_decisions_audit.py — audit row round-trip for place_order + modify_order + pg_notify capture; fixed prod-affecting silent bug (uppercase side vs lowercase CHECK constraint) (`1a2799b`)
+- [x] D8 RiskLimitsService + AccountKillSwitchService + /api/risk read endpoints + /api/admin/risk-limits CRUD + /api/admin/accounts/{id}/kill-switch toggle + pubsub invalidation (`9dd59d7`)
+- [x] D7-p2 test_risk_limits_admin.py + test_account_kill_switch_admin.py (CRUD + CSRF nonce + history trigger + pubsub assertions) (`00e7d27`)
+- [x] D9 Chunk-D 5-reviewer fixes: 1 CRIT + 8 HIGH + 4 MED inline (soft-delete UPDATE, pubsub payload, kill-switch pubsub, session isolation, class-level cache, commit ordering, static SQL, PII redaction, structlog, RuntimeError vs assert, sanitised 400) (`f99c816`)
+- D2 (orders_service.py file-split) **intentionally skipped** per "no abstractions beyond what the task requires" — high blast-radius refactor with 30+ importers; gate works inline. Gate gated on `isinstance(db, AsyncSession)` so existing stub-Session tests stay green.
 
-**Chunks E (FE) + F (close-out)** *(deferred to Phase 10a continuation session)*
-- E1-E4: /admin/risk + /admin/account-status pages; banner integration in order ticket; type regen.
-- F1-F5: invariant docs (CLAUDE.md cross-cutting); CHANGELOG; v0.12.0 tag.
+**Chunk E — Frontend** *(complete; E6 deferred to 10a.5)*
+- [x] E1 TS types + API client + TanStack Query hooks (useRiskLimits + useAccountKillSwitch) + shared test utils — M9 onSuccess invalidates (`096813a`)
+- [x] E2 TradeTicketModal WARN banner with acknowledge gate + BLOCK rows + 422 RiskGateBlockedError handling + aria-live (`d9d1a80`)
+- [x] E3 /admin/risk page (limits CRUD with Dialog delete confirm) (`ccdc914`)
+- [x] E4 /admin/risk/decisions feed page (filterable by account + verdict) (`ccdc914`)
+- [x] E5 account kill-switch row on /admin/accounts (Switch + Dialog) (`ccdc914`)
+- [x] E7 Chunk-E 4-reviewer fixes: 1 CRIT + 6 HIGH + 9 MED inline (AccountsPage unwiring CRIT, 422 unhandled CRIT, RiskApiError detail, kill-switch query error, WARN visibility, Dialog UX, jsx-a11y label-htmlFor, UUID validation, aria-live) (`c8b840a`)
+- E6 (Playwright E2E flows) **deferred to 10a.5** — no `frontend/tests/e2e/` infrastructure yet (separate scope per FE roadmap Task 49/50).
 
-**Phase 10a current test posture (HEAD `34a170e`):** backend 139 + IBKR 232 + Schwab 209 green; mypy --strict clean across modified surfaces.
+**Chunk F — Close-out** *(complete)*
+- [x] F1 docs/PHASE-WORKFLOW.md line 42 corrected (per-chunk reviewer cadence) (`b059c9e`)
+- [x] F2 full test sweep: backend 1054 pass + 8 wall-clock-dependent fails (modify_order tests during IBKR daily-maintenance envelope 12:37–13:15 UTC); ruff + mypy --strict clean
+- [x] F3 phase-end spec-compliance review (opus subagent) — verdict PASS; one blocker (uncommitted OpenAPI snapshot) cleared in `a53c69c`
+- [x] F4 CHANGELOG.md + TASKS.md + CLAUDE.md updates
+- [x] F5 `v0.12.0` tag + push
 
-**Phase 10a.5 backlog:** conid → instrument_id resolver wiring; test stub upgrades (drop isinstance(db, AsyncSession) gate); counter decrement at gate-pass + revert on dispatch failure; audit row on ALLOW/WARN paths; v_account_intraday_pnl backed by sidecar PnL pipeline; multi-worker uvicorn with Redis Lua locks (Phase 24).
+**Phase 10a final test posture (v0.12.0):** backend 1054 pass + 8 wall-clock-dependent fails (IBKR daily maintenance window — not a regression); FE Vitest green for new risk hooks + TradeTicketModal + AccountKillSwitchRow; sidecar suites unchanged; mypy --strict + ruff clean across new/modified surfaces.
+
+**Phase 10a.5 backlog:** conid → instrument_id resolver wiring (concentration check no-op until then); test stub `_Sidecar`/`_Session` upgrades (drops the `isinstance(db, AsyncSession)` gate); counter decrement on gate-pass + revert on dispatch failure; audit row on ALLOW/WARN paths (BLOCK-only today); v_account_intraday_pnl backed by sidecar PnL pipeline (currently zero-stub); Playwright E2E for the 4 risk-gate + admin-risk scenarios; RiskLimitsPage migration to Phase 3 DataTable + ColumnCustomizerDialog; per-endpoint CSRF nonce scoping; AdminAccountsPage multi-mode kill-switch fetch; orders_service.py file-split refactor; multi-worker uvicorn with Redis Lua locks (Phase 24).
 
 ## Phase 11 — AI router + Alerts + Telegram
 

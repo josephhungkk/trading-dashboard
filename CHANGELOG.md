@@ -5,21 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
-### Phase 10a — Risk gate at station 4 (2026-05-08 → 2026-05-11, 25/30 commits, in-progress)
+## [0.12.0] — 2026-05-11
 
-Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: `docs/superpowers/plans/2026-05-08-phase10a-risk-engine-plan.md`. Pre-trade risk gate becomes the fourth validation station in the order write path (after kill-switch / maintenance / capability; before broker dispatch). 7 checks: account+broker kill switches, max-daily-loss, PDT with Redis in-flight counter [H1], cross-broker position-concentration [H2], buying-power buffer with in-flight commitments [H3], sidecar margin preview with asymmetric preview/place_order fail policy [H4]. Audit trail in `risk_decisions`; admin API + FE deferred to Phase 10a continuation session.
+### Phase 10a — Risk gate at station 4 (2026-05-08 → 2026-05-11, 38 commits, complete)
 
-**Chunk A — schema + ORM + Pydantic (5 commits, complete)**
+Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: `docs/superpowers/plans/2026-05-08-phase10a-risk-engine-plan.md`. Pre-trade risk gate becomes the fourth validation station in the order write path (after kill-switch / maintenance / capability; before broker dispatch). 7 checks: account+broker kill switches, max-daily-loss, PDT with Redis in-flight counter [H1], cross-broker position-concentration [H2], buying-power buffer with in-flight commitments [H3], sidecar margin preview with asymmetric preview/place_order fail policy [H4]. Audit trail in `risk_decisions`; admin API + admin UI + trade-ticket banners shipped end-to-end.
+
+**Chunk A — schema + ORM + Pydantic (5 commits)**
 - Alembic 0036: `risk_limits` (4 cap kinds, partial unique indexes for global vs scoped) + `account_kill_switches` + `risk_decisions` + history triggers + `v_account_intraday_pnl` zero-stub view.
 - ORM models with `__table_args__` CHECK constraints mirroring DB invariants.
 - Pydantic v2 schemas for the gate's external surface.
 
-**Chunk B — RiskService + 7 checks + aggregator (10 commits, complete)**
+**Chunk B — RiskService + 7 checks + aggregator (10 commits)**
 - `app/services/risk_service.py`: 7 check methods + `evaluate()` aggregator using `asyncio.gather(return_exceptions=True)` for the 6 fast checks; margin awaited separately so its mode-asymmetric semantics aren't flattened. Verdict precedence: any blocker → BLOCK; else any warning → WARN; else ALLOW. Unhandled exceptions become `evaluator_error` blockers (fail-CLOSED).
 - `app/services/risk_inflight_counters.py`: Redis-backed PDT + BP optimistic counters with `SET NX EX 86400` cold-cache seed (closes the staleness window per spec H1) and 120s `reconcile_*` TTL bound on crash-leak.
 - Reviewer chain (4 parallel agents) applied 4 HIGH + 4 MED findings inline.
 
-**Chunk C — sidecar PreviewOrder RPCs (6 commits, complete)**
+**Chunk C — sidecar PreviewOrder RPCs (6 commits)**
 - `proto/broker/v1/broker.proto`: `PreviewOrder` rpc + `PreviewOrderRequest` (10 fields) + `PreviewOrderResponse` (9 fields). Money fields are Decimal-strings per [C2].
 - `sidecar_ibkr/handlers.py`: `placeOrder(whatIf=True)` + `asyncio.wait_for(filledEvent.wait(), timeout=2.5)` per [M7]. OrderedDict LRU dedup (60s TTL, 1000-entry cap, per-key lock against double-issue).
 - `sidecar_schwab/handlers.py` + `client.py`: REST `POST /trader/v1/accounts/{hash}/previewOrder` + lock-protected sliding-window 60req/min token bucket separate from placeOrder budget [M8].
@@ -27,14 +29,47 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 - `backend/app/services/brokers.py::BrokerSidecarClient.preview_order`: blake2b content-hash idempotency key per [M6] — identical requests collapse to one whatIf round-trip.
 - Reviewer chain (4 parallel agents) applied 1 CRIT + 7 HIGH + 4 MED findings inline (notable: token bucket race CRIT, raw_provider_payload account-field leak HIGH).
 
-**Chunk D — orders_service gate insertion (2/9 done — load-bearing pieces shipped)**
-- `preview_order`: `RiskService.evaluate(mode='preview')` inserted at station 4. New `PreviewResponse.risk_warnings` and `PreviewResponse.risk_blockers` (list[dict[str, object]]) carry the gate verdict so the FE can render structured banners.
-- `place_order`: `RiskService.evaluate(mode='place_order')` inserted; on `verdict='block'` returns 422 with structured blockers + writes a `RiskDecision` audit row (fail-OPEN per spec §4 — audit failure must not block trades; new `risk_audit_insert_failures_total` Counter tracks visibility).
-- Gate gated on `isinstance(db, AsyncSession)` so the many existing stub-Session tests stay green; production always uses a real AsyncSession. `RiskService.evaluate` aggregator gracefully degrades `AttributeError` exceptions to WARN (skips the check) rather than fail-CLOSED to BLOCK — catches misconfigured sidecar / test stubs without masking real broker errors.
-- D2 (orders_service.py file-split) intentionally skipped (high blast-radius refactor with 30+ importers, net-zero functional value vs inline gate insertion).
-- D5 (modify_order mirror), D6 (FE/BE capabilities reconcile), D7 (audit + chaos integration tests), D8 (/api/risk + /api/admin/risk-limits) deferred to Phase 10a continuation session.
+**Chunk D — orders_service gate insertion + admin surface (9 commits)**
+- `preview_order` (D3): `RiskService.evaluate(mode='preview')` inserted at station 4. New `PreviewResponse.risk_warnings` and `PreviewResponse.risk_blockers` (list[dict[str, object]]) carry the gate verdict so the FE can render structured banners.
+- `place_order` (D4): `RiskService.evaluate(mode='place_order')` inserted; on `verdict='block'` returns 422 with structured blockers + writes a `RiskDecision` audit row (fail-OPEN per spec §4 — audit failure must not block trades; new `risk_audit_insert_failures_total` Counter tracks visibility).
+- `modify_order` (D5): gate mirrored with `_evaluate_risk_for_modify_order` + `_audit_risk_decision_modify` (attempt_kind=`modify_order`). Margin-preview RPC reuses the same client the dispatch will use (client fetch hoisted above gate).
+- Capabilities reconcile (D6): `GET /api/brokers/{id}/capabilities` `response_model` pinned to `BrokerCapabilitiesResponse` (structured: `broker_id` + `order_types[]` + `time_in_force[]` + `combos[]`); polymorphic flat-list/grouped-dict legacy shape removed; `asset_class` added to `CapabilityComboRow` (FE+BE); `api-generated.ts` regenerated.
+- Audit integration test (D7-p1): `test_risk_decisions_audit.py` round-trips audit rows for place_order + modify_order + captures pg_notify payloads. **Surfaced production-affecting silent bug**: audit helpers were inserting `side='BUY'`/`'SELL'` (uppercase from PreviewRequest) but `risk_decisions_side_check` CHECK constraint requires lowercase — every BLOCK audit row would have silently failed in prod. Fixed at the boundary with `str(request.side).lower()`.
+- Admin surface (D8): `RiskLimitsService` + `AccountKillSwitchService` + read endpoints `/api/risk/limits` and `/api/risk/decisions` + admin CRUD `/api/admin/risk-limits` (POST/PUT/DELETE soft-delete) + `/api/admin/accounts/{id}/kill-switch` toggle (UPSERT). Pubsub invalidation on `app_config:invalidate:risk_limits` and `app_config:invalidate:kill_switch`. Routers registered in `main.py`; `api-generated.ts` regenerated.
+- Admin integration tests (D7-p2): `test_risk_limits_admin.py` + `test_account_kill_switch_admin.py` cover CRUD + CSRF nonce + history trigger + pubsub assertions.
+- Reviewer chain (5 parallel agents, D9) applied 1 CRIT + 8 HIGH + 4 MED findings inline. Notable: soft-delete via UPDATE (not DELETE), pubsub payload schema, kill-switch pubsub wiring, session isolation in audit helpers (`async with SessionLocal()`), class-level cache, commit ordering, static SQL filter syntax, PII redaction (kill-switch `reason` no longer leaked into blocker message), structlog over stdlib `logging`, RuntimeError vs `assert`, sanitised 400 messages.
+- D2 (orders_service.py file-split) intentionally skipped (high blast-radius refactor with 30+ importers, net-zero functional value vs inline gate insertion). Gate gated on `isinstance(db, AsyncSession)` so the many existing stub-Session tests stay green.
 
-**Tooling validated:** qwen2.5-coder:14b dispatched via remote Ollama (192.168.50.30:11434) for B6, B7, C2 method bodies (~6sec roundtrip on RTX 4080S; ~30-40% wall-time saved vs Claude-only on tasks in its sweet spot — well-spec'd async method bodies). Body-only protocol works; Claude main-thread reviews + corrects. Tests stay on Claude.
+**Chunk E — Frontend (5 commits, E6 deferred to 10a.5)**
+- TS types + API client + TanStack Query hooks (E1): `services/risk/{types,api}.ts` + `hooks/useRiskLimits.ts` + `hooks/useAccountKillSwitch.ts`. Mutations invalidate the matching query keys per [M9]. Shared test utilities at `hooks/__test-utils__/riskTestUtils.tsx`.
+- TradeTicketModal WARN/BLOCK banners (E2): WARN list with acknowledge gate (Submit disabled until checkbox ticked) + BLOCK rows rendered inline. 422 risk-gate responses caught via `RiskGateBlockedError` class + `extractRiskBlockers` helper in `services/orders.ts`. `aria-live` for re-announcement.
+- `/admin/risk` (E3): CRUD page for risk limits with Dialog confirm for delete (not `window.confirm`).
+- `/admin/risk/decisions` (E4): read-only feed page with verdict + account_id filters.
+- Account kill-switch row (E5): `AccountKillSwitchRow` (Switch + Dialog) wired into `/admin/accounts` (`AdminAccountsPage`).
+- Reviewer chain (4 parallel agents, E7) applied 1 CRIT + 6 HIGH + 9 MED findings inline. Notable: AccountsPage unwiring CRIT, 422 unhandled CRIT, RiskApiError detail extraction, kill-switch query-error branch, WARN visibility alongside BLOCK, edit-via-Dialog UX, jsx-a11y label-htmlFor pairs, UUID validation, aria-live polite/assertive.
+- E6 (Playwright E2E flows) deferred to 10a.5 — no `frontend/tests/e2e/` infrastructure yet (separate scope per FE roadmap Task 49/50).
+
+**Chunk F — Close-out**
+- F1: `docs/PHASE-WORKFLOW.md` line 42 corrected (per-chunk reviewer cadence, not per-commit).
+- F2: full test sweep — backend 1054 pass + 8 wall-clock-dependent fails (modify_order tests during the IBKR daily-maintenance envelope 12:37–13:15 UTC, documented in memory `ibkr_maintenance_schedule.md`); OpenAPI snapshot re-blessed for the new `risk_warnings`/`risk_blockers` fields on `PreviewResponse` (committed in F3 close-out); ruff + mypy --strict clean across all new/modified files.
+- F3: phase-end spec-compliance review (opus subagent) ran against the implemented surface — verdict PASS once the OpenAPI snapshot was committed; all spec invariants hold (station-4 ordering, audit row + lowercased side, pg_notify minimal payload, auth gating, soft-delete, FE WARN+BLOCK surfacing, TanStack invalidation, routers registered).
+- F4: this CHANGELOG entry + CLAUDE.md/TASKS.md updates.
+- F5: `v0.12.0` tag.
+
+**Deferred to 10a.5**
+- `conid → instrument_id` wiring (concentration check is currently a no-op until this is in place).
+- Test stub `_Sidecar`/`_Session` upgrades to support full `RiskService` deps (drops the `isinstance(db, AsyncSession)` gate).
+- Counter decrement on gate-pass + revert on dispatch failure (currently in-flight counters self-heal at next discoverer poll).
+- Audit rows on ALLOW/WARN paths (only BLOCK writes today).
+- `v_account_intraday_pnl` view backed by sidecar PnL pipeline (currently zero-stub).
+- Playwright E2E for the 4 risk-gate + admin-risk scenarios.
+- RiskLimitsPage migration to Phase 3 `DataTable` + `ColumnCustomizerDialog`.
+- Per-endpoint CSRF nonce scoping (currently shares `csrf:order-cap:` prefix).
+- AdminAccountsPage multi-mode kill-switch fetch (paper+live, not paper-only).
+- orders_service.py file-split refactor.
+- Multi-worker uvicorn with Redis Lua locks (Phase 24).
+
+**Tooling validated:** qwen2.5-coder:14b dispatched via remote Ollama (192.168.50.30:11434) for B6, B7, C2 method bodies (~6sec roundtrip on RTX 4080S; ~30-40% wall-time saved vs Claude-only on tasks in its sweet spot — well-spec'd async method bodies). Body-only protocol works; Claude main-thread reviews + corrects. Codex was rate-limited mid-phase, so Chunk D+E coding ran on Opus main thread with reviewer subagents split haiku (spec/typescript) and sonnet (code-quality/security).
 
 ## [0.11.0.1] — 2026-05-08
 
