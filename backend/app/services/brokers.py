@@ -1612,7 +1612,14 @@ class BrokerDiscoverer:
                                 {"aid": account_id},
                             )
                         ).one_or_none()
-                        if currency_row is not None:
+                        if currency_row is None:
+                            # Phase 10a.5 MED fix: log so operators see why pnl
+                            # upsert was skipped rather than silently skipping.
+                            log.warning(
+                                "pnl_intraday_currency_row_missing",
+                                account_id=str(account_id),
+                            )
+                        else:
                             account_currency = str(currency_row[0])
                             matching = [
                                 p
