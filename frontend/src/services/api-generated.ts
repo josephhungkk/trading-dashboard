@@ -89,6 +89,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/accounts/{account_id}/kill-switch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Account Kill Switch
+         * @description Return the current kill-switch state; 404 when no row exists.
+         */
+        get: operations["get_account_kill_switch_api_admin_accounts__account_id__kill_switch_get"];
+        put?: never;
+        /** Toggle Account Kill Switch */
+        post: operations["toggle_account_kill_switch_api_admin_accounts__account_id__kill_switch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/brokers/schwab/disconnect": {
         parameters: {
             query?: never;
@@ -326,6 +347,41 @@ export interface paths {
         /** Set Order Capability */
         post: operations["set_order_capability_api_admin_order_capabilities_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/risk-limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Risk Limit */
+        post: operations["create_risk_limit_api_admin_risk_limits_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/risk-limits/{limit_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Risk Limit */
+        put: operations["update_risk_limit_api_admin_risk_limits__limit_id__put"];
+        post?: never;
+        /** Delete Risk Limit */
+        delete: operations["delete_risk_limit_api_admin_risk_limits__limit_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -815,6 +871,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/risk/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Risk Decisions
+         * @description Return recent risk_decisions rows ordered by evaluated_at DESC.
+         *
+         *     Optional filters: account_id (UUID), verdict (allow|warn|block).
+         *     The DB indexes idx_risk_decisions_account_time and
+         *     idx_risk_decisions_blocked cover the two hot filter paths.
+         */
+        get: operations["list_risk_decisions_api_risk_decisions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/risk/limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Risk Limits
+         * @description Return every risk_limits row (60s TTL cache inside the service).
+         */
+        get: operations["list_risk_limits_api_risk_limits_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -857,6 +957,46 @@ export interface components {
         AccountAliasUpdate: {
             /** Alias */
             alias: string;
+        };
+        /**
+         * AccountKillSwitchOut
+         * @description Read-side projection of `account_kill_switches`.
+         */
+        AccountKillSwitchOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Enabled At */
+            enabled_at: string | null;
+            /** Enabled By */
+            enabled_by: string | null;
+            /** Is Enabled */
+            is_enabled: boolean;
+            /** Reason */
+            reason: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * AccountKillSwitchToggleRequest
+         * @description Request payload to toggle an account-level kill switch.
+         *
+         *     Reason is required when enabling — operators always document why a
+         *     real-money account was frozen.
+         */
+        AccountKillSwitchToggleRequest: {
+            /** Is Enabled */
+            is_enabled: boolean;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
         };
         /** AccountListResponse */
         AccountListResponse: {
@@ -1595,6 +1735,169 @@ export interface components {
             /** Warnings */
             warnings: string[];
         };
+        /**
+         * RiskDecisionOut
+         * @description Read-side projection of `risk_decisions` for `/api/risk/decisions`.
+         */
+        RiskDecisionOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /**
+             * Attempt Kind
+             * @enum {string}
+             */
+            attempt_kind: "place_order" | "modify_order";
+            /** Blockers */
+            blockers: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Evaluated At
+             * Format: date-time
+             */
+            evaluated_at: string;
+            /** Id */
+            id: number;
+            /** Instrument Id */
+            instrument_id: number | null;
+            /** Latency Ms */
+            latency_ms: number;
+            /** Order Id */
+            order_id: string | null;
+            /** Order Type */
+            order_type: string;
+            /** Price */
+            price: string | null;
+            /** Qty */
+            qty: string;
+            /** Request Id */
+            request_id: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+            /** Time In Force */
+            time_in_force: string;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "allow" | "warn" | "block";
+            /** Warnings */
+            warnings: {
+                [key: string]: unknown;
+            }[];
+        };
+        /**
+         * RiskLimitCreate
+         * @description Request payload to create a new risk limit row.
+         */
+        RiskLimitCreate: {
+            /**
+             * Is Active
+             * @default true
+             */
+            is_active: boolean;
+            /**
+             * Limit Kind
+             * @enum {string}
+             */
+            limit_kind: "max_daily_loss_currency_base" | "max_position_concentration_pct" | "pdt_warn_remaining" | "min_buying_power_buffer_pct";
+            /** Limit Value */
+            limit_value: number | string;
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /** Scope Id */
+            scope_id?: string | null;
+            /**
+             * Scope Type
+             * @enum {string}
+             */
+            scope_type: "global" | "broker" | "account";
+            /** Warn At Pct */
+            warn_at_pct?: number | string | null;
+        };
+        /**
+         * RiskLimitOut
+         * @description Read-side projection of a `risk_limits` row for `/api/risk/limits`.
+         */
+        RiskLimitOut: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: number;
+            /** Is Active */
+            is_active: boolean;
+            /**
+             * Limit Kind
+             * @enum {string}
+             */
+            limit_kind: "max_daily_loss_currency_base" | "max_position_concentration_pct" | "pdt_warn_remaining" | "min_buying_power_buffer_pct";
+            /** Limit Value */
+            limit_value: string;
+            /** Notes */
+            notes: string;
+            /** Scope Id */
+            scope_id: string | null;
+            /**
+             * Scope Type
+             * @enum {string}
+             */
+            scope_type: "global" | "broker" | "account";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Updated By */
+            updated_by: string;
+            /** Warn At Pct */
+            warn_at_pct: string | null;
+        };
+        /**
+         * RiskLimitUpdate
+         * @description Request payload to update an existing risk limit row.
+         *
+         *     PUT-semantics: full body required (mirrors Phase 8a MED-2 pattern).
+         */
+        RiskLimitUpdate: {
+            /**
+             * Is Active
+             * @default true
+             */
+            is_active: boolean;
+            /**
+             * Limit Kind
+             * @enum {string}
+             */
+            limit_kind: "max_daily_loss_currency_base" | "max_position_concentration_pct" | "pdt_warn_remaining" | "min_buying_power_buffer_pct";
+            /** Limit Value */
+            limit_value: number | string;
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /** Scope Id */
+            scope_id?: string | null;
+            /**
+             * Scope Type
+             * @enum {string}
+             */
+            scope_type: "global" | "broker" | "account";
+            /** Warn At Pct */
+            warn_at_pct?: number | string | null;
+        };
         /** SecretIn */
         SecretIn: {
             /** Key */
@@ -1936,6 +2239,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_account_kill_switch_api_admin_accounts__account_id__kill_switch_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountKillSwitchOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    toggle_account_kill_switch_api_admin_accounts__account_id__kill_switch_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AccountKillSwitchToggleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountKillSwitchOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2423,6 +2794,109 @@ export interface operations {
                         [key: string]: boolean;
                     };
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_risk_limit_api_admin_risk_limits_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RiskLimitCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskLimitOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_risk_limit_api_admin_risk_limits__limit_id__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path: {
+                limit_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RiskLimitUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskLimitOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_risk_limit_api_admin_risk_limits__limit_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path: {
+                limit_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -3322,6 +3796,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_risk_decisions_api_risk_decisions_get: {
+        parameters: {
+            query?: {
+                account_id?: string | null;
+                verdict?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskDecisionOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_risk_limits_api_risk_limits_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskLimitOut"][];
                 };
             };
         };

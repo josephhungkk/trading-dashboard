@@ -20,6 +20,7 @@ from app.api import admin_instruments
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.admin_metrics import router as admin_metrics_router
+from app.api.admin_risk import router as admin_risk_router
 from app.api.bars import router as bars_router  # Task 28: GET /api/bars
 from app.api.bars import ws_router as bars_ws_router  # Task 31: WS /ws/bars
 from app.api.brokers import router as brokers_router
@@ -31,6 +32,7 @@ from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
 from app.api.orders import fills_router
 from app.api.orders import router as orders_router
+from app.api.risk import router as risk_router
 from app.api.sse import router as sse_router
 from app.api.ws_quotes import router as ws_quotes_router
 from app.core.config import settings
@@ -330,6 +332,8 @@ app.add_middleware(
 
 app.include_router(admin_router)
 app.include_router(admin_instruments.router)
+app.include_router(admin_risk_router)
+app.include_router(risk_router)
 app.include_router(brokers_admin_router)
 app.include_router(accounts_router)
 app.include_router(brokers_router)
