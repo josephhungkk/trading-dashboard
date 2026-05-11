@@ -99,6 +99,10 @@ export interface paths {
         /**
          * Get Account Kill Switch
          * @description Return the current kill-switch state; 404 when no row exists.
+         *
+         *     D9-fix: IdentityDep added for parity with the write handlers; the
+         *     router-level require_admin_jwt already enforces auth but the
+         *     function-level dep makes the contract explicit at the signature.
          */
         get: operations["get_account_kill_switch_api_admin_accounts__account_id__kill_switch_get"];
         put?: never;
@@ -380,7 +384,18 @@ export interface paths {
         /** Update Risk Limit */
         put: operations["update_risk_limit_api_admin_risk_limits__limit_id__put"];
         post?: never;
-        /** Delete Risk Limit */
+        /**
+         * Delete Risk Limit
+         * @description Soft-delete a risk limit (spec §6: is_active=false, idempotent).
+         *
+         *     D9-fix: was a hard DELETE before; the BEFORE UPDATE trigger
+         *     fn_risk_limits_history doesn't fire on DELETE, so a hard-delete left
+         *     no audit trail of who removed the limit. Now flips is_active=false +
+         *     stamps updated_by from the JWT identity, which triggers the history
+         *     snapshot. Returns 204 on success, 404 only when the row doesn't
+         *     exist; re-deleting an already-inactive limit is idempotent (200/204
+         *     with another history row).
+         */
         delete: operations["delete_risk_limit_api_admin_risk_limits__limit_id__delete"];
         options?: never;
         head?: never;
@@ -885,6 +900,12 @@ export interface paths {
          *     Optional filters: account_id (UUID), verdict (allow|warn|block).
          *     The DB indexes idx_risk_decisions_account_time and
          *     idx_risk_decisions_blocked cover the two hot filter paths.
+         *
+         *     D9-fix: static SQL with `:param IS NULL OR col = :param` filters
+         *     instead of dynamic f-string WHERE composition — removes the
+         *     superficial injection-pattern that static analysers flag and
+         *     eliminates any future risk that a user-controllable string lands in
+         *     the SQL text body.
          */
         get: operations["list_risk_decisions_api_risk_decisions_get"];
         put?: never;
