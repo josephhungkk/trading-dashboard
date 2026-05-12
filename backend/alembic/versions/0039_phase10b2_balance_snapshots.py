@@ -65,4 +65,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # 0040 CAGGs must downgrade first to release dependencies.
+    # Review MED: remove TimescaleDB jobs cleanly so a re-upgrade doesn't
+    # collide with orphan retention jobs pointing at the dropped table.
+    op.execute(
+        "SELECT remove_retention_policy('account_balance_snapshots', if_exists => true)"
+    )
     op.execute("DROP TABLE IF EXISTS account_balance_snapshots CASCADE")

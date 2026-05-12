@@ -1437,6 +1437,10 @@ class BrokerDiscoverer:
 
         nlv_update_count = 0
         nlv_overflow_count = 0
+        # Review HIGH #4: clear pending publish buffer at the top of every
+        # tick so a prior tick's outer-TX rollback doesn't leak phantom
+        # dirty signals into this tick's post-commit drain.
+        self._pending_publish_account_ids.clear()
         t_start = time.monotonic()
         from app.services.broker_registry_factory import SIDECAR_BROKERS
 
@@ -1473,17 +1477,24 @@ class BrokerDiscoverer:
                             # row's id returned by the UPDATE; if no row matched
                             # (deleted_at flipped between discovery and this write),
                             # skip the snapshot.
+                            # Review HIGH #5: count only when a row actually
+                            # matched. If deleted_at flipped between discovery
+                            # and this write, RETURNING produces no rows and
+                            # the SAVEPOINT commits a no-op — the existing
+                            # nlv_update_count semantics ("rows touched") are
+                            # preserved.
+                            returned_id = nlv_update_result.scalar_one_or_none()
+                            if returned_id is None:
+                                continue
                             if self._balance_snapshot_writer is not None:
-                                returned_id = nlv_update_result.scalar_one_or_none()
-                                if returned_id is not None:
-                                    await self._balance_snapshot_writer.record(
-                                        session,
-                                        account_id=returned_id,
-                                        nlv=nlv_str,
-                                        currency=summary.net_liquidation.currency,
-                                        source_label=label,
-                                    )
-                                    self._pending_publish_account_ids.append(returned_id)
+                                await self._balance_snapshot_writer.record(
+                                    session,
+                                    account_id=returned_id,
+                                    nlv=nlv_str,
+                                    currency=summary.net_liquidation.currency,
+                                    source_label=label,
+                                )
+                                self._pending_publish_account_ids.append(returned_id)
                         nlv_update_count += 1
                     except DBAPIError as exc:
                         # 22003 = numeric_value_out_of_range (asyncpg sqlstate);

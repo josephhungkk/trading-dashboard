@@ -110,5 +110,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Review MED: remove TimescaleDB policies cleanly so a re-upgrade doesn't
+    # collide with orphan jobs. Order: drop dependent (1d) before base (1h).
+    op.execute(
+        "SELECT remove_continuous_aggregate_policy("
+        "'account_balance_snapshots_1d', if_exists => true)"
+    )
+    op.execute(
+        "SELECT remove_retention_policy('account_balance_snapshots_1d', if_exists => true)"
+    )
     op.execute("DROP MATERIALIZED VIEW IF EXISTS account_balance_snapshots_1d CASCADE")
+    op.execute(
+        "SELECT remove_continuous_aggregate_policy("
+        "'account_balance_snapshots_1h', if_exists => true)"
+    )
+    op.execute(
+        "SELECT remove_retention_policy('account_balance_snapshots_1h', if_exists => true)"
+    )
     op.execute("DROP MATERIALIZED VIEW IF EXISTS account_balance_snapshots_1h CASCADE")

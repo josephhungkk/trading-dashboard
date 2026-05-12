@@ -159,7 +159,22 @@ async def test_schedule_publish_tracks_and_drains_task(redis) -> None:
 
 
 async def test_publish_failure_increments_failure_metric() -> None:
-    """redis.publish raising → caught in _publish; failure counter ticks."""
+    """redis.publish raising → caught in _publish; failure counter ticks.
+
+    Implementation note: we need the publish task to enter its body and
+    reach the `except Exception` handler BEFORE cancellation arrives in
+    stop(). Two choices:
+
+    1. await an asyncio.sleep(0) (single event-loop yield) — lets the task
+       be scheduled and run to its first `await self._redis.publish(...)`,
+       at which point the synchronous side_effect=RuntimeError raises and
+       is caught by the except Exception handler — metric incremented.
+       Then stop() cancels a task that's already done; gather is a no-op.
+    2. Block on asyncio.sleep(longer) for cross-loop / loaded-CI safety.
+
+    Sleep(0) is sufficient on a quiet loop; bumping to 0.05 is defensive
+    against CI scheduling variance (review MED — time-coupling smell).
+    """
     import asyncio
 
     failing_redis = AsyncMock()
@@ -167,9 +182,6 @@ async def test_publish_failure_increments_failure_metric() -> None:
     writer = BalanceSnapshotWriter(failing_redis)
     before = metrics.portfolio_rollup_publish_failures_total._value.get()
     writer.schedule_publish(uuid4())
-    # Yield so the publish task runs its body (await redis.publish raises,
-    # is caught by the except Exception in _publish, and increments the
-    # failure metric) BEFORE we cancel via stop().
     await asyncio.sleep(0.05)
     await writer.stop()
     after = metrics.portfolio_rollup_publish_failures_total._value.get()

@@ -30,10 +30,21 @@ _INSERT_SNAPSHOT_SQL = text(
     """
     INSERT INTO account_balance_snapshots
       (account_id, ts, nlv, currency, source_label)
-    VALUES (:account_id, now(), CAST(:nlv AS NUMERIC(20, 8)), :currency, :source_label)
+    VALUES (
+      :account_id,
+      clock_timestamp(),
+      CAST(:nlv AS NUMERIC(20, 8)),
+      :currency,
+      :source_label
+    )
     ON CONFLICT (account_id, ts) DO NOTHING
     """
 )
+# Review HIGH #6: clock_timestamp() (NOT now()) so per-row INSERTs in the same
+# outer transaction get distinct timestamps. now() returns the transaction
+# start time and is stable across the whole TX, which would collapse multi-
+# account snapshots in a single _discover_nlv tick into the same ts and
+# trigger silent ON CONFLICT drops.
 
 _DIRTY_CHANNEL = "portfolio.rollup.dirty"
 

@@ -306,9 +306,13 @@ async def lifespan(_app: FastAPI) -> Any:
             await order_consumer.stop()
         if broker_discoverer is not None:
             await broker_discoverer.stop()
-        # Phase 10b.2: defensive — drain any publish tasks if writer was
-        # constructed but discoverer wasn't (e.g. partial-init failure path).
-        if getattr(_app.state, "balance_snapshot_writer", None) is not None:
+        # Phase 10b.2: defensive — drain publish tasks ONLY when the
+        # discoverer didn't get instantiated (partial-init failure path).
+        # When broker_discoverer.stop() runs, it already calls writer.stop().
+        # Double-calling stop() is racy (the discard done_callback can run
+        # asynchronously between calls, leaking pending entries — review
+        # HIGH #3).
+        elif getattr(_app.state, "balance_snapshot_writer", None) is not None:
             await _app.state.balance_snapshot_writer.stop()
         if broker_registry is not None:
             await broker_registry.stop()
