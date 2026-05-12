@@ -24,4 +24,4 @@ fi
 
 exec docker compose exec -T \
     -e DATABASE_URL="$TEST_DB_URL" \
-    backend /app/.venv/bin/pytest --timeout=120 -p no:cacheprovider "$@"
+    backend /app/.venv/bin/pytest --timeout=120 "$@"

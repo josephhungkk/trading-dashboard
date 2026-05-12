@@ -63,7 +63,7 @@ def _is_test_db() -> bool:
     return "test_postgres" in db_url or ":5433" in db_url
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def _seed_minimal_test_data(request: pytest.FixtureRequest) -> None:
     """Seed a single broker_account row + a handful of instruments rows on
     the test PG so integration tests that look for ANY row don't skip.
@@ -120,6 +120,15 @@ def _seed_minimal_test_data(request: pytest.FixtureRequest) -> None:
                     currency,
                     display_name,
                 )
+            # Note: did NOT seed an `orders` row. Two tests in
+            # test_risk_decisions_audit.py (modify_order audit + pg_notify
+            # trigger) need ANY orders FK target, but seeding a row with
+            # FK to our broker_account collides with `test_discover_e2e`
+            # which does `DELETE FROM broker_accounts` (FK violation), and
+            # leaks into `test_orders_get` listings (assertion drift). Those
+            # 2 specific tests stay marked skipped via their own _existing
+            # _order_id helper — they only run when the operator has a
+            # populated DB.
         finally:
             await conn.close()
 
