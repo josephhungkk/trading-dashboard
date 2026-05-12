@@ -590,6 +590,137 @@ async def test_gv8_drill_no_cap_returns_ok(db_session, redis) -> None:
         await _cleanup_accounts([aid])
 
 
+async def _seed_account_with_options(
+    broker: str,
+    native: str,
+    nlv: str | None,
+    nlv_currency: str | None,
+    age_seconds: int = 0,
+) -> UUID:
+    """Insert one broker_accounts row with explicit NLV nullability + age
+    control. age_seconds=0 means now(); positive values move last_nlv_at
+    into the past."""
+    aid = uuid4()
+    last_nlv_at_sql = "now()" if age_seconds == 0 else f"now() - INTERVAL '{age_seconds} seconds'"
+    nlv_sql = f"CAST('{nlv}' AS NUMERIC(20,8))" if nlv is not None else "NULL"
+    currency_sql = f"'{nlv_currency}'" if nlv_currency is not None else "NULL"
+    async with SessionLocal() as s:
+        async with s.begin():
+            await s.execute(
+                text(
+                    f"""
+                    INSERT INTO broker_accounts
+                      (id, broker_id, account_number, mode, gateway_label,
+                       currency_base, last_seen_via, last_nlv,
+                       last_nlv_currency, last_nlv_at)
+                    VALUES
+                      (:id, CAST(:broker AS broker_id_enum), :acct, 'paper',
+                       :gateway, :base, :gateway, {nlv_sql}, {currency_sql},
+                       {last_nlv_at_sql})
+                    """
+                ),
+                {
+                    "id": str(aid),
+                    "broker": broker,
+                    "acct": f"TEST-{aid.hex[:8]}",
+                    "gateway": f"{broker}-test",
+                    "base": native,
+                },
+            )
+    return aid
+
+
+async def test_gv3_base_equals_native_currency(db_session, redis) -> None:
+    """GV3 — single USD account, base=USD → fx_rate=1.0, total=10000.00."""
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "10000")
+    mutated = await _soft_delete_others([aid])
+    # No fx:mid:USD:USD key needed — _fx_rate identity short-circuit.
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        live = await service.compute_live("USD")
+        assert live.total_nlv_base == Decimal("10000.00")
+        gv3 = next(a for a in live.accounts if a.account_id == aid)
+        assert gv3.fx_rate == Decimal("1")
+        assert gv3.nlv_base == Decimal("10000.00000000")
+        # No fx_rates entry for the identity USD/USD path — only foreign pairs
+        assert "USD/USD" not in live.fx_rates
+    finally:
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_gv5_stale_account_in_stale_accounts(db_session, redis) -> None:
+    """GV5 — last_nlv_at older than 5min → account UUID in stale_accounts."""
+    await redis.flushdb()
+    # Use the options helper to force last_nlv_at = now() - 360 seconds
+    aid = await _seed_account_with_options("ibkr", "USD", "10000", "USD", age_seconds=360)
+    mutated = await _soft_delete_others([aid])
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        live = await service.compute_live("GBP")
+        assert aid in live.stale_accounts
+        gv5 = next(a for a in live.accounts if a.account_id == aid)
+        assert gv5.status == "stale"
+        assert gv5.nlv_age_s > 300  # > 5 min threshold
+    finally:
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_gv9_negative_nlv_margin_call(db_session, redis) -> None:
+    """GV9 — last_nlv = -1500 USD (margin call). No nlv >= 0 CHECK on
+    broker_accounts (and the snapshot table also dropped it per CRIT #1).
+    The rollup must include the negative contribution in total_nlv_base."""
+    await redis.flushdb()
+    aid = await _seed_account_with_options("ibkr", "USD", "-1500", "USD", age_seconds=0)
+    mutated = await _soft_delete_others([aid])
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        live = await service.compute_live("GBP")
+        # -1500 * 0.7912 = -1186.80
+        assert live.total_nlv_base == Decimal("-1186.80")
+        gv9 = next(a for a in live.accounts if a.account_id == aid)
+        assert gv9.nlv_native == Decimal("-1500.00000000")
+        assert gv9.nlv_base == Decimal("-1186.80000000")
+        # Status is "live" — negative NLV is not by itself stale or fx_stale
+        assert gv9.status == "live"
+    finally:
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_gv11_null_nlv_fresh_account(db_session, redis) -> None:
+    """GV11 — last_nlv=NULL → status='initialising', nlv_base=None,
+    excluded from total_nlv_base and stale_accounts."""
+    await redis.flushdb()
+    aid = await _seed_account_with_options(
+        "ibkr", "USD", nlv=None, nlv_currency=None, age_seconds=0
+    )
+    mutated = await _soft_delete_others([aid])
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        live = await service.compute_live("GBP")
+        assert len(live.accounts) == 1
+        gv11 = live.accounts[0]
+        assert gv11.account_id == aid
+        assert gv11.status == "initialising"
+        assert gv11.nlv_base is None
+        assert gv11.nlv_native is None
+        assert live.total_nlv_base == Decimal("0.00")
+        assert aid not in live.stale_accounts
+        assert aid not in live.fx_stale_accounts
+    finally:
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
 async def test_drill_unknown_asset_class_returns_empty(db_session, redis) -> None:
     """Unknown asset class → empty instruments list (not an error)."""
     await redis.flushdb()
