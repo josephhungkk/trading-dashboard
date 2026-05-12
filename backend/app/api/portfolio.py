@@ -48,13 +48,15 @@ def _check_rate_limit(identity: AdminIdentity) -> None:
     Architect HIGH #6: single bucket per jwt_subject — a curve fetch can't
     drown a live rollup poll because they share the quota.
     """
+    limiter = get_portfolio_limiter()
     try:
-        get_portfolio_limiter().check(identity.email)
+        limiter.check(identity.email)
     except PortfolioRateLimitExceededError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"error": "rate_limited"},
         ) from exc
+    limiter.evict_stale(identity.email)
 
 
 def _validate_base(base: str) -> str:
@@ -107,7 +109,14 @@ async def get_rollup_curve(
     _check_rate_limit(identity)
     _validate_base(base)
     t0 = time.monotonic()
-    result = await PortfolioRollupService(db, redis).compute_curve(base, window)
+    try:
+        result = await PortfolioRollupService(db, redis).compute_curve(base, window)
+    except PreviewUnavailable as exc:
+        if exc.payload.get("error") == "fx_rate_unavailable":
+            metrics.portfolio_rollup_fx_unavailable_total.labels(
+                pair=str(exc.payload.get("pair", "?"))
+            ).inc()
+        raise HTTPException(status_code=exc.status_code, detail=exc.payload) from exc
     metrics.portfolio_rollup_compute_total.labels(endpoint="curve", base_currency=base).inc()
     metrics.portfolio_rollup_compute_latency_seconds.labels(endpoint="curve").observe(
         time.monotonic() - t0
@@ -126,7 +135,14 @@ async def get_rollup_drill(
     _check_rate_limit(identity)
     _validate_base(base)
     t0 = time.monotonic()
-    result = await PortfolioRollupService(db, redis).drill_asset_class(asset_class, base)
+    try:
+        result = await PortfolioRollupService(db, redis).drill_asset_class(asset_class, base)
+    except PreviewUnavailable as exc:
+        if exc.payload.get("error") == "fx_rate_unavailable":
+            metrics.portfolio_rollup_fx_unavailable_total.labels(
+                pair=str(exc.payload.get("pair", "?"))
+            ).inc()
+        raise HTTPException(status_code=exc.status_code, detail=exc.payload) from exc
     metrics.portfolio_rollup_compute_total.labels(endpoint="drill", base_currency=base).inc()
     metrics.portfolio_rollup_compute_latency_seconds.labels(endpoint="drill").observe(
         time.monotonic() - t0

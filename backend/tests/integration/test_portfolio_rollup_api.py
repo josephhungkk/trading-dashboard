@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,13 +19,15 @@ from app.services.portfolio_rate_limiter import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_limiter() -> None:
+def _reset_limiter() -> Generator[None]:
     """PortfolioRateLimiter is a module-level singleton; reset its
     sliding-window state between tests so 429 doesn't leak across runs.
+    Reset BEFORE and AFTER each test to avoid ordering-dependent flakes.
     """
     _reset_portfolio_limiter_for_tests()
-    # Pre-touch so the lazy init happens BEFORE any test body
     get_portfolio_limiter()
+    yield
+    _reset_portfolio_limiter_for_tests()
 
 
 @pytest_asyncio.fixture

@@ -46,6 +46,8 @@ class PortfolioRateLimiter:
 
     def check(self, jwt_subject: str) -> None:
         """Raise PortfolioRateLimitExceededError if subject is over quota."""
+        if not jwt_subject:
+            raise PortfolioRateLimitExceededError("portfolio rate limit: empty jwt_subject")
         now = self._now()
         bucket = self._buckets[jwt_subject]
         cutoff = now - self._window
