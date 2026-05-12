@@ -25,7 +25,7 @@ This closes the last open Phase 10 deliverable. After this phase, Phase 10 is co
 ### In scope
 
 1. **NLV rollup** — cross-broker sum of `broker_accounts.last_nlv` per account, FX-converted to a user-selectable base currency (default GBP). Live, intraday curve, 30-day curve, and 1-year+ curve.
-2. **Exposure by asset class** — cross-broker `SUM(positions.market_value_base)` grouped by `instruments.asset_class` and direction (long/short).
+2. **Exposure by asset class** — cross-broker `SUM(qty * avg_cost * multiplier * fx_rate)` per position grouped by `instruments.asset_class` and direction (long/short). FX applied at read time using current rates. **Caveat:** exposure is computed at average cost, not at last quote mark — `positions.market_value_base` column does not exist today (see ARCHITECT [CRIT #2] — risk_service uses the same approximation per its Phase 10a.5 B3 comment). Page header renders "Exposure at cost basis" badge to set operator expectation. Adding a real mark-to-market column is deferred to Phase 10b.3 or Phase 24.
 3. **P&L attribution per broker/account** — realized (today) + unrealized, sourced from the existing `v_account_intraday_pnl` view (Phase 10a.5).
 4. **Drill-down** — click an asset-class row, expand contributing instruments with concentration-cap utilisation (informational, not enforcement).
 5. **Realtime push** — WebSocket topic `portfolio.rollup` whenever any sidecar refreshes NLV. FE auto-updates with 500 ms debounce.
@@ -107,8 +107,16 @@ CREATE TABLE account_balance_snapshots (
   source_label  TEXT          NOT NULL,
   PRIMARY KEY (account_id, ts),
   CONSTRAINT ck_abs_currency_iso3 CHECK (currency ~ '^[A-Z]{3}$'),
-  CONSTRAINT ck_abs_nlv_nonneg    CHECK (nlv >= 0)
+  CONSTRAINT ck_abs_source_label  CHECK (
+    source_label ~ '^[a-z0-9-]+$' AND length(source_label) <= 64
+  )
 );
+-- ARCHITECT [CRIT #1]: no nlv >= 0 constraint — margin-call accounts have
+-- legitimately negative NLV during settlement / over-leverage. Mirrors
+-- broker_accounts.last_nlv which has no such constraint (alembic 0003).
+-- ARCHITECT [MED #1]: source_label is dictionary-encoded by TimescaleDB
+-- column compression; unbounded text defeats compression. Constrain to
+-- lowercase-alphanumeric-hyphen, <= 64 chars (mirrors pnl_intraday).
 
 SELECT create_hypertable(
   'account_balance_snapshots', 'ts',
@@ -152,6 +160,17 @@ SELECT add_continuous_aggregate_policy(
   schedule_interval => INTERVAL '30 minutes'
 );
 
+-- ARCHITECT [MED #2]: every CAGG must declare retention explicitly.
+SELECT add_retention_policy(
+  'account_balance_snapshots_1h', INTERVAL '1 year'
+);
+
+-- ARCHITECT [MED #3]: real-time aggregation — UNION recent raw with CAGG
+-- so compute_curve(window='30d') doesn't gap between deploy and first
+-- scheduled refresh, and between scheduled refreshes thereafter.
+ALTER MATERIALIZED VIEW account_balance_snapshots_1h
+  SET (timescaledb.materialized_only = false);
+
 -- 1d granularity, 5y retention — feeds window=1y
 CREATE MATERIALIZED VIEW account_balance_snapshots_1d
 WITH (timescaledb.continuous) AS
@@ -173,30 +192,62 @@ SELECT add_continuous_aggregate_policy(
   end_offset   => INTERVAL '1 day',
   schedule_interval => INTERVAL '6 hours'
 );
+
+SELECT add_retention_policy(
+  'account_balance_snapshots_1d', INTERVAL '10 years'
+);
+
+ALTER MATERIALIZED VIEW account_balance_snapshots_1d
+  SET (timescaledb.materialized_only = false);
 ```
 
-Initial backfill is **synchronous in `upgrade()`** via `CALL refresh_continuous_aggregate('...', NULL, NULL)` — same pattern as Phase 10b.1 Alembic 0038.
+**ARCHITECT [CRIT #3]: CAGG backfill must use autocommit_block.** `refresh_continuous_aggregate(...)` is a PROCEDURE that issues internal `COMMIT` and rejects running inside a transaction. Alembic's `env.py:65` sets `transaction_per_migration=True` which wraps every migration in `BEGIN ... COMMIT`. The Phase 10b.1 alembic 0038 precedent is **load-bearing wrong** — it only worked because `bars_1m` was near-empty on the current deploy. Correct pattern:
+
+```python
+# In Alembic 0040 upgrade():
+with op.get_context().autocommit_block():
+    op.execute("CALL refresh_continuous_aggregate('account_balance_snapshots_1h', NULL, NULL)")
+    op.execute("CALL refresh_continuous_aggregate('account_balance_snapshots_1d', NULL, NULL)")
+```
+
+(See §15 Footguns for the precedent retraction. Phase 9.6 retro should also revert 0038 — out of scope for this phase but logged.)
 
 ### 4.3 Writer hook (code change, no schema)
 
-At `brokers.py:1416` (the canonical `SET last_nlv = ...` UPDATE site), after the UPDATE succeeds, in the **same transaction**:
+At `brokers.py:1416` (the canonical `SET last_nlv = ...` UPDATE site, inside the existing per-account `session.begin_nested()` SAVEPOINT at line 1449), the snapshot INSERT must run in its **own inner SAVEPOINT** so its failure does not roll back the NLV UPDATE.
 
-```sql
-INSERT INTO account_balance_snapshots
-  (account_id, ts, nlv, currency, source_label)
-VALUES (:id, now(), :nlv, :currency, :label)
-ON CONFLICT (account_id, ts) DO NOTHING;
+**ARCHITECT [HIGH #1]: two-level SAVEPOINT pattern.** Same-outer-SAVEPOINT placement (the naive pattern) would roll back the NLV UPDATE on INSERT failure, defeating fail-OPEN. SQLAlchemy 2.0 nested SAVEPOINTs are the canonical isolation mechanism:
+
+```python
+async with session.begin_nested():            # outer SAVEPOINT: NLV update
+    await session.execute(nlv_update_stmt, params)
+    try:
+        async with session.begin_nested():    # inner SAVEPOINT: snapshot insert
+            await session.execute(
+                text("""
+                    INSERT INTO account_balance_snapshots
+                      (account_id, ts, nlv, currency, source_label)
+                    VALUES (:id, now(), :nlv, :currency, :label)
+                    ON CONFLICT (account_id, ts) DO NOTHING
+                """),
+                {"id": account_id, "nlv": nlv, "currency": currency, "label": source_label},
+            )
+    except Exception:
+        portfolio_rollup_snapshot_write_errors_total.inc()
+        log.exception("portfolio_rollup_snapshot_write_failed", account_id=str(account_id))
 ```
 
 `ON CONFLICT DO NOTHING` guards against same-microsecond double-writes from two sidecar threads. The next refresh in ~30 s closes any visual gap.
 
-**Fail-OPEN policy:** if the INSERT raises, the exception is logged + metric ticked, but the surrounding NLV update **succeeds**. We accept losing one bucket of history rather than blocking an NLV write that gate/sizer depend on. Mirrors Phase 10a's `risk_audit_insert_failures_total` pattern.
+**Fail-OPEN policy:** if the inner SAVEPOINT raises, the exception is caught, metric ticked, but the outer SAVEPOINT (containing the NLV UPDATE) continues. We accept losing one bucket of history rather than blocking an NLV write that gate/sizer depend on. Mirrors Phase 10a's `risk_audit_insert_failures_total` pattern.
+
+**Test:** §11.1 test_balance_snapshot_writer must include "INSERT raises CheckViolation → metric increments, NLV UPDATE still commits, outer transaction still commits."
 
 ### 4.4 What is not touched
 
 - `broker_accounts.last_nlv` / `last_nlv_currency` / `last_nlv_at` — unchanged. Risk gate (`risk_service.py`), sizer (`position_sizing_service.py`), and orders (`orders_service.py`) keep reading the existing columns.
 - `pnl_intraday` / `v_account_intraday_pnl` — read-only consumers for the P&L slice.
-- `positions.market_value_base` — read-only consumer for the exposure slice.
+- `positions` (qty, avg_cost, multiplier, currency, instrument_id) — read-only consumer for the exposure slice. Computed at cost basis per ARCHITECT [CRIT #2]; no schema change to `positions`.
 
 ---
 
@@ -238,7 +289,21 @@ class RollupLive(BaseModel):
     stale_accounts: list[UUID]                          # last_nlv_at > 5min old
 ```
 
-FX conversion uses the existing `_fx_rate(redis, src, dst)` helper from `orders_service.py:1904`. **Invariant:** any `PreviewUnavailable(503, fx_rate_unavailable)` from the helper aborts the whole compute with the same code propagated upward — no zero-substitution, no silent fallback.
+FX conversion uses the existing `_fx_rate(redis, src, dst)` helper from `orders_service.py:1904`.
+
+**ARCHITECT [HIGH #4]: Per-account FX fault isolation.** Each account's `nlv_base` is computed independently. If `_fx_rate` raises `PreviewUnavailable(fx_rate_unavailable)` for ONE account's currency pair, that account is marked `fx_stale=true`, its `nlv_base` is set to `None`, and its UUID appended to `fx_stale_accounts`. The endpoint returns **200 with `partial=true`** and excludes null contributions from `total_nlv_base`. Only return 503 when ALL accounts' FX pairs are unavailable. Drift rationale: trade-execution paths (where `_fx_rate` originated) need single-decision 503; rollup view is multi-account and degrades gracefully. Phase 10a.5 effectivity-closure thesis applies.
+
+```python
+class RollupLive(BaseModel):
+    # ...existing fields...
+    partial: bool = False                                # any per-account FX failed
+    fx_stale_accounts: list[UUID] = Field(default_factory=list)
+
+class PerAccount(BaseModel):
+    # ...existing fields...
+    fx_stale: bool = False
+    nlv_base: Decimal | None = None                      # None when fx_stale
+```
 
 #### `compute_curve`
 
@@ -304,24 +369,36 @@ class InstrumentExposure(BaseModel):
 
 | Method + path | Auth | CSRF | Returns | Rate limit |
 |---|---|---|---|---|
-| `GET /api/portfolio/rollup?base=GBP` | JWT | no | `RollupLive` | 10/s burst per `(subject, route)` |
-| `GET /api/portfolio/rollup/curve?base=GBP&window=intraday\|30d\|1y` | JWT | no | `RollupCurve` | 10/s |
-| `GET /api/portfolio/rollup/drill?asset_class=equity&base=GBP` | JWT | no | `RollupDrill` | 10/s |
+| `GET /api/portfolio/rollup?base=GBP` | JWT | no | `RollupLive` | shared `"portfolio"` bucket |
+| `GET /api/portfolio/rollup/curve?base=GBP&window=intraday\|30d\|1y` | JWT | no | `RollupCurve` | shared `"portfolio"` bucket |
+| `GET /api/portfolio/rollup/drill?asset_class=equity&base=GBP` | JWT | no | `RollupDrill` | shared `"portfolio"` bucket |
 
-All endpoints validate `base` against `^[A-Z]{3}$`. `window` is a strict Literal union; `asset_class` is a permissive string validated against the `instruments.asset_class` open-set on read (returns `RollupDrill` with `instruments=[]` if no rows match — not an error).
+All endpoints validate `base` against `^[A-Z]{3}$`. `window` is a strict Literal union; `asset_class` is a permissive string validated against the `instruments.asset_class` open-set on read (returns `RollupDrill` with `instruments=[]` if no rows match — not an error). Supported base currencies (hard-coded set): `{GBP, USD, EUR, HKD, JPY, AUD}` (ARCHITECT [MED #7]).
 
-Rate limiter is the `SlidingWindowRateLimiter` from Phase 10b.1, instantiated as a module-level singleton with the `_reset_limiter` autouse fixture pattern for tests.
+**ARCHITECT [HIGH #6]: Rate limiter signature.** The existing `SlidingWindowRateLimiter` at `position_sizing_rate_limiter.py:43` keys on `(jwt_subject, account_id)` — rollup is cross-account so that shape doesn't fit. Spin a fresh instance with key `(jwt_subject, "portfolio")` — a single shared bucket across all three rollup endpoints so a curve fetch can't drown a live rollup poll. **Total cap: 10/s burst per jwt_subject**. Module-level singleton in `app/services/portfolio_rate_limiter.py`; `_reset_portfolio_limiter` autouse fixture in tests (copy from `_reset_limiter`).
 
 ### 5.3 Redis pubsub publisher (writer-side)
 
 After the snapshot insert in `brokers.py:1416`:
 
+**ARCHITECT [HIGH #5]: Tracked task set to prevent GC strand.** Naked `asyncio.create_task(...)` is on the project's silent-failure-hunter antipattern list (`codex_defaults.md` pattern). Python's GC can collect the task while in-flight if no strong ref is held, producing `Task was destroyed but it is pending!` warnings.
+
 ```python
-asyncio.create_task(_publish_dirty(redis, account_id))
-# where _publish_dirty catches and logs exceptions; never raises
+# In brokers.py BrokerDiscoverer.__init__:
+self._publish_tasks: set[asyncio.Task] = set()
+
+# After the inner SAVEPOINT INSERT in §4.3:
+task = asyncio.create_task(_publish_dirty(self._redis, account_id))
+self._publish_tasks.add(task)
+task.add_done_callback(self._publish_tasks.discard)
+
+# In BrokerDiscoverer.stop():
+for t in list(self._publish_tasks):
+    t.cancel()
+await asyncio.gather(*self._publish_tasks, return_exceptions=True)
 ```
 
-Channel: `portfolio.rollup.dirty`. Payload: `str(account_id)`. **Fire-and-forget** — a Redis blip never blocks the NLV write path.
+Channel: `portfolio.rollup.dirty`. Payload: `str(account_id)`. **`_publish_dirty` catches all exceptions** — a Redis blip never blocks the NLV write path. **On publish failure**, increment `portfolio_rollup_publish_failures_total` and rely on the WS 30 s heartbeat to mask up to one 30 s window of UI staleness.
 
 ---
 
@@ -329,40 +406,78 @@ Channel: `portfolio.rollup.dirty`. Payload: `str(account_id)`. **Fire-and-forget
 
 **Endpoint:** `/ws/portfolio/rollup?base=GBP`.
 
-**Auth:** `require_admin_jwt_ws` (same helper as `ws_quotes.py`).
+**Connection lifecycle (in order):**
 
-**Connection cap:** 20 concurrent (single-user dashboard; plenty of headroom).
+1. **ARCHITECT [HIGH #2] CSWSH origin check** — compare `ws.headers.get("origin")` against `app.state.cors_origins`. Mismatch → close `WS_1008_POLICY_VIOLATION` reason="origin". Mirrors `ws_quotes.py:156-158`.
+2. **Auth via `require_admin_jwt_ws`** — closes `WS_1008_POLICY_VIOLATION` reason="auth" on failure (NOT a custom 4401 — the helper produces 1008 per `ws_auth.py:50,57,61,66`).
+3. Accept upgrade; emit initial `snapshot` frame.
 
-**Frame format:** JSON (not MessagePack — daily-cadence data, MessagePack's wire-size win is not material here).
+**Connection cap:** 20 concurrent (single-user dashboard).
+
+**Frame format:** JSON with explicit `"version": 1` field (ARCHITECT [MED #4]) — FE checks version, unknown version → close WS + revert to REST polling.
 
 **Parallel gateway, not co-opted.** `ws_quotes.py` keeps its MessagePack subprotocol + per-symbol conflation untouched. `ws_portfolio.py` is a net-new file with its own auth, debounce, and frame schema. The two share `require_admin_jwt_ws` but nothing else.
 
 ```
 client → WS
-       ← {"type": "snapshot", "payload": <RollupLive>}      (initial)
-       ← {"type": "snapshot", "payload": <RollupLive>}      (debounced fire)
-       ← {"type": "stale", "account_ids": [...]}             (30s heartbeat)
-       ← {"type": "error", "code": "fx_rate_unavailable"}    (kept-last-snapshot)
+       ← {"version":1, "type": "snapshot", "payload": <RollupLive>}        (initial)
+       ← {"version":1, "type": "snapshot", "payload": <RollupLive>,
+          "partial": true, "fx_stale_accounts": [...]}                       (partial FX outage)
+       ← {"version":1, "type": "snapshot", "payload": <RollupLive>}        (debounced fire)
+       ← {"version":1, "type": "stale", "account_ids": [...]}              (30s heartbeat)
 ```
 
-**Debounce loop** — one task per connection, 500 ms window:
+**Debounce loop with per-connection compute cache:**
+
+**ARCHITECT [HIGH #3]:** the canonical pattern is `pubsub.listen()` + `asyncio.Event` (used in 4/5 existing pubsub consumers — `orders_sse.py:111`, `config_cache.py:70`; NOT `get_message` polling). Plus a 250 ms per-connection compute cache so a publish burst doesn't trigger N recomputes. Plus `asyncio.wait_for` on every send so a slow client can't backpressure the loop.
 
 ```python
-async def _pump():
+_COMPUTE_CACHE_TTL_S = 0.25
+_DEBOUNCE_S = 0.5
+_SEND_TIMEOUT_S = 2.0
+
+async def _pump(ws, redis, base_currency):
     pubsub = redis.pubsub()
     await pubsub.subscribe("portfolio.rollup.dirty")
+    dirty = asyncio.Event()
+
+    async def _listen():
+        async for _msg in pubsub.listen():
+            dirty.set()
+
+    listener = asyncio.create_task(_listen())
     last_send = 0.0
-    dirty = False
-    while connected:
-        msg = await asyncio.wait_for(pubsub.get_message(...), timeout=0.5)
-        if msg:
-            dirty = True
-        now = time.monotonic()
-        if dirty and (now - last_send) >= 0.5:
-            payload = await service.compute_live(base_currency)
-            await ws.send_json({"type": "snapshot", "payload": payload})
+    last_compute = 0.0
+    last_payload: dict | None = None
+    try:
+        while connected:
+            try:
+                await asyncio.wait_for(dirty.wait(), timeout=_DEBOUNCE_S)
+            except TimeoutError:
+                pass
+            dirty.clear()
+            now = time.monotonic()
+            if (now - last_send) < _DEBOUNCE_S:
+                continue
+            if (now - last_compute) < _COMPUTE_CACHE_TTL_S and last_payload is not None:
+                payload = last_payload
+            else:
+                payload = await service.compute_live(base_currency)
+                last_payload = payload
+                last_compute = now
+            try:
+                await asyncio.wait_for(
+                    ws.send_json({"version": 1, "type": "snapshot", "payload": payload}),
+                    timeout=_SEND_TIMEOUT_S,
+                )
+            except TimeoutError:
+                portfolio_rollup_ws_send_timeout_total.inc()
+                await ws.close(code=WS_1011_INTERNAL_ERROR)
+                break
             last_send = now
-            dirty = False
+    finally:
+        listener.cancel()
+        await asyncio.gather(listener, return_exceptions=True)
 ```
 
 A burst of 4 sidecars publishing within 500 ms collapses to one snapshot. Matches Phase 7b.1 quote-bus conflation philosophy (4–10/s for quotes; 2/s max for rollup is appropriate for daily-cadence data).
@@ -438,7 +553,23 @@ Pattern borrowed from `useQuoteSubscription` in `services/quotes/`. Slow network
 
 ### 7.4 Base-currency selector
 
-Bound to a Zustand-scoped store entry (`portfolioRollupBase`). Persisted to `localStorage` via Zustand's persist middleware. Default GBP. Validated against `^[A-Z]{3}$` client-side before fetch.
+Bound to a Zustand-scoped store entry (`portfolioRollupBase`). Persisted to `localStorage` via Zustand's persist middleware. Default GBP. Validated against the hard-coded supported set `{GBP, USD, EUR, HKD, JPY, AUD}` client-side before fetch.
+
+**ARCHITECT [MED #7]:** Zustand persist `migrate` callback validates the persisted value on read; resets to GBP if invalid (e.g., user hand-edited localStorage to `'XYZ'`). Prevents an indefinite-422 loop.
+
+```typescript
+persist({
+  storage: createJSONStorage(() => localStorage),
+  version: 1,
+  migrate: (state, version) => {
+    const SUPPORTED = new Set(['GBP','USD','EUR','HKD','JPY','AUD']);
+    if (!SUPPORTED.has((state as any)?.portfolioRollupBase)) {
+      return { ...(state as object), portfolioRollupBase: 'GBP' };
+    }
+    return state;
+  },
+})
+```
 
 ### 7.5 Window toggle
 
@@ -493,7 +624,7 @@ Six Prometheus metrics + one gauge:
 - **AuthN/AuthZ:** every REST + WS endpoint requires JWT via `require_admin_jwt` / `require_admin_jwt_ws`.
 - **Rate limiting:** `SlidingWindowRateLimiter` at 10/s burst per `(jwt_subject, route)` on REST; WS connection cap at 20 concurrent.
 - **Error messages:** sanitised — `{"error": code}` shape. Raw exception strings logged server-side via `log.exception`, never echoed.
-- **No echo of account IDs / instrument IDs in error bodies** — Phase 10b.1 security-reviewer pattern.
+- **Error bodies redact** `account_number`, `gateway_label`, raw `last_nlv` values. **Allowed echoes:** `account_id` UUID and `instrument_id` BIGINT are FE handles per CLAUDE.md "AccountResponse boundary stripping" doctrine and may appear in responses (e.g., `stale_accounts`, `fx_stale_accounts`). ARCHITECT [MED #6] softens the Phase 10b.1 "no IDs in errors" line which was overly strict for this surface.
 - **No new `.env` keys.** Runtime config (if any) through `app_config`.
 
 ### Logging
@@ -547,25 +678,35 @@ Pinned fixtures for the trickier conversions (per Q7 — heavy goldens):
 | GV3 — base = native currency | `10000 USD, base=USD` | `total_nlv_base = 10000.00 USD, fx_rate=1.0` |
 | GV4 — short position in exposure | `-100 AAPL @ 200 USD, base GBP` | `short_notional_base = 15824.00 GBP, pct_of_nlv negative` |
 | GV5 — stale account (last_nlv_at > 5min) | one account with `last_nlv_at = now() - 6min` | included in `stale_accounts` list |
-| GV6 — FX cache miss | `_fx_rate` raises | endpoint returns 503 `fx_rate_unavailable` |
+| GV6 — FX cache miss all accounts | `_fx_rate` raises for every account currency | endpoint returns **503** `fx_rate_unavailable` |
 | GV7 — drill with all 3 verdicts | 3 instruments, util 50% / 85% / 110% | verdicts: ok / warn / block |
 | GV8 — drill with no cap | instrument with no `risk_limits` row | `cap_pct=None, utilisation_pct=None, verdict=ok` |
+| **GV9** — negative NLV (margin call) | `last_nlv=-1500 USD, base GBP` (ARCHITECT [CRIT #1]) | snapshot inserts; `total_nlv_base` includes -1186.80 GBP contribution |
+| **GV10** — partial FX outage | 3 accounts in USD/HKD/GBP; HKD/GBP rate missing (ARCHITECT [HIGH #4]) | response 200, `partial=true`, USD+GBP accounts present with `nlv_base`, HKD account has `fx_stale=true` + `nlv_base=null`, HKD UUID in `fx_stale_accounts`, `total_nlv_base` excludes HKD |
+| **GV11** — null NLV (fresh account) | account with `last_nlv=NULL, last_nlv_at=NULL` | account included in `accounts` with `nlv_base=null, status="initialising"`; excluded from `total_nlv_base` and `stale_accounts` |
+| **GV12** — weekend gap in curve | `compute_curve(window='30d')` over a Fri-Mon range | gaps in raw between Fri 22:00 UTC and Sun 22:00 UTC; curve buckets are sparse (not interpolated to zero) |
 
-**Total: ~42 new tests.** Reviewer chain at end of each chunk.
+**TZ note:** all CAGG buckets are UTC-day boundaries. FE shifts to user TZ for display via the existing `useTimezone()` hook; daily buckets straddle local midnight as expected.
+
+**Total: ~46 new tests** (was 42; +4 goldens GV9–GV12). Reviewer chain at end of each chunk.
 
 ---
 
 ## 12. Chunking
 
+**ARCHITECT [MED #5]:** Chunk B split to three sub-chunks (B', B'', B''') to keep each under reviewer-chain working-context limits (~600–800 LOC diff per chunk).
+
 | Chunk | Scope | Commits |
 |---|---|---|
-| **A** | Schema + writer hook | A1 Alembic 0039; A2 Alembic 0040; A3 writer hook in `brokers.py:1416` (Codex); A4 writer tests (5); A5 reviewer chain | ~5 |
-| **B** | `PortfolioRollupService` + 3 REST endpoints | B1 Pydantic schemas; B2 `compute_live` + tests; B3 `compute_curve` + tests; B4 `drill_asset_class` + tests; B5 endpoints + rate limiter + integration tests; B6 metrics; B7 reviewer chain | ~7 |
-| **C** | WS gateway + pubsub publisher | C1 `ws_portfolio.py` (debounce loop + auth + heartbeat); C2 Redis publish at writer hook (extends A3); C3 WS integration tests (3); C4 reviewer chain | ~4 |
-| **D** | Frontend `/portfolio/rollup` route + drill drawer | D1 regenerate `api-generated.ts`; D2 services/portfolio module; D3 hook tests; D4 RollupPage + 4 new components; D5 drill drawer + tests; D6 reviewer chain | ~6 |
+| **A** | Schema + writer hook | A1 Alembic 0039 (with source_label CHECK); A2 Alembic 0040 (with autocommit_block + retention + materialized_only=false); A3 writer hook in `brokers.py:1416` with nested-SAVEPOINT + tracked publish task set (Codex; Qwen fallback); A4 writer tests (5); A5 reviewer chain | ~5 |
+| **B'** | Schemas + `compute_live` | B'1 Pydantic schemas (RollupLive/Curve/Drill + partial/fx_stale fields); B'2 `compute_live` per-account FX isolation + tests; B'3 reviewer chain | ~3 |
+| **B''** | Curve + drill | B''1 `compute_curve` (3 windows) + tests; B''2 `drill_asset_class` + tests; B''3 reviewer chain | ~3 |
+| **B'''** | Endpoints + rate limiter + metrics | B'''1 portfolio rate limiter (fresh instance, `(jwt, "portfolio")` key); B'''2 3 REST endpoints + integration tests; B'''3 7 Prometheus metrics; B'''4 reviewer chain | ~4 |
+| **C** | WS gateway + pubsub publisher | C1 `ws_portfolio.py` (CSWSH + listen() + 250ms cache + send timeout + heartbeat); C2 Redis publish wired in A3 writer; C3 WS integration tests (3 + CSWSH rejection); C4 reviewer chain | ~4 |
+| **D** | Frontend `/portfolio/rollup` route + drill drawer | D1 regenerate `api-generated.ts`; D2 services/portfolio module (with frame version check); D3 hook tests; D4 RollupPage + 4 new components; D5 drill drawer + tests; D6 reviewer chain | ~6 |
 | **E** | Playwright + close-out | E1 Playwright; E2 final 5-reviewer chain; E3 close-out (CHANGELOG / CLAUDE.md / TASKS.md / memory) + v0.14.0 tag | ~3 |
 
-**Total: ~25 commits, 5 chunks.** Comparable to Phase 10b.1 (20 commits / 5 chunks).
+**Total: ~28 commits, 7 chunks.** Bigger than Phase 10b.1 (20 commits / 5 chunks) — reflects heavier scope (history schema + WS gateway + drill drawer + heavy goldens).
 
 ### Model routing (CLAUDE.md table)
 
@@ -591,6 +732,7 @@ Pinned fixtures for the trickier conversions (per Q7 — heavy goldens):
 | PWA / offline / CSV export | Phase 25 covers PWA; Phase 23 covers tax export | Phase 23/25 |
 | Multi-replica WS compute cache | single-replica today | Phase 24 |
 | Drill audit (write `risk_decisions` on near-cap) | drill is informational | none |
+| Drill drawer "Edit cap" affordance | informational read-only viewport in 10b.2; backend returns `verdict` but FE renders no actionable button (ARCHITECT [MED #8]) | Phase 11 |
 
 ---
 
@@ -608,20 +750,42 @@ Per TASKS.md note: 10b.2 ships at **v0.14.0** (10b.1 was v0.13.0). ROADMAP.md na
 - **Pre-commit ruff hook rejects Unicode mathematical chars** (×, →). Use ASCII (`*`, `->`).
 - **`StrEnum` required** (ruff UP042 rejects `class X(str, Enum)`).
 - **`model_config = ConfigDict(extra="forbid")`** is canonical defence-in-depth — apply to every request/response Pydantic model.
-- **TimescaleDB CAGG initial backfill must be synchronous** in `upgrade()` via `CALL refresh_continuous_aggregate(..., NULL, NULL)`. Async background refresh is not enough — sizing/rollup is immediately usable after deploy only with sync backfill.
+- **TimescaleDB CAGG initial backfill must use `op.get_context().autocommit_block()`** (NOT raw `op.execute("CALL refresh_continuous_aggregate(...)")` — see ARCHITECT [CRIT #3] retraction of the Phase 10b.1 alembic 0038 precedent). `refresh_continuous_aggregate` is a PROCEDURE that issues internal COMMIT and rejects running inside a transaction; alembic's `transaction_per_migration=True` makes the naive pattern silently fail when the source hypertable has actual data to backfill.
 - **`DROP MATERIALIZED VIEW ... CASCADE`** in CAGG downgrade — same as Alembic 0038.
+- **Every CAGG must declare retention explicitly** (`add_retention_policy`) even if cap is high. Documented project-wide pattern (ARCHITECT [MED #2]).
+- **`pubsub.listen()` is the canonical consumer pattern**, NOT `pubsub.get_message()` polling — 4/5 existing consumers use `listen()` (orders_sse, config_cache, etc.). The Phase 10b.1 spec implicitly mixed the two; this spec pins `listen()`.
 
 ---
 
-## 16. Open questions for ARCHITECT-REVIEW
+## 16. ARCHITECT-REVIEW outcome
 
-The following are intentionally left open for the architect pass:
+Review run 2026-05-12 (opus). 19 findings: 3 CRIT + 6 HIGH + 7 MED + 3 LOW. Per project rule (`feedback_architect_findings_apply_through_medium.md`), CRIT + HIGH + MED applied inline above. Summary:
 
-1. **CAGG refresh policy interaction.** `account_balance_snapshots_1h` runs every 30 min with 7-day start-offset; `_1d` runs every 6h with 90-day start-offset. Does this leave a coverage gap between deploy day and the first scheduled refresh? Synchronous initial backfill (§4.2) covers it for raw data, but the CAGGs themselves only backfill bucket boundaries that fall before `end_offset`.
-2. **Single-transaction writer.** Snapshot INSERT rolls back if the surrounding `brokers.py` discoverer transaction fails. Acceptable per §4.3 fail-OPEN, but worth confirming the discoverer doesn't have a try/except that would mask the rollback signal.
-3. **Per-connection WS compute load.** N clients = N recomputes per 500ms debounce. For 1–2 tabs this is fine; flagging in case the architect sees a problem we don't.
-4. **`source_label` cardinality.** Free-form text means a buggy sidecar could pollute the column. Add a `LIKE` validation pattern or a denylist?
-5. **2y raw retention vs CAGG retention.** Raw is 2y, CAGGs are effectively unbounded (no `add_retention_policy` on the materialized views). Is that intentional, or should `_1d` also have a retention cap (5y? 10y?) to bound storage?
+| Tag | § | Topic | Resolution |
+|---|---|---|---|
+| CRIT #1 | 4.1 | `nlv >= 0` CHECK rejects margin-call writes | Constraint dropped; GV9 golden added |
+| CRIT #2 | 2, 5.1 | `positions.market_value_base` does not exist | Adopt `qty * avg_cost * multiplier` (risk_service approximation); "at cost basis" badge on UI |
+| CRIT #3 | 4.2 | Sync CAGG backfill fails inside `transaction_per_migration` TX | `autocommit_block()` pattern; precedent retraction logged for 0038 |
+| HIGH #1 | 4.3 | Same-SAVEPOINT writer rolls back NLV on INSERT failure | Two-level nested SAVEPOINT pattern; writer test added |
+| HIGH #2 | 6 | WS missing CSWSH origin check; wrong close code | CSWSH check + 1008 close (not 4401) |
+| HIGH #3 | 6 | Per-conn compute load + no send timeout + wrong pubsub pattern | 250 ms cache + `listen()` + `asyncio.wait_for` send |
+| HIGH #4 | 5.1 | Whole-rollup 503 on single FX miss | Per-account FX fault isolation; 200 partial; GV10 golden |
+| HIGH #5 | 5.3 | Naked `create_task` GC-strand risk | Tracked task set + lifespan cancel/gather |
+| HIGH #6 | 5.2 | Rate limiter signature mismatch | Fresh instance with `(jwt, "portfolio")` key |
+| HIGH #7 | 11.4 | Missing edge-case goldens | GV9 negative-NLV, GV10 partial-FX, GV11 null-NLV, GV12 weekend-gap |
+| MED #1 | 4.1 | `source_label` cardinality | CHECK regex + length limit |
+| MED #2 | 4.2 | CAGG retention asymmetry | Explicit `add_retention_policy` on both CAGGs |
+| MED #3 | 4.2 | CAGG coverage gap deploy→first refresh | `materialized_only = false` real-time aggregation |
+| MED #4 | 6 | Frame schema versioning | `"version": 1` on every frame; FE version-check |
+| MED #5 | 12 | Chunk B too large for reviewer chain | Split into B'/B''/B''' (7 chunks total) |
+| MED #6 | 10 | Account-ID redaction overly strict | Softened — UUIDs are FE handles per CLAUDE.md |
+| MED #7 | 7.4 | localStorage corruption indefinite-422 loop | Zustand persist `migrate` callback resets to GBP |
+| MED #8 | 13 | Drill drawer cap-edit affordance | Deferred to Phase 11 with explicit row |
+| LOW #1 | 3 | Diagram caption inconsistency | Accepted; minor cosmetic |
+| LOW #2 | 11.1 | `pytest.mark.asyncio` decoration unstated | Implicit per pytest-asyncio strict mode; noted |
+| LOW #3 | 14 | Phase 10 versioning collision residue | TASKS.md already documents the resolved lapping |
+
+LOWs documented; not applied inline per project rule.
 
 ---
 
