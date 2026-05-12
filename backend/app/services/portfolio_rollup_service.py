@@ -7,7 +7,7 @@ FX-converts per-account with fault isolation (architect HIGH #4 — partial
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
@@ -55,7 +55,7 @@ class PortfolioRollupService:
         EVERY non-initialising account fails FX do we raise 503.
         """
         if base_currency not in SUPPORTED_BASE:
-            raise ValueError(f"unsupported base currency: {base_currency}")
+            raise ValueError("unsupported base currency")
 
         rows = (
             (
@@ -320,7 +320,7 @@ class PortfolioRollupService:
         coverage is preferred over a 503 for the whole window.
         """
         if base_currency not in SUPPORTED_BASE:
-            raise ValueError(f"unsupported base currency: {base_currency}")
+            raise ValueError("unsupported base currency")
 
         if window == "intraday":
             source_sql = """
@@ -369,7 +369,10 @@ class PortfolioRollupService:
                 ORDER BY cagg.account_id, cagg.bucket
             """
         else:
-            raise ValueError(f"invalid window: {window}")
+            # Review HIGH: don't echo the raw input into the error message —
+            # the REST handler maps ValueError → 422 with the message body.
+            # Pydantic Literal validation upstream rejects bad inputs first.
+            raise ValueError("invalid window")
 
         rows = (await self._db.execute(text(source_sql))).mappings().all()
 
@@ -391,7 +394,7 @@ class PortfolioRollupService:
             return fx_cache[native_ccy]
 
         per_account: list[CurvePoint] = []
-        bucket_totals: dict[Any, Decimal] = {}
+        bucket_totals: dict[datetime, Decimal] = {}
 
         for r in rows:
             fx = await _get_fx(r["currency"])
@@ -430,6 +433,46 @@ class PortfolioRollupService:
             totals=totals,
         )
 
+    async def _compute_total_nlv_base(self, base_currency: str) -> Decimal:
+        """Shared helper: cross-broker SUM of NLV in base_currency.
+
+        Used by drill_asset_class to get a denominator for pct_of_nlv WITHOUT
+        re-emitting compute_live's per-account warnings / metrics (review
+        HIGH: drill was double-firing compute_live's structlog/metric side
+        effects on every page load).
+
+        Per-currency FX failures degrade silently — the drill view is
+        informational, not gate-load-bearing. Initialising accounts (null
+        NLV) are excluded.
+        """
+        rows = (
+            (
+                await self._db.execute(
+                    text(
+                        """
+                        SELECT ba.last_nlv_currency AS native_ccy,
+                               SUM(ba.last_nlv) AS sum_native
+                        FROM broker_accounts ba
+                        WHERE ba.deleted_at IS NULL
+                          AND ba.last_nlv IS NOT NULL
+                          AND ba.last_nlv_currency IS NOT NULL
+                        GROUP BY ba.last_nlv_currency
+                        """
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        total = Decimal("0")
+        for r in rows:
+            try:
+                fx = await _fx_rate(self._redis, r["native_ccy"], base_currency)
+            except PreviewUnavailable:
+                continue
+            total += (Decimal(r["sum_native"]) * fx).quantize(_QUANTIZE_8DP)
+        return total.quantize(_QUANTIZE_2DP)
+
     async def drill_asset_class(self, asset_class: str, base_currency: str) -> RollupDrill:
         """Per-instrument exposure for an asset_class with cap utilisation.
 
@@ -447,13 +490,12 @@ class PortfolioRollupService:
         red-line reference.
         """
         if base_currency not in SUPPORTED_BASE:
-            raise ValueError(f"unsupported base currency: {base_currency}")
+            raise ValueError("unsupported base currency")
 
-        # Reuse compute_live to get total_nlv_base (cheap; same FX cache hits
-        # via Redis). Drill is page-load-fetched, not per-tick — extra ~50ms
-        # is acceptable.
-        live = await self.compute_live(base_currency)
-        total_nlv_base = live.total_nlv_base
+        # Review HIGH: use the lightweight _compute_total_nlv_base helper
+        # instead of compute_live, which would re-emit per-account structlog
+        # warnings + (future) metric counters on every drill page load.
+        total_nlv_base = await self._compute_total_nlv_base(base_currency)
 
         # Global concentration cap (broadest scope). Returns None if no row.
         cap_row = (
@@ -483,13 +525,22 @@ class PortfolioRollupService:
                 await self._db.execute(
                     text(
                         """
+                    -- Review HIGH: split long/short legs before SUM so a
+                    -- perfectly hedged instrument (e.g. +50 in account A,
+                    -- -50 in account B) doesn't net to 0 notional and hide
+                    -- gross concentration. abs() the pct_of_nlv at the end.
                     SELECT
                       p.instrument_id     AS instrument_id,
                       i.display_name      AS display_name,
                       i.primary_exchange  AS exchange,
                       p.currency          AS native_ccy,
-                      SUM(p.qty)                                              AS total_qty,
-                      SUM(p.qty * p.avg_cost * COALESCE(p.multiplier, 1))     AS notional_native
+                      SUM(p.qty)          AS total_qty,
+                      SUM(CASE WHEN p.qty >= 0
+                          THEN p.qty * p.avg_cost * COALESCE(p.multiplier, 1)
+                          ELSE 0 END) AS long_native,
+                      SUM(CASE WHEN p.qty <  0
+                          THEN p.qty * p.avg_cost * COALESCE(p.multiplier, 1)
+                          ELSE 0 END) AS short_native
                     FROM positions p
                     JOIN instruments i ON i.id = p.instrument_id
                     JOIN broker_accounts ba ON ba.id = p.account_id
@@ -517,9 +568,16 @@ class PortfolioRollupService:
                     asset_class=asset_class,
                 )
                 continue
-            notional_base = (Decimal(r["notional_native"] or 0) * fx).quantize(_QUANTIZE_8DP)
+            # Review HIGH: long + short are summed separately so a hedged
+            # instrument doesn't net to zero notional and hide gross
+            # concentration risk. notional_base shows the signed net (long
+            # minus the absolute short value); pct_of_nlv uses gross exposure.
+            long_base = (Decimal(r["long_native"] or 0) * fx).quantize(_QUANTIZE_8DP)
+            short_base = (Decimal(r["short_native"] or 0) * fx).quantize(_QUANTIZE_8DP)
+            notional_base = long_base + short_base
+            gross_base = abs(long_base) + abs(short_base)
             pct_of_nlv = (
-                (abs(notional_base) / total_nlv_base * 100).quantize(_QUANTIZE_2DP)
+                (gross_base / total_nlv_base * 100).quantize(_QUANTIZE_2DP)
                 if total_nlv_base != 0
                 else Decimal("0")
             )

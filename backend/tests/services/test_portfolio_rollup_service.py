@@ -14,6 +14,7 @@ Test isolation strategy:
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -23,6 +24,9 @@ from sqlalchemy import bindparam, text
 from app.core.db import SessionLocal
 from app.services.orders_service import PreviewUnavailable
 from app.services.portfolio_rollup_service import PortfolioRollupService
+
+# Review MED: validates ts offset literal (test-only INTERVAL splicing).
+_INTERVAL_PATTERN = re.compile(r"-?\d+ (minute|minutes|hour|hours|day|days)")
 
 pytestmark = pytest.mark.asyncio
 
@@ -183,9 +187,7 @@ async def _seed_snapshot(account_id: UUID, ts_offset_sql: str, nlv: str, currenc
     pattern so a stray semicolon can't sneak in.
     """
     # Defence-in-depth: validate the interval string before splicing.
-    import re
-
-    if not re.fullmatch(r"-?\d+ (minute|minutes|hour|hours|day|days)", ts_offset_sql):
+    if not _INTERVAL_PATTERN.fullmatch(ts_offset_sql):
         raise ValueError(f"unsafe interval literal: {ts_offset_sql!r}")
     async with SessionLocal() as s:
         async with s.begin():
@@ -213,20 +215,6 @@ async def _cleanup_snapshots(account_id: UUID) -> None:
             await s.execute(
                 text("DELETE FROM account_balance_snapshots WHERE account_id = :aid"),
                 {"aid": str(account_id)},
-            )
-
-
-async def _delete_orphan_snapshots() -> None:
-    """Clean up any account_balance_snapshots rows whose parent account
-    no longer exists (FK is ON DELETE CASCADE so this is paranoid but
-    cheap — sometimes setup test fixtures leave orphans between runs)."""
-    async with SessionLocal() as s:
-        async with s.begin():
-            await s.execute(
-                text(
-                    "DELETE FROM account_balance_snapshots WHERE account_id NOT IN "
-                    "(SELECT id FROM broker_accounts)"
-                )
             )
 
 
@@ -599,11 +587,17 @@ async def _seed_account_with_options(
 ) -> UUID:
     """Insert one broker_accounts row with explicit NLV nullability + age
     control. age_seconds=0 means now(); positive values move last_nlv_at
-    into the past."""
+    into the past.
+
+    Review HIGH: nlv + nlv_currency are passed via bindparams (CAST(:nlv AS
+    NUMERIC) handles NULL via the bind being None). Only age_seconds (int)
+    is spliced because PostgreSQL INTERVAL literals can't be parameterised;
+    Python type system enforces that age_seconds is int.
+    """
     aid = uuid4()
+    if not isinstance(age_seconds, int):
+        raise TypeError("age_seconds must be int")  # defence-in-depth
     last_nlv_at_sql = "now()" if age_seconds == 0 else f"now() - INTERVAL '{age_seconds} seconds'"
-    nlv_sql = f"CAST('{nlv}' AS NUMERIC(20,8))" if nlv is not None else "NULL"
-    currency_sql = f"'{nlv_currency}'" if nlv_currency is not None else "NULL"
     async with SessionLocal() as s:
         async with s.begin():
             await s.execute(
@@ -615,7 +609,8 @@ async def _seed_account_with_options(
                        last_nlv_currency, last_nlv_at)
                     VALUES
                       (:id, CAST(:broker AS broker_id_enum), :acct, 'paper',
-                       :gateway, :base, :gateway, {nlv_sql}, {currency_sql},
+                       :gateway, :base, :gateway,
+                       CAST(:nlv AS NUMERIC(20,8)), :nlv_currency,
                        {last_nlv_at_sql})
                     """
                 ),
@@ -625,6 +620,8 @@ async def _seed_account_with_options(
                     "acct": f"TEST-{aid.hex[:8]}",
                     "gateway": f"{broker}-test",
                     "base": native,
+                    "nlv": nlv,  # None binds as SQL NULL
+                    "nlv_currency": nlv_currency,
                 },
             )
     return aid
