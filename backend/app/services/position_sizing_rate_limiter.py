@@ -1,30 +1,28 @@
 """Phase 10b.1 H3 — in-process sliding-window rate limiter.
 
-Pattern mirrors backend/app/services/quotes/registry.py:144 (deque-based
-sliding window). Per (jwt_subject, account_id) bucket. Single-replica
-today; multi-replica will need Redis backing (Phase 24).
+Thin facade over `services.common.rate_limiter.SlidingWindowRateLimiter[tuple[str, str]]`
+(extracted in chunk 11a-B1, MED-3). Public surface preserved verbatim
+including the two-positional-arg `.check(jwt_subject, account_id)` shape.
+
+Single-replica today; multi-replica needs Redis backing (Phase 24).
 """
 
 from __future__ import annotations
 
-import time
-from collections import defaultdict, deque
 from collections.abc import Callable
 
+from app.services.common.rate_limiter import (
+    RateLimitExceededError,
+)
+from app.services.common.rate_limiter import (
+    SlidingWindowRateLimiter as _Generic,
+)
 
-class RateLimitExceededError(Exception):
-    """Raised when a (user, account) key exceeds its sliding-window quota."""
+__all__ = ["RateLimitExceededError", "SlidingWindowRateLimiter"]
 
 
-class SlidingWindowRateLimiter:
-    """Per-key sliding-window limiter.
-
-    Args:
-        burst: Max requests inside the window.
-        sustained_per_sec: Steady-state ceiling (reserved for future redis-backed impl).
-        window_seconds: Window length.
-        now: Time source; injected for tests.
-    """
+class SlidingWindowRateLimiter(_Generic[tuple[str, str]]):
+    """Per-(jwt_subject, account_id) limiter with the legacy 2-arg shape."""
 
     def __init__(
         self,
@@ -34,41 +32,15 @@ class SlidingWindowRateLimiter:
         window_seconds: int = 1,
         now: Callable[[], float] | None = None,
     ) -> None:
-        self._burst = burst
-        self._sustained = sustained_per_sec
-        self._window = window_seconds
-        self._now = now or time.monotonic
-        self._buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+        super().__init__(
+            burst=burst,
+            window_seconds=window_seconds,
+            now=now,
+            name="position_sizing",
+        )
 
-    def check(self, jwt_subject: str, account_id: str) -> None:
-        """Raises RateLimitExceededError if (subject, account) is over quota."""
-        key = (jwt_subject, account_id)
-        now = self._now()
-        bucket = self._buckets[key]
-        cutoff = now - self._window
-        while bucket and bucket[0] < cutoff:
-            bucket.popleft()
-        if len(bucket) >= self._burst:
-            raise RateLimitExceededError(
-                f"position_sizing rate limit exceeded (burst={self._burst}, window={self._window}s)"
-            )
-        bucket.append(now)
+    def check(self, jwt_subject: str, account_id: str) -> None:  # type: ignore[override]
+        super().check((jwt_subject, account_id))
 
-    def evict_stale(self, jwt_subject: str, account_id: str) -> None:
-        """Drop the bucket if it's empty after the window-cutoff sweep.
-
-        Caller-driven eviction so the buckets dict doesn't accumulate
-        entries per unique (jwt_subject, account_id) over a long-running
-        process — flagged by Chunk A+B security review. Periodic callers
-        (or the next ``check`` for the same key) can use this to free
-        memory for idle keys.
-        """
-        key = (jwt_subject, account_id)
-        if key not in self._buckets:
-            return
-        cutoff = self._now() - self._window
-        bucket = self._buckets[key]
-        while bucket and bucket[0] < cutoff:
-            bucket.popleft()
-        if not bucket:
-            del self._buckets[key]
+    def evict_stale(self, jwt_subject: str, account_id: str) -> None:  # type: ignore[override]
+        super().evict_stale((jwt_subject, account_id))
