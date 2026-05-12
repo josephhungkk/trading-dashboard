@@ -35,6 +35,23 @@ class _MemoryRedis:
     async def aclose(self) -> None:
         return None
 
+    def pubsub(self) -> _MemoryPubSub:
+        return _MemoryPubSub()
+
+
+class _MemoryPubSub:
+    async def subscribe(self, *_channels: str) -> None:
+        return None
+
+    async def unsubscribe(self, *_channels: str) -> None:
+        return None
+
+    async def listen(self) -> Any:
+        import asyncio as _asyncio
+
+        await _asyncio.Event().wait()
+        yield {}  # pragma: no cover
+
 
 def _lifespan_patches() -> tuple[Any, Any, Any, Any]:
     """Return (redis, config_svc, mock_bridge, mock_bar_svc) and the

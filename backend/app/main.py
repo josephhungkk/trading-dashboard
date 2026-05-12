@@ -173,6 +173,72 @@ async def lifespan(_app: FastAPI) -> Any:
     await _ollama_watcher.start()
     _app.state.ollama_health_watcher = _ollama_watcher
 
+    # Phase 11a-B8: AI router stack (services/ai/ core)
+    from app.services.ai.cost_ledger import CostLedger
+    from app.services.ai.jobs import AIJobStore
+    from app.services.ai.rate_limiter import AIRouterRateLimiter
+    from app.services.ai.router import LiteLLMClient
+    from app.services.ai.secrets import AIProviderKeyCache
+    from app.services.config_defaults import DEFAULT_AI_ROUTER_CAPABILITY_MAP
+
+    ai_secrets = AIProviderKeyCache(config_svc=svc)
+    _app.state.ai_secrets = ai_secrets
+    listener_ai_secrets: asyncio.Task[None] = asyncio.create_task(
+        ai_secrets.run_pubsub_listener(redis)
+    )
+
+    ai_cost_ledger = CostLedger(session_factory=session_factory)
+    await ai_cost_ledger.start()
+    _app.state.ai_cost_ledger = ai_cost_ledger
+
+    ai_jobs = AIJobStore(session_factory=session_factory, redis=redis)
+    try:
+        await ai_jobs.recover_orphans()  # HIGH-8
+    except Exception:
+        log.exception("ai_jobs_orphan_recovery_failed")
+    _app.state.ai_jobs = ai_jobs
+
+    ai_rate_limiter = AIRouterRateLimiter(
+        semaphores={"LOCAL_ONLY": 1, "REASONING": 2, "__default__": 5},
+    )
+    _app.state.ai_rate_limiter = ai_rate_limiter
+
+    async def _master_key_provider() -> str:
+        raw = await redis.get("ai:litellm_master_key")
+        if raw is None:
+            return ""
+        return raw.decode() if isinstance(raw, bytes) else str(raw)
+
+    async def _capability_map_provider() -> dict[str, list[dict[str, str]]]:
+        override = await svc.get_json("ai_router", "capability_map", default=None)
+        return override if isinstance(override, dict) else DEFAULT_AI_ROUTER_CAPABILITY_MAP
+
+    async def _available_providers_provider() -> set[str]:
+        # Providers whose api_key is configured in app_secrets.
+        # Local Ollama placeholders are always available (no auth needed).
+        from app.services.ai.capabilities import LOCAL_PROVIDERS
+
+        available: set[str] = set(LOCAL_PROVIDERS)
+        for cloud in ("xai", "gemini", "anthropic", "openai"):
+            try:
+                key = await svc.reveal_secret("ai_provider", f"{cloud}.api_key")
+            except Exception:
+                key = None
+            if key:
+                available.add(cloud)
+        return available
+
+    _app.state.ai_router = LiteLLMClient(
+        secrets=ai_secrets,
+        rate_limiter=ai_rate_limiter,
+        cost_ledger=ai_cost_ledger,
+        jobs=ai_jobs,
+        proxy_url=os.environ.get("LITELLM_PROXY_URL", "http://litellm:4000"),
+        master_key_provider=_master_key_provider,
+        capability_map_provider=_capability_map_provider,
+        available_providers_provider=_available_providers_provider,
+    )
+
     listener_config = asyncio.create_task(config_cache.run_listener())
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
 
@@ -381,7 +447,8 @@ async def lifespan(_app: FastAPI) -> Any:
         listener_config.cancel()
         listener_secrets.cancel()
         listener_capability.cancel()
-        for t in (listener_config, listener_secrets, listener_capability):
+        listener_ai_secrets.cancel()
+        for t in (listener_config, listener_secrets, listener_capability, listener_ai_secrets):
             try:
                 await t
             except asyncio.CancelledError:
@@ -390,6 +457,10 @@ async def lifespan(_app: FastAPI) -> Any:
             await callback_server.stop(grace=5)
         except Exception:
             log.exception("callback_server_stop_failed")
+        try:
+            await _app.state.ai_cost_ledger.stop()
+        except Exception:
+            log.exception("ai_cost_ledger_stop_failed")
         await _app.state.ollama_health_watcher.stop()
         await redis.aclose()
         _app.state.redis = None
