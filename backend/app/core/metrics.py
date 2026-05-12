@@ -832,3 +832,41 @@ ai_jobs_orphan_recovered_total = Counter(
     ["phase"],
     registry=registry,
 )
+
+# Phase 11a-B7 — AI router completion/fallback metrics
+AI_ROUTER_COMPLETIONS_TOTAL = Counter(
+    "ai_router_completions_total",
+    "AI router completion outcomes.",
+    labelnames=["provider", "model", "capability", "outcome"],
+    registry=registry,
+)
+AI_ROUTER_LATENCY_SECONDS = Histogram(
+    "ai_router_latency_seconds",
+    "AI router completion latency in seconds.",
+    labelnames=["provider", "capability"],
+    buckets=(0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30),
+    registry=registry,
+)
+AI_ROUTER_TOKENS_PROMPT_TOTAL = Counter(
+    "ai_router_tokens_prompt_total",
+    "AI router prompt tokens by provider/model.",
+    labelnames=["provider", "model"],
+    registry=registry,
+)
+AI_ROUTER_TOKENS_COMPLETION_TOTAL = Counter(
+    "ai_router_tokens_completion_total",
+    "AI router completion tokens by provider/model.",
+    labelnames=["provider", "model"],
+    registry=registry,
+)
+AI_ROUTER_FALLBACK_CHAIN_TOTAL = Counter(
+    "ai_router_fallback_chain_total",
+    "AI router fallback hops by provider and reason.",
+    labelnames=["from_provider", "to_provider", "reason"],
+    registry=registry,
+)
+AI_ROUTER_PROXY_UNAVAILABLE_TOTAL = Counter(
+    "ai_router_proxy_unavailable_total",
+    "AI router requests where all retryable providers were exhausted.",
+    registry=registry,
+)
