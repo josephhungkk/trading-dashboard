@@ -23,8 +23,14 @@ QTY_COLUMNS = (
 def _alembic_config() -> Config:
     """Alembic Config wired at the +asyncpg URL — env.py uses
     async_engine_from_config so the +asyncpg driver works directly.
+
+    ``config_file_name`` is cleared so Alembic's env.py skips
+    ``fileConfig()``; otherwise it resets the root logger and
+    caplog handlers stop receiving records for subsequent tests
+    (matches the same guard in tests/conftest.py::_apply_migrations).
     """
     cfg = Config("alembic.ini")
+    cfg.config_file_name = None
     cfg.set_main_option("script_location", "alembic")
     cfg.set_main_option("sqlalchemy.url", settings.database_url)
     return cfg
