@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Response, status
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,6 +72,10 @@ class OrderCapabilityWrite(BaseModel):
         if not re.fullmatch(r"[\x20-\x7E]*", v):
             raise ValueError("notes must be printable ASCII only")
         return v
+
+
+class LiteLLMMasterKeyRotate(BaseModel):
+    value: str = Field(min_length=16)
 
 
 async def parse_order_capability_write(
@@ -280,6 +284,24 @@ async def create_secret(
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+@router.put("/secrets/ai/litellm_master_key", status_code=200)
+async def put_litellm_master_key(
+    body: LiteLLMMasterKeyRotate,
+    cfg: ConfigDep,
+    identity: IdentityDep,
+    redis: RedisDep,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+) -> dict[str, bool]:
+    await cfg.set_secret("ai", "litellm_master_key", body.value, "str")
+    await redis.set("ai:litellm_master_key", body.value)
+    log.info(
+        "admin_litellm_master_key_put actor=%s kind=%s",
+        identity.email,
+        identity.kind,
+    )
+    return {"ok": True}
 
 
 @router.put("/secrets/{namespace}/{key}", response_model=SecretMetadataOut)
