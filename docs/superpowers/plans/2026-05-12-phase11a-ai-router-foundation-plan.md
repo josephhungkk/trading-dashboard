@@ -1860,17 +1860,23 @@ git push --tags
 - MAC resolution: **ARP-from-NUC** — helper resolves 192.168.50.30 → MAC from the local ARP table on each wake; caches in memory.
 
 **Files to create:**
-- `deploy/nuc/install-ollama.ps1` — Windows installer + service registration + initial model pull (`qwen2.5:7b`, `llama3.2:8b`)
+- `deploy/nuc/install-ollama.ps1` — Windows installer + service registration + initial model pull (`qwen2.5:7b`, `llama3.2:8b`) + **service-recovery policy** for auto-restart on crash (watchdog Option 1)
 - `deploy/nuc/wol_helper.ps1` — PowerShell HTTP service: listens on `10.10.0.2:11900/wake`, ARP-resolves heavy box, broadcasts magic packet on LAN
 - `deploy/nuc/install-wol-helper.ps1` — registers the helper as a Windows scheduled task that starts at boot (pattern matches existing broker-sidecar scheduled tasks)
-- `deploy/heavybox/install-ollama.ps1` — Windows installer mirror; pulls `qwen2.5:32b`, `llama3.3:70b`, `qwen2.5-coder:32b`
+- `deploy/heavybox/install-ollama.ps1` — Windows installer mirror + service-recovery policy; pulls `qwen2.5:32b`, `llama3.3:70b`, `qwen2.5-coder:32b`
 - `deploy/heavybox/install-idle-suspend.ps1` — Windows scheduled task: every 5min check `netstat` for active connections on :11434; suspend if idle >15min
 - `backend/app/services/ai/wol.py` — `HeavyBoxWoL` class with `wake_and_wait_for_model(model_name) -> WakeResult`; uses async httpx to call NUC helper + poll Ollama `/api/tags`
+- `backend/app/services/ai/ollama_health_watcher.py` — **BE-side health watcher** (watchdog Option 2): asyncio task polls NUC + heavy-box `/api/tags` every 60s; increments `ai_router_ollama_health_failures_total{host}` Counter on failures; threshold breach (3 in 10min) fires a Redis-pubsub event on `ai:ollama_health:alert` channel (Phase 11c Telegram bot will subscribe; for now metric-only)
 - `backend/tests/services/ai/test_wol.py` — unit tests for WoL primitive with fake helper + fake Ollama
+- `backend/tests/services/ai/test_ollama_health_watcher.py` — unit tests for the health watcher (fake httpx + clock-driven loop)
 
 **Files to modify:**
-- `backend/app/main.py` — lifespan: instantiate `HeavyBoxWoL` singleton on `app.state.heavy_wol` (mirrors `app.state.vol_service` pattern from Phase 10b.1)
-- `backend/app/core/metrics.py` — register WoL metrics (`ai_router_wol_*`)
+- `backend/app/main.py` — lifespan: instantiate `HeavyBoxWoL` singleton on `app.state.heavy_wol` (mirrors `app.state.vol_service` pattern from Phase 10b.1); start `OllamaHealthWatcher` background task
+- `backend/app/core/metrics.py` — register WoL metrics (`ai_router_wol_*`) + watcher metrics (`ai_router_ollama_health_*`)
+
+**Watchdog scope (user decision 2026-05-12):**
+- **Option 1 + 2 ship in this chunk.** Windows service-recovery in PowerShell installers; BE-side health watcher + metrics + Redis-pubsub alert event.
+- **Option 3 (Telegram alert)** deferred to chunk 11c-A — the health-watcher emits on a Redis-pubsub channel today; 11c subscribes and routes to Telegram. Cross-phase coupling minimised by using metrics + pubsub-events as the integration surface.
 
 ### Task 16: NUC Ollama install runbook
 
