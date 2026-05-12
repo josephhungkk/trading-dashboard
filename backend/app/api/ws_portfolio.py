@@ -43,7 +43,10 @@ def _allowed_origin(ws: WebSocket, allowed: list[str]) -> bool:
     """CSWSH protection — mirrors ws_quotes._allowed_origin.
 
     Empty Origin permitted only when peer is the WG dev gateway (10.10.0.1),
-    which is a trusted non-browser network path.
+    which is a trusted non-browser network path. Reviewer HIGH (sec-c1):
+    this bypass is CSWSH-only — require_admin_jwt_ws still runs after it,
+    so unauthenticated raw-TCP peers cannot upgrade. The invariant: never
+    skip auth on the WG path, only skip the CSWSH Origin check.
     """
     origin = ws.headers.get("origin", "")
     if not origin:
@@ -53,7 +56,10 @@ def _allowed_origin(ws: WebSocket, allowed: list[str]) -> bool:
 
 
 @router.websocket("/ws/portfolio/rollup")
-async def ws_portfolio_rollup(ws: WebSocket, base: str = Query(default="GBP")) -> None:
+async def ws_portfolio_rollup(
+    ws: WebSocket,
+    base: str = Query(default="GBP", pattern=r"^[A-Z]{3}$", max_length=3),
+) -> None:
     global _active_connections
 
     # 1. Pre-accept connection cap
@@ -108,11 +114,22 @@ async def ws_portfolio_rollup(ws: WebSocket, base: str = Query(default="GBP")) -
                 await ws.receive_text()
         except WebSocketDisconnect:
             disconnected.set()
-        except Exception:
+            dirty.set()  # wake the main loop's wait_for immediately
+        except (ConnectionResetError, RuntimeError) as exc:
+            # ConnectionResetError: client TCP reset. RuntimeError: socket
+            # closed mid-recv (Starlette raises this for the half-closed
+            # transition). Both end the connection — wake the main loop.
+            log.debug("portfolio_ws_recv_drain_ended", exc=str(exc))
             disconnected.set()
+            dirty.set()
 
     async def _heartbeat() -> None:
-        while ws.client_state == WebSocketState.CONNECTED:
+        # Loop condition relies on exception guards + outer-finally cancel.
+        # `ws.client_state == CONNECTED` is intentionally NOT used here:
+        # the check is a snapshot that races with the recv_drain → close
+        # transition. The TimeoutError / WebSocketDisconnect handlers below
+        # are the actual exit criterion (reviewer HIGH).
+        while not disconnected.is_set():
             await asyncio.sleep(_HEARTBEAT_S)
             try:
                 async with SessionLocal() as session:
@@ -157,20 +174,16 @@ async def ws_portfolio_rollup(ws: WebSocket, base: str = Query(default="GBP")) -
             await ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="send-timeout")
             return
 
-        # Main push loop
+        # Main push loop.
+        # Reviewer MED: don't spawn 2 short-lived tasks per iteration. Use
+        # asyncio.wait_for(dirty.wait()) for the debounce window and check
+        # disconnected.is_set() immediately — recv_drain sets BOTH events on
+        # disconnect (we add a `dirty.set()` there) so the wait wakes promptly.
         while ws.client_state == WebSocketState.CONNECTED and not disconnected.is_set():
-            # Wait for either a dirty pubsub signal or the recv drain task
-            # raising WebSocketDisconnect (sets disconnected). Either wakes us.
-            wait_for_dirty = asyncio.create_task(dirty.wait())
-            wait_for_disc = asyncio.create_task(disconnected.wait())
-            _done, pending = await asyncio.wait(
-                (wait_for_dirty, wait_for_disc),
-                timeout=_DEBOUNCE_S,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for p in pending:
-                p.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            try:
+                await asyncio.wait_for(dirty.wait(), timeout=_DEBOUNCE_S)
+            except TimeoutError:
+                pass
             if disconnected.is_set():
                 break
             dirty.clear()
