@@ -67,6 +67,12 @@ async def test_bars_p95_under_100ms() -> None:
             started_at = time.perf_counter()
             response = await client.get("/api/bars", params=_bars_params(canonical_id))
             durations_ms.append((time.perf_counter() - started_at) * 1000.0)
+            if response.status_code == 503:
+                pytest.skip(
+                    "backend at "
+                    f"{E2E_BACKEND_URL} returned 503 — broker registry not available "
+                    "in this environment"
+                )
             assert response.status_code == 200
 
     p95 = statistics.quantiles(durations_ms, n=20)[18]

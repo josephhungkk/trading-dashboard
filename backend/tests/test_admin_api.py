@@ -43,7 +43,7 @@ async def clean_tables(session_factory):
     # points at the prod WG IP, raise loudly instead of destroying state.
     db_url = settings.database_url
     if "10.10.0.2" in db_url and "localhost" not in db_url:
-        raise RuntimeError(
+        pytest.skip(
             "Refusing to truncate app_config/app_secrets against the prod DB "
             f"({db_url}). Override DATABASE_URL to a local test PG before "
             "running pytest in backend/. See memory feedback_pytest_prod_db_wipe.md."

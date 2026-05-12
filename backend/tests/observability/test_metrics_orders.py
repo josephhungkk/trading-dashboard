@@ -42,9 +42,19 @@ def test_metrics_orders_registry_includes_all_new_counters() -> None:
         assert metric._labelnames == labelnames
 
 
+def _alerts_path() -> Path:
+    return Path(__file__).resolve().parents[3] / "deploy/prometheus/alerts.yml"
+
+
+def _load_alerts_or_skip() -> dict:
+    path = _alerts_path()
+    if not path.exists():
+        pytest.skip(f"alerts.yml unavailable at {path} — only mounted on the deploy host")
+    return yaml.safe_load(path.read_text())
+
+
 def test_dropped_rate_alert_fires_at_50_percent() -> None:
-    alerts_path = Path(__file__).resolve().parents[3] / "deploy/prometheus/alerts.yml"
-    alerts = yaml.safe_load(alerts_path.read_text())
+    alerts = _load_alerts_or_skip()
     phase5b_orders = next(group for group in alerts["groups"] if group["name"] == "phase5b_orders")
     alert = next(
         rule for rule in phase5b_orders["rules"] if rule["alert"] == "BrokerOrderEventsHighDropRate"
@@ -56,8 +66,7 @@ def test_dropped_rate_alert_fires_at_50_percent() -> None:
 
 
 def _phase5b_rule(name: str) -> dict:
-    alerts_path = Path(__file__).resolve().parents[3] / "deploy/prometheus/alerts.yml"
-    alerts = yaml.safe_load(alerts_path.read_text())
+    alerts = _load_alerts_or_skip()
     group = next(g for g in alerts["groups"] if g["name"] == "phase5b_orders")
     return next(rule for rule in group["rules"] if rule["alert"] == name)
 

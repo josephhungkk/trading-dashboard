@@ -436,6 +436,21 @@ def _make_lifespan_mocks(
     mock_bar_cls.return_value = mock_bar_svc
 
 
+def _patch_config_service(mock_svc_cls: MagicMock) -> AsyncMock:
+    """Phase 11a-A.5+B8: lifespan reads/writes secrets via async svc methods.
+
+    Returns an AsyncMock instance with reveal_secret, set_secret, and get_json
+    pre-wired. Caller should `patch("app.main.ConfigService", return_value=...)`
+    or `mock_svc_cls.return_value = ...` after calling.
+    """
+    svc = AsyncMock()
+    svc.reveal_secret = AsyncMock(return_value="sk-test-master")
+    svc.set_secret = AsyncMock()
+    svc.get_json = AsyncMock(return_value=None)
+    mock_svc_cls.return_value = svc
+    return svc
+
+
 async def test_lifespan_starts_scheduler() -> None:
     """Invoke lifespan directly; assert scheduler exists, is running, has 3 cron jobs."""
     from app.main import app as fastapi_app
@@ -445,10 +460,16 @@ async def test_lifespan_starts_scheduler() -> None:
         patch("app.main.Redis") as mock_redis_cls,
         patch("app.main.PostgresListenBridge") as mock_bridge_cls,
         patch("app.main.ConfigCache") as mock_cache_cls,
-        patch("app.main.ConfigService"),
+        patch("app.main.ConfigService") as mock_svc_cls,
         patch("app.main.get_fernet"),
         patch("app.main.set_config_service"),
         patch("app.main.start_backend_callback_server") as mock_cbs,
+        patch("app.main.OrderCapabilityService") as mock_capability_cls,
+        patch("app.main.build_quote_engine", return_value=None),
+        patch(
+            "app.main._update_schwab_token_metrics",
+            side_effect=lambda *_a, **_k: asyncio.Event().wait(),
+        ),
         patch(
             "app.main.build_broker_registry",
             side_effect=MissingBrokerSecrets("no broker"),
@@ -460,6 +481,10 @@ async def test_lifespan_starts_scheduler() -> None:
         _make_lifespan_mocks(
             mock_redis_cls, mock_bridge_cls, mock_cache_cls, mock_cbs, mock_bar_cls
         )
+        _patch_config_service(mock_svc_cls)
+        _mock_capability_svc = AsyncMock()
+        _mock_capability_svc.run_listener = AsyncMock(return_value=None)
+        mock_capability_cls.return_value = _mock_capability_svc
 
         async with lifespan(fastapi_app):
             scheduler = fastapi_app.state.scheduler
@@ -483,10 +508,16 @@ async def test_lifespan_runs_initial_pre_warm() -> None:
         patch("app.main.Redis") as mock_redis_cls,
         patch("app.main.PostgresListenBridge") as mock_bridge_cls,
         patch("app.main.ConfigCache") as mock_cache_cls,
-        patch("app.main.ConfigService"),
+        patch("app.main.ConfigService") as mock_svc_cls,
         patch("app.main.get_fernet"),
         patch("app.main.set_config_service"),
         patch("app.main.start_backend_callback_server") as mock_cbs,
+        patch("app.main.OrderCapabilityService") as mock_capability_cls,
+        patch("app.main.build_quote_engine", return_value=None),
+        patch(
+            "app.main._update_schwab_token_metrics",
+            side_effect=lambda *_a, **_k: asyncio.Event().wait(),
+        ),
         patch(
             "app.main.build_broker_registry",
             side_effect=MissingBrokerSecrets("no broker"),
@@ -499,6 +530,10 @@ async def test_lifespan_runs_initial_pre_warm() -> None:
         _make_lifespan_mocks(
             mock_redis_cls, mock_bridge_cls, mock_cache_cls, mock_cbs, mock_bar_cls
         )
+        _patch_config_service(mock_svc_cls)
+        _mock_capability_svc = AsyncMock()
+        _mock_capability_svc.run_listener = AsyncMock(return_value=None)
+        mock_capability_cls.return_value = _mock_capability_svc
 
         async with lifespan(fastapi_app):
             try:

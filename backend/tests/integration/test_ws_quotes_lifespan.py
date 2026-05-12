@@ -17,6 +17,7 @@ These tests assert:
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -83,6 +84,20 @@ def _make_lifespan_mocks(
     """
     mock_redis = AsyncMock()
     mock_redis.aclose = AsyncMock()
+    # Phase 11a-A.5+B8: lifespan calls redis.pubsub() (sync) and starts a
+    # background listener task on its async-context-manager result.
+    mock_pubsub = AsyncMock()
+    mock_pubsub.subscribe = AsyncMock()
+    mock_pubsub.unsubscribe = AsyncMock()
+
+    async def _block_forever_listen():
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+    mock_pubsub.listen = MagicMock(side_effect=_block_forever_listen)
+    mock_pubsub.__aenter__ = AsyncMock(return_value=mock_pubsub)
+    mock_pubsub.__aexit__ = AsyncMock(return_value=None)
+    mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
     mock_redis_cls.from_url.return_value = mock_redis
 
     mock_bridge = MagicMock()
@@ -102,6 +117,23 @@ def _make_lifespan_mocks(
     mock_bar_svc.start = AsyncMock()
     mock_bar_svc.stop = AsyncMock()
     mock_bar_cls.return_value = mock_bar_svc
+
+
+def _patch_config_service(mock_svc_cls: MagicMock) -> AsyncMock:
+    """Phase 11a-A.5+B8 helper — wire AsyncMock for ConfigService."""
+    svc = AsyncMock()
+    svc.reveal_secret = AsyncMock(return_value="sk-test-master")
+    svc.set_secret = AsyncMock()
+    svc.get_json = AsyncMock(return_value=None)
+    mock_svc_cls.return_value = svc
+    return svc
+
+
+def _patch_capability_service(mock_cap_cls: MagicMock) -> AsyncMock:
+    inst = AsyncMock()
+    inst.run_listener = AsyncMock(return_value=None)
+    mock_cap_cls.return_value = inst
+    return inst
 
 
 @pytest.mark.no_db
@@ -129,10 +161,14 @@ async def test_app_state_quote_engine_attribute_set_by_lifespan() -> None:
         patch("app.main.Redis") as mock_redis_cls,
         patch("app.main.PostgresListenBridge") as mock_bridge_cls,
         patch("app.main.ConfigCache") as mock_cache_cls,
-        patch("app.main.ConfigService"),
+        patch("app.main.ConfigService") as mock_svc_cls,
         patch("app.main.get_fernet"),
         patch("app.main.set_config_service"),
         patch("app.main.start_backend_callback_server") as mock_cbs,
+        patch(
+            "app.main._update_schwab_token_metrics",
+            side_effect=lambda *_a, **_k: asyncio.Event().wait(),
+        ),
         patch("app.main.build_broker_registry", side_effect=MissingBrokerSecrets("no-broker")),
         patch("app.main.seed_instruments_from_positions", return_value=0),
         patch("app.main.build_quote_engine", mock_build),
@@ -143,6 +179,7 @@ async def test_app_state_quote_engine_attribute_set_by_lifespan() -> None:
         _make_lifespan_mocks(
             mock_redis_cls, mock_bridge_cls, mock_cache_cls, mock_cbs, mock_bar_cls
         )
+        _patch_config_service(mock_svc_cls)
         # OrderCapabilityService must have an awaitable run_listener() for the task.
         mock_cap = AsyncMock()
         mock_cap.run_listener = AsyncMock(return_value=None)
@@ -181,10 +218,14 @@ async def test_lifespan_sets_quote_engine_to_none_when_build_returns_none() -> N
         patch("app.main.Redis") as mock_redis_cls,
         patch("app.main.PostgresListenBridge") as mock_bridge_cls,
         patch("app.main.ConfigCache") as mock_cache_cls,
-        patch("app.main.ConfigService"),
+        patch("app.main.ConfigService") as mock_svc_cls,
         patch("app.main.get_fernet"),
         patch("app.main.set_config_service"),
         patch("app.main.start_backend_callback_server") as mock_cbs,
+        patch(
+            "app.main._update_schwab_token_metrics",
+            side_effect=lambda *_a, **_k: asyncio.Event().wait(),
+        ),
         patch("app.main.build_broker_registry", side_effect=MissingBrokerSecrets("no-broker")),
         patch("app.main.seed_instruments_from_positions", return_value=0),
         patch("app.main.build_quote_engine", mock_build),
@@ -195,6 +236,7 @@ async def test_lifespan_sets_quote_engine_to_none_when_build_returns_none() -> N
         _make_lifespan_mocks(
             mock_redis_cls, mock_bridge_cls, mock_cache_cls, mock_cbs, mock_bar_cls
         )
+        _patch_config_service(mock_svc_cls)
         mock_cap = AsyncMock()
         mock_cap.run_listener = AsyncMock(return_value=None)
         mock_cap_cls.return_value = mock_cap
