@@ -126,6 +126,18 @@ async def lifespan(_app: FastAPI) -> Any:
     set_config_service(svc)
     callback_server = await start_backend_callback_server(svc, session_factory)
 
+    # Phase 11a-A.5 (HIGH-5): bootstrap LiteLLM master-key in Redis so
+    # the auth-callback in deploy/litellm/config.yaml sees it. Operator
+    # rotates via PUT /api/admin/secrets/ai/litellm_master_key.
+    master_key = await svc.reveal_secret("ai", "litellm_master_key")
+    if master_key is None:
+        master_key = "sk-bootstrap-rotate-me"
+        await svc.set_secret("ai", "litellm_master_key", master_key)
+    try:
+        await redis.set("ai:litellm_master_key", master_key)
+    except Exception as exc:
+        log.warning("litellm_master_key_redis_set_failed", error=str(exc))
+
     listener_config = asyncio.create_task(config_cache.run_listener())
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
 
