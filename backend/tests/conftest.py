@@ -54,6 +54,78 @@ def _apply_migrations(request: pytest.FixtureRequest) -> None:
     command.upgrade(cfg, "head")
 
 
+def _is_test_db() -> bool:
+    """True iff DATABASE_URL points at the dedicated test PG (port 5433 or
+    host ``test_postgres``). Guards the seed fixture against running on the
+    prod NUC DB at 10.10.0.2.
+    """
+    db_url = settings.database_url
+    return "test_postgres" in db_url or ":5433" in db_url
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _seed_minimal_test_data(request: pytest.FixtureRequest) -> None:
+    """Seed a single broker_account row + a handful of instruments rows on
+    the test PG so integration tests that look for ANY row don't skip.
+
+    Idempotent — uses ON CONFLICT to avoid duplicate-key on re-runs. Runs
+    only when DATABASE_URL points at the test PG (never against the prod NUC
+    DB). Skipped for ``no_db``-only sessions to avoid forcing migrations on
+    pure-unit runs.
+    """
+    if request.session.items and all(
+        item.get_closest_marker("no_db") for item in request.session.items
+    ):
+        return
+    if not _is_test_db():
+        return
+
+    import asyncio as _seed_asyncio
+
+    import asyncpg as _seed_asyncpg
+
+    async def _seed() -> None:
+        dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await _seed_asyncpg.connect(dsn)
+        try:
+            await conn.execute(
+                """
+                INSERT INTO broker_accounts (
+                    broker_id, account_number, alias, mode, gateway_label,
+                    currency_base, last_seen_via
+                ) VALUES (
+                    'ibkr'::broker_id_enum, 'TEST001', 'test-acct-1',
+                    'paper'::trading_mode_enum, 'isa-paper', 'GBP', 'isa-paper'
+                ) ON CONFLICT (broker_id, account_number) DO NOTHING
+                """
+            )
+            instruments = [
+                ("equity_us:AAPL:NASDAQ", "STOCK", "NASDAQ", "USD", "Apple Inc."),
+                ("equity_us:MSFT:NASDAQ", "STOCK", "NASDAQ", "USD", "Microsoft Corp."),
+                ("equity_us:SPY:ARCA", "ETF", "ARCA", "USD", "SPDR S&P 500 ETF"),
+                ("equity_uk:VOD:LSE", "STOCK", "LSE", "GBP", "Vodafone Group"),
+                ("crypto:BTC:COINBASE", "CRYPTO", "COINBASE", "USD", "Bitcoin"),
+            ]
+            for canonical_id, asset_class, exchange, currency, display_name in instruments:
+                await conn.execute(
+                    """
+                    INSERT INTO instruments (canonical_id, asset_class, primary_exchange,
+                                              currency, display_name)
+                    VALUES ($1, $2::instrument_asset_class, $3, $4, $5)
+                    ON CONFLICT (canonical_id) DO NOTHING
+                    """,
+                    canonical_id,
+                    asset_class,
+                    exchange,
+                    currency,
+                    display_name,
+                )
+        finally:
+            await conn.close()
+
+    _seed_asyncio.run(_seed())
+
+
 @pytest.fixture
 async def client() -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:

@@ -26,6 +26,24 @@ services:
       AGGREGATOR_SHARD_COUNT: "1"
     restart: unless-stopped
 
+  # Phase 11a CI-debt: dedicated TimescaleDB instance for the test suite.
+  # The prod PG at 10.10.0.2 holds operator data (broker accounts, positions,
+  # encrypted secrets) and must not be touched by test setup/teardown.
+  # Tests override DATABASE_URL via scripts/run-tests.sh or pytest env var.
+  test_postgres:
+    image: timescale/timescaledb:2.21.3-pg16
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+    ports: ["5433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d test"]
+      interval: 3s
+      retries: 20
+    profiles: ["test"]
+    restart: "no"
+
   backend:
     build: ./backend
     env_file: .env

@@ -130,7 +130,7 @@ async def test_0028a_duplicate_active_order_id_a_rejected(db_session: AsyncSessi
     await db_session.execute(
         text(
             "INSERT INTO oco_links (id, broker_id, account_id, order_id_a, order_id_b, status) "
-            "VALUES (:id, 'ibkr', :acct, :oa, :ob, 'ACTIVE')"
+            "VALUES (:id, 'ibkr', :acct, :oa, :ob, 'PENDING_BOTH')"
         ),
         {"id": str(uuid4()), "acct": str(acct), "oa": shared_order_a, "ob": ob1},
     )
@@ -141,7 +141,7 @@ async def test_0028a_duplicate_active_order_id_a_rejected(db_session: AsyncSessi
         await db_session.execute(
             text(
                 "INSERT INTO oco_links (id, broker_id, account_id, order_id_a, order_id_b, status) "
-                "VALUES (:id, 'ibkr', :acct, :oa, :ob, 'PENDING')"
+                "VALUES (:id, 'ibkr', :acct, :oa, :ob, 'PENDING_BOTH')"
             ),
             {"id": str(uuid4()), "acct": str(acct), "oa": shared_order_a, "ob": ob2},
         )
@@ -176,7 +176,7 @@ async def test_0028a_terminal_order_id_a_allows_reuse(db_session: AsyncSession) 
     await db_session.execute(
         text(
             "INSERT INTO oco_links (id, broker_id, account_id, order_id_a, order_id_b, status) "
-            "VALUES (:id, 'ibkr', :acct, :oa, :ob, 'ACTIVE')"
+            "VALUES (:id, 'ibkr', :acct, :oa, :ob, 'PENDING_BOTH')"
         ),
         {"id": str(uuid4()), "acct": str(acct), "oa": shared_order_a, "ob": ob4},
     )

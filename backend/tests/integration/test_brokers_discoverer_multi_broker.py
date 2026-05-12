@@ -21,8 +21,17 @@ from app.services.brokers import BrokerDiscoverer
 
 
 def _postgres_reachable() -> bool:
+    """Probe whatever DATABASE_URL is currently pointing at — see twin in
+    test_broker_discoverer_resurrect.py (Phase 11a CI debt)."""
+    from urllib.parse import urlparse
+
+    from app.core.config import settings
+
+    parsed = urlparse(settings.database_url.replace("+asyncpg", ""))
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 5432
     try:
-        with socket.create_connection(("127.0.0.1", 5432), timeout=1):
+        with socket.create_connection((host, port), timeout=1):
             return True
     except OSError:
         return False
