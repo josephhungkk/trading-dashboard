@@ -821,3 +821,14 @@ AI_COST_LEDGER_INSERT_FAILURES_TOTAL = Counter(
     "Cost-ledger batched INSERT failures (rows dropped, fail-OPEN).",
     registry=registry,
 )
+ai_jobs_in_flight = Gauge(
+    "ai_jobs_in_flight",
+    "AI jobs not in terminal state.",
+    registry=registry,
+)
+ai_jobs_orphan_recovered_total = Counter(
+    "ai_jobs_orphan_recovered_total",
+    "Jobs failed via orphan-recovery sweep (started before crash).",
+    ["phase"],
+    registry=registry,
+)
