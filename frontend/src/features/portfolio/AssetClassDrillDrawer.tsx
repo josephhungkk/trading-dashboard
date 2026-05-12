@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useEffect } from 'react';
 
 import type { BaseCurrency } from '@/services/portfolio/types';
 import { useRollupDrill } from '@/services/portfolio/useRollupDrill';
@@ -22,6 +23,15 @@ export function AssetClassDrillDrawer({
   onClose,
 }: Props): React.JSX.Element | null {
   const drill = useRollupDrill(assetClass, base);
+
+  useEffect(() => {
+    if (assetClass === null) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [assetClass, onClose]);
 
   if (assetClass === null) return null;
 
