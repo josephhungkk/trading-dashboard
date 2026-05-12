@@ -805,6 +805,12 @@ AI_ROUTER_OLLAMA_HEALTH_ALERT_PUBLISH_FAILURES_TOTAL = Counter(
     labelnames=["host"],
     registry=registry,
 )
+AI_ROUTER_RATE_LIMITED_TOTAL = Counter(
+    "ai_router_rate_limited_total",
+    "AI router rate-limit rejections.",
+    labelnames=["capability"],
+    registry=registry,
+)
 AI_COST_LEDGER_DROPS_TOTAL = Counter(
     "ai_cost_ledger_drops_total",
     "Cost-ledger queue drops (queue full).",
@@ -813,11 +819,5 @@ AI_COST_LEDGER_DROPS_TOTAL = Counter(
 AI_COST_LEDGER_INSERT_FAILURES_TOTAL = Counter(
     "ai_cost_ledger_insert_failures_total",
     "Cost-ledger batched INSERT failures (rows dropped, fail-OPEN).",
-    registry=registry,
-)
-AI_ROUTER_RATE_LIMITED_TOTAL = Counter(
-    "ai_router_rate_limited_total",
-    "AI router rate-limit rejections.",
-    labelnames=["capability"],
     registry=registry,
 )
