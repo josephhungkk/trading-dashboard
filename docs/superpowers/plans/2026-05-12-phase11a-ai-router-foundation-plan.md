@@ -1850,18 +1850,876 @@ git push --tags
 
 (Tag message file follows the v0.11.0.1 template — chunk-commits list + reviewer-results summary + test status.)
 
-### Chunk A2 — WoL + Ollama service installs (sketch)
+### Chunk A2 — WoL + Ollama service installs + readiness probe + circuit breaker
 
-**Files to create:** `backend/app/services/ai/wol.py`, `deploy/nuc/install-ollama.ps1`, `deploy/heavybox/install-ollama.sh`, `deploy/heavybox/idle-suspend.service`, tests.
+**Goal:** Make the heavy box wake-able on demand from the BE. NUC-side WoL helper resolves the heavy-box MAC via ARP and broadcasts the magic packet on the LAN; BE polls the heavy-box Ollama `GET /api/tags` until the requested model is loaded. Circuit breaker opens after 3 failures in 10min so a flapping heavy box doesn't melt the router.
 
-**Task outline:**
-1. Operator runbook task: install Ollama Windows service on NUC; pull `qwen2.5:7b` + `llama3.2:8b`; verify `curl http://10.10.0.2:11434/api/tags` returns model list.
-2. Operator runbook task: install Ollama on heavy box; pull `qwen2.5:32b` + `llama3.3:70b` + `qwen2.5-coder:32b`; install idle-suspend timer.
-3. Verify WoL packet path: VPS → NUC → heavy box (LAN broadcast). If two-hop fails, create NUC-side WoL helper PowerShell.
-4. TDD: `services/ai/wol.py::HeavyBoxWoL` magic packet shape; model-ready probe via `GET /api/tags`; circuit-breaker open after 3 failures in 10min.
-5. Metrics: `ai_router_wol_wake_total`, `wol_wake_latency_seconds`, `wol_warm_to_ready_seconds`, `wol_wake_failures_total`, `wol_circuit_breaker_state{host}`.
-6. Reviewer chain (haiku + sonnet for code-quality).
-7. Tag `v0.11.0.a2`.
+**Locked decisions (from user clarifying questions 2026-05-12):**
+- Heavy box is **Windows (with WSL)** — Ollama installed as a Windows service for boot-without-login. Same pattern as NUC.
+- WoL path: **NUC-side WoL helper** — BE on VPS calls a tiny HTTP service on the NUC over WG; helper broadcasts on the LAN.
+- MAC resolution: **ARP-from-NUC** — helper resolves 192.168.50.30 → MAC from the local ARP table on each wake; caches in memory.
+
+**Files to create:**
+- `deploy/nuc/install-ollama.ps1` — Windows installer + service registration + initial model pull (`qwen2.5:7b`, `llama3.2:8b`)
+- `deploy/nuc/wol_helper.ps1` — PowerShell HTTP service: listens on `10.10.0.2:11900/wake`, ARP-resolves heavy box, broadcasts magic packet on LAN
+- `deploy/nuc/install-wol-helper.ps1` — registers the helper as a Windows scheduled task that starts at boot (pattern matches existing broker-sidecar scheduled tasks)
+- `deploy/heavybox/install-ollama.ps1` — Windows installer mirror; pulls `qwen2.5:32b`, `llama3.3:70b`, `qwen2.5-coder:32b`
+- `deploy/heavybox/install-idle-suspend.ps1` — Windows scheduled task: every 5min check `netstat` for active connections on :11434; suspend if idle >15min
+- `backend/app/services/ai/wol.py` — `HeavyBoxWoL` class with `wake_and_wait_for_model(model_name) -> WakeResult`; uses async httpx to call NUC helper + poll Ollama `/api/tags`
+- `backend/tests/services/ai/test_wol.py` — unit tests for WoL primitive with fake helper + fake Ollama
+
+**Files to modify:**
+- `backend/app/main.py` — lifespan: instantiate `HeavyBoxWoL` singleton on `app.state.heavy_wol` (mirrors `app.state.vol_service` pattern from Phase 10b.1)
+- `backend/app/core/metrics.py` — register WoL metrics (`ai_router_wol_*`)
+
+### Task 16: NUC Ollama install runbook
+
+**Files:**
+- Create: `deploy/nuc/install-ollama.ps1`
+
+- [ ] **Step 1: Author the install script**
+
+Create `deploy/nuc/install-ollama.ps1`:
+
+```powershell
+# deploy/nuc/install-ollama.ps1 — Phase 11a-A2
+# Run as Administrator on the NUC15PRO. Installs Ollama as a Windows
+# service so it survives reboot without login. Pulls the LOCAL_ONLY +
+# STRUCTURED_OUTPUT default models. Verifies the API responds.
+
+#Requires -RunAsAdministrator
+
+$ErrorActionPreference = "Stop"
+
+Write-Host "==> Installing Ollama (Windows)..."
+$installer = "$env:TEMP\OllamaSetup.exe"
+Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $installer
+Start-Process -FilePath $installer -ArgumentList "/SILENT" -Wait
+
+Write-Host "==> Configuring Ollama service to listen on 0.0.0.0:11434..."
+# Recent Ollama installers register as a per-user service; we set the
+# OLLAMA_HOST env var system-wide so it binds to 0.0.0.0 and is reachable
+# from the WG-routed BE on the VPS.
+[System.Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0:11434", "Machine")
+[System.Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", "5m", "Machine")
+
+Write-Host "==> Restarting Ollama service to pick up env vars..."
+Stop-Service -Name "Ollama" -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+Start-Service -Name "Ollama"
+
+Write-Host "==> Pulling default LOCAL_ONLY models (this takes a while)..."
+& ollama pull qwen2.5:7b
+& ollama pull llama3.2:8b
+
+Write-Host "==> Smoke-testing the API..."
+$response = Invoke-RestMethod -Uri "http://10.10.0.2:11434/api/tags" -TimeoutSec 10
+if ($response.models.Count -lt 2) {
+    Write-Error "Ollama returned <2 models after install"
+    exit 1
+}
+Write-Host "✓ NUC Ollama install complete. Models loaded:"
+$response.models | ForEach-Object { Write-Host "  - $($_.name)" }
+```
+
+- [ ] **Step 2: Document operator action**
+
+The script is operator-run; we don't execute it. Add to chunk-A2 close-out notes that the operator must run it once on the NUC after `git pull`. Reviewer chain (haiku spec) doesn't validate runtime behaviour; the smoke step inside the script is the operator's confirmation.
+
+- [ ] **Step 3: Commit**
+
+```
+feat(phase11a-A2): NUC Ollama install runbook (Windows service)
+
+deploy/nuc/install-ollama.ps1 installs Ollama as a Windows service
+with OLLAMA_HOST=0.0.0.0:11434 and OLLAMA_KEEP_ALIVE=5m as machine
+env vars (survives reboot, no login required). Pulls qwen2.5:7b +
+llama3.2:8b for the LOCAL_ONLY + STRUCTURED_OUTPUT defaults in
+config_defaults.DEFAULT_AI_ROUTER_CAPABILITY_MAP. Operator-run once
+post-deploy; pattern matches existing broker-sidecar scheduled tasks.
+```
+
+### Task 17: NUC WoL helper service
+
+**Files:**
+- Create: `deploy/nuc/wol_helper.ps1`
+- Create: `deploy/nuc/install-wol-helper.ps1`
+
+- [ ] **Step 1: Author the WoL helper**
+
+Create `deploy/nuc/wol_helper.ps1`:
+
+```powershell
+# deploy/nuc/wol_helper.ps1 — Phase 11a-A2
+# Tiny HTTP service on the NUC. BE on the VPS calls this over WG to
+# wake the heavy box; we ARP-resolve the heavy box IP to MAC on the
+# LAN side and broadcast the magic packet. The packet doesn't cross
+# WG cleanly so it MUST be sent from a same-LAN host.
+#
+# Listen on 10.10.0.2:11900 (WG-internal). NOT exposed past WG.
+# Single endpoint: POST /wake -> { "status": "sent", "mac": "..." }
+
+$ErrorActionPreference = "Stop"
+$Listener = New-Object System.Net.HttpListener
+$Listener.Prefixes.Add("http://10.10.0.2:11900/")
+$Listener.Start()
+Write-Host "WoL helper listening on http://10.10.0.2:11900/"
+
+# In-memory MAC cache (per-process, lost on restart — fine; ARP re-
+# resolves on next wake).
+$MacCache = @{}
+
+function Resolve-MacFromArp($ip) {
+    if ($MacCache.ContainsKey($ip)) { return $MacCache[$ip] }
+    # Probe the host so the ARP table has a fresh entry.
+    Test-Connection -ComputerName $ip -Count 1 -TimeoutSeconds 2 -Quiet | Out-Null
+    $arpLine = (arp -a $ip | Select-String "$ip\s+([\w-]{17})") .Matches.Groups[1].Value
+    if (-not $arpLine) { return $null }
+    $mac = $arpLine -replace '-', ':'
+    $MacCache[$ip] = $mac
+    return $mac
+}
+
+function Send-MagicPacket($macStr) {
+    $macBytes = ($macStr -split ':') | ForEach-Object { [Convert]::ToByte($_, 16) }
+    $packet = [byte[]](,0xFF * 6 + ($macBytes * 16))
+    $udpClient = New-Object System.Net.Sockets.UdpClient
+    $udpClient.EnableBroadcast = $true
+    $udpClient.Send($packet, $packet.Length, "255.255.255.255", 9) | Out-Null
+    $udpClient.Close()
+}
+
+while ($Listener.IsListening) {
+    $ctx = $Listener.GetContext()
+    $req = $ctx.Request
+    $res = $ctx.Response
+    try {
+        if ($req.HttpMethod -ne "POST" -or $req.Url.AbsolutePath -ne "/wake") {
+            $res.StatusCode = 404
+            continue
+        }
+        $heavyIp = "192.168.50.30"
+        $mac = Resolve-MacFromArp $heavyIp
+        if (-not $mac) {
+            $res.StatusCode = 502
+            $body = '{"status":"failed","reason":"arp_resolve_failed"}'
+        } else {
+            Send-MagicPacket $mac
+            $res.StatusCode = 200
+            $body = "{`"status`":`"sent`",`"mac`":`"$mac`"}"
+        }
+        $buf = [System.Text.Encoding]::UTF8.GetBytes($body)
+        $res.OutputStream.Write($buf, 0, $buf.Length)
+    } finally {
+        $res.Close()
+    }
+}
+```
+
+- [ ] **Step 2: Author the scheduled-task installer**
+
+Create `deploy/nuc/install-wol-helper.ps1`:
+
+```powershell
+# deploy/nuc/install-wol-helper.ps1 — Phase 11a-A2
+# Register wol_helper.ps1 as a Windows scheduled task that starts at
+# boot. Mirrors the pattern used by broker-sidecar tasks.
+
+#Requires -RunAsAdministrator
+$ErrorActionPreference = "Stop"
+
+$taskName = "dashboard-wol-helper"
+$scriptPath = (Resolve-Path "$PSScriptRoot\wol_helper.ps1").Path
+
+$action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
+
+Register-ScheduledTask `
+    -TaskName $taskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Force
+
+Start-ScheduledTask -TaskName $taskName
+Write-Host "✓ wol-helper scheduled task installed and started."
+```
+
+- [ ] **Step 3: Commit**
+
+```
+feat(phase11a-A2): NUC WoL helper + Windows scheduled-task installer
+
+The WoL magic packet doesn't cross WireGuard cleanly, so the BE on
+the VPS calls a tiny HTTP service on the NUC over WG; that service
+ARP-resolves the heavy box's MAC on the LAN side and broadcasts the
+packet. Mirrors the broker-sidecar scheduled-task pattern. Listens on
+10.10.0.2:11900 (NOT exposed past WG). MAC cache is in-memory; ARP
+re-resolves on restart.
+```
+
+### Task 18: Heavy-box Ollama install runbook + idle-suspend
+
+**Files:**
+- Create: `deploy/heavybox/install-ollama.ps1`
+- Create: `deploy/heavybox/install-idle-suspend.ps1`
+
+- [ ] **Step 1: Author the heavy-box Ollama install script**
+
+Create `deploy/heavybox/install-ollama.ps1`:
+
+```powershell
+# deploy/heavybox/install-ollama.ps1 — Phase 11a-A2
+# Run as Administrator on the heavy box (Windows + WSL — Ollama runs
+# native). Installs as a Windows service so it survives WoL wake
+# without anyone logging in. Pulls the REASONING + CODING + heavy
+# LOCAL_ONLY defaults.
+
+#Requires -RunAsAdministrator
+
+$ErrorActionPreference = "Stop"
+
+Write-Host "==> Installing Ollama (Windows)..."
+$installer = "$env:TEMP\OllamaSetup.exe"
+Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $installer
+Start-Process -FilePath $installer -ArgumentList "/SILENT" -Wait
+
+Write-Host "==> Configuring Ollama service to listen on 0.0.0.0:11434..."
+[System.Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0:11434", "Machine")
+[System.Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", "5m", "Machine")
+
+Write-Host "==> Restarting Ollama service to pick up env vars..."
+Stop-Service -Name "Ollama" -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+Start-Service -Name "Ollama"
+
+Write-Host "==> Pulling default REASONING / heavy LOCAL_ONLY / CODING models (takes a while)..."
+& ollama pull qwen2.5:32b
+& ollama pull llama3.3:70b
+& ollama pull qwen2.5-coder:32b
+
+Write-Host "==> Smoke-testing the API from the heavy box itself..."
+$response = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 10
+if ($response.models.Count -lt 3) {
+    Write-Error "Ollama returned <3 models after install"
+    exit 1
+}
+Write-Host "✓ Heavy-box Ollama install complete. Models loaded:"
+$response.models | ForEach-Object { Write-Host "  - $($_.name)" }
+```
+
+- [ ] **Step 2: Author the idle-suspend task**
+
+Create `deploy/heavybox/install-idle-suspend.ps1`:
+
+```powershell
+# deploy/heavybox/install-idle-suspend.ps1 — Phase 11a-A2
+# Auto-suspend the heavy box after 15min of no traffic to :11434.
+# Runs as a scheduled task every 5min; checks netstat; suspends when
+# the count of established connections has been zero for 3 consecutive
+# checks (3 * 5min = 15min idle window).
+
+#Requires -RunAsAdministrator
+$ErrorActionPreference = "Stop"
+
+$watchScript = @'
+$idleFile = "$env:ProgramData\dashboard-heavy-idle.txt"
+$count = 0
+if (Test-Path $idleFile) { $count = [int](Get-Content $idleFile) }
+
+$conns = (netstat -an | Select-String ":11434" | Select-String "ESTABLISHED").Count
+if ($conns -eq 0) { $count++ } else { $count = 0 }
+Set-Content -Path $idleFile -Value $count
+
+if ($count -ge 3) {
+    Remove-Item $idleFile -Force
+    # 0=sleep, 1=hibernate
+    rundll32.exe powrprof.dll,SetSuspendState 0,1,0
+}
+'@
+
+$watchPath = "$env:ProgramData\dashboard-heavy-idle-check.ps1"
+Set-Content -Path $watchPath -Value $watchScript -Encoding UTF8
+
+$taskName = "dashboard-heavy-idle-suspend"
+$action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watchPath`""
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+
+Register-ScheduledTask `
+    -TaskName $taskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Force
+
+Write-Host "✓ idle-suspend scheduled task installed (15min idle window)."
+```
+
+- [ ] **Step 3: Commit**
+
+```
+feat(phase11a-A2): heavy-box Ollama install runbook + idle-suspend task
+
+deploy/heavybox/install-ollama.ps1 mirrors the NUC pattern: Windows
+service, OLLAMA_HOST=0.0.0.0:11434, OLLAMA_KEEP_ALIVE=5m. Pulls
+qwen2.5:32b + llama3.3:70b + qwen2.5-coder:32b for the REASONING +
+CODING + heavy LOCAL_ONLY defaults.
+
+install-idle-suspend.ps1 registers a 5-minute scheduled task that
+counts consecutive idle checks on :11434 and suspends after 15min
+of no active connections — keeps the heavy box asleep when nobody's
+using it; WoL wakes it back on demand.
+```
+
+### Task 19: Write the failing test for `HeavyBoxWoL`
+
+**Files:**
+- Create: `backend/tests/services/ai/test_wol.py`
+
+- [ ] **Step 1: Author the test**
+
+Create `backend/tests/services/ai/test_wol.py`:
+
+```python
+"""Phase 11a-A2: HeavyBoxWoL unit tests.
+
+Validates: wake-helper RPC, model-ready polling, circuit-breaker
+state transitions, and idempotent wake (multiple concurrent callers
+share one probe).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any
+
+import httpx
+import pytest
+
+pytestmark = pytest.mark.no_db
+
+
+class _FakeClock:
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def fake_clock() -> _FakeClock:
+    return _FakeClock()
+
+
+def _make_transport(
+    *,
+    wake_status: int = 200,
+    tags_seq: list[dict[str, Any]] | None = None,
+) -> httpx.MockTransport:
+    """Build a transport that the WoL primitive talks through.
+
+    Args:
+        wake_status: status code returned by POST /wake on the NUC helper.
+        tags_seq: response payloads (dict) returned by successive calls
+          to GET /api/tags on the heavy-box Ollama. Useful for simulating
+          "model not loaded yet" -> "model loaded" transitions.
+    """
+    if tags_seq is None:
+        tags_seq = [{"models": [{"name": "qwen2.5:32b"}]}]
+    tags_iter = iter(tags_seq)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/wake" in request.url.path:
+            return httpx.Response(wake_status, json={"status": "sent", "mac": "AA:BB"})
+        if request.method == "GET" and request.url.path == "/api/tags":
+            try:
+                return httpx.Response(200, json=next(tags_iter))
+            except StopIteration:
+                return httpx.Response(200, json={"models": []})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_wake_and_wait_returns_ready_when_model_present(fake_clock: _FakeClock) -> None:
+    from app.services.ai.wol import HeavyBoxWoL
+
+    wol = HeavyBoxWoL(
+        helper_url="http://nuc-helper:11900",
+        heavy_url="http://heavy:11434",
+        clock=fake_clock,
+        transport=_make_transport(),
+    )
+    result = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=60.0)
+    assert result.status == "ready"
+    assert result.tcp_open_ms is not None
+    assert result.model_ready_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_wake_returns_failed_when_helper_rejects(fake_clock: _FakeClock) -> None:
+    from app.services.ai.wol import HeavyBoxWoL
+
+    wol = HeavyBoxWoL(
+        helper_url="http://nuc-helper:11900",
+        heavy_url="http://heavy:11434",
+        clock=fake_clock,
+        transport=_make_transport(wake_status=502),
+    )
+    result = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=5.0)
+    assert result.status == "failed"
+    assert "helper" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_wake_returns_failed_when_model_never_appears(fake_clock: _FakeClock) -> None:
+    from app.services.ai.wol import HeavyBoxWoL
+
+    # /api/tags responds 200 but never lists the requested model.
+    tags_seq = [{"models": [{"name": "other-model"}]}] * 30
+    wol = HeavyBoxWoL(
+        helper_url="http://nuc-helper:11900",
+        heavy_url="http://heavy:11434",
+        clock=fake_clock,
+        transport=_make_transport(tags_seq=tags_seq),
+        poll_interval_s=0.0,  # synchronous test loop
+    )
+    result = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.5)
+    assert result.status == "failed"
+    assert "timeout" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_opens_after_three_failures_in_window(
+    fake_clock: _FakeClock,
+) -> None:
+    """3 wake failures within 10min open the breaker; subsequent calls
+    return 'circuit_open' WITHOUT issuing a wake request."""
+    from app.services.ai.wol import HeavyBoxWoL
+
+    wol = HeavyBoxWoL(
+        helper_url="http://nuc-helper:11900",
+        heavy_url="http://heavy:11434",
+        clock=fake_clock,
+        transport=_make_transport(wake_status=502),
+    )
+    for _ in range(3):
+        r = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.1)
+        assert r.status == "failed"
+
+    # 4th call within the window must short-circuit.
+    r4 = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.1)
+    assert r4.status == "circuit_open"
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_recovers_after_window(fake_clock: _FakeClock) -> None:
+    """After 5min in the open state, the next call gets one trial wake
+    (half-open). If it succeeds, the breaker closes."""
+    from app.services.ai.wol import HeavyBoxWoL
+
+    # Three failures open the breaker.
+    failing_transport = _make_transport(wake_status=502)
+    wol = HeavyBoxWoL(
+        helper_url="http://nuc-helper:11900",
+        heavy_url="http://heavy:11434",
+        clock=fake_clock,
+        transport=failing_transport,
+    )
+    for _ in range(3):
+        await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.1)
+
+    # Window passes.
+    fake_clock.advance(5 * 60 + 1)
+
+    # Swap the transport to a healthy one (success path).
+    wol.transport = _make_transport()
+    r = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=60.0)
+    assert r.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_waker_calls_share_single_probe(fake_clock: _FakeClock) -> None:
+    """Two callers concurrently asking for the same model wake just
+    once. Defended via asyncio.Event."""
+    from app.services.ai.wol import HeavyBoxWoL
+
+    call_count = {"wake": 0, "tags": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/wake" in request.url.path:
+            call_count["wake"] += 1
+            return httpx.Response(200, json={"status": "sent"})
+        if request.method == "GET" and request.url.path == "/api/tags":
+            call_count["tags"] += 1
+            return httpx.Response(200, json={"models": [{"name": "qwen2.5:32b"}]})
+        return httpx.Response(404)
+
+    wol = HeavyBoxWoL(
+        helper_url="http://nuc-helper:11900",
+        heavy_url="http://heavy:11434",
+        clock=fake_clock,
+        transport=httpx.MockTransport(handler),
+    )
+    r1, r2 = await asyncio.gather(
+        wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=5.0),
+        wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=5.0),
+    )
+    assert r1.status == "ready"
+    assert r2.status == "ready"
+    assert call_count["wake"] == 1  # Only ONE wake packet despite TWO callers.
+```
+
+- [ ] **Step 2: Run test to verify failure**
+
+Run: `cd /home/joseph/dashboard/backend && uv run pytest tests/services/ai/test_wol.py -v`
+Expected: `ModuleNotFoundError: app.services.ai.wol`.
+
+- [ ] **Step 3: Commit**
+
+```
+test(phase11a-A2): unit tests for HeavyBoxWoL primitive
+
+6 tests cover the contract: helper-RPC success, helper-RPC failure,
+model never appears (timeout), circuit-breaker opens after 3 fails
+in 10min, circuit-breaker half-open recovery, concurrent-callers
+share single probe (asyncio.Event-based dedup).
+```
+
+### Task 20: Implement `HeavyBoxWoL`
+
+**Files:**
+- Create: `backend/app/services/ai/wol.py`
+
+- [ ] **Step 1: Author the implementation**
+
+Create `backend/app/services/ai/wol.py`:
+
+```python
+"""Phase 11a-A2 (HIGH-3 / HIGH-8): HeavyBoxWoL primitive.
+
+BE on the VPS asks the NUC-side WoL helper to broadcast a magic
+packet (the packet doesn't cross WG cleanly so the NUC, same LAN as
+the heavy box, fires it). BE then polls heavy-box Ollama
+``GET /api/tags`` until the requested model appears OR a deadline
+elapses. Circuit breaker: 3 wake failures within 10min open the
+breaker for 5min, after which one trial wake is allowed (half-open).
+
+Idempotent under concurrent callers via asyncio.Event — multiple
+requests for the same model share a single magic-packet + probe loop.
+Single-replica today; multi-replica deferred to Phase 24.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Literal
+
+import httpx
+
+
+@dataclass(frozen=True)
+class WakeResult:
+    status: Literal["ready", "failed", "circuit_open"]
+    tcp_open_ms: int | None = None
+    model_ready_ms: int | None = None
+    error: str | None = None
+
+
+@dataclass
+class _BreakerState:
+    failures: list[float] = field(default_factory=list)  # monotonic times
+    opened_at: float | None = None
+
+
+_FAILURE_WINDOW_S = 10 * 60
+_FAILURE_THRESHOLD = 3
+_OPEN_DURATION_S = 5 * 60
+
+
+class HeavyBoxWoL:
+    """Wakes the heavy box on demand and waits for a named Ollama model."""
+
+    def __init__(
+        self,
+        *,
+        helper_url: str,
+        heavy_url: str,
+        clock: Callable[[], float] | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+        poll_interval_s: float = 1.0,
+    ) -> None:
+        self._helper_url = helper_url.rstrip("/")
+        self._heavy_url = heavy_url.rstrip("/")
+        self._clock = clock or time.monotonic
+        self.transport = transport  # public so tests can swap it mid-run
+        self._poll_interval_s = poll_interval_s
+        self._breaker = _BreakerState()
+        # Per-model singleton wake — keyed by model name so different
+        # models don't share each other's pending probe.
+        self._inflight: dict[str, asyncio.Task[WakeResult]] = {}
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=self.transport, timeout=10.0)
+
+    def _circuit_state(self) -> Literal["closed", "open", "half_open"]:
+        now = self._clock()
+        if self._breaker.opened_at is None:
+            return "closed"
+        if (now - self._breaker.opened_at) < _OPEN_DURATION_S:
+            return "open"
+        return "half_open"
+
+    def _record_failure(self) -> None:
+        now = self._clock()
+        # Drop failures outside the window.
+        cutoff = now - _FAILURE_WINDOW_S
+        self._breaker.failures = [t for t in self._breaker.failures if t >= cutoff]
+        self._breaker.failures.append(now)
+        if len(self._breaker.failures) >= _FAILURE_THRESHOLD:
+            self._breaker.opened_at = now
+
+    def _record_success(self) -> None:
+        self._breaker.failures.clear()
+        self._breaker.opened_at = None
+
+    async def wake_and_wait_for_model(
+        self, model_name: str, *, timeout_s: float = 60.0
+    ) -> WakeResult:
+        state = self._circuit_state()
+        if state == "open":
+            return WakeResult(status="circuit_open", error="breaker open after 3 failures")
+
+        existing = self._inflight.get(model_name)
+        if existing is not None and not existing.done():
+            return await existing
+
+        task = asyncio.create_task(self._do_wake(model_name, timeout_s))
+        self._inflight[model_name] = task
+        try:
+            return await task
+        finally:
+            self._inflight.pop(model_name, None)
+
+    async def _do_wake(self, model_name: str, timeout_s: float) -> WakeResult:
+        started = self._clock()
+        async with self._client() as client:
+            # 1) Tell the NUC helper to broadcast the magic packet.
+            try:
+                resp = await client.post(f"{self._helper_url}/wake")
+            except Exception as exc:  # noqa: BLE001
+                self._record_failure()
+                return WakeResult(status="failed", error=f"helper_unreachable: {exc}")
+            if resp.status_code != 200:
+                self._record_failure()
+                return WakeResult(
+                    status="failed", error=f"helper_rejected: HTTP {resp.status_code}"
+                )
+
+            tcp_open_ms: int | None = None
+            deadline = started + timeout_s
+            while self._clock() < deadline:
+                try:
+                    tags = await client.get(f"{self._heavy_url}/api/tags")
+                except Exception:  # noqa: BLE001 — box still booting
+                    await asyncio.sleep(self._poll_interval_s)
+                    continue
+                if tcp_open_ms is None:
+                    tcp_open_ms = int((self._clock() - started) * 1000)
+                if tags.status_code == 200:
+                    payload = tags.json()
+                    names = {m.get("name") for m in payload.get("models", [])}
+                    if model_name in names:
+                        ready_ms = int((self._clock() - started) * 1000)
+                        self._record_success()
+                        return WakeResult(
+                            status="ready",
+                            tcp_open_ms=tcp_open_ms,
+                            model_ready_ms=ready_ms,
+                        )
+                await asyncio.sleep(self._poll_interval_s)
+
+            self._record_failure()
+            return WakeResult(
+                status="failed",
+                tcp_open_ms=tcp_open_ms,
+                error="timeout_waiting_for_model",
+            )
+```
+
+- [ ] **Step 2: Run tests to verify pass**
+
+Run: `cd /home/joseph/dashboard/backend && uv run pytest tests/services/ai/test_wol.py -v`
+Expected: 6 PASS.
+
+- [ ] **Step 3: Commit**
+
+```
+feat(phase11a-A2): HeavyBoxWoL primitive with circuit breaker
+
+services/ai/wol.py — async helper-RPC + Ollama tag-poll. Magic packet
+is broadcast by the NUC-side wol_helper.ps1 (the packet doesn't cross
+WG cleanly so a same-LAN host must fire it). HIGH-3: readiness probe
+checks the target model is listed in /api/tags, not just that TCP
+:11434 is open (Ollama accepts connections during 30-90s model load).
+
+Circuit breaker: 3 wake failures within 10min open the breaker for
+5min; half-open after that. Concurrent callers asking for the same
+model share a single probe via per-model asyncio task cache.
+```
+
+### Task 21: Register WoL metrics + wire singleton into lifespan
+
+**Files:**
+- Modify: `backend/app/core/metrics.py`
+- Modify: `backend/app/main.py`
+
+- [ ] **Step 1: Add metrics in core/metrics.py**
+
+Run: `grep -n "ai_router\|Counter\|Histogram\|Gauge" /home/joseph/dashboard/backend/app/core/metrics.py | head -20`
+
+Append (mirroring the existing Counter/Histogram patterns):
+
+```python
+# Phase 11a-A2: WoL primitive metrics (spec §6, HIGH-3 split).
+AI_ROUTER_WOL_WAKE_TOTAL = Counter(
+    "ai_router_wol_wake_total",
+    "Total wake attempts via the NUC helper.",
+    ["host", "outcome"],  # host=heavy; outcome=ready|failed|circuit_open
+)
+AI_ROUTER_WOL_WAKE_LATENCY_SECONDS = Histogram(
+    "ai_router_wol_wake_latency_seconds",
+    "Seconds from wake request to first TCP-open on the target Ollama.",
+    ["host"],
+)
+AI_ROUTER_WOL_WARM_TO_READY_SECONDS = Histogram(
+    "ai_router_wol_warm_to_ready_seconds",
+    "Seconds from wake request to target model present in /api/tags.",
+    ["host"],
+)
+AI_ROUTER_WOL_WAKE_FAILURES_TOTAL = Counter(
+    "ai_router_wol_wake_failures_total",
+    "Wake attempts that ended in failed/timeout (excludes circuit_open).",
+    ["host", "reason"],
+)
+AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE = Gauge(
+    "ai_router_wol_circuit_breaker_state",
+    "Circuit-breaker state per host (0=closed, 1=half-open, 2=open).",
+    ["host"],
+)
+```
+
+- [ ] **Step 2: Wire the metrics into `HeavyBoxWoL`**
+
+Modify `backend/app/services/ai/wol.py` — observe metrics in `_do_wake` + `_record_failure` + `_record_success` + `_circuit_state` (state Gauge updated on transition):
+
+```python
+# At top of file:
+from app.core.metrics import (
+    AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE,
+    AI_ROUTER_WOL_WAKE_FAILURES_TOTAL,
+    AI_ROUTER_WOL_WAKE_LATENCY_SECONDS,
+    AI_ROUTER_WOL_WAKE_TOTAL,
+    AI_ROUTER_WOL_WARM_TO_READY_SECONDS,
+)
+
+# In _record_failure (after appending now to failures):
+AI_ROUTER_WOL_WAKE_FAILURES_TOTAL.labels(host="heavy", reason="wake_or_probe").inc()
+if self._breaker.opened_at == now:
+    AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE.labels(host="heavy").set(2)
+
+# In _record_success:
+AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE.labels(host="heavy").set(0)
+
+# In _do_wake on ready:
+AI_ROUTER_WOL_WAKE_TOTAL.labels(host="heavy", outcome="ready").inc()
+AI_ROUTER_WOL_WAKE_LATENCY_SECONDS.labels(host="heavy").observe(tcp_open_ms / 1000)
+AI_ROUTER_WOL_WARM_TO_READY_SECONDS.labels(host="heavy").observe(ready_ms / 1000)
+
+# In wake_and_wait_for_model when status=circuit_open:
+AI_ROUTER_WOL_WAKE_TOTAL.labels(host="heavy", outcome="circuit_open").inc()
+```
+
+- [ ] **Step 3: Wire singleton into lifespan**
+
+Modify `backend/app/main.py` — after the LiteLLM bootstrap block (~line 156), instantiate:
+
+```python
+# Phase 11a-A2: HeavyBoxWoL singleton; consumers reach it via
+# app.state.heavy_wol. URLs come from env (10.10.0.2:11900 helper,
+# 10.10.0.3:11434 heavy-box Ollama by default per docs/NETWORK.md).
+from app.services.ai.wol import HeavyBoxWoL
+
+_app.state.heavy_wol = HeavyBoxWoL(
+    helper_url=os.environ.get("WOL_HELPER_URL", "http://10.10.0.2:11900"),
+    heavy_url=os.environ.get("OLLAMA_HEAVY_URL", "http://10.10.0.3:11434"),
+)
+```
+
+- [ ] **Step 4: Run tests + verify lifespan starts**
+
+```bash
+cd /home/joseph/dashboard
+docker compose cp backend/app/main.py backend:/app/app/main.py
+docker compose cp backend/app/services/ai/wol.py backend:/app/app/services/ai/wol.py
+docker compose cp backend/app/core/metrics.py backend:/app/app/core/metrics.py
+docker compose restart backend
+sleep 8
+docker compose logs --tail 20 backend | grep -i "uvicorn running\|application startup"
+docker compose exec backend uv run pytest tests/services/ai/test_wol.py -v
+```
+
+- [ ] **Step 5: Commit**
+
+```
+feat(phase11a-A2): WoL metrics + lifespan singleton wiring
+
+5 new Prometheus series under ai_router_wol_* per spec §6:
+- wake_total{host,outcome}
+- wake_latency_seconds{host} (TCP-open)
+- warm_to_ready_seconds{host} (model loaded — HIGH-3 split)
+- wake_failures_total{host,reason}
+- circuit_breaker_state{host} (Gauge: 0=closed, 1=half-open, 2=open)
+
+HeavyBoxWoL singleton on app.state.heavy_wol (mirrors vol_service
+pattern from Phase 10b.1). URLs from env so dev/prod swap is trivial.
+```
+
+### Task 22: Chunk A2 reviewer chain + tag v0.11.0.3
+
+- [ ] **Step 1: Dispatch reviewers in parallel**
+
+- spec-compliance (haiku) with inline spec slice for §2 11a-A2
+- python-reviewer (haiku) on all chunk-A2 commits
+- code-reviewer (sonnet) — circuit-breaker logic + concurrency dedup deserve sonnet-level scrutiny
+- silent-failure-hunter (sonnet) — multiple network failure paths
+
+- [ ] **Step 2: Apply CRIT+HIGH+MED findings inline**
+
+- [ ] **Step 3: Tag**
+
+```bash
+git tag -a v0.11.0.3 -F /tmp/tag-msg-phase11a-a2.txt
+git push origin main --tags
+```
 
 ### Chunk B — services/ai/ core (sketch)
 
