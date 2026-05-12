@@ -57,4 +57,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP TABLE IF EXISTS ai_jobs;")
+    # database-reviewer M1: CASCADE forward-compatible with FKs that
+    # later chunks (services/ai/jobs.py wiring) may reference this table.
+    op.execute("DROP TABLE IF EXISTS ai_jobs CASCADE;")

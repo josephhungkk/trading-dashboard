@@ -21,6 +21,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # database-reviewer H1: composite PK (ts, request_id) so fire-and-forget
+    # cost-ledger retries can't silently insert duplicates. TimescaleDB
+    # requires the partition key (ts) to be part of any hypertable PK.
     op.execute(
         """
         CREATE TABLE ai_completions (
@@ -38,6 +41,7 @@ def upgrade() -> None:
             outcome           TEXT        NOT NULL,
             error_class       TEXT,
             caller            TEXT        NOT NULL,
+            PRIMARY KEY (ts, request_id),
             CHECK (outcome IN ('ok', 'failed', 'timeout', 'rate_limited', 'fallback')),
             CHECK (capability ~ '^[A-Z_]+$'),
             CHECK (host IN ('nuc', 'heavy', 'cloud'))
@@ -49,20 +53,29 @@ def upgrade() -> None:
         "chunk_time_interval => INTERVAL '7 days');"
     )
     op.execute("SELECT add_retention_policy('ai_completions', INTERVAL '1 year');")
+    # database-reviewer H2: explicit compress_orderby pins ordering across
+    # TimescaleDB major versions; default would be 'ts DESC' today but
+    # leaving it implicit risks silent regression on upgrade.
     op.execute(
         "ALTER TABLE ai_completions SET ("
         "  timescaledb.compress, "
-        "  timescaledb.compress_segmentby = 'provider, capability'"
+        "  timescaledb.compress_segmentby = 'provider, capability', "
+        "  timescaledb.compress_orderby = 'ts DESC'"
         ");"
     )
     op.execute("SELECT add_compression_policy('ai_completions', INTERVAL '90 days');")
     op.execute(
-        "CREATE INDEX idx_ai_completions_subject_ts "
-        "ON ai_completions (jwt_subject, ts DESC);"
+        "CREATE INDEX idx_ai_completions_subject_ts ON ai_completions (jwt_subject, ts DESC);"
     )
     op.execute(
-        "CREATE INDEX idx_ai_completions_caller_ts "
-        "ON ai_completions (caller, ts DESC);"
+        "CREATE INDEX idx_ai_completions_caller_ts ON ai_completions (caller, ts DESC);"
+    )
+    # database-reviewer M2: cost-ledger admin view aggregates by provider
+    # over time ranges; covering index avoids full-chunk scans.
+    op.execute(
+        "CREATE INDEX idx_ai_completions_provider_ts "
+        "ON ai_completions (provider, ts DESC) "
+        "INCLUDE (prompt_tokens, completion_tokens, wall_time_ms);"
     )
 
 
