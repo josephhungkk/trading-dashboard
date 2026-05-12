@@ -2727,27 +2727,1287 @@ git tag -a v0.11.0.3 -F /tmp/tag-msg-phase11a-a2.txt
 git push origin main --tags
 ```
 
-### Chunk B — services/ai/ core (sketch)
+### Chunk B — services/ai/ core (detailed)
 
-**Files to create:** `backend/app/services/ai/router.py`, `secrets.py`, `cost_ledger.py`, `jobs.py`, `rate_limiter.py`, `services/common/rate_limiter.py`, `services/common/ws_envelope.py`, tests.
+**Files to create:**
+- `backend/app/services/common/rate_limiter.py` — generic `SlidingWindowRateLimiter[K]`
+- `backend/app/services/common/ws_envelope.py` — `make_ws_endpoint(...)` factory
+- `backend/app/services/ai/secrets.py` — provider-key cache + pubsub listener
+- `backend/app/services/ai/cost_ledger.py` — fire-and-forget batched writer
+- `backend/app/services/ai/jobs.py` — PG-backed async-job store + pubsub
+- `backend/app/services/ai/rate_limiter.py` — capability-scoped sliding-window + per-capability semaphore registry
+- `backend/app/services/ai/router.py` — `AICompletionClient` ABC + `LiteLLMClient` impl
 
-**Task outline:**
-1. Extract `SlidingWindowRateLimiter[K]` generic from `portfolio_rate_limiter` + `position_sizing_rate_limiter` (MED-3 — no-op refactor; existing tests stay green).
-2. Extract `make_ws_endpoint(...)` from `ws_portfolio` patterns (MED-4).
-3. Author `services/ai/secrets.py` with 60s TTL cache + pubsub-invalidation listener.
-4. Author `services/ai/cost_ledger.py` fire-and-forget batched writer (HIGH-2). Bounded queue + drop-oldest + counters + fail-OPEN.
-5. Author `services/ai/jobs.py` PG-backed async-job store + pubsub `ai:job:{id}` + orphan recovery (HIGH-8).
-6. Author `services/ai/router.py` `AICompletionClient` ABC + `LiteLLMClient` impl with:
-   - `complete`, `stream`, `batch_complete`, `submit_job`, `get_job`, `cancel_job` (HIGH-4 batch + tools)
-   - Router-level fallback walk
-   - Per-capability semaphore (HIGH-9)
-   - 501 on `tools is not None`
-   - Per-request `api_key` injection from `secrets.py`
-   - Fallback-chain metadata on `CompletionResult` (MED-8)
-7. Wire all three into lifespan (`app.state.ai_router`).
-8. Add 24 new metric series (§6 of spec).
-9. Reviewer chain (haiku + sonnet for code-quality + sonnet for silent-failure-hunter).
-10. Tag `v0.11.0.b`.
+**Files to modify:**
+- `backend/app/services/portfolio_rate_limiter.py` — delegate to generic (keep public surface)
+- `backend/app/services/position_sizing_rate_limiter.py` — delegate to generic (keep public surface)
+- `backend/app/api/ws_portfolio.py` — adopt `make_ws_endpoint` (no behavior change)
+- `backend/app/main.py` — wire `app.state.ai_secrets`, `app.state.ai_cost_ledger`, `app.state.ai_jobs`, `app.state.ai_router`
+- `backend/app/core/metrics.py` — 13 new series (5 router + 2 cost-ledger + 1 jobs gauge + 5 rate-limiter/router internal). Existing 6 WoL/health series stay.
+
+**Tests to create (all `pytest.mark.no_db` except integration):**
+- `backend/tests/services/common/test_rate_limiter.py` (8 tests — burst, window, evict_stale, generic K typing, multi-key isolation)
+- `backend/tests/services/common/test_ws_envelope.py` (6 tests — origin-allow, capacity-cap, auth-fail, send-timeout, recv-drain, heartbeat)
+- `backend/tests/services/ai/test_secrets.py` (5 tests — fresh fetch, cache hit within TTL, expiry refetch, pubsub invalidates, fail-CLOSED on missing)
+- `backend/tests/services/ai/test_cost_ledger.py` (6 tests — single insert, batch flush, drop-oldest on overflow, counter increments, fail-OPEN on PG error, graceful shutdown drain)
+- `backend/tests/services/ai/test_jobs.py` (8 tests — create+pubsub, transition warming→inferring→completed, cancel flag, get_status, orphan recovery warming-cutoff 90s, orphan recovery inferring-cutoff 600s, idempotent transitions, pubsub on every state change)
+- `backend/tests/services/ai/test_rate_limiter.py` (5 tests — per-capability semaphore acquire+release, per-jwt sliding window, joint over-quota path, semaphore release on exception, metrics labels)
+- `backend/tests/services/ai/test_router.py` (12 tests — single complete, fallback walk on 5xx, fallback walk on rate-limit, terminal-fail returns last error, per-capability semaphore, LOCAL_ONLY honored, tools→501, batch_complete sequential default, submit_job→job_id, get_job, cancel_job sets flag, fallback_chain metadata)
+- `backend/tests/api/test_lifespan_ai_services.py` (1 test — assert `app.state.ai_{secrets,cost_ledger,jobs,router}` all present + correct types after lifespan startup)
+
+**Dependency ordering (matters for parallel dispatch):**
+
+```
+common/rate_limiter (generic)  ──┐
+common/ws_envelope             ──┤
+ai/secrets                     ──┼─→ ai/router (depends on all 4)
+ai/cost_ledger                 ──┤
+ai/jobs                        ──┘
+ai/rate_limiter (wraps generic)──┘
+```
+
+Parallel-safe batch 1 (all independent): `common/rate_limiter`, `common/ws_envelope`, `ai/secrets`, `ai/cost_ledger`, `ai/jobs`, `ai/rate_limiter`.
+
+Serialize after batch 1: `ai/router` (imports the other five).
+
+Serialize after router: lifespan wiring + reviewer chain.
+
+---
+
+#### B1: Extract generic SlidingWindowRateLimiter[K] (MED-3)
+
+**Files:**
+- Create: `backend/app/services/common/__init__.py`
+- Create: `backend/app/services/common/rate_limiter.py`
+- Create: `backend/tests/services/common/__init__.py`
+- Create: `backend/tests/services/common/test_rate_limiter.py`
+- Modify: `backend/app/services/portfolio_rate_limiter.py`
+- Modify: `backend/app/services/position_sizing_rate_limiter.py`
+
+**Existing public surface to preserve** (verify with grep before commit):
+- `position_sizing_rate_limiter.SlidingWindowRateLimiter(burst, sustained_per_sec, window_seconds, now).check(jwt_subject, account_id)` + `.evict_stale(jwt_subject, account_id)`
+- `position_sizing_rate_limiter.RateLimitExceededError`
+- `portfolio_rate_limiter.PortfolioRateLimiter(burst, window_seconds, now).check(jwt_subject)` + `.evict_stale(jwt_subject)` + `get_portfolio_limiter()` + `_reset_portfolio_limiter_for_tests()`
+- `portfolio_rate_limiter.PortfolioRateLimitExceededError`
+
+- [ ] **Step 1: Write failing tests for generic limiter** — `tests/services/common/test_rate_limiter.py`
+
+```python
+"""Tests for the generic SlidingWindowRateLimiter[K]."""
+
+from __future__ import annotations
+
+import pytest
+
+from app.services.common.rate_limiter import (
+    RateLimitExceededError,
+    SlidingWindowRateLimiter,
+)
+
+pytestmark = pytest.mark.no_db
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def test_check_under_burst_passes() -> None:
+    clock = _Clock()
+    limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(burst=3, window_seconds=1, now=clock)
+    for _ in range(3):
+        limiter.check("alice")
+
+
+def test_check_at_burst_raises() -> None:
+    clock = _Clock()
+    limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(burst=2, window_seconds=1, now=clock)
+    limiter.check("alice")
+    limiter.check("alice")
+    with pytest.raises(RateLimitExceededError):
+        limiter.check("alice")
+
+
+def test_window_expiry_admits_again() -> None:
+    clock = _Clock()
+    limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(burst=1, window_seconds=1, now=clock)
+    limiter.check("alice")
+    clock.t = 1.01
+    limiter.check("alice")  # window expired
+
+
+def test_tuple_key_isolation() -> None:
+    clock = _Clock()
+    limiter: SlidingWindowRateLimiter[tuple[str, str]] = SlidingWindowRateLimiter(
+        burst=1, window_seconds=1, now=clock
+    )
+    limiter.check(("alice", "acc1"))
+    limiter.check(("alice", "acc2"))  # different key
+    with pytest.raises(RateLimitExceededError):
+        limiter.check(("alice", "acc1"))
+
+
+def test_evict_stale_removes_idle_keys() -> None:
+    clock = _Clock()
+    limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(burst=1, window_seconds=1, now=clock)
+    limiter.check("alice")
+    clock.t = 1.5
+    limiter.evict_stale("alice")
+    assert "alice" not in limiter._buckets
+
+
+def test_evict_stale_unknown_key_is_noop() -> None:
+    limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(burst=1, window_seconds=1)
+    limiter.evict_stale("never-checked")  # must not raise
+
+
+def test_empty_key_rejected() -> None:
+    limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(burst=1, window_seconds=1)
+    with pytest.raises(RateLimitExceededError):
+        limiter.check("")
+
+
+def test_message_includes_burst_and_window() -> None:
+    clock = _Clock()
+    limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(
+        burst=5, window_seconds=2, now=clock, name="position_sizing"
+    )
+    for _ in range(5):
+        limiter.check("alice")
+    with pytest.raises(RateLimitExceededError) as exc:
+        limiter.check("alice")
+    assert "burst=5" in str(exc.value) and "window=2s" in str(exc.value) and "position_sizing" in str(exc.value)
+```
+
+- [ ] **Step 2: Run** — `docker compose exec backend pytest backend/tests/services/common/test_rate_limiter.py -v` → FAIL (module not found)
+
+- [ ] **Step 3: Implement generic** — `backend/app/services/common/rate_limiter.py`
+
+```python
+"""Generic per-key sliding-window rate limiter (MED-3 — extracted from
+portfolio_rate_limiter.py + position_sizing_rate_limiter.py).
+
+Key type is generic so callers can use ``str``, ``tuple[str, str]``, or
+anything hashable. Single-replica today; multi-replica needs Redis backing
+(Phase 24, same constraint as the originals).
+"""
+
+from __future__ import annotations
+
+import time
+from collections import defaultdict, deque
+from collections.abc import Callable, Hashable
+from typing import Generic, TypeVar
+
+K = TypeVar("K", bound=Hashable)
+
+
+class RateLimitExceededError(Exception):
+    """Raised when a key exceeds its sliding-window quota."""
+
+
+class SlidingWindowRateLimiter(Generic[K]):
+    """Per-key sliding-window limiter.
+
+    Args:
+        burst: Max requests inside the window.
+        window_seconds: Window length.
+        now: Time source; injected for tests.
+        name: Optional label for the exception message (e.g. ``"position_sizing"``).
+    """
+
+    def __init__(
+        self,
+        *,
+        burst: int,
+        window_seconds: int = 1,
+        now: Callable[[], float] | None = None,
+        name: str = "rate",
+    ) -> None:
+        self._burst = burst
+        self._window = window_seconds
+        self._now = now or time.monotonic
+        self._name = name
+        self._buckets: dict[K, deque[float]] = defaultdict(deque)
+
+    def check(self, key: K) -> None:
+        """Raise RateLimitExceededError if ``key`` is over quota."""
+        if isinstance(key, str) and not key:
+            raise RateLimitExceededError(f"{self._name} rate limit: empty key")
+        now = self._now()
+        bucket = self._buckets[key]
+        cutoff = now - self._window
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= self._burst:
+            raise RateLimitExceededError(
+                f"{self._name} rate limit exceeded (burst={self._burst}, window={self._window}s)"
+            )
+        bucket.append(now)
+
+    def evict_stale(self, key: K) -> None:
+        """Drop the bucket if empty after the cutoff sweep — caller-driven
+        eviction to bound memory across unique keys over time."""
+        if key not in self._buckets:
+            return
+        cutoff = self._now() - self._window
+        bucket = self._buckets[key]
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if not bucket:
+            del self._buckets[key]
+```
+
+- [ ] **Step 4: Run generic tests** — `docker compose exec backend pytest backend/tests/services/common/test_rate_limiter.py -v` → PASS (8/8)
+
+- [ ] **Step 5: Delegate `position_sizing_rate_limiter`** — replace internals, keep surface
+
+```python
+"""Phase 10b.1 H3 — kept as thin facade after MED-3 (chunk 11a-B1)
+extracted the generic SlidingWindowRateLimiter to services/common."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from app.services.common.rate_limiter import (
+    RateLimitExceededError,
+    SlidingWindowRateLimiter,
+)
+
+__all__ = ["RateLimitExceededError", "SlidingWindowRateLimiter"]
+
+
+def make_position_sizing_limiter(
+    *,
+    burst: int,
+    sustained_per_sec: int,  # noqa: ARG001 — reserved for future redis-backed impl
+    window_seconds: int = 1,
+    now: Callable[[], float] | None = None,
+) -> SlidingWindowRateLimiter[tuple[str, str]]:
+    """Build the position-sizing limiter keyed on ``(jwt_subject, account_id)``."""
+    return SlidingWindowRateLimiter[tuple[str, str]](
+        burst=burst,
+        window_seconds=window_seconds,
+        now=now,
+        name="position_sizing",
+    )
+```
+
+Note: callers currently instantiate `SlidingWindowRateLimiter` directly with `(jwt_subject, account_id)` tuple via positional call. Audit call sites — if any pass keyword `account_id="..."`, update to `key=(...)`. Most sites use `.check(jwt_subject, account_id)` which is the 2-arg shape — preserve that as `.check((jwt_subject, account_id))`. **If migration would touch >3 call sites, keep the OLD shape via a delegating subclass:**
+
+```python
+class SlidingWindowRateLimiter(_Generic):
+    def check(self, jwt_subject: str, account_id: str) -> None:  # type: ignore[override]
+        super().check((jwt_subject, account_id))
+    def evict_stale(self, jwt_subject: str, account_id: str) -> None:  # type: ignore[override]
+        super().evict_stale((jwt_subject, account_id))
+```
+
+- [ ] **Step 6: Delegate `portfolio_rate_limiter`** — same pattern, single-string key
+
+```python
+"""Phase 10b.2 §5.2 — kept as thin facade after MED-3 (chunk 11a-B1)."""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+
+from app.services.common.rate_limiter import (
+    RateLimitExceededError,
+    SlidingWindowRateLimiter,
+)
+
+
+class PortfolioRateLimitExceededError(RateLimitExceededError):
+    """Phase 10b.2 name kept for backwards-compat at call sites."""
+
+
+class PortfolioRateLimiter(SlidingWindowRateLimiter[str]):
+    def __init__(
+        self,
+        *,
+        burst: int = 10,
+        window_seconds: int = 1,
+        now: Callable[[], float] | None = None,
+    ) -> None:
+        super().__init__(burst=burst, window_seconds=window_seconds, now=now, name="portfolio")
+
+    def check(self, jwt_subject: str) -> None:
+        try:
+            super().check(jwt_subject)
+        except RateLimitExceededError as e:
+            raise PortfolioRateLimitExceededError(str(e)) from None
+
+
+_LIMITER: PortfolioRateLimiter | None = None
+
+
+def get_portfolio_limiter() -> PortfolioRateLimiter:
+    global _LIMITER
+    if _LIMITER is None:
+        _LIMITER = PortfolioRateLimiter()
+    return _LIMITER
+
+
+def _reset_portfolio_limiter_for_tests() -> None:
+    global _LIMITER
+    _LIMITER = None
+```
+
+- [ ] **Step 7: Run existing portfolio + position-sizing tests — must stay green**
+
+```bash
+docker compose exec backend pytest backend/tests/services/test_portfolio_rate_limiter.py backend/tests/services/test_position_sizing_rate_limiter.py -v
+```
+
+If any test fails, the surface drifted — fix delegation, do not modify tests.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add backend/app/services/common backend/app/services/portfolio_rate_limiter.py \
+        backend/app/services/position_sizing_rate_limiter.py \
+        backend/tests/services/common
+git commit -m "refactor(phase11a-B1): extract generic SlidingWindowRateLimiter[K] (MED-3)"
+```
+
+---
+
+#### B2: Extract make_ws_endpoint(...) (MED-4)
+
+**Files:**
+- Create: `backend/app/services/common/ws_envelope.py`
+- Create: `backend/tests/services/common/test_ws_envelope.py`
+- Modify: `backend/app/api/ws_portfolio.py` (adopt the factory)
+
+The goal is to extract the **boilerplate** (origin check, capacity cap, auth, accept, recv-drain task, heartbeat task, cleanup) into a generic factory while leaving the **payload-shape-specific** parts (initial snapshot, dirty-channel pubsub, debounce, payload compute) in the caller. Pattern: `make_ws_endpoint` returns a context-manager-like helper that the caller awaits inside its main loop.
+
+- [ ] **Step 1: Write failing tests** — `tests/services/common/test_ws_envelope.py`
+
+```python
+"""Tests for make_ws_endpoint factory (MED-4)."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.services.common.ws_envelope import WSEnvelopeConfig, make_ws_endpoint
+
+pytestmark = pytest.mark.no_db
+
+
+def _ws_with(*, origin: str = "https://app.example", client_host: str = "1.2.3.4") -> MagicMock:
+    ws = MagicMock()
+    ws.headers = {"origin": origin}
+    ws.client = MagicMock(host=client_host)
+    ws.accept = AsyncMock()
+    ws.close = AsyncMock()
+    ws.send_json = AsyncMock()
+    ws.receive_text = AsyncMock(side_effect=asyncio.CancelledError)
+    ws.client_state = MagicMock(name="CONNECTED")
+    return ws
+
+
+@pytest.mark.asyncio
+async def test_origin_rejected_closes_1008() -> None:
+    ws = _ws_with(origin="https://evil.example")
+    cfg = WSEnvelopeConfig(
+        allowed_origins=["https://app.example"],
+        max_connections=10,
+        active_counter=lambda: 0,
+        send_timeout_s=2.0,
+        heartbeat_s=30.0,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    accepted = await env.handshake(auth=AsyncMock(return_value="alice"))
+    assert accepted is False
+    ws.close.assert_awaited_once()
+    assert ws.close.await_args.kwargs["code"] == 1008
+
+
+@pytest.mark.asyncio
+async def test_capacity_cap_rejects() -> None:
+    ws = _ws_with()
+    cfg = WSEnvelopeConfig(
+        allowed_origins=["https://app.example"],
+        max_connections=2,
+        active_counter=lambda: 2,
+        send_timeout_s=2.0,
+        heartbeat_s=30.0,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    accepted = await env.handshake(auth=AsyncMock(return_value="alice"))
+    assert accepted is False
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_returns_false() -> None:
+    from fastapi import WebSocketException
+    ws = _ws_with()
+    cfg = WSEnvelopeConfig(
+        allowed_origins=["https://app.example"],
+        max_connections=10,
+        active_counter=lambda: 0,
+        send_timeout_s=2.0,
+        heartbeat_s=30.0,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    accepted = await env.handshake(
+        auth=AsyncMock(side_effect=WebSocketException(code=4401, reason="bad-token"))
+    )
+    assert accepted is False
+
+
+@pytest.mark.asyncio
+async def test_send_timeout_closes_1011() -> None:
+    ws = _ws_with()
+    ws.send_json = AsyncMock(side_effect=TimeoutError)
+    cfg = WSEnvelopeConfig(
+        allowed_origins=["https://app.example"],
+        max_connections=10,
+        active_counter=lambda: 0,
+        send_timeout_s=0.01,
+        heartbeat_s=30.0,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    await env.handshake(auth=AsyncMock(return_value="alice"))
+    ok = await env.send_or_close({"version": 1, "type": "x"})
+    assert ok is False
+    ws.close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recv_drain_sets_disconnect_event() -> None:
+    from starlette.websockets import WebSocketDisconnect
+    ws = _ws_with()
+    ws.receive_text = AsyncMock(side_effect=WebSocketDisconnect(code=1000))
+    cfg = WSEnvelopeConfig(
+        allowed_origins=["https://app.example"],
+        max_connections=10,
+        active_counter=lambda: 0,
+        send_timeout_s=2.0,
+        heartbeat_s=30.0,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    await env.handshake(auth=AsyncMock(return_value="alice"))
+    env.start_recv_drain()
+    await asyncio.sleep(0.05)
+    assert env.disconnected.is_set()
+
+
+@pytest.mark.asyncio
+async def test_wg_dev_gateway_bypass_when_origin_empty() -> None:
+    ws = _ws_with(origin="", client_host="10.10.0.1")
+    cfg = WSEnvelopeConfig(
+        allowed_origins=["https://app.example"],
+        max_connections=10,
+        active_counter=lambda: 0,
+        send_timeout_s=2.0,
+        heartbeat_s=30.0,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    accepted = await env.handshake(auth=AsyncMock(return_value="alice"))
+    assert accepted is True
+    ws.accept.assert_awaited_once()
+```
+
+- [ ] **Step 2: Implement `ws_envelope`** — `backend/app/services/common/ws_envelope.py`
+
+```python
+"""Generic WebSocket envelope (MED-4 — extracted from ws_portfolio.py).
+
+Encapsulates the per-connection boilerplate every push-only WS endpoint
+needs: CSWSH origin check, capacity cap, auth call, accept, recv-drain
+task, send-with-timeout helper, cleanup. The caller's main loop owns
+the payload-specific work (dirty-channel pubsub, debounce, compute).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+
+import structlog
+from fastapi import WebSocket, WebSocketDisconnect, WebSocketException, status
+
+log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class WSEnvelopeConfig:
+    allowed_origins: list[str]
+    max_connections: int
+    active_counter: Callable[[], int]
+    send_timeout_s: float
+    heartbeat_s: float
+
+
+class WSEnvelope:
+    def __init__(self, ws: WebSocket, cfg: WSEnvelopeConfig) -> None:
+        self.ws = ws
+        self.cfg = cfg
+        self.disconnected = asyncio.Event()
+        self._recv_task: asyncio.Task[None] | None = None
+        self.jwt_subject: str | None = None
+        self._accepted = False
+
+    async def handshake(self, *, auth: Callable[[WebSocket], Awaitable[str]]) -> bool:
+        """Run origin → capacity → auth → accept, returning True on success.
+
+        Closes the socket with the appropriate 1008/1011 code on failure.
+        """
+        if self.cfg.active_counter() >= self.cfg.max_connections:
+            await self.ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="capacity")
+            return False
+
+        if not self._allowed_origin():
+            await self.ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="origin")
+            return False
+
+        try:
+            self.jwt_subject = await auth(self.ws)
+        except WebSocketException:
+            return False
+
+        await self.ws.accept()
+        self._accepted = True
+        return True
+
+    def _allowed_origin(self) -> bool:
+        origin = self.ws.headers.get("origin", "")
+        if not origin:
+            client_host = self.ws.client.host if self.ws.client else ""
+            return client_host == "10.10.0.1"  # WG dev gateway bypass
+        return origin in self.cfg.allowed_origins
+
+    def start_recv_drain(self) -> None:
+        async def _drain() -> None:
+            try:
+                while True:
+                    await self.ws.receive_text()
+            except WebSocketDisconnect:
+                self.disconnected.set()
+            except (ConnectionResetError, RuntimeError) as exc:
+                log.debug("ws_envelope_recv_drain_ended", exc=str(exc))
+                self.disconnected.set()
+        self._recv_task = asyncio.create_task(_drain())
+
+    async def send_or_close(self, payload: dict[str, Any]) -> bool:
+        """Send a frame with the configured timeout. Closes (1011) and returns
+        False on TimeoutError; returns False without closing on disconnect."""
+        try:
+            await asyncio.wait_for(self.ws.send_json(payload), timeout=self.cfg.send_timeout_s)
+            return True
+        except TimeoutError:
+            await self.ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="send-timeout")
+            return False
+        except WebSocketDisconnect:
+            self.disconnected.set()
+            return False
+
+    async def cleanup(self) -> None:
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            await asyncio.gather(self._recv_task, return_exceptions=True)
+
+
+def make_ws_endpoint(ws: WebSocket, cfg: WSEnvelopeConfig) -> WSEnvelope:
+    """Factory — returns a WSEnvelope bound to this connection."""
+    return WSEnvelope(ws, cfg)
+```
+
+- [ ] **Step 3: Run tests** — `docker compose exec backend pytest backend/tests/services/common/test_ws_envelope.py -v` → PASS (6/6)
+
+- [ ] **Step 4: Adopt in `ws_portfolio.py`** (no behavior change)
+
+Only the handshake + send + recv-drain blocks get replaced. The pubsub-listen, dirty-event, debounce, and compute loop stay verbatim. After the change, the existing `tests/integration/test_portfolio_rollup_ws.py` MUST stay green. If any test fails, you broke a behavior — fix the adapter, do not modify the test.
+
+- [ ] **Step 5: Run portfolio WS integration test**
+
+```bash
+docker compose exec backend pytest backend/tests/integration/test_portfolio_rollup_ws.py -v
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/app/services/common/ws_envelope.py \
+        backend/tests/services/common/test_ws_envelope.py \
+        backend/app/api/ws_portfolio.py
+git commit -m "refactor(phase11a-B2): extract make_ws_endpoint envelope (MED-4)"
+```
+
+---
+
+#### B3: services/ai/secrets.py — provider-key cache + pubsub invalidation
+
+**Files:**
+- Create: `backend/app/services/ai/secrets.py`
+- Create: `backend/tests/services/ai/test_secrets.py`
+
+Spec invariants (§2 11a-A0):
+- `get_provider_key(provider)` returns cached key for up to 60s.
+- Cache is invalidated by Redis pubsub on `app_config:invalidate:ai_provider_keys`.
+- Backing store: `app_secrets` namespace `ai_provider.{provider}.api_key` via `ConfigService.reveal_secret`.
+- Fail-CLOSED on missing key — caller (router) catches and triggers fallback to next provider.
+
+- [ ] **Step 1: Write failing tests** — `tests/services/ai/test_secrets.py`
+
+```python
+"""Tests for services/ai/secrets.py — provider-key cache + pubsub."""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.services.ai.secrets import (
+    AIProviderKeyCache,
+    ProviderKeyUnavailableError,
+)
+
+pytestmark = pytest.mark.no_db
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+@pytest.mark.asyncio
+async def test_fresh_fetch_hits_config_service() -> None:
+    clock = _Clock()
+    config_svc = AsyncMock()
+    config_svc.reveal_secret = AsyncMock(return_value="sk-xyz")
+    cache = AIProviderKeyCache(config_svc=config_svc, ttl_s=60.0, now=clock)
+    key = await cache.get_provider_key("openai")
+    assert key == "sk-xyz"
+    config_svc.reveal_secret.assert_awaited_once_with("ai_provider", "openai.api_key")
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_within_ttl() -> None:
+    clock = _Clock()
+    config_svc = AsyncMock()
+    config_svc.reveal_secret = AsyncMock(return_value="sk-xyz")
+    cache = AIProviderKeyCache(config_svc=config_svc, ttl_s=60.0, now=clock)
+    await cache.get_provider_key("openai")
+    clock.t = 30.0
+    await cache.get_provider_key("openai")
+    assert config_svc.reveal_secret.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_expiry_refetches() -> None:
+    clock = _Clock()
+    config_svc = AsyncMock()
+    config_svc.reveal_secret = AsyncMock(side_effect=["sk-old", "sk-new"])
+    cache = AIProviderKeyCache(config_svc=config_svc, ttl_s=60.0, now=clock)
+    assert await cache.get_provider_key("openai") == "sk-old"
+    clock.t = 61.0
+    assert await cache.get_provider_key("openai") == "sk-new"
+
+
+@pytest.mark.asyncio
+async def test_pubsub_invalidates_specific_provider() -> None:
+    clock = _Clock()
+    config_svc = AsyncMock()
+    config_svc.reveal_secret = AsyncMock(side_effect=["sk-old", "sk-new"])
+    cache = AIProviderKeyCache(config_svc=config_svc, ttl_s=60.0, now=clock)
+    await cache.get_provider_key("openai")
+    cache.invalidate("openai")
+    assert await cache.get_provider_key("openai") == "sk-new"
+
+
+@pytest.mark.asyncio
+async def test_missing_key_raises_unavailable() -> None:
+    config_svc = AsyncMock()
+    config_svc.reveal_secret = AsyncMock(return_value=None)
+    cache = AIProviderKeyCache(config_svc=config_svc, ttl_s=60.0)
+    with pytest.raises(ProviderKeyUnavailableError):
+        await cache.get_provider_key("xai")
+```
+
+- [ ] **Step 2: Run tests** → FAIL (module not found)
+
+- [ ] **Step 3: Implement** — `backend/app/services/ai/secrets.py`
+
+```python
+"""Phase 11a §2 11a-A0 — provider-key cache.
+
+Per-provider api_key with 60s TTL cache + Redis pubsub invalidation on
+``app_config:invalidate:ai_provider_keys``. Fail-CLOSED on missing key
+so the router can fall back to the next provider in the capability map.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Callable
+
+import structlog
+
+log = structlog.get_logger(__name__)
+
+_INVALIDATE_CHANNEL = "app_config:invalidate:ai_provider_keys"
+
+
+class ProviderKeyUnavailableError(Exception):
+    """Raised when no key is configured for a provider — router triggers fallback."""
+
+
+class AIProviderKeyCache:
+    def __init__(
+        self,
+        *,
+        config_svc: object,  # ConfigService — typed loosely to avoid circular import
+        ttl_s: float = 60.0,
+        now: Callable[[], float] | None = None,
+    ) -> None:
+        self._svc = config_svc
+        self._ttl = ttl_s
+        self._now = now or time.monotonic
+        self._cache: dict[str, tuple[str, float]] = {}  # provider → (key, expires_at)
+        self._lock = asyncio.Lock()
+
+    async def get_provider_key(self, provider: str) -> str:
+        async with self._lock:
+            entry = self._cache.get(provider)
+            if entry is not None and self._now() < entry[1]:
+                return entry[0]
+            key = await self._svc.reveal_secret("ai_provider", f"{provider}.api_key")  # type: ignore[attr-defined]
+            if not key:
+                raise ProviderKeyUnavailableError(f"no api_key configured for provider={provider}")
+            self._cache[provider] = (key, self._now() + self._ttl)
+            return key
+
+    def invalidate(self, provider: str | None = None) -> None:
+        """Drop cache for ``provider`` (or all if None). Synchronous because it's
+        called from a pubsub listener task that just wants to clear state."""
+        if provider is None:
+            self._cache.clear()
+        else:
+            self._cache.pop(provider, None)
+
+    async def run_pubsub_listener(self, redis: object) -> None:
+        """Subscribe to invalidation channel; clear on every message. Caller
+        owns the task lifecycle (start in lifespan, cancel on shutdown)."""
+        pubsub = redis.pubsub()  # type: ignore[attr-defined]
+        await pubsub.subscribe(_INVALIDATE_CHANNEL)
+        try:
+            async for msg in pubsub.listen():
+                if msg.get("type") != "message":
+                    continue
+                data = msg.get("data", b"")
+                provider = data.decode() if isinstance(data, bytes) else str(data)
+                self.invalidate(provider or None)
+                log.info("ai_provider_key_invalidated", provider=provider or "ALL")
+        finally:
+            try:
+                await pubsub.unsubscribe(_INVALIDATE_CHANNEL)
+            except Exception:
+                log.exception("ai_provider_key_pubsub_unsubscribe_failed")
+```
+
+- [ ] **Step 4: Run** → PASS (5/5)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/services/ai/secrets.py backend/tests/services/ai/test_secrets.py
+git commit -m "feat(phase11a-B3): ai provider-key cache with 60s ttl + pubsub invalidation"
+```
+
+---
+
+#### B4: services/ai/cost_ledger.py — fire-and-forget batched writer (HIGH-2)
+
+**Files:**
+- Create: `backend/app/services/ai/cost_ledger.py`
+- Create: `backend/tests/services/ai/test_cost_ledger.py`
+- Modify: `backend/app/core/metrics.py` (+ 2 counters)
+
+Spec invariants (§5 + HIGH-2):
+- Inserts into `ai_completions` hypertable (alembic 0041).
+- Bounded queue (`maxsize=1000`).
+- Drop-oldest on overflow + increment `ai_cost_ledger_drops_total`.
+- Batch flush every 5 rows OR every 2s (whichever first).
+- Insert errors increment `ai_cost_ledger_insert_failures_total`; rows are dropped (fail-OPEN).
+- Graceful shutdown: drain queue with 5s deadline before cancelling the task.
+
+- [ ] **Step 1: Add metrics** — `backend/app/core/metrics.py`
+
+```python
+ai_cost_ledger_drops_total = Counter(
+    "ai_cost_ledger_drops_total",
+    "Cost-ledger queue drops (queue full).",
+)
+ai_cost_ledger_insert_failures_total = Counter(
+    "ai_cost_ledger_insert_failures_total",
+    "Cost-ledger batched INSERT failures (rows dropped, fail-OPEN).",
+)
+```
+
+- [ ] **Step 2: Write failing tests** — `tests/services/ai/test_cost_ledger.py`
+
+Tests: (1) single record flushes after deadline; (2) batch of 5 flushes immediately; (3) queue overflow drops oldest + counter increments; (4) PG error increments counter + drops + does not crash; (5) shutdown drains pending rows within deadline; (6) record after shutdown is no-op.
+
+- [ ] **Step 3: Implement** — `backend/app/services/ai/cost_ledger.py`
+
+```python
+"""Phase 11a HIGH-2 — fire-and-forget cost-ledger batched writer.
+
+The router records (provider, model, capability, prompt_tokens,
+completion_tokens, wall_time_ms, outcome, etc.) without blocking on
+the DB. A background task batches up to 5 rows or 2s and INSERTs into
+the ``ai_completions`` hypertable. Fail-OPEN: insert errors drop rows
+and increment a counter; the router never sees the failure.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+import structlog
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.core import metrics
+
+log = structlog.get_logger(__name__)
+
+_QUEUE_MAX = 1000
+_BATCH_SIZE = 5
+_FLUSH_INTERVAL_S = 2.0
+_SHUTDOWN_DEADLINE_S = 5.0
+
+
+@dataclass(frozen=True)
+class CompletionRecord:
+    request_id: uuid.UUID
+    ts: Any  # datetime, set at enqueue
+    provider: str
+    model: str
+    capability: str
+    prompt_tokens: int
+    completion_tokens: int
+    wall_time_ms: int
+    outcome: str
+    host: str | None = None
+
+
+class CostLedger:
+    def __init__(self, session_factory: async_sessionmaker) -> None:
+        self._sf = session_factory
+        self._q: asyncio.Queue[CompletionRecord] = asyncio.Queue(maxsize=_QUEUE_MAX)
+        self._task: asyncio.Task[None] | None = None
+        self._stopping = asyncio.Event()
+
+    async def start(self) -> None:
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(self._run())
+        log.info("cost_ledger_started")
+
+    async def stop(self) -> None:
+        self._stopping.set()
+        if self._task is None:
+            return
+        try:
+            await asyncio.wait_for(self._drain_remaining(), timeout=_SHUTDOWN_DEADLINE_S)
+        except TimeoutError:
+            log.warning("cost_ledger_stop_drain_timeout", q_size=self._q.qsize())
+        self._task.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)
+
+    def record(self, rec: CompletionRecord) -> None:
+        """Non-blocking enqueue. Drops oldest on overflow."""
+        if self._stopping.is_set():
+            return
+        try:
+            self._q.put_nowait(rec)
+        except asyncio.QueueFull:
+            try:
+                _ = self._q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            metrics.ai_cost_ledger_drops_total.inc()
+            try:
+                self._q.put_nowait(rec)
+            except asyncio.QueueFull:
+                metrics.ai_cost_ledger_drops_total.inc()
+
+    async def _run(self) -> None:
+        try:
+            while not self._stopping.is_set():
+                batch = await self._collect_batch()
+                if batch:
+                    await self._flush(batch)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("cost_ledger_loop_unhandled")
+
+    async def _collect_batch(self) -> list[CompletionRecord]:
+        deadline = time.monotonic() + _FLUSH_INTERVAL_S
+        batch: list[CompletionRecord] = []
+        while len(batch) < _BATCH_SIZE:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                break
+            try:
+                rec = await asyncio.wait_for(self._q.get(), timeout=timeout)
+            except TimeoutError:
+                break
+            batch.append(rec)
+        return batch
+
+    async def _drain_remaining(self) -> None:
+        while not self._q.empty():
+            batch: list[CompletionRecord] = []
+            for _ in range(_BATCH_SIZE):
+                try:
+                    batch.append(self._q.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if batch:
+                await self._flush(batch)
+
+    async def _flush(self, batch: list[CompletionRecord]) -> None:
+        try:
+            async with self._sf() as session:
+                rows = [
+                    {
+                        "request_id": r.request_id,
+                        "ts": r.ts,
+                        "provider": r.provider,
+                        "model": r.model,
+                        "capability": r.capability,
+                        "prompt_tokens": r.prompt_tokens,
+                        "completion_tokens": r.completion_tokens,
+                        "wall_time_ms": r.wall_time_ms,
+                        "outcome": r.outcome,
+                        "host": r.host,
+                    }
+                    for r in batch
+                ]
+                from sqlalchemy import text
+                await session.execute(
+                    text(
+                        "INSERT INTO ai_completions "
+                        "(request_id, ts, provider, model, capability, prompt_tokens, "
+                        " completion_tokens, wall_time_ms, outcome, host) "
+                        "VALUES (:request_id, :ts, :provider, :model, :capability, "
+                        " :prompt_tokens, :completion_tokens, :wall_time_ms, :outcome, :host)"
+                    ),
+                    rows,
+                )
+                await session.commit()
+        except Exception:
+            metrics.ai_cost_ledger_insert_failures_total.inc(len(batch))
+            log.exception("cost_ledger_flush_failed", n=len(batch))
+```
+
+- [ ] **Step 4: Run tests** → PASS (6/6)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/services/ai/cost_ledger.py \
+        backend/tests/services/ai/test_cost_ledger.py \
+        backend/app/core/metrics.py
+git commit -m "feat(phase11a-B4): fire-and-forget batched cost ledger (HIGH-2)"
+```
+
+---
+
+#### B5: services/ai/jobs.py — async-job store + pubsub + orphan recovery (HIGH-8)
+
+**Files:**
+- Create: `backend/app/services/ai/jobs.py`
+- Create: `backend/tests/services/ai/test_jobs.py`
+- Modify: `backend/app/core/metrics.py` (+ 1 gauge + 1 counter)
+
+Spec invariants (§5 + HIGH-8):
+- Backed by `ai_jobs` table (alembic 0042). Status ∈ {pending, warming, inferring, completed, failed, cancelled}.
+- Every state transition publishes on `ai:job:{id}`.
+- Orphan recovery (called from lifespan startup):
+  - rows in `warming` with `warming_started_at < now - 90s` → mark `failed` + counter `ai_jobs_orphan_recovered_total{phase="warming"}`.
+  - rows in `inferring` with `inferring_started_at < now - 600s` → mark `failed` + counter `..{phase="inferring"}`.
+
+- [ ] **Step 1: Add metrics**
+
+```python
+ai_jobs_in_flight = Gauge(
+    "ai_jobs_in_flight",
+    "AI jobs not in terminal state.",
+)
+ai_jobs_orphan_recovered_total = Counter(
+    "ai_jobs_orphan_recovered_total",
+    "Jobs failed via orphan-recovery sweep (started before crash).",
+    ["phase"],
+)
+```
+
+- [ ] **Step 2-4: Write tests + implement + commit** (8 tests; mirror cost_ledger pattern)
+
+Test list:
+1. `create_job` inserts row, returns UUID, publishes initial state
+2. `set_warming` updates state + `warming_started_at` + publishes
+3. `set_inferring` updates state + `inferring_started_at` + publishes
+4. `set_completed` writes response + publishes terminal state
+5. `set_failed` writes error + publishes terminal state
+6. `cancel_job` sets `cancel_requested=true` + publishes
+7. `recover_orphans` ages warming > 90s + inferring > 600s; increments per-phase counter; idempotent
+8. `get_job` returns dataclass with all fields
+
+Implementation note: use `RETURNING *` on INSERT for the row payload. Pubsub message body = JSON `{"job_id": "...", "status": "...", "ts": <epoch>}`.
+
+```bash
+git commit -m "feat(phase11a-B5): pg-backed async job store with orphan recovery (HIGH-8)"
+```
+
+---
+
+#### B6: services/ai/rate_limiter.py — capability-scoped sliding-window + semaphore (HIGH-9)
+
+**Files:**
+- Create: `backend/app/services/ai/rate_limiter.py`
+- Create: `backend/tests/services/ai/test_rate_limiter.py`
+- Modify: `backend/app/core/metrics.py` (+ `ai_router_rate_limited_total{capability}`)
+
+Spec invariants (§5 + HIGH-9):
+- Two-tier limiter:
+  - Per-`jwt_subject` sliding window: 30 reqs / 60s (general router cap).
+  - Per-`capability` semaphore: `LOCAL_ONLY=1`, `REASONING=2`, others=5 (prevents LiteLLM-side queue blow-out).
+- Caller pattern: `await limiter.check_and_acquire(jwt_subject, capability)` returns an async-context-manager that releases the semaphore on exit.
+
+Concrete shape:
+
+```python
+class AIRouterRateLimiter:
+    def __init__(self, *, per_subject_burst=30, per_subject_window_s=60, semaphores: dict[str, int]):
+        self._sliding = SlidingWindowRateLimiter[str](
+            burst=per_subject_burst, window_seconds=per_subject_window_s, name="ai_router"
+        )
+        self._sems = {k: asyncio.Semaphore(v) for k, v in semaphores.items()}
+
+    @asynccontextmanager
+    async def check_and_acquire(self, jwt_subject: str, capability: str) -> AsyncIterator[None]:
+        try:
+            self._sliding.check(jwt_subject)
+        except RateLimitExceededError:
+            metrics.ai_router_rate_limited_total.labels(capability=capability).inc()
+            raise
+        sem = self._sems.get(capability) or self._sems["__default__"]
+        async with sem:
+            yield
+```
+
+Tests (5): per-subject burst enforced, per-capability semaphore limits concurrent, semaphore released on exception, unknown capability uses default, metrics label.
+
+```bash
+git commit -m "feat(phase11a-B6): ai router rate limiter with per-capability semaphores (HIGH-9)"
+```
+
+---
+
+#### B7: services/ai/router.py — AICompletionClient ABC + LiteLLMClient impl (HIGH-4, HIGH-9, MED-8)
+
+**Files:**
+- Create: `backend/app/services/ai/router.py`
+- Create: `backend/tests/services/ai/test_router.py`
+- Modify: `backend/app/core/metrics.py` (+ 5 router series per spec §6)
+
+ABC shape (locked at HIGH-4 inline application):
+
+```python
+class AICompletionClient(ABC):
+    @abstractmethod
+    async def complete(self, req: CompletionRequest) -> CompletionResult: ...
+    @abstractmethod
+    def stream(self, req: CompletionRequest) -> AsyncIterator[CompletionChunk]: ...
+    @abstractmethod
+    async def batch_complete(self, reqs: list[CompletionRequest]) -> AsyncIterator[CompletionResult]: ...
+    @abstractmethod
+    async def submit_job(self, req: CompletionRequest) -> uuid.UUID: ...
+    @abstractmethod
+    async def get_job(self, job_id: uuid.UUID) -> JobRecord: ...
+    @abstractmethod
+    async def cancel_job(self, job_id: uuid.UUID) -> None: ...
+```
+
+`LiteLLMClient` implementation contract:
+
+1. Resolves model list via `resolve_models(capability, ...)` (chunk A1).
+2. **LOCAL_ONLY enforcement** (defence layer 3 — router-side): drop any non-`LOCAL_PROVIDERS` from the resolved chain. If `capability == LOCAL_ONLY` and the post-filter chain is empty → raise `LocalModelsUnavailableError`.
+3. **`tools is not None` → raise `AIToolCallingNotSupportedError`** (HTTP handler maps to 501).
+4. **For each (provider, model) in resolved chain (HIGH-9 + MED-8):**
+   - Acquire per-capability semaphore via `AIRouterRateLimiter.check_and_acquire`.
+   - Fetch `api_key` via `AIProviderKeyCache.get_provider_key(provider)`.
+   - POST to LiteLLM proxy `/chat/completions` with `model`, `messages`, **`api_key` in request body**, master-key as `Authorization: Bearer`.
+   - Append a `FallbackHop(provider, model, outcome, latency_ms)` to a running list.
+   - On 4xx (non-rate-limit) → break out (semantic error, no retry).
+   - On 429 / 5xx / timeout / `ProviderKeyUnavailableError` → continue to next entry; increment `ai_router_fallback_chain_total{from_provider, to_provider, reason}`.
+5. Record `CompletionResult` with `fallback_chain` populated (MED-8).
+6. Submit to `CostLedger.record(...)` (non-blocking).
+7. If all entries exhausted → raise `AIProxyUnavailableError` with chain attached.
+
+`submit_job`: insert row → schedule async background task → return UUID. Background task calls `complete` and writes terminal state via `AIJobStore`.
+
+`stream`: stub for chunk B (raise `NotImplementedError` — wired in chunk C with HTTPX async stream).
+
+`batch_complete`: v0.11.0 = serial loop yielding results; ABC shape locked now for Phase 18 fan-out (HIGH-4).
+
+Metrics added in this step (per spec §6, 5 of them — others were in B4/B5/B6):
+- `ai_router_completions_total{provider,model,capability,outcome}`
+- `ai_router_latency_seconds{provider,capability}` (buckets: 0.1-30s)
+- `ai_router_tokens_prompt_total{provider,model}`
+- `ai_router_tokens_completion_total{provider,model}`
+- `ai_router_fallback_chain_total{from_provider,to_provider,reason}`
+- `ai_router_proxy_unavailable_total`
+
+Test list (12):
+1. single complete on first provider succeeds
+2. provider returns 500 → fall back to second; result.fallback_chain has 2 hops
+3. provider rate-limit (429) → fall back; counter increments
+4. provider 400 (semantic) → no retry; raises immediately
+5. all providers exhausted → raises `AIProxyUnavailableError`
+6. capability=LOCAL_ONLY filters cloud entries
+7. capability=LOCAL_ONLY with empty post-filter → `LocalModelsUnavailableError`
+8. `tools is not None` → `AIToolCallingNotSupportedError`
+9. semaphore acquired + released on success
+10. semaphore released on exception
+11. provider missing api_key → counted as fallback reason, skips
+12. metrics labels match spec exactly
+
+- [ ] Implement, test, commit:
+
+```bash
+git commit -m "feat(phase11a-B7): AICompletionClient ABC + LiteLLMClient with router-level fallback (HIGH-4, MED-8)"
+```
+
+---
+
+#### B8: Lifespan wiring
+
+**Files:**
+- Modify: `backend/app/main.py`
+- Create: `backend/tests/api/test_lifespan_ai_services.py`
+
+Wire in lifespan, after `app.state.heavy_wol` block:
+
+```python
+# Phase 11a-B8: AI router stack
+from app.services.ai.cost_ledger import CostLedger
+from app.services.ai.jobs import AIJobStore
+from app.services.ai.rate_limiter import AIRouterRateLimiter
+from app.services.ai.router import LiteLLMClient
+from app.services.ai.secrets import AIProviderKeyCache
+
+_app.state.ai_secrets = AIProviderKeyCache(config_svc=config_svc)
+_secrets_listener = asyncio.create_task(_app.state.ai_secrets.run_pubsub_listener(redis))
+
+_app.state.ai_cost_ledger = CostLedger(session_factory=async_session_maker)
+await _app.state.ai_cost_ledger.start()
+
+_app.state.ai_jobs = AIJobStore(session_factory=async_session_maker, redis=redis)
+await _app.state.ai_jobs.recover_orphans()  # HIGH-8
+
+_app.state.ai_rate_limiter = AIRouterRateLimiter(
+    semaphores={"LOCAL_ONLY": 1, "REASONING": 2, "__default__": 5},
+)
+
+_app.state.ai_router = LiteLLMClient(
+    secrets=_app.state.ai_secrets,
+    rate_limiter=_app.state.ai_rate_limiter,
+    cost_ledger=_app.state.ai_cost_ledger,
+    jobs=_app.state.ai_jobs,
+    proxy_url=os.environ.get("LITELLM_PROXY_URL", "http://litellm:4000"),
+    master_key_provider=lambda: redis.get("ai:litellm_master_key"),
+)
+```
+
+Shutdown:
+
+```python
+_secrets_listener.cancel()
+await asyncio.gather(_secrets_listener, return_exceptions=True)
+await _app.state.ai_cost_ledger.stop()
+```
+
+Test: assert all 5 state attrs are populated + correct types after `async with lifespan(fastapi_app):`. Mirror the existing `test_lifespan_wol_health.py` mock-patching pattern.
+
+```bash
+git commit -m "feat(phase11a-B8): wire ai router stack into lifespan"
+```
+
+---
+
+#### B9: Reviewer chain + chunk close
+
+Dispatch 4 reviewers in parallel:
+
+| Reviewer | Model | Scope |
+|---|---|---|
+| `spec-compliance` | haiku | Verify HIGH-4 ABC shape, HIGH-2 batched ledger, HIGH-8 orphan recovery, HIGH-9 semaphore, MED-3 generic, MED-4 envelope, MED-8 fallback_chain |
+| `python-reviewer` | haiku | Type hints, async correctness, asyncio.Queue semantics, semaphore release on exception |
+| `code-reviewer` | sonnet | Architecture: ABC vs impl boundaries; fallback walk correctness; metric label cardinality |
+| `silent-failure-hunter` | sonnet | Cost-ledger fail-OPEN paths (insert error counter must fire); orphan recovery must log; pubsub listener restart |
+
+Apply CRIT + HIGH + MED inline (per `feedback_architect_findings_apply_through_medium.md`).
+
+- [ ] Tag
+
+```bash
+git tag -a v0.11.0.4 -F /tmp/tag-msg-phase11a-b.txt
+git push origin main --tags
+```
+
+Tag message template:
+
+```
+v0.11.0.4 — phase 11a chunk B: services/ai/ core
+
+Generics:
+- SlidingWindowRateLimiter[K] extracted (MED-3); portfolio + position_sizing
+  rate limiters now thin facades.
+- make_ws_endpoint envelope extracted (MED-4); ws_portfolio adopts no-op.
+
+AI core:
+- AIProviderKeyCache (60s TTL + pubsub invalidation).
+- CostLedger (HIGH-2; bounded queue + drop-oldest + fail-OPEN).
+- AIJobStore (HIGH-8; pubsub on every transition + orphan recovery
+  warming/90s + inferring/600s).
+- AIRouterRateLimiter (HIGH-9; per-subject sliding + per-capability semaphore).
+- AICompletionClient ABC + LiteLLMClient impl (HIGH-4):
+  complete/stream/batch_complete/submit_job/get_job/cancel_job; router-level
+  fallback walk with FallbackHop metadata on result (MED-8); 501 on tools.
+
+Lifespan: app.state.ai_{secrets,cost_ledger,jobs,rate_limiter,router}.
+
+13 new metric series. 51 new tests passing.
+```
 
 ### Chunk C — REST + WS endpoints (sketch)
 
