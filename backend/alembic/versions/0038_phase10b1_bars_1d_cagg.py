@@ -86,7 +86,11 @@ def upgrade() -> None:
     # "use the hypertable's earliest data". Blocks during migration so
     # vol-targeted sizing is immediately usable after deploy. Tens of
     # seconds for a fresh system; only what's already in bars_1m anyway.
-    op.execute("CALL refresh_continuous_aggregate('bars_1d', NULL, NULL)")
+    # autocommit_block() escapes the alembic migration TX so the
+    # PROCEDURE's internal COMMITs are legal — mirrors Phase 10b.2 0040
+    # (refresh_continuous_aggregate cannot run inside a transaction block).
+    with op.get_context().autocommit_block():
+        op.execute("CALL refresh_continuous_aggregate('bars_1d', NULL, NULL)")
 
 
 def downgrade() -> None:
