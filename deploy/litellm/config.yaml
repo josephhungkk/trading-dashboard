@@ -1,0 +1,39 @@
+# Production LiteLLM config — committed to git, contains NO secrets.
+# Provider keys arrive per-request from BE (Option C, validated in 11a-A0).
+#
+# NOTE: 11a-A1 ships with env-var-based master-key validation (LiteLLM
+# default). Chunk 11a-A.5 wires a custom_auth callback that reads the
+# master key from Redis for zero-restart rotation (HIGH-5). When that
+# lands, this file gains:
+#   general_settings:
+#     custom_auth: services.ai.litellm_auth_callback.user_api_key_auth
+model_list:
+  - model_name: ollama-nuc
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://10.10.0.2:11434
+  - model_name: ollama-nuc-llama
+    litellm_params:
+      model: ollama/llama3.2:8b
+      api_base: http://10.10.0.2:11434
+  - model_name: ollama-heavy
+    litellm_params:
+      model: ollama/qwen2.5:32b
+      api_base: http://10.10.0.3:11434
+  - model_name: ollama-heavy-70b
+    litellm_params:
+      model: ollama/llama3.3:70b
+      api_base: http://10.10.0.3:11434
+  - model_name: xai-grok
+    litellm_params:
+      model: xai/grok-2-latest
+      api_base: https://api.x.ai/v1
+  - model_name: gemini-pro
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+  - model_name: anthropic-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+  - model_name: openai-gpt4o
+    litellm_params:
+      model: openai/gpt-4o

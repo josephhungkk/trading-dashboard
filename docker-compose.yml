@@ -49,3 +49,29 @@ services:
       - "./frontend/public:/app/public"
     environment:
       VITE_API_URL: "http://localhost:8000"
+
+  # Phase 11a-A1: AI router proxy. Lightweight image; cost ledger is
+  # ours (not litellm-database). Master-key validation is env-var-based
+  # at A1; A.5 swaps in a Redis-backed custom_auth callback for
+  # zero-restart rotation (HIGH-5).
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: dashboard-litellm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-bootstrap-rotate-me}
+      LITELLM_LOG: WARNING
+    healthcheck:
+      test: ["CMD", "litellm", "--health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
