@@ -19,11 +19,17 @@ End-state: a self-hosted personal trading dashboard covering every asset class s
 
 **Pattern: `0.x.y.z`** (locked 2026-05-12 during Phase 10b.2 close-out)
 
-- `x` = phase version, computed as **ROADMAP §N + 2** for §7 onwards. This offset reflects the historical lap (Phase 8c shipped at v0.10.0, Phase 9 at v0.11.0, etc.) and keeps the "Tag" column below an accurate map from now on.
-- `y` = chunk / sub-phase within the umbrella phase (chunks A/B/C/… AND sub-phases like 10a.5, 10b.1, 10b.2 all count as `y` bumps).
+- `x` = phase version:
+  - **§1–§8: `x = §N`** (historical; tags v0.1.x through v0.8.x already shipped under this rule)
+  - **§9 onwards: `x = §N + 2`** (the lap occurred between §8 and §9; reflecting the actual tag history)
+- `y` = chunk / sub-phase within the umbrella phase (chunks A/B/C/… AND sub-phases like 8b, 8c, 10a.5, 10b.1, 10b.2 all count as `y` bumps).
 - `z` = task / iteration / re-issue under a chunk (e.g. a retro-applied reviewer-fix or operator hot-patch).
 
-**Sub-phases never bump `x`.** When Phase 10 split into 10a / 10a.5 / 10b.1 / 10b.2 they shipped as v0.12.0 / v0.12.1 / v0.12.2 / v0.12.3 — all under x=12. Same will hold for Phase 11's sub-phases (v0.13.x), Phase 14 Futures sub-phases (v0.16.x), and so on.
+**Sub-phases never bump `x`.**
+- Phase 8 split into 8a / 8b / 8c → v0.8.0 / v0.8.1 / v0.8.2 (8b retagged from v0.9.0; 8c retagged from v0.10.0, both on 2026-05-12 to correct the historical lap)
+- Phase 9 has 9.5 → v0.11.0 + v0.11.0.1
+- Phase 10 split into 10a / 10a.5 / 10b.1 / 10b.2 → v0.12.0 / v0.12.1 / v0.12.2 / v0.12.3 (10b.1 retagged from v0.13.0 on 2026-05-12)
+- Phase 11's sub-phases will land at v0.13.x, Phase 14 Futures at v0.16.x, etc.
 
 **1.0.0** ships when ROADMAP §25 (PWA mobile) is complete. The intermediate Tag column below shows the FIRST tag in each phase's `x` window; sub-phases land at `0.x.{1,2,3,…}`.
 
@@ -38,8 +44,8 @@ See `memory/feedback_sub_phase_versioning.md` for the case-by-case decision rule
 | **7b.1.5** | 0.7.2 ✅ | **Instruments seed + admin alias endpoint** *(mini-phase)* | Alembic 0010 adds `symbol`/`primary_exchange`/`canonical_id` to `positions` + creates `watchlist_entries` table. Boot-time `seed_instruments_from_positions(session)` resolves canonical_ids from positions ∪ orders ∪ watchlists. Admin endpoint `POST /api/admin/instruments` for operator-driven alias creation when lazy creation surfaces `NO_INSTRUMENT`. Replaces 7b.1 Task A5 (deferred — plan-vs-schema mismatch). |
 | **7c** | 0.7.3 ✅ | **Alpaca adapter (data + read-only)** | `sidecar_alpaca/` gRPC sidecar using `alpaca-py` SDK. API-key auth (no OAuth dance). Read-only `Configure`/`ListManagedAccounts`/`GetAccountSummary`/`GetPositions`/`GetOrders` mirror of `sidecar_schwab`. `StreamQuotes` wired to free real-time IEX feed (`stream.data.alpaca.markets/v2/iex`) — registers `alpaca` source in the open-set enum (already designed-for in 7b.1). US equity + crypto in scope; options scaffolded, trade execution deferred to Phase 8. |
 | **8** | 0.8.0 ✅ | **Schwab + Alpaca trade + order-type expansion + Futu Modify/Bracket** | Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6). Alpaca `PlaceOrder` (US equity + crypto). |
-| **8c** | 0.10.0 ✅ | **Crypto trade execution** *(historical lap; this was the first off-by-one against `x = §N + 2`)* | IBKR Paxos crypto orders. Slotted in early as v0.10.0. |
-| **9** | 0.11.0 ✅ | **Charting v1 + bar aggregator + historical store** *(historical lap continues)* | TimescaleDB hypertable on PG-18, klinecharts integration, 1s/1m/5m/15m/1h/1d bars, drag-handle stop/TP edit on the chart, historical backfill from broker APIs (Schwab CHART_EQUITY → free 1m US bars). |
+| **8c** | 0.8.2 ✅ | **Crypto trade execution** *(retagged from v0.10.0 on 2026-05-12)* | Alpaca trade write path: equity + crypto + bracket + OCO. 8b sits at v0.8.1 (retagged from v0.9.0). |
+| **9** | 0.11.0 ✅ | **Charting v1 + bar aggregator + historical store** *(first phase under `x = §N + 2`)* | TimescaleDB hypertable on PG-18, klinecharts integration, 1s/1m/5m/15m/1h/1d bars, drag-handle stop/TP edit on the chart, historical backfill from broker APIs (Schwab CHART_EQUITY → free 1m US bars). Sub-phase 9.5 shipped at v0.11.0.1. |
 | **10** | 0.12.0 ✅ | **Risk engine + position-sizing + multi-account rollup** | PDT counter (US accts), buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly, fixed-fractional, vol-targeting). Multi-account portfolio rollup (cross-broker aggregate NLV / exposure / per-asset-class delta). Pre-trade gate becomes mandatory chokepoint. **Shipped across 4 sub-phases:** 10a (v0.12.0 risk gate), 10a.5 (v0.12.1 effectivity), 10b.1 (v0.12.2 sizing — originally tagged v0.13.0, retagged 2026-05-12), 10b.2 (v0.12.3 rollup). |
 | **11** | 0.13.0 | **AI router + Alerts + Telegram** | Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` module any subsystem can call. Price/condition alerts engine. Telegram bot (notifications + admin commands). Prompt-cost tracking. |
 | 12 | 0.14.0 | Options — single-leg | Option chain viewer, strike/expiry pickers, on-demand strike-window subscribe, Greeks display, exercise/assign events on IBKR + Schwab + Futu-US. Polymorphic contract via JSONB `contract_details`. |

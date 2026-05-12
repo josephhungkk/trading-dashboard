@@ -326,7 +326,7 @@ Phase 8 split into 8a (Schwab single-leg + capability foundation),
 - [ ] **G3** Phase 8a runbook (operator playbook)
 - [x] **G4** Close-out v0.8.0 (CHANGELOG + tag) once A5+E3+F all green  *(2026-05-06)*
 
-### Phase 8b — Order-type expansion + Futu Modify/Bracket + OCO  *(complete — v0.9.0 · 2026-05-06)*
+### Phase 8b — Order-type expansion + Futu Modify/Bracket + OCO  *(complete — v0.8.1 · 2026-05-06; retagged from v0.9.0 on 2026-05-12)*
 
 41 tasks across 6 chunks shipped in single-day burst (74 commits since v0.8.0). 17 architect findings (3 CRIT + 6 HIGH + 8 MED) applied inline.
 
@@ -335,22 +335,22 @@ Phase 8 split into 8a (Schwab single-leg + capability foundation),
 - [x] **Chunk F** Futu Modify+Bracket+universe: ModifyOrder + PlaceBracket live, TRAIL→ft.OrderType.TRAILING_STOP, HKEX auction rejection, Alembic 0014 + **0014a** (revert IOC/FOK/GTD per SDK enum discovery), empirical hard-gate, real-broker E2E + workflow  *(commits c48d352..3fb6637, 279376d, 92b74c5, 226f6d9)*
 - [x] **Chunk I** IBKR full universe: order_builder (TRAIL_LIMIT="TRAIL LIMIT" verbatim per TWS docs, MOO/LOO use OPG tif, GTD goodTillDate), Alembic 0015 (21 row flips), real-broker E2E with TRAIL+MOC+GTD matrix  *(commits 38ca957..5e34567, a82b1fa)*
 - [x] **Chunk O** OCO orchestrator: Alembic 0016 oco_links 9-state machine, oco_orchestrator.py (Redis advisory lock + per-account stream cap=100 + oco_group_id_for_ibkr helper), POST /api/orders/oco endpoint, Schwab native (orderStrategyType=OCO), IBKR native (proto field 25 oco_group_id + ocaGroup/ocaType=1), Futu orchestrated (existing event stream sufficient), 2 empirical hard-gates, Alembic 0017 OCO feature flip, killswitch test, cancel-always-allowed invariant  *(commits e1a7332..2d7b1a6)*
-- [x] **Close-out** CHANGELOG/TASKS.md/v0.9.0 tag
+- [x] **Close-out** CHANGELOG/TASKS.md/v0.8.1 tag (originally v0.9.0; retagged 2026-05-12)
 
-### Phase 8c — Alpaca trade  *(complete — v0.10.0 · 2026-05-07)*
+### Phase 8c — Alpaca trade  *(complete — v0.8.2 · 2026-05-07; retagged from v0.10.0 → v0.8.1 → v0.8.2 on 2026-05-12)*
 
-Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 lines, 21 architect findings applied inline @ commit 82482e4). Plan at `docs/superpowers/plans/2026-05-06-phase8c-alpaca-trade-plan.md` (4169 lines, 37 tasks). 23 tasks shipped across 4 chunks (S/C/B/OCO; chunk 0 already in v0.9.0); 19 commits since v0.9.0. Per-chunk reviewer chain caught 4 CRIT + 7 HIGH defects across chunks before merge.
+Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 lines, 21 architect findings applied inline @ commit 82482e4). Plan at `docs/superpowers/plans/2026-05-06-phase8c-alpaca-trade-plan.md` (4169 lines, 37 tasks). 23 tasks shipped across 4 chunks (S/C/B/OCO; chunk 0 already in v0.8.1); 19 commits since v0.8.1. Per-chunk reviewer chain caught 4 CRIT + 7 HIGH defects across chunks before merge.
 
 - [x] **Chunk S** Alpaca equity trade write-path: PlaceOrder/CancelOrder/ModifyOrder live, TradingStream cap=5, client_order_id dedupe, Alembic 0020 (16 STOCK rows), nightly E2E. *(commits `70fd771..0666f0b`)*
 - [x] **Chunk C** Alpaca crypto trade write-path: streaming.py (deferred-future-use), cash_amount→notional, BTCUSD→BTC/USD ingress normalization, ALPACA_CRYPTO_LOCATION env, Alembic 0020a (4 CRYPTO rows). *(commits `89fcc4a..b5fc398`)*
 - [x] **Chunk B** Bracket asymmetry: PlaceBracket equity native (OrderClass.BRACKET + leg classification by order_type), Alembic 0021-eq TRUE / 0021-cr FALSE explicit negative capability, empirical PASS/EXPECTED_FAIL scripts. *(commits `8fa6b3e..458709c`)*
 - [x] **Chunk OCO** OCO asymmetry: dispatch_oco_alpaca_equity (native order_class=OCO), dispatch_oco_alpaca_crypto (default crypto_oco_supported=False), Alembic 0022, lazy alpaca-py import + no_db marker. *(commits `6fcda69..f0d20e7`)*
 - [x] **Close-out** CHANGELOG.md / TASKS.md
-- [ ] **v0.10.0 tag** *(deferred to user — `git tag v0.10.0 && git push --tags`)*
+- [x] **v0.8.2 tag** *(originally v0.10.0; retagged via v0.8.1 to v0.8.2 on 2026-05-12 for policy alignment)*
 
 ## Phase 9 — Charting v1 + bar aggregator + historical store  *(complete — v0.11.0 · 2026-05-08)*
 
-50/53 tasks across 9/11 chunks shipped (64 commits since v0.10.0). See `CHANGELOG.md` v0.11.0 for the per-chunk breakdown and reviewer-fix commit refs. Spec [`docs/superpowers/specs/2026-05-07-phase9-charting-design.md`](docs/superpowers/specs/2026-05-07-phase9-charting-design.md); plan [`docs/superpowers/plans/2026-05-07-phase9-charting-plan.md`](docs/superpowers/plans/2026-05-07-phase9-charting-plan.md).
+50/53 tasks across 9/11 chunks shipped (64 commits since v0.8.2). See `CHANGELOG.md` v0.11.0 for the per-chunk breakdown and reviewer-fix commit refs. Spec [`docs/superpowers/specs/2026-05-07-phase9-charting-design.md`](docs/superpowers/specs/2026-05-07-phase9-charting-design.md); plan [`docs/superpowers/plans/2026-05-07-phase9-charting-plan.md`](docs/superpowers/plans/2026-05-07-phase9-charting-plan.md).
 
 - [x] Chunk A (Tasks 1-10) — Foundation: 7 Alembic migrations, bar_service.active_set, CI plumbing
 - [x] Chunk B (Tasks 11-17) — bar_aggregator service: Docker scaffold, WAL via Redis Streams, coalescer, minute emitter
@@ -586,7 +586,12 @@ PDT counter, buying-power calc, position concentration limits, pre-trade margin 
 | 8 | **Position-sizing calculator (Kelly / fixed-fractional / vol-target)** | ✅ **10b.1** — 3 methods shipped (Kelly deferred to Phase 19 per spec §1 — needs strategy-tagged backtest stats) |
 | 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ✅ **10b.2** — REST + WS + /portfolio/rollup page; account_balance_snapshots hypertable + 1h/1d CAGGs; FE hybrid REST+WS with poll fallback |
 
-**Versioning note (LOCKED 2026-05-12):** pattern is `0.x.y.z` where `x = ROADMAP §N + 2` (so Phase §10 → x=12), `y` = chunk/sub-phase, `z` = task/iteration. Sub-phases never bump `x`. So Phase 10 maps to: 10a → v0.12.0, 10a.5 → v0.12.1, 10b.1 → v0.12.2 (retagged 2026-05-12 from v0.13.0), 10b.2 → v0.12.3. ROADMAP §11 = v0.13.x, §12 = v0.14.x, §14 Futures = v0.16.x, §25 PWA → 1.0.0. See ROADMAP.md versioning header + `memory/feedback_sub_phase_versioning.md`.
+**Versioning note (LOCKED 2026-05-12):** pattern is `0.x.y.z` where:
+- §1–§8: `x = §N` (historical)
+- §9 onwards: `x = §N + 2` (lap absorbed at the §8→§9 boundary)
+- `y` = chunk/sub-phase; `z` = task/iteration. Sub-phases never bump `x`.
+
+Phase 8 maps to: 8a → v0.8.0, 8b → v0.8.1 (retagged 2026-05-12 from v0.9.0), 8c → v0.8.2 (retagged 2026-05-12 from v0.10.0 → v0.8.1 → v0.8.2). Phase 10 maps to: 10a → v0.12.0, 10a.5 → v0.12.1, 10b.1 → v0.12.2 (retagged 2026-05-12 from v0.13.0), 10b.2 → v0.12.3. ROADMAP §11 = v0.13.x, §12 = v0.14.x, §14 Futures = v0.16.x, §25 PWA → 1.0.0. See ROADMAP.md versioning header + `memory/feedback_sub_phase_versioning.md`.
 
 ### Phase 10b.1 — Position-sizing calculator  *(complete · 2026-05-12 · v0.12.2 · 20 commits since v0.12.1; retagged from v0.13.0 on 2026-05-12)*
 

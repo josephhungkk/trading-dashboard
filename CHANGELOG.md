@@ -417,7 +417,7 @@ numbers, or APP_SECRET_KEY in code or commits.
 
 ### Added — Phase 9 complete (Charting v1: bar aggregator + historical store + chart UI + 45 indicators)
 
-50 of 53 tasks across 9 of 11 chunks shipped (64 commits since v0.10.0). Plan
+50 of 53 tasks across 9 of 11 chunks shipped (64 commits since v0.8.1). Plan
 [`docs/superpowers/plans/2026-05-07-phase9-charting-plan.md`](docs/superpowers/plans/2026-05-07-phase9-charting-plan.md);
 spec [`docs/superpowers/specs/2026-05-07-phase9-charting-design.md`](docs/superpowers/specs/2026-05-07-phase9-charting-design.md)
 (1225 lines after ARCHITECT-REVIEW applied 5 CRIT + 9 HIGH + 14 MED inline at `aa006b1`).
@@ -571,11 +571,13 @@ deferred pending production validation of `bars_1s` with real broker traffic. Tr
 - **Phase 18** — autonomous self-refining bots (depends on Phase 9 bar aggregator + indicators)
 - **Phase 19** — UK CGT (S104 + SA108) (depends on bar history for cost basis)
 
-## [0.10.0] — 2026-05-07
+## [0.8.2] — 2026-05-07
+
+*(retagged 2026-05-12 from v0.10.0 → v0.8.1 → v0.8.2 per the `0.x.y.z` versioning policy; Phase 8c is a sub-phase under §8. v0.10.0 was the historical lap; brief retag to v0.8.1 collided with Phase 8b's correct slot; final v0.8.2 = §8a→0.8.0, §8b→0.8.1, §8c→0.8.2. All tags point at the same commit `25dd9e9`.)*
 
 ### Added — Phase 8c complete (Alpaca trade write path: equity + crypto + bracket + OCO)
 
-23 tasks across 4 chunks shipped (19 commits since v0.9.0). Plan
+23 tasks across 4 chunks shipped (19 commits since v0.8.0). Plan
 [`docs/superpowers/plans/2026-05-06-phase8c-alpaca-trade-plan.md`](docs/superpowers/plans/2026-05-06-phase8c-alpaca-trade-plan.md).
 Per-chunk reviewer chain (5 agents at end of each chunk) caught CRIT/HIGH defects before merge —
 fixes batched into single commits per chunk: `0666f0b` (S), `b5fc398` (C), `458709c` (B), `f0d20e7` (OCO).
@@ -618,7 +620,9 @@ fixes batched into single commits per chunk: `0666f0b` (S), `b5fc398` (C), `4587
 - **Phase 8c migration discipline** (matches chunks C/B/OCO): `LOCK TABLE broker_order_capability IN SHARE ROW EXCLUSIVE MODE` in upgrade() + downgrade(); `INSERT ... ON CONFLICT DO UPDATE`; `pg_notify('app_config:invalidate:order_capabilities', 'alpaca')` for runtime cache invalidation.
 - **Per-chunk reviewer rule** (memory `feedback_review_per_chunk.md`) honored: 4-5 reviewer agents (spec/code/security/db/python) dispatched at end of every chunk ≥5 commits. CRITs caught and fixed before merge.
 
-## [0.9.0] — 2026-05-06
+## [0.8.1] — 2026-05-06
+
+*(retagged 2026-05-12 from v0.9.0 to v0.8.1 per the `0.x.y.z` versioning policy; Phase 8b is a sub-phase under §8. v0.9.0 was deleted from origin; v0.8.1 points at the same commit `ce63032`.)*
 
 ### Added — Phase 8b complete (order-type expansion + Modify/Bracket/OCO across IBKR/Futu/Schwab)
 
