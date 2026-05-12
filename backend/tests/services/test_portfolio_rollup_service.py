@@ -1,9 +1,21 @@
-"""Phase 10b.2 §11.4 — PortfolioRollupService golden tests (GV1, GV2, GV6, GV10)."""
+"""Phase 10b.2 §11.4 — PortfolioRollupService golden tests (GV1, GV2, GV6, GV10).
+
+Test isolation strategy:
+  - Setup helpers (_seed_account, _soft_delete_others, _cleanup_accounts) open
+    a FRESH SessionLocal() context each. The service-under-test runs against
+    the per-test ``db_session`` fixture. Mixing the two would trigger
+    SQLAlchemy's "InvalidRequestError: A transaction is already begun"
+    when the test's explicit begin() overlaps with the service's autobegin.
+  - The shared dev/CI DB is a global resource; soft_delete_others +
+    restore_others sandbox the test's view of broker_accounts so the
+    cross-broker rollup returns deterministic data regardless of leftover
+    state from prior tests.
+"""
 
 from __future__ import annotations
 
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import bindparam, text
@@ -31,7 +43,7 @@ _DELETE_ACCOUNTS_SQL = text("DELETE FROM broker_accounts WHERE id IN :ids").bind
 )
 
 
-async def _seed_account(broker: str, native: str, nlv: str):
+async def _seed_account(broker: str, native: str, nlv: str) -> UUID:
     """Insert one broker_accounts row in its OWN committed session.
 
     Returning the UUID. Setup needs to be in a separate session from the
@@ -57,33 +69,43 @@ async def _seed_account(broker: str, native: str, nlv: str):
     return aid
 
 
-async def _soft_delete_others(keep_ids: list) -> None:
-    """Soft-delete every broker_account NOT in keep_ids — so the rollup
-    SELECT sees a deterministic set across test runs."""
+async def _soft_delete_others(keep_ids: list[UUID]) -> list[UUID]:
+    """Soft-delete every broker_account NOT in keep_ids; return the IDs the
+    test mutated so teardown can restore exactly those rows.
+
+    Review HIGH (code-reviewer): prior `_restore_others` restored EVERY
+    soft-deleted row not in our keep-list, which would resurrect legitimately
+    deleted accounts that pre-dated the test. Now we snapshot the exact set
+    we soft-deleted and only restore those.
+    """
     async with SessionLocal() as s:
         async with s.begin():
-            await s.execute(
+            result = await s.execute(
                 text(
                     "UPDATE broker_accounts SET deleted_at = now() "
-                    "WHERE id NOT IN :keep AND deleted_at IS NULL"
+                    "WHERE id NOT IN :keep AND deleted_at IS NULL "
+                    "RETURNING id"
                 ).bindparams(bindparam("keep", expanding=True)),
                 {"keep": [str(i) for i in keep_ids]},
             )
+            return [row[0] for row in result.fetchall()]
 
 
-async def _restore_others(our_ids: list) -> None:
+async def _restore_others(mutated_ids: list[UUID]) -> None:
+    """Restore exactly the IDs we soft-deleted (see _soft_delete_others)."""
+    if not mutated_ids:
+        return
     async with SessionLocal() as s:
         async with s.begin():
             await s.execute(
-                text(
-                    "UPDATE broker_accounts SET deleted_at = NULL "
-                    "WHERE id NOT IN :ours AND deleted_at IS NOT NULL"
-                ).bindparams(bindparam("ours", expanding=True)),
-                {"ours": [str(i) for i in our_ids]},
+                text("UPDATE broker_accounts SET deleted_at = NULL WHERE id IN :ids").bindparams(
+                    bindparam("ids", expanding=True)
+                ),
+                {"ids": [str(i) for i in mutated_ids]},
             )
 
 
-async def _cleanup_accounts(ids: list) -> None:
+async def _cleanup_accounts(ids: list[UUID]) -> None:
     async with SessionLocal() as s:
         async with s.begin():
             await s.execute(_DELETE_ACCOUNTS_SQL, {"ids": [str(i) for i in ids]})
@@ -93,7 +115,7 @@ async def test_gv1_single_usd_account_base_gbp(db_session, redis) -> None:
     """GV1 — 10000 USD, FX USD/GBP=0.7912, base GBP → 7912.00."""
     await redis.flushdb()
     aid = await _seed_account("ibkr", "USD", "10000")
-    await _soft_delete_others([aid])
+    mutated = await _soft_delete_others([aid])
     await redis.set("fx:mid:USD:GBP", "0.7912")
 
     try:
@@ -107,7 +129,7 @@ async def test_gv1_single_usd_account_base_gbp(db_session, redis) -> None:
         assert gv1_acct.status == "live"
         assert live.fx_rates.get("USD/GBP") == Decimal("0.7912")
     finally:
-        await _restore_others([aid])
+        await _restore_others(mutated)
         await _cleanup_accounts([aid])
 
 
@@ -117,7 +139,7 @@ async def test_gv2_usd_plus_hkd_base_gbp(db_session, redis) -> None:
     aid_usd = await _seed_account("ibkr", "USD", "10000")
     aid_hkd = await _seed_account("futu", "HKD", "50000")
     ids = [aid_usd, aid_hkd]
-    await _soft_delete_others(ids)
+    mutated = await _soft_delete_others(ids)
     await redis.set("fx:mid:USD:GBP", "0.7912")
     await redis.set("fx:mid:HKD:GBP", "0.1015")
 
@@ -128,7 +150,7 @@ async def test_gv2_usd_plus_hkd_base_gbp(db_session, redis) -> None:
         assert live.fx_rates.get("USD/GBP") == Decimal("0.7912")
         assert live.fx_rates.get("HKD/GBP") == Decimal("0.1015")
     finally:
-        await _restore_others(ids)
+        await _restore_others(mutated)
         await _cleanup_accounts(ids)
 
 
@@ -138,7 +160,7 @@ async def test_gv6_all_fx_unavailable_raises_503(db_session, redis) -> None:
     aid_usd = await _seed_account("ibkr", "USD", "10000")
     aid_hkd = await _seed_account("futu", "HKD", "50000")
     ids = [aid_usd, aid_hkd]
-    await _soft_delete_others(ids)
+    mutated = await _soft_delete_others(ids)
 
     try:
         service = PortfolioRollupService(db_session, redis)
@@ -149,7 +171,7 @@ async def test_gv6_all_fx_unavailable_raises_503(db_session, redis) -> None:
             "pair": "all",
         }
     finally:
-        await _restore_others(ids)
+        await _restore_others(mutated)
         await _cleanup_accounts(ids)
 
 
@@ -160,7 +182,7 @@ async def test_gv10_partial_fx_outage(db_session, redis) -> None:
     aid_hkd = await _seed_account("futu", "HKD", "50000")
     aid_gbp = await _seed_account("schwab", "GBP", "1000")
     ids = [aid_usd, aid_hkd, aid_gbp]
-    await _soft_delete_others(ids)
+    mutated = await _soft_delete_others(ids)
     await redis.set("fx:mid:USD:GBP", "0.7912")
     # HKD/GBP intentionally NOT seeded; GBP→GBP path uses Decimal(1) auto.
 
@@ -176,5 +198,5 @@ async def test_gv10_partial_fx_outage(db_session, redis) -> None:
         assert hkd_acct.status == "fx_stale"
         assert hkd_acct.currency_native == "HKD"
     finally:
-        await _restore_others(ids)
+        await _restore_others(mutated)
         await _cleanup_accounts(ids)

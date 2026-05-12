@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import structlog
@@ -27,6 +27,11 @@ log = structlog.get_logger(__name__)
 
 SUPPORTED_BASE = frozenset({"GBP", "USD", "EUR", "HKD", "JPY", "AUD"})
 _STALE_THRESHOLD_S = 300.0  # 5 minutes
+
+# Review MED: module-level constants for quantize() — avoids re-instantiating
+# Decimal literals on every per-account / per-bucket loop.
+_QUANTIZE_8DP = Decimal("0.00000001")
+_QUANTIZE_2DP = Decimal("0.01")
 
 
 class PortfolioRollupService:
@@ -52,10 +57,14 @@ class PortfolioRollupService:
                 await self._db.execute(
                     text(
                         """
+                    -- Review MED: select ba.alias (human-set) not ba.gateway_label
+                    -- (internal sidecar label) per CLAUDE.md AccountResponse
+                    -- boundary-stripping doctrine. Fall back to gateway_label
+                    -- when alias is NULL (legacy rows).
                     SELECT
                       ba.id              AS account_id,
                       ba.broker_id::text AS broker_id,
-                      ba.gateway_label   AS alias,
+                      COALESCE(ba.alias, ba.gateway_label) AS alias,
                       ba.currency_base   AS currency_base,
                       ba.last_nlv        AS last_nlv,
                       ba.last_nlv_currency AS last_nlv_currency,
@@ -95,6 +104,15 @@ class PortfolioRollupService:
             currency_native = r["currency_base"] or "GBP"
 
             # Initialising — no NLV yet (e.g. fresh account discovered seconds ago)
+            # Review MED: if NLV is present but currency is NULL (legacy / adapter
+            # bug), log a warning — silently treating it as "initialising" hides
+            # the data inconsistency from ops.
+            if r["last_nlv"] is not None and r["last_nlv_currency"] is None:
+                log.warning(
+                    "portfolio_rollup_account_nlv_without_currency",
+                    account_id=str(account_id),
+                    broker_id=r["broker_id"],
+                )
             if r["last_nlv"] is None or r["last_nlv_currency"] is None:
                 accounts.append(
                     PerAccount(
@@ -142,20 +160,23 @@ class PortfolioRollupService:
                 fx_rates_used[f"{native_ccy}/{base_currency}"] = fx
 
             nlv_native = Decimal(r["last_nlv"])
-            nlv_base = (nlv_native * fx).quantize(Decimal("1e-8"))
-            realized_base = (Decimal(r["realized"] or 0) * fx).quantize(Decimal("1e-8"))
-            unrealized_base = (Decimal(r["unrealized"] or 0) * fx).quantize(Decimal("1e-8"))
+            nlv_base = (nlv_native * fx).quantize(_QUANTIZE_8DP)
+            realized_base = (Decimal(r["realized"] or 0) * fx).quantize(_QUANTIZE_8DP)
+            unrealized_base = (Decimal(r["unrealized"] or 0) * fx).quantize(_QUANTIZE_8DP)
 
             total_nlv_base += nlv_base
             total_realized += realized_base
             total_unrealized += unrealized_base
             any_account_computed = True
 
-            status: str = "live"
+            # Review HIGH: narrow to the actual Literal values flowing through this
+            # branch — "live" or "stale". "initialising" + "fx_stale" are handled in
+            # other branches. This removes the # type: ignore mypy was suppressing.
+            live_or_stale: Literal["live", "stale"] = "live"
             nlv_age = r["nlv_age_s"]
             if nlv_age is not None and nlv_age > _STALE_THRESHOLD_S:
                 stale_accounts.append(account_id)
-                status = "stale"
+                live_or_stale = "stale"
 
             accounts.append(
                 PerAccount(
@@ -170,7 +191,7 @@ class PortfolioRollupService:
                     fx_rate=fx,
                     fx_stale=False,
                     nlv_age_s=nlv_age,
-                    status=status,  # type: ignore[arg-type]
+                    status=live_or_stale,
                 )
             )
 
@@ -182,9 +203,9 @@ class PortfolioRollupService:
 
         return RollupLive(
             base_currency=base_currency,
-            total_nlv_base=total_nlv_base.quantize(Decimal("0.01")),
-            total_realized_today_base=total_realized.quantize(Decimal("0.01")),
-            total_unrealized_base=total_unrealized.quantize(Decimal("0.01")),
+            total_nlv_base=total_nlv_base.quantize(_QUANTIZE_2DP),
+            total_realized_today_base=total_realized.quantize(_QUANTIZE_2DP),
+            total_unrealized_base=total_unrealized.quantize(_QUANTIZE_2DP),
             history_since=history_since,
             accounts=accounts,
             exposure_by_asset_class=exposure,
@@ -209,6 +230,10 @@ class PortfolioRollupService:
                 await self._db.execute(
                     text(
                         """
+                    -- Review HIGH: JOIN broker_accounts and filter deleted_at
+                    -- IS NULL so stale positions from soft-deleted accounts
+                    -- don't inflate exposure. positions table has FK to
+                    -- broker_accounts(id) but no auto-filter on deleted_at.
                     SELECT
                       i.asset_class::text AS asset_class,
                       p.currency          AS native_ccy,
@@ -220,6 +245,8 @@ class PortfolioRollupService:
                           ELSE 0 END)     AS short_native
                     FROM positions p
                     JOIN instruments i ON i.id = p.instrument_id
+                    JOIN broker_accounts ba ON ba.id = p.account_id
+                       AND ba.deleted_at IS NULL
                     WHERE p.instrument_id IS NOT NULL
                     GROUP BY i.asset_class, p.currency
                     """
@@ -235,12 +262,19 @@ class PortfolioRollupService:
             try:
                 fx = await _fx_rate(self._redis, r["native_ccy"], base_currency)
             except PreviewUnavailable:
-                # Per-currency FX failure here downgrades silently — exposure
-                # is informational, not a gate decision. Account-level FX
-                # failures are still surfaced in fx_stale_accounts above.
+                # Per-currency FX failure here downgrades silently from the
+                # response shape (exposure is informational, not a gate
+                # decision) but is logged so ops can spot a USD-wide outage
+                # silently zeroing out US equity exposure (review MED).
+                log.info(
+                    "portfolio_rollup_exposure_fx_unavailable",
+                    native_ccy=r["native_ccy"],
+                    base_currency=base_currency,
+                    asset_class=r["asset_class"],
+                )
                 continue
-            long_base = (Decimal(r["long_native"] or 0) * fx).quantize(Decimal("1e-8"))
-            short_base = (Decimal(r["short_native"] or 0) * fx).quantize(Decimal("1e-8"))
+            long_base = (Decimal(r["long_native"] or 0) * fx).quantize(_QUANTIZE_8DP)
+            short_base = (Decimal(r["short_native"] or 0) * fx).quantize(_QUANTIZE_8DP)
             bucket = per_class.setdefault(
                 r["asset_class"], {"long": Decimal(0), "short": Decimal(0)}
             )
@@ -251,15 +285,15 @@ class PortfolioRollupService:
         for asset_class, b in sorted(per_class.items()):
             gross = abs(b["long"]) + abs(b["short"])
             pct = (
-                (gross / total_nlv_base * 100).quantize(Decimal("0.01"))
+                (gross / total_nlv_base * 100).quantize(_QUANTIZE_2DP)
                 if total_nlv_base != 0
                 else Decimal("0")
             )
             exposures.append(
                 AssetClassExposure(
                     asset_class=asset_class,
-                    long_notional_base=b["long"].quantize(Decimal("0.01")),
-                    short_notional_base=b["short"].quantize(Decimal("0.01")),
+                    long_notional_base=b["long"].quantize(_QUANTIZE_2DP),
+                    short_notional_base=b["short"].quantize(_QUANTIZE_2DP),
                     pct_of_nlv=pct,
                 )
             )
