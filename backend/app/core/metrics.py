@@ -771,12 +771,14 @@ AI_ROUTER_WOL_WAKE_LATENCY_SECONDS = Histogram(
     "ai_router_wol_wake_latency_seconds",
     "Elapsed seconds from wake start until heavy-box Ollama TCP/API responds.",
     labelnames=["host"],
+    buckets=(1, 2.5, 5, 10, 15, 30, 45, 60, 90, 120, 180, 300),
     registry=registry,
 )
 AI_ROUTER_WOL_WARM_TO_READY_SECONDS = Histogram(
     "ai_router_wol_warm_to_ready_seconds",
     "Elapsed seconds from wake start until requested model is listed by Ollama.",
     labelnames=["host"],
+    buckets=(1, 2.5, 5, 10, 15, 30, 45, 60, 90, 120, 180, 300),
     registry=registry,
 )
 AI_ROUTER_WOL_WAKE_FAILURES_TOTAL = Counter(
@@ -794,6 +796,12 @@ AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE = Gauge(
 AI_ROUTER_OLLAMA_HEALTH_FAILURES_TOTAL = Counter(
     "ai_router_ollama_health_failures_total",
     "Raw Ollama health-check failures by host.",
+    labelnames=["host"],
+    registry=registry,
+)
+AI_ROUTER_OLLAMA_HEALTH_ALERT_PUBLISH_FAILURES_TOTAL = Counter(
+    "ai_router_ollama_health_alert_publish_failures_total",
+    "Redis pubsub publish failures while emitting Ollama health alerts.",
     labelnames=["host"],
     registry=registry,
 )

@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING
 import httpx
 import structlog
 
-from app.core.metrics import AI_ROUTER_OLLAMA_HEALTH_FAILURES_TOTAL
+from app.core.metrics import (
+    AI_ROUTER_OLLAMA_HEALTH_ALERT_PUBLISH_FAILURES_TOTAL,
+    AI_ROUTER_OLLAMA_HEALTH_FAILURES_TOTAL,
+)
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -52,7 +55,11 @@ class OllamaHealthResult:
 
 
 class OllamaHealthWatcher:
-    """Periodically poll each Ollama host; emit alerts on threshold breach."""
+    """Periodically poll each Ollama host; emit alerts on threshold breach.
+
+    Alert state does NOT persist across restarts; expect up to 3 poll-cycles of
+    silence after restart if backends are still down.
+    """
 
     def __init__(
         self,
@@ -96,9 +103,13 @@ class OllamaHealthWatcher:
             return await self._check_host(host)
 
         results: list[HealthCheckResult] = []
-        if self._http_client is not None:
+        client = self._http_client
+        if client is not None:
             for host_name, base_url in self._hosts.items():
-                result = await self._check_host(OllamaHost(name=host_name, base_url=base_url))
+                result = await self._check_host(
+                    OllamaHost(name=host_name, base_url=base_url),
+                    client=client,
+                )
                 results.append(
                     HealthCheckResult(
                         host=result.host_name,
@@ -111,30 +122,35 @@ class OllamaHealthWatcher:
         async with httpx.AsyncClient(
             transport=self._transport, timeout=self._request_timeout_s
         ) as client:
-            self._http_client = client
-            try:
-                for host_name, base_url in self._hosts.items():
-                    result = await self._check_host(OllamaHost(name=host_name, base_url=base_url))
-                    results.append(
-                        HealthCheckResult(
-                            host=result.host_name,
-                            healthy=result.healthy,
-                            error=result.error,
-                        )
+            for host_name, base_url in self._hosts.items():
+                result = await self._check_host(
+                    OllamaHost(name=host_name, base_url=base_url),
+                    client=client,
+                )
+                results.append(
+                    HealthCheckResult(
+                        host=result.host_name,
+                        healthy=result.healthy,
+                        error=result.error,
                     )
-            finally:
-                self._http_client = None
+                )
         return results
 
-    async def _check_host(self, host: OllamaHost) -> OllamaHealthResult:
-        client = self._http_client
+    async def _check_host(
+        self,
+        host: OllamaHost,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> OllamaHealthResult:
         close_client = False
         if client is None:
-            client = httpx.AsyncClient(
-                transport=self._transport,
-                timeout=self._request_timeout_s,
-            )
-            close_client = True
+            client = self._http_client
+            if client is None:
+                client = httpx.AsyncClient(
+                    transport=self._transport,
+                    timeout=self._request_timeout_s,
+                )
+                close_client = True
         try:
             resp = await client.get(f"{host.base_url.rstrip('/')}/api/tags")
             if resp.status_code == 200 and resp.json().get("models") is not None:
@@ -201,8 +217,10 @@ class OllamaHealthWatcher:
                 ),
             )
         except Exception as exc:
+            AI_ROUTER_OLLAMA_HEALTH_ALERT_PUBLISH_FAILURES_TOTAL.labels(host=host).inc()
             log.warning(
                 "ollama_health_pubsub_failed",
+                host=host,
                 error_class=type(exc).__name__,
                 error=str(exc),
             )
@@ -236,6 +254,13 @@ class OllamaHealthWatcher:
             )
             self._owns_http_client = True
         self._task = asyncio.create_task(self._run())
+        log.info(
+            "watcher_started",
+            hosts=list(self._hosts),
+            poll_interval_s=self._poll_interval_s,
+            failure_threshold=self._failure_threshold,
+            failure_window_s=self._failure_window_s,
+        )
 
     async def stop(self) -> None:
         self._stop_event.set()

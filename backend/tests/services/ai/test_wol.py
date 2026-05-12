@@ -36,6 +36,8 @@ def _make_transport(
     *,
     wake_status: int = 200,
     tags_seq: list[dict[str, Any]] | None = None,
+    clock: _FakeClock | None = None,
+    advance_s_per_tags: float = 0.0,
 ) -> httpx.MockTransport:
     """Build a transport that the WoL primitive talks through.
 
@@ -53,6 +55,8 @@ def _make_transport(
         if request.method == "POST" and "/wake" in request.url.path:
             return httpx.Response(wake_status, json={"status": "sent", "mac": "AA:BB"})
         if request.method == "GET" and request.url.path == "/api/tags":
+            if clock is not None:
+                clock.advance(advance_s_per_tags)
             try:
                 return httpx.Response(200, json=next(tags_iter))
             except StopIteration:
@@ -103,7 +107,11 @@ async def test_wake_returns_failed_when_model_never_appears(fake_clock: _FakeClo
         helper_url="http://nuc-helper:11900",
         heavy_url="http://heavy:11434",
         clock=fake_clock,
-        transport=_make_transport(tags_seq=tags_seq),
+        transport=_make_transport(
+            tags_seq=tags_seq,
+            clock=fake_clock,
+            advance_s_per_tags=0.1,
+        ),
         poll_interval_s=0.0,  # synchronous test loop
     )
     result = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.5)
@@ -132,6 +140,37 @@ async def test_circuit_breaker_opens_after_three_failures_in_window(
     # 4th call within the window must short-circuit.
     r4 = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.1)
     assert r4.status == "circuit_open"
+
+
+@pytest.mark.asyncio
+async def test_half_open_trial_failure_reopens_breaker(
+    fake_clock: _FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed half-open trial immediately re-opens the breaker."""
+    import app.services.ai.wol as wol_module
+    from app.services.ai.wol import HeavyBoxWoL
+
+    monkeypatch.setattr(wol_module, "_FAILURE_WINDOW_S", 300)
+    fake_clock.now = 0
+    wol = HeavyBoxWoL(
+        helper_url="http://nuc-helper:11900",
+        heavy_url="http://heavy:11434",
+        clock=fake_clock,
+        transport=_make_transport(wake_status=502),
+    )
+
+    for now in (0, 1, 2):
+        fake_clock.now = now
+        result = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.1)
+        assert result.status == "failed"
+
+    fake_clock.advance(5 * 60 + 1)
+    result = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.1)
+    assert result.status == "failed"
+
+    next_result = await wol.wake_and_wait_for_model("qwen2.5:32b", timeout_s=0.1)
+    assert next_result.status == "circuit_open"
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import httpx
+import structlog
 
 from app.core.metrics import (
     AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE,
@@ -29,6 +30,8 @@ from app.core.metrics import (
     AI_ROUTER_WOL_WAKE_TOTAL,
     AI_ROUTER_WOL_WARM_TO_READY_SECONDS,
 )
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,7 @@ class HeavyBoxWoL:
         self.transport = transport  # public so tests can swap it mid-run
         self._poll_interval_s = poll_interval_s
         self._breaker = _BreakerState()
+        AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE.labels(host=self._heavy_host).set(0)
         # Per-model singleton wake — keyed by model name so different
         # models don't share each other's pending probe.
         self._inflight: dict[str, asyncio.Task[WakeResult]] = {}
@@ -86,11 +90,12 @@ class HeavyBoxWoL:
 
     def _record_failure(self) -> None:
         now = self._clock()
+        was_half_open = self._circuit_state() == "half_open"
         # Drop failures outside the window.
         cutoff = now - _FAILURE_WINDOW_S
         self._breaker.failures = [t for t in self._breaker.failures if t >= cutoff]
         self._breaker.failures.append(now)
-        if len(self._breaker.failures) >= _FAILURE_THRESHOLD:
+        if was_half_open or len(self._breaker.failures) >= _FAILURE_THRESHOLD:
             self._breaker.opened_at = now
             AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE.labels(host=self._heavy_host).set(2)
 
@@ -125,12 +130,19 @@ class HeavyBoxWoL:
 
     async def _do_wake(self, model_name: str, timeout_s: float) -> WakeResult:
         started = self._clock()
-        deadline = time.monotonic() + timeout_s
+        deadline = started + timeout_s
         async with self._client() as client:
             # 1) Tell the NUC helper to broadcast the magic packet.
             try:
                 resp = await client.post(f"{self._helper_url}/wake")
             except Exception as exc:
+                log.warning(
+                    "wol_helper_unreachable",
+                    host=self._heavy_host,
+                    helper_url=self._helper_url,
+                    error_class=type(exc).__name__,
+                    error=str(exc),
+                )
                 self._record_failure()
                 AI_ROUTER_WOL_WAKE_TOTAL.labels(host=self._heavy_host, outcome="failed").inc()
                 AI_ROUTER_WOL_WAKE_FAILURES_TOTAL.labels(
@@ -139,6 +151,12 @@ class HeavyBoxWoL:
                 ).inc()
                 return WakeResult(status="failed", error=f"helper_unreachable: {exc}")
             if resp.status_code != 200:
+                log.warning(
+                    "wol_helper_rejected",
+                    host=self._heavy_host,
+                    helper_url=self._helper_url,
+                    status_code=resp.status_code,
+                )
                 self._record_failure()
                 AI_ROUTER_WOL_WAKE_TOTAL.labels(host=self._heavy_host, outcome="failed").inc()
                 AI_ROUTER_WOL_WAKE_FAILURES_TOTAL.labels(
@@ -150,7 +168,7 @@ class HeavyBoxWoL:
                 )
 
             tcp_open_ms: int | None = None
-            while time.monotonic() < deadline:
+            while self._clock() < deadline:
                 try:
                     tags = await client.get(f"{self._heavy_url}/api/tags")
                 except Exception:
@@ -185,6 +203,14 @@ class HeavyBoxWoL:
 
             self._record_failure()
             reason = "tcp_timeout" if tcp_open_ms is None else "model_timeout"
+            log.warning(
+                "wol_model_load_timeout",
+                host=self._heavy_host,
+                heavy_url=self._heavy_url,
+                model=model_name,
+                reason=reason,
+                timeout_s=timeout_s,
+            )
             AI_ROUTER_WOL_WAKE_TOTAL.labels(host=self._heavy_host, outcome="failed").inc()
             AI_ROUTER_WOL_WAKE_FAILURES_TOTAL.labels(
                 host=self._heavy_host,
