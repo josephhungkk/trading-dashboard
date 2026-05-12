@@ -23,6 +23,10 @@ from app.api.ws_auth import require_admin_jwt_ws
 from app.core import metrics
 from app.core.db import SessionLocal
 from app.services.orders_service import PreviewUnavailable
+from app.services.portfolio_rate_limiter import (
+    PortfolioRateLimitExceededError,
+    get_portfolio_limiter,
+)
 from app.services.portfolio_rollup_service import PortfolioRollupService
 
 log = structlog.get_logger(__name__)
@@ -78,9 +82,22 @@ async def ws_portfolio_rollup(
 
     # 3. Auth — helper raises WebSocketException on miss
     try:
-        await require_admin_jwt_ws(ws)
+        jwt_subject = await require_admin_jwt_ws(ws)
     except WebSocketException:
         return
+
+    # 3a. Rate limit (final-reviewer HIGH #1) — share the bucket with the 3
+    # REST endpoints. The initial-snapshot compute is identical work to
+    # GET /api/portfolio/rollup, so an unauthenticated WS storm would bypass
+    # the REST limiter. evict_stale runs after a successful check, mirroring
+    # the REST helper at portfolio.py:_check_rate_limit.
+    limiter = get_portfolio_limiter()
+    try:
+        limiter.check(jwt_subject)
+    except PortfolioRateLimitExceededError:
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="rate_limited")
+        return
+    limiter.evict_stale(jwt_subject)
 
     # 4. Accept + bookkeeping
     await ws.accept()
