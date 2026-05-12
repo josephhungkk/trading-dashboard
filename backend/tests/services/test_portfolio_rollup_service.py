@@ -375,3 +375,234 @@ async def test_gv12_weekend_gap_in_curve_no_interpolation(db_session, redis) -> 
         await _cleanup_snapshots(aid)
         await _restore_others(mutated)
         await _cleanup_accounts([aid])
+
+
+# ---------------------------------------------------------------------------
+# drill_asset_class tests (Phase 10b.2 §5.1 — 4 tests: GV4, GV7, GV8, unknown)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_instrument(asset_class: str, display_name: str) -> int:
+    """Insert an instruments row; return its bigint id."""
+    async with SessionLocal() as s:
+        async with s.begin():
+            # canonical_id must be unique; use display_name + asset_class as key.
+            result = await s.execute(
+                text(
+                    """
+                    INSERT INTO instruments (canonical_id, asset_class,
+                                             primary_exchange, currency,
+                                             display_name)
+                    VALUES (:cid, CAST(:ac AS instrument_asset_class),
+                            'TEST', 'USD', :dn)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "cid": f"TEST-{display_name}-{asset_class}",
+                    "ac": asset_class,
+                    "dn": display_name,
+                },
+            )
+            return int(result.scalar_one())
+
+
+async def _seed_position(
+    account_id: UUID, instrument_id: int, qty: str, avg_cost: str, asset_class: str
+) -> None:
+    """Insert a positions row for the test account/instrument."""
+    async with SessionLocal() as s:
+        async with s.begin():
+            await s.execute(
+                text(
+                    """
+                    INSERT INTO positions (account_id, conid, qty, avg_cost,
+                                           currency, multiplier, asset_class,
+                                           instrument_id)
+                    VALUES (:aid, :conid, CAST(:qty AS NUMERIC(20,8)),
+                            CAST(:avg AS NUMERIC(20,8)), 'USD', 1.0,
+                            CAST(:ac AS instrument_asset_class), :iid)
+                    """
+                ),
+                {
+                    "aid": str(account_id),
+                    "conid": f"TEST-{instrument_id}",
+                    "qty": qty,
+                    "avg": avg_cost,
+                    "ac": asset_class,
+                    "iid": instrument_id,
+                },
+            )
+
+
+async def _cleanup_instrument(instrument_id: int) -> None:
+    async with SessionLocal() as s:
+        async with s.begin():
+            await s.execute(
+                text("DELETE FROM positions WHERE instrument_id = :iid"),
+                {"iid": instrument_id},
+            )
+            await s.execute(
+                text("DELETE FROM instruments WHERE id = :iid"),
+                {"iid": instrument_id},
+            )
+
+
+async def _seed_concentration_cap(limit_value: str, warn_at_pct: str) -> int:
+    """Insert a global max_position_concentration_pct row; return its id
+    for cleanup."""
+    async with SessionLocal() as s:
+        async with s.begin():
+            result = await s.execute(
+                text(
+                    """
+                    INSERT INTO risk_limits (scope_type, scope_id, limit_kind,
+                                             limit_value, warn_at_pct, is_active,
+                                             updated_by)
+                    VALUES (CAST('global' AS risk_scope_type), NULL,
+                            CAST('max_position_concentration_pct' AS risk_limit_kind),
+                            CAST(:lv AS NUMERIC), CAST(:wp AS NUMERIC), true,
+                            'phase10b2-test')
+                    RETURNING id
+                    """
+                ),
+                {"lv": limit_value, "wp": warn_at_pct},
+            )
+            return int(result.scalar_one())
+
+
+async def _delete_risk_limit(limit_id: int) -> None:
+    async with SessionLocal() as s:
+        async with s.begin():
+            await s.execute(text("DELETE FROM risk_limits WHERE id = :id"), {"id": limit_id})
+
+
+async def test_gv4_short_position_drill_negative_notional(db_session, redis) -> None:
+    """GV4 — short -100 AAPL @ 200 USD, base GBP. abs(notional) used for
+    pct_of_nlv (shorts concentrate just as much as longs)."""
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "100000")  # 100k NLV so the
+    # short position is a small fraction
+    mutated = await _soft_delete_others([aid])
+    iid = await _seed_instrument("STOCK", "AAPL")
+    await _seed_position(aid, iid, "-100", "200", "STOCK")
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        drill = await service.drill_asset_class("STOCK", "GBP")
+        assert drill.asset_class == "STOCK"
+        aapl = next(i for i in drill.instruments if i.display_name == "AAPL")
+        assert aapl.total_qty == Decimal("-100")
+        # Notional native: -100 * 200 = -20000; FX 0.7912 → -15824.00
+        assert aapl.notional_base == Decimal("-15824.00000000")
+        # pct_of_nlv uses abs() — even though the position is short
+        assert aapl.pct_of_nlv > Decimal("0")
+    finally:
+        await _cleanup_instrument(iid)
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_gv7_drill_three_verdicts(db_session, redis) -> None:
+    """GV7 — 3 instruments with util ~50% / ~85% / ~110% → ok / warn / block.
+
+    NLV = 1000 GBP. Concentration cap = 10 (% of NLV). warn_at_pct = 80
+    means warn fires at 80% of the cap = 8% of NLV.
+    Build positions to land at ~5%, ~9%, ~12% of NLV (cost basis in GBP).
+    """
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "GBP", "1000")
+    mutated = await _soft_delete_others([aid])
+    cap_id = await _seed_concentration_cap("10", "80")
+    # Note: positions use currency=USD by the test helper. So the values are
+    # USD-denominated and FX-converted at compute time. To get GBP-equivalent
+    # numbers, use a 1.0 FX rate (USD:GBP=1) so the math is clean.
+    iid_ok = await _seed_instrument("STOCK", "OK-INST")
+    iid_warn = await _seed_instrument("STOCK", "WARN-INST")
+    iid_block = await _seed_instrument("STOCK", "BLOCK-INST")
+    # 1 share at price equal to target notional:
+    await _seed_position(aid, iid_ok, "1", "50", "STOCK")  # ~5% of NLV
+    await _seed_position(aid, iid_warn, "1", "90", "STOCK")  # ~9% of NLV
+    await _seed_position(aid, iid_block, "1", "120", "STOCK")  # ~12% of NLV
+    # FX rate 1.0 so USD notional == GBP notional
+    await redis.set("fx:mid:USD:GBP", "1")
+    # NB GBP→GBP for total NLV uses Decimal(1) auto.
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        drill = await service.drill_asset_class("STOCK", "GBP")
+        verdicts = {i.display_name: i.verdict for i in drill.instruments}
+        assert verdicts["OK-INST"] == "ok"
+        assert verdicts["WARN-INST"] == "warn"
+        assert verdicts["BLOCK-INST"] == "block"
+    finally:
+        await _cleanup_instrument(iid_ok)
+        await _cleanup_instrument(iid_warn)
+        await _cleanup_instrument(iid_block)
+        await _delete_risk_limit(cap_id)
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_gv8_drill_no_cap_returns_ok(db_session, redis) -> None:
+    """GV8 — no risk_limits row for max_position_concentration_pct →
+    cap_pct=None, utilisation_pct=None, verdict='ok' regardless of size."""
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "1000")
+    mutated = await _soft_delete_others([aid])
+    iid = await _seed_instrument("STOCK", "NOCAP")
+    await _seed_position(aid, iid, "100", "100", "STOCK")
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        # Defensive: ensure no global cap is active (other tests may leave one)
+        async with SessionLocal() as s:
+            async with s.begin():
+                await s.execute(
+                    text(
+                        "UPDATE risk_limits SET is_active = false "
+                        "WHERE scope_type = 'global' "
+                        "AND limit_kind = 'max_position_concentration_pct'"
+                    )
+                )
+        try:
+            service = PortfolioRollupService(db_session, redis)
+            drill = await service.drill_asset_class("STOCK", "GBP")
+            inst = next(i for i in drill.instruments if i.display_name == "NOCAP")
+            assert inst.cap_pct is None
+            assert inst.utilisation_pct is None
+            assert inst.verdict == "ok"
+        finally:
+            # Restore any rows we deactivated
+            async with SessionLocal() as s:
+                async with s.begin():
+                    await s.execute(
+                        text(
+                            "UPDATE risk_limits SET is_active = true "
+                            "WHERE scope_type = 'global' "
+                            "AND limit_kind = 'max_position_concentration_pct'"
+                        )
+                    )
+    finally:
+        await _cleanup_instrument(iid)
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_drill_unknown_asset_class_returns_empty(db_session, redis) -> None:
+    """Unknown asset class → empty instruments list (not an error)."""
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "10000")
+    mutated = await _soft_delete_others([aid])
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        # Pick an asset_class that's almost certainly not in the enum + has
+        # no positions
+        # FOREX enum exists but no fixture seeded a forex instrument → empty
+        drill = await service.drill_asset_class("FOREX", "GBP")
+        assert drill.instruments == []
+    finally:
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])

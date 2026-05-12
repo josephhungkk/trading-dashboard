@@ -20,8 +20,10 @@ from app.schemas.portfolio import (
     AssetClassExposure,
     BucketTotal,
     CurvePoint,
+    InstrumentExposure,
     PerAccount,
     RollupCurve,
+    RollupDrill,
     RollupLive,
 )
 from app.services.orders_service import PreviewUnavailable, RedisLike, _fx_rate
@@ -426,4 +428,132 @@ class PortfolioRollupService:
             window=window,
             per_account=per_account,
             totals=totals,
+        )
+
+    async def drill_asset_class(self, asset_class: str, base_currency: str) -> RollupDrill:
+        """Per-instrument exposure for an asset_class with cap utilisation.
+
+        Reads risk_limits with the same precedence walk as
+        RiskService._resolve_limit (account → broker → global). Drill is
+        read-only / informational — no audit, no gate evaluate (spec §2 #4 +
+        §13 deferral). Multi-account dashboard: drill aggregates positions
+        across ALL non-deleted accounts (matches the cross-broker
+        concentration model in §10a B5).
+
+        Cap resolution: drill is cross-account so we take the **global**
+        scope cap as the displayed cap_pct. Account- and broker-scoped caps
+        exist in risk_limits but they're contextual to a specific trade —
+        the drill view is informational and uses the broadest cap as the
+        red-line reference.
+        """
+        if base_currency not in SUPPORTED_BASE:
+            raise ValueError(f"unsupported base currency: {base_currency}")
+
+        # Reuse compute_live to get total_nlv_base (cheap; same FX cache hits
+        # via Redis). Drill is page-load-fetched, not per-tick — extra ~50ms
+        # is acceptable.
+        live = await self.compute_live(base_currency)
+        total_nlv_base = live.total_nlv_base
+
+        # Global concentration cap (broadest scope). Returns None if no row.
+        cap_row = (
+            await self._db.execute(
+                text(
+                    """
+                    SELECT limit_value, warn_at_pct
+                    FROM risk_limits
+                    WHERE scope_type = 'global'
+                      AND scope_id IS NULL
+                      AND limit_kind = 'max_position_concentration_pct'
+                      AND is_active = true
+                    LIMIT 1
+                    """
+                )
+            )
+        ).first()
+        cap_pct: Decimal | None = Decimal(cap_row[0]) if cap_row is not None else None
+        warn_at_pct: Decimal | None = (
+            Decimal(cap_row[1]) if cap_row is not None and cap_row[1] is not None else None
+        )
+
+        # Per-instrument exposure within the requested asset class. Group by
+        # instrument; cost basis approximation per CRIT #2.
+        rows = (
+            (
+                await self._db.execute(
+                    text(
+                        """
+                    SELECT
+                      p.instrument_id     AS instrument_id,
+                      i.display_name      AS display_name,
+                      i.primary_exchange  AS exchange,
+                      p.currency          AS native_ccy,
+                      SUM(p.qty)                                              AS total_qty,
+                      SUM(p.qty * p.avg_cost * COALESCE(p.multiplier, 1))     AS notional_native
+                    FROM positions p
+                    JOIN instruments i ON i.id = p.instrument_id
+                    JOIN broker_accounts ba ON ba.id = p.account_id
+                       AND ba.deleted_at IS NULL
+                    WHERE i.asset_class::text = :ac
+                      AND p.instrument_id IS NOT NULL
+                    GROUP BY p.instrument_id, i.display_name, i.primary_exchange, p.currency
+                    """
+                    ),
+                    {"ac": asset_class},
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+        instruments: list[InstrumentExposure] = []
+        for r in rows:
+            try:
+                fx = await _fx_rate(self._redis, r["native_ccy"], base_currency)
+            except PreviewUnavailable:
+                log.info(
+                    "portfolio_rollup_drill_fx_unavailable",
+                    native_ccy=r["native_ccy"],
+                    asset_class=asset_class,
+                )
+                continue
+            notional_base = (Decimal(r["notional_native"] or 0) * fx).quantize(_QUANTIZE_8DP)
+            pct_of_nlv = (
+                (abs(notional_base) / total_nlv_base * 100).quantize(_QUANTIZE_2DP)
+                if total_nlv_base != 0
+                else Decimal("0")
+            )
+            utilisation_pct: Decimal | None
+            verdict: Literal["ok", "warn", "block"]
+            if cap_pct is None:
+                utilisation_pct = None
+                verdict = "ok"
+            else:
+                utilisation_pct = (pct_of_nlv / cap_pct * 100).quantize(_QUANTIZE_2DP)
+                if pct_of_nlv >= cap_pct:
+                    verdict = "block"
+                elif warn_at_pct is not None and pct_of_nlv >= (
+                    cap_pct * warn_at_pct / Decimal("100")
+                ):
+                    verdict = "warn"
+                else:
+                    verdict = "ok"
+            instruments.append(
+                InstrumentExposure(
+                    instrument_id=int(r["instrument_id"]),
+                    display_name=r["display_name"] or "",
+                    exchange=r["exchange"] or "",
+                    total_qty=Decimal(r["total_qty"] or 0),
+                    notional_base=notional_base,
+                    pct_of_nlv=pct_of_nlv,
+                    cap_pct=cap_pct,
+                    utilisation_pct=utilisation_pct,
+                    verdict=verdict,
+                )
+            )
+
+        return RollupDrill(
+            asset_class=asset_class,
+            base_currency=base_currency,
+            instruments=instruments,
         )
