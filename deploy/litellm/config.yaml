@@ -1,12 +1,10 @@
 # Production LiteLLM config — committed to git, contains NO secrets.
 # Provider keys arrive per-request from BE (Option C, validated in 11a-A0).
 #
-# NOTE: 11a-A1 ships with env-var-based master-key validation (LiteLLM
-# default). Chunk 11a-A.5 wires a custom_auth callback that reads the
-# master key from Redis for zero-restart rotation (HIGH-5). When that
-# lands, this file gains:
-#   general_settings:
-#     custom_auth: services.ai.litellm_auth_callback.user_api_key_auth
+# Master-key validation is Redis-backed via the custom_auth callback
+# mounted from backend/app/services/ai/litellm_auth_callback.py
+# (HIGH-5 — zero-restart rotation). Operator rotates via
+# PUT /api/admin/secrets/ai/litellm_master_key (CSRF nonce required).
 model_list:
   - model_name: ollama-nuc
     litellm_params:
@@ -37,3 +35,10 @@ model_list:
   - model_name: openai-gpt4o
     litellm_params:
       model: openai/gpt-4o
+
+general_settings:
+  custom_auth: services.ai.litellm_auth_callback.user_api_key_auth
+  custom_auth_settings:
+    # 'on' makes LiteLLM trust ONLY our callback; the default master-key
+    # env-var check is disabled. Rotation is Redis-backed (HIGH-5).
+    mode: "on"

@@ -50,10 +50,16 @@ services:
     environment:
       VITE_API_URL: "http://localhost:8000"
 
-  # Phase 11a-A1: AI router proxy. Lightweight image; cost ledger is
-  # ours (not litellm-database). Master-key validation is env-var-based
-  # at A1; A.5 swaps in a Redis-backed custom_auth callback for
-  # zero-restart rotation (HIGH-5).
+  # Phase 11a-A1 + A.5: AI router proxy. Lightweight image; cost ledger
+  # is ours (not litellm-database). Master-key validation is Redis-backed
+  # via the custom_auth callback mounted from backend/app/services/ai/
+  # (HIGH-5 — zero-restart rotation).
+  #
+  # LiteLLM's get_instance_fn resolves custom_auth relative to the
+  # config.yaml directory (dirname(/app/config.yaml) = /app), so the
+  # callback must live at /app/services/ai/litellm_auth_callback.py —
+  # PYTHONPATH alone is NOT consulted when --config is passed. Hence
+  # the bind mounts target /app/services/ai/ directly.
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
     container_name: dashboard-litellm
@@ -62,8 +68,11 @@ services:
       - "127.0.0.1:4000:4000"
     volumes:
       - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+      - ./backend/app/services/ai/litellm_auth_callback.py:/app/services/ai/litellm_auth_callback.py:ro
+      - ./deploy/litellm/__init__.py:/app/services/__init__.py:ro
+      - ./deploy/litellm/__init__.py:/app/services/ai/__init__.py:ro
     environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-bootstrap-rotate-me}
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       LITELLM_LOG: WARNING
     healthcheck:
       test: ["CMD", "litellm", "--health"]
