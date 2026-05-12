@@ -38,6 +38,7 @@ export function AssetClassDrillDrawer({
   return (
     <aside
       role="dialog"
+      aria-modal="true"
       aria-label={`Drill: ${assetClass}`}
       className="fixed inset-y-0 right-0 z-40 w-full max-w-md overflow-y-auto border-l border-border bg-panel p-4 shadow-xl md:w-[28rem]"
       data-testid="rollup-drill-drawer"

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import { useNavigate, useSearch } from '@tanstack/react-router';
 
@@ -9,6 +9,7 @@ import { PerAccountTable } from '@/features/portfolio/PerAccountTable';
 import { RollupCurveChart } from '@/features/portfolio/RollupCurveChart';
 import { RollupKpiBar } from '@/features/portfolio/RollupKpiBar';
 import { Route } from '@/routes/portfolio.rollup';
+import { isPortfolioApiError } from '@/services/portfolio/api';
 import type { BaseCurrency, CurveWindow } from '@/services/portfolio/types';
 import { useRollupCurve } from '@/services/portfolio/useRollupCurve';
 import { useRollupLive } from '@/services/portfolio/useRollupLive';
@@ -25,6 +26,7 @@ export function RollupPage(): React.JSX.Element {
   };
 
   const [drillAssetClass, setDrillAssetClass] = useState<string | null>(null);
+  const closeDrill = useCallback(() => setDrillAssetClass(null), []);
 
   const live = useRollupLive(base);
   const curve = useRollupCurve(base, search.window);
@@ -37,6 +39,24 @@ export function RollupPage(): React.JSX.Element {
     );
   }
   if (live.error || !live.data) {
+    // Reviewer MED: distinguish 503 fx_rate_unavailable from generic
+    // failures — softer "FX rates unavailable" banner (operator can still
+    // see the page shell once FX returns), full failure for other errors.
+    const isFxUnavailable
+      = live.error
+      && isPortfolioApiError(live.error)
+      && live.error.status === 503;
+    if (isFxUnavailable && !live.data) {
+      return (
+        <div
+          className="m-6 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900"
+          data-testid="rollup-fx-unavailable"
+        >
+          FX rates unavailable — retrying. The rollup will appear when at
+          least one account&apos;s currency can be priced in {base}.
+        </div>
+      );
+    }
     return (
       <div className="p-6 text-sm text-red-600" data-testid="rollup-error">
         Failed to load rollup: {live.error?.message ?? 'unknown error'}
@@ -71,7 +91,7 @@ export function RollupPage(): React.JSX.Element {
       <AssetClassDrillDrawer
         assetClass={drillAssetClass}
         base={base}
-        onClose={() => setDrillAssetClass(null)}
+        onClose={closeDrill}
       />
     </div>
   );

@@ -28,11 +28,18 @@ export const usePortfolioStore = create<PortfolioStore>()(
       storage: createJSONStorage(() => localStorage),
       version: 1,
       migrate: (state: unknown) => {
-        const s = state as { portfolioRollupBase?: BaseCurrency } | null;
-        if (!s?.portfolioRollupBase || !SUPPORTED.has(s.portfolioRollupBase)) {
+        const s = state as { portfolioRollupBase?: unknown } | null;
+        const persisted = s?.portfolioRollupBase;
+        // Security: explicit string-typed check before SUPPORTED.has() — guards
+        // against persisted objects/arrays/numbers that JS Set.has would silently
+        // reject but ts-cast hides at compile time (reviewer HIGH).
+        if (
+          typeof persisted !== 'string'
+          || !SUPPORTED.has(persisted as BaseCurrency)
+        ) {
           return { portfolioRollupBase: 'GBP' as BaseCurrency };
         }
-        return s;
+        return { portfolioRollupBase: persisted as BaseCurrency };
       },
     },
   ),

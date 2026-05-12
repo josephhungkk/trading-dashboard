@@ -94,9 +94,10 @@ function Sparkline({ data }: { data: RollupCurve }): React.JSX.Element {
       <path
         d={path}
         fill="none"
-        stroke="rgb(37, 99, 235)"
+        stroke="currentColor"
         strokeWidth="2"
         vectorEffect="non-scaling-stroke"
+        className="text-blue-600"
       />
     </svg>
   );

@@ -46,10 +46,12 @@ export function isPortfolioApiError(err: unknown): err is PortfolioApiError {
 }
 
 function extractDetail(payload: unknown): string | null {
-  if (payload === null || typeof payload !== 'object') return null;
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
   const detail = (payload as { detail?: unknown }).detail;
   if (typeof detail === 'string') return detail;
-  if (detail && typeof detail === 'object') {
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
     const errField = (detail as { error?: unknown }).error;
     if (typeof errField === 'string') return errField;
   }
@@ -88,15 +90,20 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+// All query-string params encoded for defence-in-depth; BaseCurrency and
+// CurveWindow are closed string unions today so injection is type-impossible,
+// but the encoding survives any future type widening (reviewer MED).
 export const fetchRollupLive = (base: BaseCurrency): Promise<RollupLive> =>
-  fetchJson<RollupLive>(`/api/portfolio/rollup?base=${base}`);
+  fetchJson<RollupLive>(
+    `/api/portfolio/rollup?base=${encodeURIComponent(base)}`,
+  );
 
 export const fetchRollupCurve = (
   base: BaseCurrency,
   window: CurveWindow,
 ): Promise<RollupCurve> =>
   fetchJson<RollupCurve>(
-    `/api/portfolio/rollup/curve?base=${base}&window=${window}`,
+    `/api/portfolio/rollup/curve?base=${encodeURIComponent(base)}&window=${encodeURIComponent(window)}`,
   );
 
 export const fetchRollupDrill = (
@@ -104,5 +111,5 @@ export const fetchRollupDrill = (
   base: BaseCurrency,
 ): Promise<RollupDrill> =>
   fetchJson<RollupDrill>(
-    `/api/portfolio/rollup/drill?asset_class=${encodeURIComponent(assetClass)}&base=${base}`,
+    `/api/portfolio/rollup/drill?asset_class=${encodeURIComponent(assetClass)}&base=${encodeURIComponent(base)}`,
   );

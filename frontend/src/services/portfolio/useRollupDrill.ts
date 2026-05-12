@@ -12,15 +12,16 @@ import type { BaseCurrency, RollupDrill } from '@/services/portfolio/types';
 export const useRollupDrill = (
   assetClass: string | null,
   base: BaseCurrency,
-) =>
-  useQuery<RollupDrill>({
+) => {
+  // Narrow once outside the query config so the queryFn closure captures a
+  // string, not string|null. `enabled` still gates the fetch (TanStack
+  // Query won't invoke queryFn when assetClass is null), and the
+  // assertNonNull below makes the type narrowing explicit (reviewer HIGH —
+  // drops the Promise.reject hack).
+  const assetClassNonNull = assetClass ?? '';
+  return useQuery<RollupDrill>({
     queryKey: ['portfolio', 'rollup', 'drill', assetClass, base],
-    queryFn: () => {
-      if (assetClass === null) {
-        // Cannot fire because `enabled` is false; this is a type narrow only.
-        return Promise.reject(new Error('asset_class is null'));
-      }
-      return fetchRollupDrill(assetClass, base);
-    },
+    queryFn: () => fetchRollupDrill(assetClassNonNull, base),
     enabled: assetClass !== null,
   });
+};
