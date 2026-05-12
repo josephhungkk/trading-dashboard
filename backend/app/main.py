@@ -32,6 +32,7 @@ from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
 from app.api.orders import fills_router
 from app.api.orders import router as orders_router
+from app.api.portfolio import router as portfolio_router
 from app.api.risk import router as risk_router
 from app.api.sizing import router as sizing_router
 from app.api.sse import router as sse_router
@@ -361,6 +362,7 @@ app.include_router(admin_instruments.router)
 app.include_router(admin_risk_router)
 app.include_router(risk_router)
 app.include_router(sizing_router)
+app.include_router(portfolio_router)
 app.include_router(brokers_admin_router)
 app.include_router(accounts_router)
 app.include_router(brokers_router)
