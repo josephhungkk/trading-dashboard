@@ -35,11 +35,13 @@ async def client() -> AsyncIterator[AsyncClient]:
 
 @pytest.mark.skip(
     reason=(
-        "Broken by _app_state autouse which stubs account_service with a MagicMock — "
-        "GET /api/accounts returns ResponseValidationError because the mock returns a "
-        "non-serialisable MagicMock instead of AccountListResponse. Same root cause as "
-        "test_e2e_trade_chain.py: needs FakeBrokerServicer wiring + real account_service "
-        "so the accounts endpoint can return a real paper account row."
+        "Phase 11a CI-debt sweep (2026-05-12): tests/fixtures/e2e_chain.py "
+        "wires the lifespan+broker_registry+account_service correctly, but "
+        "uncovered a real bug — same root cause as test_e2e_trade_chain.py "
+        "(risk_service.py:506 calls BrokerSidecarClient.preview_order with "
+        "wrong kwargs, evaluator-error then tries attempt_kind='preview' "
+        "which alembic 0036 CHECK rejects). Two real bugs to fix before "
+        "unskipping."
     )
 )
 @pytest.mark.asyncio

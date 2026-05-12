@@ -40,9 +40,17 @@ async def client() -> AsyncIterator[AsyncClient]:
 
 @pytest.mark.skip(
     reason=(
-        "Broken since v0.10.0 lifespan-init refactor — needs FakeBrokerServicer "
-        "wiring + mTLS PKI seed in app_secrets so build_broker_registry succeeds. "
-        "See docs/superpowers/plans/2026-05-08-ci-debt-cleanup.md (Companion Issues)."
+        "Phase 11a CI-debt sweep (2026-05-12): tests/fixtures/e2e_chain.py "
+        "wires the lifespan+broker_registry+account_service correctly, but "
+        "uncovered a real bug — RiskService._check_margin calls "
+        "BrokerSidecarClient.preview_order with (broker_id, instrument_id, "
+        "price, request_id) kwargs that the BrokerSidecarClient signature "
+        "(account_id, side, symbol, asset_class, order_type, time_in_force, "
+        "qty, limit_price, stop_price) doesn't accept. The risk gate's "
+        "evaluator-error path then tries to audit attempt_kind='preview' "
+        "which the alembic 0036 CHECK constraint forbids "
+        "(place_order|modify_order only). Two real bugs to fix before "
+        "unskipping. See risk_service.py:506 + alembic_0036."
     )
 )
 @pytest.mark.asyncio
