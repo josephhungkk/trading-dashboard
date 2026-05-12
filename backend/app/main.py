@@ -42,6 +42,7 @@ from app.core.db import SessionLocal, engine
 from app.core.deps import set_account_service, set_broker_registry, set_config_service
 from app.core.logging import configure_logging
 from app.core.metrics import SCHWAB_REFRESH_TOKEN_AGE_HOURS, SCHWAB_REFRESH_TOKEN_USES_PER_24H
+from app.services.balance_snapshot_writer import BalanceSnapshotWriter
 from app.services.bar_service import BarService
 from app.services.broker_callback_server import start_backend_callback_server
 from app.services.broker_registry_factory import MissingBrokerSecrets, build_broker_registry
@@ -156,7 +157,17 @@ async def lifespan(_app: FastAPI) -> Any:
             log.warning("instrument_seed.failed", exc=str(exc))
 
         broker_registry = await build_broker_registry(svc)
-        broker_discoverer = BrokerDiscoverer(broker_registry, session_factory, redis=redis)
+        # Phase 10b.2: snapshot writer mirrors NLV updates to
+        # account_balance_snapshots and publishes portfolio.rollup.dirty for
+        # the WS gateway to debounce + republish.
+        balance_snapshot_writer = BalanceSnapshotWriter(redis=redis)
+        _app.state.balance_snapshot_writer = balance_snapshot_writer
+        broker_discoverer = BrokerDiscoverer(
+            broker_registry,
+            session_factory,
+            redis=redis,
+            balance_snapshot_writer=balance_snapshot_writer,
+        )
         broker_health_task = asyncio.create_task(broker_registry.health_probe_loop())
         broker_discover_task = asyncio.create_task(broker_discoverer.discover_loop())
         set_broker_registry(broker_registry)
@@ -295,6 +306,10 @@ async def lifespan(_app: FastAPI) -> Any:
             await order_consumer.stop()
         if broker_discoverer is not None:
             await broker_discoverer.stop()
+        # Phase 10b.2: defensive — drain any publish tasks if writer was
+        # constructed but discoverer wasn't (e.g. partial-init failure path).
+        if getattr(_app.state, "balance_snapshot_writer", None) is not None:
+            await _app.state.balance_snapshot_writer.stop()
         if broker_registry is not None:
             await broker_registry.stop()
         for t in (broker_discover_task, broker_health_task):

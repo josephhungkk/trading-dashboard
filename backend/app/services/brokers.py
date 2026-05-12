@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app._generated.broker.v1 import broker_pb2, broker_pb2_grpc
 from app.brokers import base
 from app.core import metrics
+from app.services.balance_snapshot_writer import BalanceSnapshotWriter
 from app.services.ibkr_maintenance import compute_broker_maintenance
 from app.services.pnl_intraday_writer import PnlIntradayWriter
 from app.services.quotes.base import canonical_id_components, country_for_exchange
@@ -1037,6 +1038,7 @@ class BrokerDiscoverer:
         *,
         interval_seconds: float = 30.0,
         redis: Any = None,
+        balance_snapshot_writer: BalanceSnapshotWriter | None = None,
     ) -> None:
         self._registry = registry
         self._session_factory = session_factory
@@ -1059,6 +1061,13 @@ class BrokerDiscoverer:
         # BP counter reconcile. Optional (None) so existing tests that
         # build a BrokerDiscoverer without redis still construct.
         self._redis = redis
+        # Phase 10b.2: snapshot writer (optional); when wired, each NLV
+        # update is mirrored to account_balance_snapshots in a nested
+        # SAVEPOINT (fail-OPEN) and a dirty signal is published post-commit.
+        self._balance_snapshot_writer = balance_snapshot_writer
+        # Drained at the end of each _discover_nlv tick so publish fan-out
+        # only fires for snapshots whose enclosing outer TX actually committed.
+        self._pending_publish_account_ids: list[UUID] = []
 
     async def discover_loop(self) -> None:
         # Single-consumer invariant: only this method calls _discover_once,
@@ -1410,6 +1419,8 @@ class BrokerDiscoverer:
                 return None
             return format(d, "f")
 
+        # Phase 10b.2: RETURNING id so the balance-snapshot writer can stamp
+        # account_balance_snapshots without a second SELECT round-trip.
         nlv_update_stmt = text(
             """
             UPDATE broker_accounts
@@ -1420,6 +1431,7 @@ class BrokerDiscoverer:
              WHERE broker_id = CAST(:broker_id AS broker_id_enum)
                AND account_number = :account_number
                AND deleted_at IS NULL
+             RETURNING id
             """
         )
 
@@ -1447,7 +1459,7 @@ class BrokerDiscoverer:
                         continue
                     try:
                         async with session.begin_nested():
-                            await session.execute(
+                            nlv_update_result = await session.execute(
                                 nlv_update_stmt,
                                 {
                                     "broker_id": SIDECAR_BROKERS.get(label, "ibkr"),
@@ -1456,6 +1468,22 @@ class BrokerDiscoverer:
                                     "currency": summary.net_liquidation.currency,
                                 },
                             )
+                            # Phase 10b.2: mirror to account_balance_snapshots in
+                            # an inner SAVEPOINT (writer handles fail-OPEN). Use the
+                            # row's id returned by the UPDATE; if no row matched
+                            # (deleted_at flipped between discovery and this write),
+                            # skip the snapshot.
+                            if self._balance_snapshot_writer is not None:
+                                returned_id = nlv_update_result.scalar_one_or_none()
+                                if returned_id is not None:
+                                    await self._balance_snapshot_writer.record(
+                                        session,
+                                        account_id=returned_id,
+                                        nlv=nlv_str,
+                                        currency=summary.net_liquidation.currency,
+                                        source_label=label,
+                                    )
+                                    self._pending_publish_account_ids.append(returned_id)
                         nlv_update_count += 1
                     except DBAPIError as exc:
                         # 22003 = numeric_value_out_of_range (asyncpg sqlstate);
@@ -1475,6 +1503,14 @@ class BrokerDiscoverer:
                             error_class=type(exc).__name__,
                         )
         metrics.broker_discover_nlv_update_duration_ms.observe((time.monotonic() - t_start) * 1000)
+
+        # Phase 10b.2: drain post-commit publish queue. Tasks tracked + GC-safe
+        # via the writer's _publish_tasks set; schedule_publish is a no-op when
+        # _balance_snapshot_writer is None.
+        if self._balance_snapshot_writer is not None and self._pending_publish_account_ids:
+            for acct_id in self._pending_publish_account_ids:
+                self._balance_snapshot_writer.schedule_publish(acct_id)
+            self._pending_publish_account_ids.clear()
 
         # Phase 5b.1 A3: positions fan-out (mirrors NLV pattern above).
         positions_targets: list[tuple[str, str]] = [
@@ -1797,6 +1833,10 @@ class BrokerDiscoverer:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        # Phase 10b.2: drain any in-flight publish tasks so the writer
+        # doesn't strand tasks when the process is about to exit.
+        if self._balance_snapshot_writer is not None:
+            await self._balance_snapshot_writer.stop()
 
     @staticmethod
     def _mode_value(mode: base.TradingMode) -> str:
