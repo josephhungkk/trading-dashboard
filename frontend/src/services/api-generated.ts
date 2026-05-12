@@ -903,6 +903,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/portfolio/rollup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Rollup */
+        get: operations["get_rollup_api_portfolio_rollup_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/portfolio/rollup/curve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Rollup Curve */
+        get: operations["get_rollup_curve_api_portfolio_rollup_curve_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/portfolio/rollup/drill": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Rollup Drill */
+        get: operations["get_rollup_drill_api_portfolio_rollup_drill_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/risk/decisions": {
         parameters: {
             query?: never;
@@ -1116,6 +1167,17 @@ export interface components {
              */
             position_count: number;
         };
+        /** AssetClassExposure */
+        AssetClassExposure: {
+            /** Asset Class */
+            asset_class: string;
+            /** Long Notional Base */
+            long_notional_base: string;
+            /** Pct Of Nlv */
+            pct_of_nlv: string;
+            /** Short Notional Base */
+            short_notional_base: string;
+        };
         /**
          * BarItem
          * @description Single bar row in the paginated response.
@@ -1195,6 +1257,16 @@ export interface components {
         BrokerSidecarStatusList: {
             /** Accounts */
             accounts: components["schemas"]["BrokerSidecarStatus"][];
+        };
+        /** BucketTotal */
+        BucketTotal: {
+            /**
+             * Bucket
+             * Format: date-time
+             */
+            bucket: string;
+            /** Total Nlv Base */
+            total_nlv_base: string;
         };
         /** CapabilityComboRow */
         CapabilityComboRow: {
@@ -1321,6 +1393,25 @@ export interface components {
             /** Description */
             description: string;
         };
+        /** CurvePoint */
+        CurvePoint: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /**
+             * Bucket
+             * Format: date-time
+             */
+            bucket: string;
+            /** Nlv Close Base */
+            nlv_close_base: string;
+            /** Nlv High Base */
+            nlv_high_base: string | null;
+            /** Nlv Low Base */
+            nlv_low_base: string | null;
+        };
         /** FillListResponse */
         FillListResponse: {
             /** Fills */
@@ -1417,6 +1508,30 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** InstrumentExposure */
+        InstrumentExposure: {
+            /** Cap Pct */
+            cap_pct: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Exchange */
+            exchange: string;
+            /** Instrument Id */
+            instrument_id: number;
+            /** Notional Base */
+            notional_base: string;
+            /** Pct Of Nlv */
+            pct_of_nlv: string;
+            /** Total Qty */
+            total_qty: string;
+            /** Utilisation Pct */
+            utilisation_pct: string | null;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "ok" | "warn" | "block";
         };
         /**
          * InstrumentIdResponse
@@ -1720,6 +1835,43 @@ export interface components {
             label: string;
             /** Sort Order */
             sort_order: number;
+        };
+        /** PerAccount */
+        PerAccount: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Alias */
+            alias: string;
+            /** Broker Id */
+            broker_id: string;
+            /** Currency Native */
+            currency_native: string;
+            /** Fx Rate */
+            fx_rate: string | null;
+            /**
+             * Fx Stale
+             * @default false
+             */
+            fx_stale: boolean;
+            /** Nlv Age S */
+            nlv_age_s: number | null;
+            /** Nlv Base */
+            nlv_base: string | null;
+            /** Nlv Native */
+            nlv_native: string | null;
+            /** Realized Today Base */
+            realized_today_base: string | null;
+            /**
+             * Status
+             * @default live
+             * @enum {string}
+             */
+            status: "live" | "initialising" | "stale" | "fx_stale";
+            /** Unrealized Base */
+            unrealized_base: string | null;
         };
         /** PolicyResponse */
         PolicyResponse: {
@@ -2061,6 +2213,59 @@ export interface components {
             risk_pct: number | string;
             /** Stop */
             stop: number | string;
+        };
+        /** RollupCurve */
+        RollupCurve: {
+            /** Base Currency */
+            base_currency: string;
+            /** Per Account */
+            per_account: components["schemas"]["CurvePoint"][];
+            /** Totals */
+            totals: components["schemas"]["BucketTotal"][];
+            /**
+             * Window
+             * @enum {string}
+             */
+            window: "intraday" | "30d" | "1y";
+        };
+        /** RollupDrill */
+        RollupDrill: {
+            /** Asset Class */
+            asset_class: string;
+            /** Base Currency */
+            base_currency: string;
+            /** Instruments */
+            instruments: components["schemas"]["InstrumentExposure"][];
+        };
+        /** RollupLive */
+        RollupLive: {
+            /** Accounts */
+            accounts: components["schemas"]["PerAccount"][];
+            /** Base Currency */
+            base_currency: string;
+            /** Exposure By Asset Class */
+            exposure_by_asset_class: components["schemas"]["AssetClassExposure"][];
+            /** Fx Rates */
+            fx_rates?: {
+                [key: string]: string;
+            };
+            /** Fx Stale Accounts */
+            fx_stale_accounts?: string[];
+            /** History Since */
+            history_since: string | null;
+            /**
+             * Partial
+             * @default false
+             */
+            partial: boolean;
+            /** Stale Accounts */
+            stale_accounts?: string[];
+            /** Total Nlv Base */
+            total_nlv_base: string;
+            /** Total Realized Today Base */
+            total_realized_today_base: string;
+            /** Total Unrealized Base */
+            total_unrealized_base: string;
         };
         /** SecretIn */
         SecretIn: {
@@ -4080,6 +4285,101 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_rollup_api_portfolio_rollup_get: {
+        parameters: {
+            query?: {
+                base?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupLive"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_rollup_curve_api_portfolio_rollup_curve_get: {
+        parameters: {
+            query?: {
+                base?: string;
+                window?: "intraday" | "30d" | "1y";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupCurve"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_rollup_drill_api_portfolio_rollup_drill_get: {
+        parameters: {
+            query: {
+                asset_class: string;
+                base?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RollupDrill"];
                 };
             };
             /** @description Validation Error */
