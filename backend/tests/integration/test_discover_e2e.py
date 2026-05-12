@@ -186,11 +186,15 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 async def clean_broker_accounts(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[None]:
+    # Drop dependent rows first; FKs from orders/positions/etc. reference
+    # broker_accounts and would otherwise raise ForeignKeyViolationError.
     async with session_factory() as s:
+        await s.execute(text("DELETE FROM orders"))
         await s.execute(text("DELETE FROM broker_accounts"))
         await s.commit()
     yield
     async with session_factory() as s:
+        await s.execute(text("DELETE FROM orders"))
         await s.execute(text("DELETE FROM broker_accounts"))
         await s.commit()
 

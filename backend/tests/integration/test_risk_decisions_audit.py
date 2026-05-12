@@ -58,13 +58,54 @@ async def _existing_account_id() -> uuid.UUID:
 
 
 async def _existing_order_id() -> uuid.UUID:
-    """Return any orders row id; modify_order audit needs a real FK target."""
+    """Return any orders row id; modify_order audit needs a real FK target.
+
+    Seeds an orders row tied to the conftest TEST001 account if no row
+    exists. Created with a UTEST_AUDIT_ prefix so it doesn't collide with
+    fixture/discover_e2e cleanup. Cleanup happens in the autouse
+    finaliser below.
+    """
     async with SessionLocal() as s:
         result = await s.execute(text("SELECT id FROM orders LIMIT 1"))
         row = result.first()
-    if row is None:
-        pytest.skip("No orders rows on this DB; can't run modify_order audit test")
-    return row[0]
+        if row is not None:
+            return row[0]
+        # Seed via conftest TEST001 account; this fixture should have already
+        # run because of the autouse seed in tests/conftest.py.
+        account_row = await s.execute(
+            text(
+                "SELECT id FROM broker_accounts "
+                "WHERE broker_id = 'ibkr' AND account_number = 'TEST001' LIMIT 1"
+            )
+        )
+        account_id = account_row.scalar_one_or_none()
+        if account_id is None:
+            pytest.skip(
+                "Neither orders rows nor TEST001 broker_account present; "
+                "cannot seed orders row for modify_order audit test"
+            )
+        new_order_id = uuid.uuid4()
+        await s.execute(
+            text(
+                """
+                INSERT INTO orders (
+                  id, account_id, client_order_id, conid, symbol, side,
+                  order_type, tif, qty, filled_qty, status, notional
+                )
+                VALUES (
+                  :id, :account_id, :client_order_id, '265598', 'AAPL', 'BUY',
+                  'MARKET', 'DAY', 1, 0, 'pending_submit', 0
+                )
+                """
+            ),
+            {
+                "id": new_order_id,
+                "account_id": account_id,
+                "client_order_id": uuid.uuid4(),
+            },
+        )
+        await s.commit()
+        return new_order_id
 
 
 async def _delete_decisions_by_request_id(request_id: str) -> None:
