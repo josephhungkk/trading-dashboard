@@ -348,24 +348,24 @@ Spec at `docs/superpowers/specs/2026-05-06-phase8c-alpaca-trade-design.md` (517 
 - [x] **Close-out** CHANGELOG.md / TASKS.md
 - [x] **v0.8.2 tag** *(originally v0.10.0; retagged via v0.8.1 to v0.8.2 on 2026-05-12 for policy alignment)*
 
-## Phase 9 — Charting v1 + bar aggregator + historical store  *(complete — v0.11.0 · 2026-05-08)*
+## Phase 9 — Charting v1 + bar aggregator + historical store  *(complete — v0.9.0 · 2026-05-08)*
 
-50/53 tasks across 9/11 chunks shipped (64 commits since v0.8.2). See `CHANGELOG.md` v0.11.0 for the per-chunk breakdown and reviewer-fix commit refs. Spec [`docs/superpowers/specs/2026-05-07-phase9-charting-design.md`](docs/superpowers/specs/2026-05-07-phase9-charting-design.md); plan [`docs/superpowers/plans/2026-05-07-phase9-charting-plan.md`](docs/superpowers/plans/2026-05-07-phase9-charting-plan.md).
+50/53 tasks across 9/11 chunks shipped (64 commits since v0.8.2). See `CHANGELOG.md` v0.9.0 for the per-chunk breakdown and reviewer-fix commit refs. Spec [`docs/superpowers/specs/2026-05-07-phase9-charting-design.md`](docs/superpowers/specs/2026-05-07-phase9-charting-design.md); plan [`docs/superpowers/plans/2026-05-07-phase9-charting-plan.md`](docs/superpowers/plans/2026-05-07-phase9-charting-plan.md).
 
 - [x] Chunk A (Tasks 1-10) — Foundation: 7 Alembic migrations, bar_service.active_set, CI plumbing
 - [x] Chunk B (Tasks 11-17) — bar_aggregator service: Docker scaffold, WAL via Redis Streams, coalescer, minute emitter
-- [ ] Chunk B-bis (Task 18) — 10 CAGGs **DEFERRED** to v0.11.1 (needs production bars_1s traffic)
+- [ ] Chunk B-bis (Task 18) — 10 CAGGs **DEFERRED** to v0.9.1 (needs production bars_1s traffic)
 - [x] Chunk C (Tasks 19-25) — Sidecar GetHistoricalBars (4 brokers) + empirical history scripts
 - [x] Chunk D (Tasks 26-33) — Backend orchestration: BarService.get_bars cross-worker coalesce, /api/chart/layouts CRUD with If-Match, /ws/bars revision-sequenced live-tail
 - [x] Chunk E (Tasks 34-40) — FE chart feature: klinecharts v10 DataLoader, /chart/:canonicalId, TradeChart, DrawingTools, ChartToolbar
 - [x] Chunk F1+F2 (Tasks 41-42) — 45 custom indicators with `// Reference:` headers + golden-vector tests
 - [x] Chunk G (Tasks 43-45) — Drag-handle SL/TP: PositionOverlay, modify-nonce, ConfirmDialog
 - [x] Chunk H (Tasks 46-48) — Mobile responsive parity + ChartLayoutSync debounced PUT
-- [x] Chunk I (Tasks 49-53) — Playwright E2E + perf scaffolds; close-out + v0.11.0 tag (E2E/perf actuals deferred to first compose+CI run)
+- [x] Chunk I (Tasks 49-53) — Playwright E2E + perf scaffolds; close-out + v0.9.0 tag (E2E/perf actuals deferred to first compose+CI run)
 
-**Deferred to v0.11.1 / Phase 9.5 / Phase 10:** Task 18 CAGGs; /ws/orders backend; diff modal UI; Phase 9.5 CI debt mini-phase per `phase_reviewer_audit.md`; `instrument_id` resolution; toast tone bump; debounce widening.
+**Deferred to v0.9.1 / Phase 9.5 / Phase 10:** Task 18 CAGGs; /ws/orders backend; diff modal UI; Phase 9.5 CI debt mini-phase per `phase_reviewer_audit.md`; `instrument_id` resolution; toast tone bump; debounce widening.
 
-## v0.11.1 — Phase 9 follow-ups (planned)
+## v0.9.1 — Phase 9 follow-ups (planned)
 
 - [ ] Task 18 — 10 CAGGs (5s/10s/15s/30s/45s + 5m/15m/30m/1h/1d) once production bars_1s validated
 - [ ] Storage actuals — measure 24h steady state at 100 instruments; reconcile against analytical projection
@@ -400,7 +400,7 @@ per-chunk reviewer rule. 15/15 phases applied. Pre-existing CI debt
 False positive suppressed (8 reviewers): unparenthesized `except A, B:`
 is valid under Python 3.14 PEP 758. See `phase9_5_shipped.md`.
 
-## Phase 9.6 — CI red reconciliation  *(complete — 2026-05-08 · 30 commits since v0.11.0)*
+## Phase 9.6 — CI red reconciliation  *(complete — 2026-05-08 · 30 commits since v0.9.0)*
 
 CI on main has been red since multiple phases per
 `feedback_ci_review_per_phase_owed.md`. Phase 9.5 retro confirmed the
@@ -421,7 +421,7 @@ Root-cause inventory (verified at run `25558439124` on `e40f56a`):
 - [x] **Deploy + E2E Mock Trade Chain workflows** — both green on `f1776c3`
       onwards.
 
-### Backend pytest debt sweep  *(2026-05-08, 14 commits since v0.11.0)*
+### Backend pytest debt sweep  *(2026-05-08, 14 commits since v0.9.0)*
 
 After enabling `pytest-timeout` exposed ~67 hidden backend test failures,
 worked through them in clusters newest-first:
@@ -586,14 +586,11 @@ PDT counter, buying-power calc, position concentration limits, pre-trade margin 
 | 8 | **Position-sizing calculator (Kelly / fixed-fractional / vol-target)** | ✅ **10b.1** — 3 methods shipped (Kelly deferred to Phase 19 per spec §1 — needs strategy-tagged backtest stats) |
 | 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ✅ **10b.2** — REST + WS + /portfolio/rollup page; account_balance_snapshots hypertable + 1h/1d CAGGs; FE hybrid REST+WS with poll fallback |
 
-**Versioning note (LOCKED 2026-05-12):** pattern is `0.x.y.z` where:
-- §1–§8: `x = §N` (historical)
-- §9 onwards: `x = §N + 2` (lap absorbed at the §8→§9 boundary)
-- `y` = chunk/sub-phase; `z` = task/iteration. Sub-phases never bump `x`.
+**Versioning note (LOCKED 2026-05-12, historical lap fully absorbed):** pattern is `0.x.y.z` where `x = §N` for ALL phases (no offset), `y` = chunk/sub-phase, `z` = task/iteration. Sub-phases never bump `x`. Deeper levels (`0.x.y.z.…`) reserved for fine-grained iterations.
 
-Phase 8 maps to: 8a → v0.8.0, 8b → v0.8.1 (retagged 2026-05-12 from v0.9.0), 8c → v0.8.2 (retagged 2026-05-12 from v0.10.0 → v0.8.1 → v0.8.2). Phase 10 maps to: 10a → v0.12.0, 10a.5 → v0.12.1, 10b.1 → v0.12.2 (retagged 2026-05-12 from v0.13.0), 10b.2 → v0.12.3. ROADMAP §11 = v0.13.x, §12 = v0.14.x, §14 Futures = v0.16.x, §25 PWA → 1.0.0. See ROADMAP.md versioning header + `memory/feedback_sub_phase_versioning.md`.
+Phase 8: 8a → v0.8.0, 8b → v0.8.1 (retagged from v0.9.0), 8c → v0.8.2 (retagged v0.10.0 → v0.8.1 → v0.8.2). Phase 9: 9 → v0.9.0 (retagged from v0.11.0), 9.5 → v0.9.0.1 (retagged from v0.11.0.1). Phase 10: 10a → v0.10.0 (retagged from v0.12.0), 10a.5 → v0.10.1 (retagged from v0.12.1), 10b.1 → v0.10.2 (retag chain v0.13.0 → v0.12.2 → v0.10.2), 10b.2 → v0.10.3 (retagged from v0.12.3). Going forward: §11 → v0.11.x, §12 → v0.12.x, §14 Futures → v0.14.x, §25 PWA → 1.0.0. See ROADMAP.md versioning header + `memory/feedback_sub_phase_versioning.md`.
 
-### Phase 10b.1 — Position-sizing calculator  *(complete · 2026-05-12 · v0.12.2 · 20 commits since v0.12.1; retagged from v0.13.0 on 2026-05-12)*
+### Phase 10b.1 — Position-sizing calculator  *(complete · 2026-05-12 · v0.10.2 · 20 commits since v0.10.1; retagged from v0.13.0 on 2026-05-12)*
 
 Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b1-position-sizing-plan.md`. Memory: `phase10b1_shipped.md`.
 
@@ -618,7 +615,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. P
 - [x] E1 /trade/sizing route + SizingCalculatorPage + 3-column shell (`db84e89`)
 - [x] E2 Page render + shared-inputs smoke (`fc8ac75`)
 - [x] E3 Playwright spec — page smoke + admin defaults round-trip (`6f171d4`)
-- [x] E4 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.12.2 tag (originally v0.13.0; retagged 2026-05-12)
+- [x] E4 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.10.2 tag (originally v0.13.0; retagged 2026-05-12)
 
 **Deferred / handoff to next phase:**
 - D3 — debounced PUT of sizing-defaults from the modal as the operator edits.
@@ -626,7 +623,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. P
 - Kelly criterion — Phase 19 (post-strategy-backtest).
 - Multi-account portfolio rollup — Phase 10b.2 (next).
 
-### Phase 10b.2 — Multi-account portfolio rollup  *(complete · 2026-05-12 · v0.12.3 · 32 commits since v0.12.2)*
+### Phase 10b.2 — Multi-account portfolio rollup  *(complete · 2026-05-12 · v0.10.3 · 32 commits since v0.10.2)*
 
 Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b2-portfolio-rollup-plan.md`. Memory: `phase10b2_shipped.md`.
 
@@ -670,7 +667,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. 
 **Chunk E — Playwright + final-reviewer + close-out** *(complete)*
 - [x] E1 Playwright spec — 3 smokes (page mount + window-toggle URL + drill-drawer open) (`af60095`)
 - [x] E2 Final-reviewer integration sweep (opus) — 1 HIGH applied inline: WS gateway now calls PortfolioRateLimiter.check post-auth pre-accept so WS storms can't bypass the REST limiter (`83ba95a`)
-- [x] E3 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.12.3 tag (+ retag v0.13.0 → v0.12.2 to align history)
+- [x] E3 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.10.3 tag (+ retag v0.13.0 → v0.10.2 to align history)
 
 **Known limitations (documented in CHANGELOG):**
 - FE drops `stale` heartbeat frames (only acts on snapshot); either drop the BE send next phase or wire FE to mark accounts.
@@ -682,7 +679,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. 
 
 
 
-### Phase 10a — Risk gate at station 4  *(complete · 2026-05-08 → 2026-05-11 · v0.12.0 · 38 commits since v0.11.0.1)*
+### Phase 10a — Risk gate at station 4  *(complete · 2026-05-08 → 2026-05-11 · v0.10.0 · 38 commits since v0.9.0.1)*
 
 Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: `docs/superpowers/plans/2026-05-08-phase10a-risk-engine-plan.md`.
 
@@ -736,15 +733,15 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 - [x] F2 full test sweep: backend 1054 pass + 8 wall-clock-dependent fails (modify_order tests during IBKR daily-maintenance envelope 12:37–13:15 UTC); ruff + mypy --strict clean
 - [x] F3 phase-end spec-compliance review (opus subagent) — verdict PASS; one blocker (uncommitted OpenAPI snapshot) cleared in `a53c69c`
 - [x] F4 CHANGELOG.md + TASKS.md + CLAUDE.md updates
-- [x] F5 `v0.12.0` tag + push
+- [x] F5 `v0.10.0` tag + push
 
-**Phase 10a final test posture (v0.12.0):** backend 1054 pass + 8 wall-clock-dependent fails (IBKR daily maintenance window — not a regression); FE Vitest green for new risk hooks + TradeTicketModal + AccountKillSwitchRow; sidecar suites unchanged; mypy --strict + ruff clean across new/modified surfaces.
+**Phase 10a final test posture (v0.10.0):** backend 1054 pass + 8 wall-clock-dependent fails (IBKR daily maintenance window — not a regression); FE Vitest green for new risk hooks + TradeTicketModal + AccountKillSwitchRow; sidecar suites unchanged; mypy --strict + ruff clean across new/modified surfaces.
 
 **Phase 10a.5 backlog:** conid → instrument_id resolver wiring (concentration check no-op until then); test stub `_Sidecar`/`_Session` upgrades (drops the `isinstance(db, AsyncSession)` gate); counter decrement on gate-pass + revert on dispatch failure; audit row on ALLOW/WARN paths (BLOCK-only today); v_account_intraday_pnl backed by sidecar PnL pipeline (currently zero-stub); Playwright E2E for the 4 risk-gate + admin-risk scenarios; RiskLimitsPage migration to Phase 3 DataTable + ColumnCustomizerDialog; per-endpoint CSRF nonce scoping; AdminAccountsPage multi-mode kill-switch fetch; orders_service.py file-split refactor; multi-worker uvicorn with Redis Lua locks (Phase 24).
 
-### Phase 10a.5 — Risk-gate effectivity + tech-debt cleanup  *(complete · 2026-05-11 · v0.12.1 · 34 commits since v0.12.0)*
+### Phase 10a.5 — Risk-gate effectivity + tech-debt cleanup  *(complete · 2026-05-11 · v0.10.1 · 34 commits since v0.10.0)*
 
-Closed the effectivity blockers from Phase 10a's v0.12.0 ship. Spec: `docs/superpowers/specs/2026-05-11-phase10a5-cleanup-design.md`. Plan: `docs/superpowers/plans/2026-05-11-phase10a5-cleanup-plan.md`. Memory: `phase10a5_shipped.md`.
+Closed the effectivity blockers from Phase 10a's v0.10.0 ship. Spec: `docs/superpowers/specs/2026-05-11-phase10a5-cleanup-design.md`. Plan: `docs/superpowers/plans/2026-05-11-phase10a5-cleanup-plan.md`. Memory: `phase10a5_shipped.md`.
 
 **Chunks shipped:**
 - Chunk A (BE backbone, 16 commits): Alembic 0037 (`pnl_intraday` + view rewrite + risk_decisions index CONCURRENTLY + prune helper); `PnlIntradayWriter` + BrokerDiscoverer fan-in; max-daily-loss staleness WARN (CRIT-2); token-bearing counter API with per-account-scoped orphan sweep (CRIT-1); ALLOW/WARN audit widening + 30s SETNX dedupe

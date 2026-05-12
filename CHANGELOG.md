@@ -5,7 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
-## [0.12.3] — 2026-05-12
+## [0.10.3] — 2026-05-12
 
 ### Phase 10b.2 — Multi-account portfolio rollup (32 commits since v0.13.0)
 
@@ -70,15 +70,15 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. 
 Downgrade order: 0040 drops CAGGs cleanly (1d before 1h); 0039 drops the hypertable with `CASCADE` and removes retention policy. `BalanceSnapshotWriter` wiring in `main.py` is `BalanceSnapshotWriter | None` injection so reverting just the lifespan changes restores prior behaviour without schema rollback. `portfolio_router` + `ws_portfolio_router` are independent `include_router` calls — safe to comment out.
 
 ### Tag
-- `v0.12.3` on top of `v0.12.2`. Sub-phase patch bump under the Phase-10 umbrella (Phase 10 → ROADMAP §10 → x=12 per the new versioning policy `0.x.y.z` where `x = §N + 2`). 10b.2 is the 4th deliverable in the Phase-10 umbrella: 10a → v0.12.0, 10a.5 → v0.12.1, 10b.1 → v0.12.2 (retagged from v0.13.0), 10b.2 → v0.12.3. See `docs/ROADMAP.md` versioning section + `memory/feedback_sub_phase_versioning.md`.
+- `v0.10.3` on top of `v0.10.2`. Sub-phase patch bump under the Phase-10 umbrella per the final `0.x.y.z` policy (`x = §N` for all phases — historical lap fully absorbed 2026-05-12). 10b.2 is the 4th deliverable in the Phase-10 umbrella: 10a → v0.10.0, 10a.5 → v0.10.1, 10b.1 → v0.10.2, 10b.2 → v0.10.3. See `docs/ROADMAP.md` versioning section + `memory/feedback_sub_phase_versioning.md`.
 
 ---
 
-## [0.12.2] — 2026-05-12
+## [0.10.2] — 2026-05-12
 
-*(retagged 2026-05-12 from v0.13.0 to v0.12.2 per the `0.x.y.z` versioning policy; `x = ROADMAP §N + 2`, so Phase-10 sub-phases all stay under x=12. v0.13.0 was deleted from origin; v0.12.2 points at the same commit.)*
+*(retag chain 2026-05-12: v0.13.0 → v0.12.2 → v0.10.2. Per the final `0.x.y.z` policy (`x = §N` for all phases — the historical lap was fully absorbed on 2026-05-12 by retagging §8b/8c/9/10), §10 sub-phases sit under x=10. All retags point at the same commit `c113a19`; v0.13.0 + v0.12.2 deleted from origin.)*
 
-### Phase 10b.1 — Position-sizing calculator (20 commits since v0.12.1)
+### Phase 10b.1 — Position-sizing calculator (20 commits since v0.10.1)
 
 Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b1-position-sizing-plan.md`. Adds a backend position-sizing service that produces a suggested qty from one of three sizing methods (fixed-fractional, fixed-risk-per-trade, vol-targeted), pre-runs the Phase 10a risk gate against the suggestion, and surfaces both the qty and the gate verdict in the TradeTicketModal (inline pre-fill section) and a new `/trade/sizing` standalone page (side-by-side three-method comparison).
 
@@ -118,13 +118,13 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. P
 **Deferred:** D3 (debounced PUT of sizing-defaults from the modal as the operator edits) — non-critical, admin UI drives the same endpoint. Final E-end reviewer chain skipped — A+B chain already ran with 0 CRIT and C/D/E are thin TS that vitest covers. Kelly criterion stays deferred to Phase 19 per spec §1.
 
 ### Tag
-- `v0.12.2` on top of `v0.12.1`. (Originally tagged as v0.13.0 on 2026-05-12; retagged later same day to v0.12.2 to align with the `0.x.y.z` policy.)
+- `v0.10.2` on top of `v0.10.1`. (Originally tagged as v0.13.0 on 2026-05-12; retagged later same day to v0.10.2 to align with the `0.x.y.z` policy.)
 
 ---
 
-## [0.12.1] — 2026-05-11
+## [0.10.1] — 2026-05-11
 
-### Phase 10a.5 — Risk-gate effectivity + tech-debt cleanup (34 commits since v0.12.0)
+### Phase 10a.5 — Risk-gate effectivity + tech-debt cleanup (34 commits since v0.10.0)
 
 Spec: `docs/superpowers/specs/2026-05-11-phase10a5-cleanup-design.md`. Plan: `docs/superpowers/plans/2026-05-11-phase10a5-cleanup-plan.md`. Phase 10a shipped the risk-gate machinery but several effectivity blockers stayed in the backlog: `risk_decisions.instrument_id` always NULL, intraday PnL view stubbed, in-flight counter race window unbounded, ALLOW/WARN audit emission gated to BLOCK-only, dead metric declarations. 10a.5 lands the closure items so the gate's decisions are observable and the counter is reconcilable.
 
@@ -191,7 +191,7 @@ Spec: `docs/superpowers/specs/2026-05-11-phase10a5-cleanup-design.md`. Plan: `do
 - **Concentration check math:** uses `qty * avg_cost * multiplier` (approximate, no real-time market value). Phase 10b view will expose `market_value_base` properly.
 - **Test infrastructure:** C1.2-C1.6 stub upgrades, C2 isinstance guard removal, C3 Playwright E2E suite, C4 real_broker reorg deferred to 10a.5.1. The effectivity-fix work (A1-A5 + B1-B3) is complete and reviewed.
 
-## [0.12.0] — 2026-05-11
+## [0.10.0] — 2026-05-11
 
 ### Phase 10a — Risk gate at station 4 (2026-05-08 → 2026-05-11, 38 commits, complete)
 
@@ -240,7 +240,7 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 - F2: full test sweep — backend 1054 pass + 8 wall-clock-dependent fails (modify_order tests during the IBKR daily-maintenance envelope 12:37–13:15 UTC, documented in memory `ibkr_maintenance_schedule.md`); OpenAPI snapshot re-blessed for the new `risk_warnings`/`risk_blockers` fields on `PreviewResponse` (committed in F3 close-out); ruff + mypy --strict clean across all new/modified files.
 - F3: phase-end spec-compliance review (opus subagent) ran against the implemented surface — verdict PASS once the OpenAPI snapshot was committed; all spec invariants hold (station-4 ordering, audit row + lowercased side, pg_notify minimal payload, auth gating, soft-delete, FE WARN+BLOCK surfacing, TanStack invalidation, routers registered).
 - F4: this CHANGELOG entry + CLAUDE.md/TASKS.md updates.
-- F5: `v0.12.0` tag.
+- F5: `v0.10.0` tag.
 
 **Deferred to 10a.5**
 - `conid → instrument_id` wiring (concentration check is currently a no-op until this is in place).
@@ -257,7 +257,7 @@ Spec: `docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md`. Plan: 
 - Real-broker test deps: `alpaca-py` + `schwabdev` live in `sidecar_*/pyproject.toml` only; `backend/tests/real_broker/test_real_{alpaca_*,schwab_*}_e2e.py` import them directly and fail at collection time in CI with `ModuleNotFoundError`. Either move the tests into the sidecar trees or add the SDKs as a `real-broker` dependency group in `backend/pyproject.toml`.
 - VPS Docker BuildKit cache discipline: 1956 stale layers totalling 67 GB filled the IONOS root volume during Phase 10a close-out. Prune-on-deploy step (`docker builder prune -f --filter "until=720h"`) belongs in `scripts/deploy.sh` or a separate `scripts/vps-prune-cache.sh` triggered nightly.
 
-**Phase 10a CI hardening (post-tag, 8 commits):** The v0.12.0 push surfaced a cluster of pre-existing CI debt in the nightly real-broker workflows that the per-phase reviewer chain wouldn't catch (these workflows never run during a normal PR). Cleaned up:
+**Phase 10a CI hardening (post-tag, 8 commits):** The v0.10.0 push surfaced a cluster of pre-existing CI debt in the nightly real-broker workflows that the per-phase reviewer chain wouldn't catch (these workflows never run during a normal PR). Cleaned up:
 
 - `00b4c2b` — proto stub generation step added to 7 nightly workflows + proto file reformatted with `buf format -w` to satisfy `buf format --diff --exit-code`
 - `6b90f9c` — extracted proto codegen into `backend/scripts/generate_proto_stubs.py` because the bash heredoc form crashed under PowerShell on the self-hosted Windows runners
@@ -274,13 +274,13 @@ CI state at phase end: main push pipeline (CI + Deploy + E2E Mock) green on the 
 
 **Tooling validated:** qwen2.5-coder:14b dispatched via remote Ollama (192.168.50.30:11434) for B6, B7, C2 method bodies (~6sec roundtrip on RTX 4080S; ~30-40% wall-time saved vs Claude-only on tasks in its sweet spot — well-spec'd async method bodies). Body-only protocol works; Claude main-thread reviews + corrects. Codex was rate-limited mid-phase, so Chunk D+E coding ran on Opus main thread with reviewer subagents split haiku (spec/typescript) and sonnet (code-quality/security).
 
-## [0.11.0.1] — 2026-05-08
+## [0.9.0.1] — 2026-05-08
 
-### Internal — Phase 9.5 + 9.6 close-out (CI green-up, 30 commits since v0.11.0)
+### Internal — Phase 9.5 + 9.6 close-out (CI green-up, 30 commits since v0.9.0)
 
 Patch release marking Phase 9.5 retro reviewer-chain sweep + Phase 9.6 CI
 red reconciliation as both **complete**. **No public/wire surface
-changes** vs v0.11.0; all commits are quality + observability + test
+changes** vs v0.9.0; all commits are quality + observability + test
 hygiene. CI now green on all 5 jobs (proto + backend + sidecar +
 frontend + frontend-types-up-to-date) for 3 consecutive runs (`ea20e17`
 → `0d94b26` → `677dab9`), satisfying the Phase 9.6 exit criteria.
@@ -413,7 +413,7 @@ branch name is now world-readable; test fixtures use `U99999999` /
 `DUP000000` synthetic stubs; never echo real broker creds, account
 numbers, or APP_SECRET_KEY in code or commits.
 
-## [0.11.0] — 2026-05-08
+## [0.9.0] — 2026-05-08
 
 ### Added — Phase 9 complete (Charting v1: bar aggregator + historical store + chart UI + 45 indicators)
 
@@ -451,7 +451,7 @@ into single commits per chunk: `40c63b3` (B), `44bb754` (C), `1a435ca`+`a8739b5`
 
 10 continuous-aggregate hypertables (5s/10s/15s/30s/45s from `bars_1s`; 5m/15m/30m/1h/1d from `bars_1m`)
 deferred pending production validation of `bars_1s` with real broker traffic. Tracked in
-`phase_reviewer_audit.md`; will land as v0.11.1 mini-phase or first prod run.
+`phase_reviewer_audit.md`; will land as v0.9.1 mini-phase or first prod run.
 
 #### Chunk C — Sidecars: GetHistoricalBars (commits `a60d08a..3879388` + `44bb754`, 7 commits)
 
@@ -538,7 +538,7 @@ deferred pending production validation of `bars_1s` with real broker traffic. Tr
   projection. Above 1000 needs aggregator sharding (architect MED #10) AND/OR shorter `bars_1s`
   retention.
 
-### Deferred to v0.11.1 / Phase 9.5 / Phase 10
+### Deferred to v0.9.1 / Phase 9.5 / Phase 10
 
 - **Task 18 CAGGs** (10 continuous aggregates) — needs production `bars_1s` traffic to validate
   refresh boundaries.

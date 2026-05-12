@@ -17,19 +17,19 @@ End-state: a self-hosted personal trading dashboard covering every asset class s
 
 ## Versioning policy
 
-**Pattern: `0.x.y.z`** (locked 2026-05-12 during Phase 10b.2 close-out)
+**Pattern: `0.x.y.z`** (locked 2026-05-12 — historical lap fully absorbed by retagging §8b/§8c/§9/§9.5/§10×4)
 
-- `x` = phase version:
-  - **§1–§8: `x = §N`** (historical; tags v0.1.x through v0.8.x already shipped under this rule)
-  - **§9 onwards: `x = §N + 2`** (the lap occurred between §8 and §9; reflecting the actual tag history)
-- `y` = chunk / sub-phase within the umbrella phase (chunks A/B/C/… AND sub-phases like 8b, 8c, 10a.5, 10b.1, 10b.2 all count as `y` bumps).
-- `z` = task / iteration / re-issue under a chunk (e.g. a retro-applied reviewer-fix or operator hot-patch).
+- `x` = phase version, **`x = §N` for ALL phases** (no offset; clean 1:1 mapping between ROADMAP § and minor)
+- `y` = chunk or sub-phase within the umbrella phase (e.g. 8b, 8c, 9.5, 10a.5, 10b.1, 10b.2 — each counts as a `y` bump)
+- `z` = task or iteration under a chunk (e.g. a retro-applied reviewer-fix or operator hot-patch)
+- Deeper levels (`0.x.y.z.…`) are reserved for fine-grained iterations if ever needed; the formula extends arbitrarily.
 
-**Sub-phases never bump `x`.**
-- Phase 8 split into 8a / 8b / 8c → v0.8.0 / v0.8.1 / v0.8.2 (8b retagged from v0.9.0; 8c retagged from v0.10.0, both on 2026-05-12 to correct the historical lap)
-- Phase 9 has 9.5 → v0.11.0 + v0.11.0.1
-- Phase 10 split into 10a / 10a.5 / 10b.1 / 10b.2 → v0.12.0 / v0.12.1 / v0.12.2 / v0.12.3 (10b.1 retagged from v0.13.0 on 2026-05-12)
-- Phase 11's sub-phases will land at v0.13.x, Phase 14 Futures at v0.16.x, etc.
+**Sub-phases NEVER bump `x`.** Examples (all retagged 2026-05-12 to absorb the historical lap):
+- §8 → 8a / 8b / 8c → v0.8.0 / v0.8.1 / v0.8.2 *(8b retagged from v0.9.0; 8c retagged via v0.8.1 to v0.8.2)*
+- §9 → 9 / 9.5 → v0.9.0 / v0.9.0.1 *(retagged from v0.11.0 / v0.11.0.1)*
+- §10 → 10a / 10a.5 / 10b.1 / 10b.2 → v0.10.0 / v0.10.1 / v0.10.2 / v0.10.3 *(retagged from v0.12.0–v0.12.3; 10b.1 had an extra v0.13.0 → v0.12.2 step earlier)*
+
+Going forward: §11 → v0.11.x, §12 → v0.12.x, §14 Futures → v0.14.x, §25 PWA → 1.0.0.
 
 **1.0.0** ships when ROADMAP §25 (PWA mobile) is complete. The intermediate Tag column below shows the FIRST tag in each phase's `x` window; sub-phases land at `0.x.{1,2,3,…}`.
 
@@ -45,22 +45,22 @@ See `memory/feedback_sub_phase_versioning.md` for the case-by-case decision rule
 | **7c** | 0.7.3 ✅ | **Alpaca adapter (data + read-only)** | `sidecar_alpaca/` gRPC sidecar using `alpaca-py` SDK. API-key auth (no OAuth dance). Read-only `Configure`/`ListManagedAccounts`/`GetAccountSummary`/`GetPositions`/`GetOrders` mirror of `sidecar_schwab`. `StreamQuotes` wired to free real-time IEX feed (`stream.data.alpaca.markets/v2/iex`) — registers `alpaca` source in the open-set enum (already designed-for in 7b.1). US equity + crypto in scope; options scaffolded, trade execution deferred to Phase 8. |
 | **8** | 0.8.0 ✅ | **Schwab + Alpaca trade + order-type expansion + Futu Modify/Bracket** | Schwab `PlaceOrder`/`CancelOrder`/`ModifyOrder`/`OrderEvent`. STOP_LIMIT, TRAIL/TRAIL_LIMIT, IOC/FOK/GTD, OCO non-bracket, MOC/MOO/LOC/LOO across IBKR + Futu + Schwab. Futu Modify + Bracket (deferred from Phase 6). Alpaca `PlaceOrder` (US equity + crypto). |
 | **8c** | 0.8.2 ✅ | **Crypto trade execution** *(retagged from v0.10.0 on 2026-05-12)* | Alpaca trade write path: equity + crypto + bracket + OCO. 8b sits at v0.8.1 (retagged from v0.9.0). |
-| **9** | 0.11.0 ✅ | **Charting v1 + bar aggregator + historical store** *(first phase under `x = §N + 2`)* | TimescaleDB hypertable on PG-18, klinecharts integration, 1s/1m/5m/15m/1h/1d bars, drag-handle stop/TP edit on the chart, historical backfill from broker APIs (Schwab CHART_EQUITY → free 1m US bars). Sub-phase 9.5 shipped at v0.11.0.1. |
-| **10** | 0.12.0 ✅ | **Risk engine + position-sizing + multi-account rollup** | PDT counter (US accts), buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly, fixed-fractional, vol-targeting). Multi-account portfolio rollup (cross-broker aggregate NLV / exposure / per-asset-class delta). Pre-trade gate becomes mandatory chokepoint. **Shipped across 4 sub-phases:** 10a (v0.12.0 risk gate), 10a.5 (v0.12.1 effectivity), 10b.1 (v0.12.2 sizing — originally tagged v0.13.0, retagged 2026-05-12), 10b.2 (v0.12.3 rollup). |
-| **11** | 0.13.0 | **AI router + Alerts + Telegram** | Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` module any subsystem can call. Price/condition alerts engine. Telegram bot (notifications + admin commands). Prompt-cost tracking. |
-| 12 | 0.14.0 | Options — single-leg | Option chain viewer, strike/expiry pickers, on-demand strike-window subscribe, Greeks display, exercise/assign events on IBKR + Schwab + Futu-US. Polymorphic contract via JSONB `contract_details`. |
-| 13 | 0.15.0 | Multi-leg option combos | Spread / straddle / strangle / collar / butterfly / condor / iron-condor ticket. Net-debit/credit preview. Schwab `complexOrderStrategyType` + IBKR combo legs. |
-| 14 | 0.16.0 | Futures | CME on IBKR + Schwab; HKFE (HSI/HHI) on Futu. Contract-month roll UI. Settlement events. Tick-size/multiplier per contract. |
-| 15 | 0.17.0 | Forex + Crypto | IBKR IDEALPRO FX. IBKR Paxos crypto. Coinbase WS as free crypto data source (data-only). 24/7 maintenance handling. Decimal qty (not integer). |
-| 16 | 0.18.0 | Bonds + Mutual Funds + CFD | CUSIP search, accrued-interest, T+2 settlement. Mutual-fund EOD NAV ordering. CFD on IBKR (ex-US jurisdictions only). |
-| 17 | 0.19.0 | IBKR algos | Adaptive, TWAP, VWAP, Arrival, Iceberg / Hidden / Reserve. Algo parameter UI. |
-| 18 | 0.20.0 | **Universe scanner + News/filings + Earnings-event handling** | Rule-based scanner (RSI, breakout, volume, mcap, fundamentals) + LLM commentary on candidates. Schwab `SCREENER_EQUITY` feed. SEC EDGAR (US) + RNS (HK) filings ingest. Earnings calendar with auto-flat / auto-pause hooks for bots. |
-| 19 | 0.21.0 | Backtesting harness | Replay historical bars through strategy code, PnL/drawdown/Sharpe/MAR report, walk-forward, Monte Carlo. |
-| 20 | 0.22.0 | Bot engine v1 — rule-based | Strategy plugin model (Python files), bot lifecycle (create/start/stop/version), per-bot risk caps, paper-mode-by-default. Bot worker is a separate Docker service. |
-| 21 | 0.23.0 | Bot engine v2 — LLM-in-loop | LLM-as-analyst on bot decisions, parameter-tuning loop with human approval, shadow-mode strategy promotion, perf-attribution per bot. |
-| 22 | 0.24.0 | Bot engine v3 — autonomous, self-refining | Multi-bot orchestration, nightly retrain, LLM-driven strategy generation with guardrails, auto-promotion rules. **No raw RL.** |
-| **23** | 0.25.0 | **UK CGT awareness + per-bot attribution + cgt-calc handoff** | Real-time Section 104 pool tracker (mirrors `fills`), same-day + 30-day b&b matcher, pre-trade gate "would trigger b&b" warning, live £3k allowance gauge, "Tax" page (Section 104 positions + per-bot/per-strategy/per-asset PnL), year-end RAW-CSV export consumable by [`KapJI/capital-gains-calculator`](https://github.com/KapJI/capital-gains-calculator), optional admin-page subprocess invocation of `cgt-calc` for in-place PDF. **Contingency:** if cgt-calc proves unfit at Phase 23 start (current bug investigation pending; tracked as a side task), scope expands to include an in-house Section 104 calculation engine. |
-| 24 | 0.26.0 | Infra hardening | PG client-cert auth (drops `.env` plaintext password). Multi-worker uvicorn (Redis-backed nonce / replay / commission stores). ClickHouse for tick history if TimescaleDB outgrows the volume. |
+| **9** | 0.9.0 ✅ | **Charting v1 + bar aggregator + historical store** *(retagged from v0.11.0 on 2026-05-12)* | TimescaleDB hypertable on PG-18, klinecharts integration, 1s/1m/5m/15m/1h/1d bars, drag-handle stop/TP edit on the chart, historical backfill from broker APIs (Schwab CHART_EQUITY → free 1m US bars). Sub-phase 9.5 shipped at v0.9.0.1 (retagged from v0.11.0.1). |
+| **10** | 0.10.0 ✅ | **Risk engine + position-sizing + multi-account rollup** *(retagged from v0.12.0 on 2026-05-12)* | PDT counter (US accts), buying-power calc, position concentration limits, pre-trade margin check, max daily loss, account-level kill switch. Position-sizing calculator (Kelly, fixed-fractional, vol-targeting). Multi-account portfolio rollup (cross-broker aggregate NLV / exposure / per-asset-class delta). Pre-trade gate becomes mandatory chokepoint. **Shipped across 4 sub-phases:** 10a (v0.10.0 risk gate), 10a.5 (v0.10.1 effectivity), 10b.1 (v0.10.2 sizing — original v0.13.0 → v0.12.2 → v0.10.2), 10b.2 (v0.10.3 rollup — original v0.12.3 → v0.10.3). |
+| **11** | 0.11.0 | **AI router + Alerts + Telegram** | Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` module any subsystem can call. Price/condition alerts engine. Telegram bot (notifications + admin commands). Prompt-cost tracking. |
+| 12 | 0.12.0 | Options — single-leg | Option chain viewer, strike/expiry pickers, on-demand strike-window subscribe, Greeks display, exercise/assign events on IBKR + Schwab + Futu-US. Polymorphic contract via JSONB `contract_details`. |
+| 13 | 0.13.0 | Multi-leg option combos | Spread / straddle / strangle / collar / butterfly / condor / iron-condor ticket. Net-debit/credit preview. Schwab `complexOrderStrategyType` + IBKR combo legs. |
+| 14 | 0.14.0 | Futures | CME on IBKR + Schwab; HKFE (HSI/HHI) on Futu. Contract-month roll UI. Settlement events. Tick-size/multiplier per contract. |
+| 15 | 0.15.0 | Forex + Crypto | IBKR IDEALPRO FX. IBKR Paxos crypto. Coinbase WS as free crypto data source (data-only). 24/7 maintenance handling. Decimal qty (not integer). |
+| 16 | 0.16.0 | Bonds + Mutual Funds + CFD | CUSIP search, accrued-interest, T+2 settlement. Mutual-fund EOD NAV ordering. CFD on IBKR (ex-US jurisdictions only). |
+| 17 | 0.17.0 | IBKR algos | Adaptive, TWAP, VWAP, Arrival, Iceberg / Hidden / Reserve. Algo parameter UI. |
+| 18 | 0.18.0 | **Universe scanner + News/filings + Earnings-event handling** | Rule-based scanner (RSI, breakout, volume, mcap, fundamentals) + LLM commentary on candidates. Schwab `SCREENER_EQUITY` feed. SEC EDGAR (US) + RNS (HK) filings ingest. Earnings calendar with auto-flat / auto-pause hooks for bots. |
+| 19 | 0.19.0 | Backtesting harness | Replay historical bars through strategy code, PnL/drawdown/Sharpe/MAR report, walk-forward, Monte Carlo. |
+| 20 | 0.20.0 | Bot engine v1 — rule-based | Strategy plugin model (Python files), bot lifecycle (create/start/stop/version), per-bot risk caps, paper-mode-by-default. Bot worker is a separate Docker service. |
+| 21 | 0.21.0 | Bot engine v2 — LLM-in-loop | LLM-as-analyst on bot decisions, parameter-tuning loop with human approval, shadow-mode strategy promotion, perf-attribution per bot. |
+| 22 | 0.22.0 | Bot engine v3 — autonomous, self-refining | Multi-bot orchestration, nightly retrain, LLM-driven strategy generation with guardrails, auto-promotion rules. **No raw RL.** |
+| **23** | 0.23.0 | **UK CGT awareness + per-bot attribution + cgt-calc handoff** | Real-time Section 104 pool tracker (mirrors `fills`), same-day + 30-day b&b matcher, pre-trade gate "would trigger b&b" warning, live £3k allowance gauge, "Tax" page (Section 104 positions + per-bot/per-strategy/per-asset PnL), year-end RAW-CSV export consumable by [`KapJI/capital-gains-calculator`](https://github.com/KapJI/capital-gains-calculator), optional admin-page subprocess invocation of `cgt-calc` for in-place PDF. **Contingency:** if cgt-calc proves unfit at Phase 23 start (current bug investigation pending; tracked as a side task), scope expands to include an in-house Section 104 calculation engine. |
+| 24 | 0.24.0 | Infra hardening | PG client-cert auth (drops `.env` plaintext password). Multi-worker uvicorn (Redis-backed nonce / replay / commission stores). ClickHouse for tick history if TimescaleDB outgrows the volume. |
 | **25** | **1.0.0** | **PWA mobile + v1.0 ship** | Service worker, install-to-home-screen, FCM / Web Push notifications, mobile-only chart UX, offline order queue, biometric lock via WebAuthn. |
 
 ## Pacing
