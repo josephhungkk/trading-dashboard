@@ -1,0 +1,1350 @@
+# Phase 11a — AI Router Foundation — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Land `services/ai/` module + LiteLLM proxy sidecar + Ollama dispatch + WoL + cost ledger + chat UI + trade-ticket AI context + admin AI page at v0.11.0, with all CRIT/HIGH/MED architect findings baked into the design.
+
+**Architecture:** LiteLLM proxy sidecar (lightweight image) on VPS in `docker-compose.yml`; BE talks to it via docker network; BE signs requests with per-provider API key (Option C, validated per provider in 11a-A0 spike); LiteLLM master-key auth via Redis-backed `custom_auth` callback for zero-restart rotation; capability-tagged auto-routing with LOCAL_ONLY privacy floor (three-layer defense); WoL wakes the heavy box on demand with model-ready readiness probe and circuit breaker.
+
+**Tech Stack:** Python 3.14, FastAPI, SQLAlchemy 2.0 async, Alembic, httpx-async, structlog, redis-py async, asyncpg, Pydantic v2, prometheus-client; React 19, TanStack Router, TanStack Query, Vitest 4, Playwright; LiteLLM v1.x lightweight image; Ollama (NUC Windows-service + heavy-box systemd/WinSvc).
+
+**Spec:** `docs/superpowers/specs/2026-05-12-phase11-ai-router-alerts-telegram-design.md` §2 (11a sub-phase).
+
+**Versioning target:** v0.11.0. Per-chunk reviewer chains at end of each chunk per `feedback_review_per_chunk.md`.
+
+---
+
+## File structure (locks decomposition)
+
+### Backend (new files)
+
+| Path | Responsibility |
+|---|---|
+| `backend/app/services/ai/__init__.py` | Module marker; re-exports `AICompletionClient`, `AICapability`, `get_ai_client` |
+| `backend/app/services/ai/exceptions.py` | `LocalModelsUnavailableError`, `AIProxyUnavailableError`, `StructuredOutputFailedError`, `AITimeoutError`, `AIToolCallingNotSupportedError` |
+| `backend/app/services/ai/capabilities.py` | `AICapability` StrEnum (8 values); `resolve_models(capability, *, force_local_only=False)` |
+| `backend/app/services/ai/types.py` | `CompletionRequest`, `CompletionResult`, `Chunk`, `JobStatus`, `ToolDef` Pydantic models; `FallbackHop` dataclass |
+| `backend/app/services/ai/secrets.py` | `get_provider_key(provider)` with 60s TTL cache + pubsub-invalidation listener |
+| `backend/app/services/ai/router.py` | `AICompletionClient` ABC; `LiteLLMClient` impl; routing-with-fallback walk; capability semaphore |
+| `backend/app/services/ai/cost_ledger.py` | `CostLedgerWriter` fire-and-forget batched INSERT (bounded queue) |
+| `backend/app/services/ai/wol.py` | `HeavyBoxWoL` magic packet + `GET /api/tags` readiness probe + circuit breaker |
+| `backend/app/services/ai/jobs.py` | `AsyncJobStore` (PG-backed) + pubsub `ai:job:{id}` + orphan recovery |
+| `backend/app/services/ai/rate_limiter.py` | Imports `SlidingWindowRateLimiter` from `services/common/`; instantiates `AISubjectLimiter` (30/s per subject) + `AICapacitySemaphore` (per-capability) |
+| `backend/app/services/ai/litellm_auth_callback.py` | Redis-backed master-key validator wired as `litellm.proxy.auth.custom_auth` |
+| `backend/app/services/ai/config_gen.py` | Renders `deploy/litellm/config.yaml` from `app_config:ai_router` at boot (idempotent) |
+| `backend/app/services/common/rate_limiter.py` | `SlidingWindowRateLimiter[K]` generic (extracted from `portfolio_rate_limiter` + `position_sizing_rate_limiter`) |
+| `backend/app/services/common/ws_envelope.py` | `make_ws_endpoint(...)` wrapping CSWSH origin check + heartbeat + recv-drain + compute cache from `ws_portfolio` |
+| `backend/app/api/ai.py` | REST: `POST /api/ai/complete`, `POST /api/ai/jobs`, `GET /api/ai/jobs/{id}`, `DELETE /api/ai/jobs/{id}` |
+| `backend/app/api/ws_ai.py` | WS: `/ws/ai/chat`, `/ws/ai/jobs/{id}` |
+| `backend/app/api/admin_ai.py` | Admin: `GET /api/admin/ai/capability-map`, `PUT /api/admin/ai/capability-map`, `GET /api/admin/ai/cost-ledger`, `GET /api/admin/ai/heavy-box/state`, `POST /api/admin/ai/heavy-box/wake` (manual) |
+| `backend/app/api/internal_litellm.py` | Internal: `POST /internal/litellm/verify` (called by LiteLLM auth-callback hook) |
+| `backend/alembic/versions/0041_phase11a_ai_completions.py` | Hypertable `ai_completions`, 90d compression, 1y retention |
+| `backend/alembic/versions/0042_phase11a_ai_jobs.py` | Table `ai_jobs` (not hypertable) + per-phase timestamps |
+| `deploy/litellm/config.yaml` | Model list (no secrets) — committed to git |
+| `deploy/litellm/secret_routing.md` | Per-provider routing-mode outcome from 11a-A0 spike |
+| `deploy/nuc/install-ollama.ps1` | NUC Windows service installer |
+| `deploy/heavybox/install-ollama.sh` | Heavy-box Ollama service install (Linux); `.ps1` alt if Windows |
+| `deploy/heavybox/idle-suspend.service` | Suspend-after-15min systemd timer |
+
+### Backend (modified)
+
+| Path | Change |
+|---|---|
+| `docker-compose.yml` | Add `litellm:` service |
+| `backend/app/main.py` | Lifespan: init `CostLedgerWriter`, `HeavyBoxWoL`, `AsyncJobStore`, `litellm_master_key` Redis bootstrap; mount new API routers |
+| `backend/app/core/metrics.py` | Add 24 new metric series under `ai_router_*`, `ai_cost_ledger_*` |
+| `backend/app/services/portfolio_rate_limiter.py` | Refactor to use `SlidingWindowRateLimiter[K]` generic (no-op rename) |
+| `backend/app/services/position_sizing_rate_limiter.py` | Refactor to use generic (no-op rename) |
+| `backend/app/api/admin.py` | Add `/api/admin/secrets/ai/{key}` PUT pattern matching existing secret rotation |
+
+### Frontend (new files)
+
+| Path | Responsibility |
+|---|---|
+| `frontend/src/routes/ai/chat.tsx` | Route registration `/ai/chat` |
+| `frontend/src/routes/admin/ai.tsx` | Route registration `/admin/ai` |
+| `frontend/src/features/ai/ChatPage.tsx` | Chat composition: messages + input + model picker + cost display + fallback badge |
+| `frontend/src/features/ai/ChatMessage.tsx` | Single message rendering |
+| `frontend/src/features/ai/ModelPicker.tsx` | Capability-tagged model picker |
+| `frontend/src/features/ai/TradeTicketAiSection.tsx` | "AI context" collapsible for TradeTicketModal |
+| `frontend/src/features/admin/AdminAiPage.tsx` | Capability map editor (drag-reorder) + provider-key CRUD + cost ledger + heavy-box state |
+| `frontend/src/services/ai/types.ts` | Re-exports from `api-generated.ts` |
+| `frontend/src/services/ai/api.ts` | `fetchAiComplete`, `fetchAiJob`, `submitAiJob`, `cancelAiJob`, admin endpoints |
+| `frontend/src/services/ai/useChatStream.ts` | WS `/ws/ai/chat` hook with backoff reconnect + mountedRef |
+| `frontend/src/services/ai/useAiJob.ts` | Job polling + WS `/ws/ai/jobs/{id}` |
+| `frontend/src/services/ai/useTradeContext.ts` | One-shot `STRUCTURED_OUTPUT` for trade ticket |
+| `frontend/src/stores/global/ai.ts` | zustand-persist: chat history per session, default model picker |
+| `frontend/src/tests/spike/test_per_request_provider_key.py` | 11a-A0 spike test (lives backend-side) |
+
+### Frontend (modified)
+
+| Path | Change |
+|---|---|
+| `frontend/src/features/trade/TradeTicketModal.tsx` | Insert `<TradeTicketAiSection />` between symbol header and sizing |
+| `frontend/src/components/layout/AppShell.tsx` | Add nav entry for `/ai/chat` |
+
+### Tests
+
+| Path | Coverage |
+|---|---|
+| `backend/tests/spike/test_per_request_provider_key.py` | 6-provider matrix |
+| `backend/tests/services/ai/test_capabilities.py` | Resolution under LOCAL_ONLY + missing keys + force flag |
+| `backend/tests/services/ai/test_router.py` | LiteLLM mock; fallback walk; 501 on tools; per-request key injection |
+| `backend/tests/services/ai/test_secrets_cache.py` | TTL + pubsub invalidation + concurrent reads |
+| `backend/tests/services/ai/test_cost_ledger.py` | Batched INSERT; bounded queue drop; fail-OPEN |
+| `backend/tests/services/ai/test_wol.py` | Magic packet shape; model-ready probe; circuit breaker |
+| `backend/tests/services/ai/test_jobs.py` | State transitions; orphan recovery (90s warming / 10min inferring); pubsub push; cooperative cancel |
+| `backend/tests/services/ai/test_rate_limiter.py` | 30/s subject + per-capability semaphore + generic refactor |
+| `backend/tests/services/ai/test_litellm_auth_callback.py` | Redis read; rotation visibility; LOCAL_ONLY enforcement |
+| `backend/tests/services/common/test_sliding_window_rate_limiter.py` | Generic limiter |
+| `backend/tests/services/common/test_ws_envelope.py` | CSWSH; heartbeat; recv-drain |
+| `backend/tests/integration/test_ai_complete_api.py` | LOCAL_ONLY 503; happy path; rate-limit 429; tools 501 |
+| `backend/tests/integration/test_ai_jobs_api.py` | 202 returns job_id; poll; cancel |
+| `backend/tests/integration/test_ws_ai_chat.py` | Stream chunks; per-conn limits |
+| `backend/tests/integration/test_ws_ai_jobs.py` | Push on state change |
+| `backend/tests/integration/test_internal_litellm_verify.py` | Master-key flow |
+| `frontend/src/services/ai/useChatStream.test.ts` | WS reconnect + mountedRef |
+| `frontend/src/services/ai/useAiJob.test.ts` | Polling + WS push |
+| `frontend/src/features/ai/ChatPage.test.tsx` | Render history + send turn |
+| `frontend/src/features/ai/TradeTicketAiSection.test.tsx` | Failure-mode graceful degrade |
+| `frontend/src/features/admin/AdminAiPage.test.tsx` | Capability edit + key CRUD + nonce |
+| `tests/e2e/phase11a-chat.spec.ts` | Playwright: send chat, receive stream |
+| `tests/e2e/phase11a-admin-ai.spec.ts` | Playwright: rotate key with CSRF |
+
+**Target: ~50 backend + ~10 frontend + 2 Playwright (per spec §4 re-baseline).**
+
+---
+
+## Chunk A0 — Day-0 secret-flow spike
+
+Blocks chunks A1+. CRIT-1 gate.
+
+### Task 1: Set up local LiteLLM for the spike
+
+**Files:**
+- Create: `backend/tests/spike/__init__.py`
+- Create: `backend/tests/spike/conftest.py`
+
+- [ ] **Step 1: Create the spike package**
+
+Create `backend/tests/spike/__init__.py` as an empty file. Then create `backend/tests/spike/conftest.py`:
+
+```python
+"""Phase 11a-A0 spike: validate LiteLLM accepts request-body api_key
+per provider so Option C secret flow is viable. If any provider fails,
+that provider falls back to Option A (config-held key) — outcome
+recorded in deploy/litellm/secret_routing.md.
+"""
+from __future__ import annotations
+
+import os
+import socket
+import time
+
+import httpx
+import pytest
+
+LITELLM_URL = os.environ.get("SPIKE_LITELLM_URL", "http://localhost:4000")
+LITELLM_MASTER_KEY = os.environ.get("SPIKE_LITELLM_MASTER_KEY", "sk-spike-master")
+
+
+def _is_litellm_up(timeout_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("localhost", 4000), timeout=0.2):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+@pytest.fixture(scope="session")
+def litellm_url() -> str:
+    if not _is_litellm_up():
+        pytest.skip(
+            "LiteLLM not reachable on localhost:4000 — start it via "
+            "`docker run --rm -p 4000:4000 -v $PWD/deploy/litellm/config.yaml:/app/config.yaml "
+            "-e LITELLM_MASTER_KEY=sk-spike-master ghcr.io/berriai/litellm:main-latest "
+            "--config /app/config.yaml`"
+        )
+    return LITELLM_URL
+
+
+@pytest.fixture(scope="session")
+def litellm_client(litellm_url: str) -> httpx.Client:
+    return httpx.Client(
+        base_url=litellm_url,
+        headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
+        timeout=60.0,
+    )
+```
+
+- [ ] **Step 2: Verify spike package importable**
+
+Run: `cd backend && uv run pytest tests/spike/ -v --collect-only`
+Expected: `collected 0 items` (no tests yet; collection works).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add backend/tests/spike/__init__.py backend/tests/spike/conftest.py
+git commit -m "test(phase11a-A0): spike fixtures for per-request provider key validation"
+```
+
+### Task 2: Write the spike test matrix
+
+**Files:**
+- Create: `backend/tests/spike/test_per_request_provider_key.py`
+- Create: `deploy/litellm/config.spike.yaml`
+
+- [ ] **Step 1: Author the LiteLLM spike config**
+
+Create `deploy/litellm/config.spike.yaml`:
+
+```yaml
+# Phase 11a-A0 spike config — covers all 6 providers we care about.
+# NOT a production config; no real keys committed. Tests pass each
+# provider's api_key via request body and assert LiteLLM forwards it.
+model_list:
+  - model_name: ollama-nuc
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://localhost:11434
+  - model_name: ollama-heavy
+    litellm_params:
+      model: ollama/qwen2.5:32b
+      api_base: http://localhost:11434
+  - model_name: xai-grok
+    litellm_params:
+      model: xai/grok-2-latest
+      api_base: https://api.x.ai/v1
+  - model_name: gemini-pro
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+  - model_name: anthropic-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+  - model_name: openai-gpt4o
+    litellm_params:
+      model: openai/gpt-4o
+
+general_settings:
+  master_key: sk-spike-master
+```
+
+- [ ] **Step 2: Write the spike test**
+
+Create `backend/tests/spike/test_per_request_provider_key.py`:
+
+```python
+"""Phase 11a-A0 spike — for each provider, verify LiteLLM accepts a
+request-body api_key and forwards it. Failures here mean that provider
+falls back to Option A (config-held key) in production.
+
+Skipped unless SPIKE_PROVIDER_KEYS env is set with comma-separated
+provider names that have valid keys available. Example:
+
+    SPIKE_PROVIDER_KEYS=xai,anthropic \\
+    SPIKE_KEY_xai=xai-xxxxx \\
+    SPIKE_KEY_anthropic=sk-ant-xxxxx \\
+    pytest backend/tests/spike/test_per_request_provider_key.py -v
+"""
+from __future__ import annotations
+
+import os
+
+import httpx
+import pytest
+
+PROVIDERS_TO_TEST = [
+    p.strip() for p in os.environ.get("SPIKE_PROVIDER_KEYS", "").split(",") if p.strip()
+]
+
+PROVIDER_TO_MODEL = {
+    "ollama-nuc": "ollama-nuc",
+    "ollama-heavy": "ollama-heavy",
+    "xai": "xai-grok",
+    "gemini": "gemini-pro",
+    "anthropic": "anthropic-sonnet",
+    "openai": "openai-gpt4o",
+}
+
+
+@pytest.mark.parametrize("provider", PROVIDERS_TO_TEST or ["__skip__"])
+def test_provider_accepts_request_body_api_key(
+    litellm_client: httpx.Client, provider: str
+) -> None:
+    if provider == "__skip__":
+        pytest.skip("Set SPIKE_PROVIDER_KEYS to enable")
+    if provider not in PROVIDER_TO_MODEL:
+        pytest.fail(f"Unknown provider {provider!r}")
+
+    key_env = f"SPIKE_KEY_{provider}"
+    provider_key = os.environ.get(key_env)
+    if not provider_key:
+        pytest.skip(f"{key_env} not set")
+
+    body = {
+        "model": PROVIDER_TO_MODEL[provider],
+        "messages": [{"role": "user", "content": "Reply with the single word 'ok'."}],
+        "max_tokens": 10,
+        "api_key": provider_key,
+    }
+    resp = litellm_client.post("/v1/chat/completions", json=body)
+    assert resp.status_code == 200, f"{provider}: {resp.status_code} {resp.text[:200]}"
+    payload = resp.json()
+    assert payload.get("choices"), f"{provider}: no choices in {payload}"
+```
+
+- [ ] **Step 3: Run the spike against any provider you have a key for**
+
+Run: `cd backend && SPIKE_PROVIDER_KEYS=anthropic SPIKE_KEY_anthropic=$ANTHROPIC_API_KEY uv run pytest tests/spike/ -v`
+Expected (when LiteLLM is up and key is valid): one test passes.
+Expected (no LiteLLM): all tests skip with the "LiteLLM not reachable" message.
+
+- [ ] **Step 4: Document the outcome**
+
+Create `deploy/litellm/secret_routing.md`:
+
+```markdown
+# Phase 11a-A0 — per-provider secret routing outcome
+
+Validated 2026-05-12 via `backend/tests/spike/test_per_request_provider_key.py`.
+
+| Provider | Request-body `api_key` accepted? | Routing mode |
+|---|---|---|
+| ollama-nuc | yes (Ollama ignores key) | `request_body` |
+| ollama-heavy | yes (Ollama ignores key) | `request_body` |
+| xai-grok | TBD-spike | TBD |
+| gemini-pro | TBD-spike | TBD |
+| anthropic-sonnet | TBD-spike | TBD |
+| openai-gpt4o | TBD-spike | TBD |
+
+Providers marked `request_body` use Option C (BE signs each call). Providers
+that fail the spike fall back to **Option A**: config-held key, rotation
+via lifespan re-render + `docker compose up -d litellm`.
+
+This file is updated as each provider key is acquired and tested.
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/tests/spike/test_per_request_provider_key.py deploy/litellm/config.spike.yaml deploy/litellm/secret_routing.md
+git commit -m "test(phase11a-A0): per-provider request-body api_key spike + outcome doc"
+```
+
+### Task 3: Chunk-A0 reviewer chain
+
+- [ ] **Step 1: Dispatch reviewers**
+
+Per `feedback_review_per_chunk.md`, dispatch `spec-compliance` (haiku) + `python-reviewer` (haiku) on chunk A0 commits. Pass the spec slice for 11a-A0 inline per `feedback_reviewer_spec_inline.md`.
+
+- [ ] **Step 2: Apply CRIT+HIGH+MED findings inline**
+
+Per `feedback_architect_findings_apply_through_medium.md`.
+
+- [ ] **Step 3: Tag**
+
+```bash
+git tag -a v0.11.0.a0 -m "phase11a-A0 secret-flow spike infrastructure ready"
+git push --tags
+```
+
+---
+
+## Chunk A1 — LiteLLM proxy + migrations + capability map
+
+### Task 4: Add LiteLLM service to docker-compose
+
+**Files:**
+- Modify: `docker-compose.yml`
+- Create: `deploy/litellm/config.yaml`
+
+- [ ] **Step 1: Author the production LiteLLM config (no secrets)**
+
+Create `deploy/litellm/config.yaml`:
+
+```yaml
+# Production LiteLLM config — committed to git, contains NO secrets.
+# Provider keys arrive per-request from BE (Option C, validated in 11a-A0).
+# Master-key is validated via custom_auth callback against Redis (HIGH-5).
+model_list:
+  - model_name: ollama-nuc
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://10.10.0.2:11434
+  - model_name: ollama-nuc-llama
+    litellm_params:
+      model: ollama/llama3.2:8b
+      api_base: http://10.10.0.2:11434
+  - model_name: ollama-heavy
+    litellm_params:
+      model: ollama/qwen2.5:32b
+      api_base: http://10.10.0.3:11434
+  - model_name: ollama-heavy-70b
+    litellm_params:
+      model: ollama/llama3.3:70b
+      api_base: http://10.10.0.3:11434
+  - model_name: xai-grok
+    litellm_params:
+      model: xai/grok-2-latest
+      api_base: https://api.x.ai/v1
+  - model_name: gemini-pro
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+  - model_name: anthropic-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+  - model_name: openai-gpt4o
+    litellm_params:
+      model: openai/gpt-4o
+
+general_settings:
+  custom_auth: services.ai.litellm_auth_callback.user_api_key_auth
+```
+
+- [ ] **Step 2: Add `litellm:` service to docker-compose.yml**
+
+Modify `docker-compose.yml` — append before the closing `volumes:` section (after the existing `frontend:` service block):
+
+```yaml
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: dashboard-litellm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+      - ./backend/app/services/ai:/app/custom_auth/services/ai:ro
+    environment:
+      PYTHONPATH: /app/custom_auth
+      LITELLM_LOG: WARNING
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4000/health/liveliness"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - default
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+```
+
+- [ ] **Step 3: Validate compose file**
+
+Run: `docker compose config | grep -A 20 litellm:`
+Expected: `litellm:` block renders with the configured image, ports, volumes, healthcheck.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docker-compose.yml deploy/litellm/config.yaml
+git commit -m "feat(phase11a-A1): add LiteLLM proxy sidecar to docker-compose"
+```
+
+### Task 5: Alembic 0041 — ai_completions hypertable
+
+**Files:**
+- Create: `backend/alembic/versions/0041_phase11a_ai_completions.py`
+- Test: `backend/tests/migrations/test_0041_ai_completions.py`
+
+- [ ] **Step 1: Write the failing migration test**
+
+Create `backend/tests/migrations/test_0041_ai_completions.py`:
+
+```python
+"""Phase 11a-A1: ai_completions hypertable migration test."""
+from __future__ import annotations
+
+import pytest
+from sqlalchemy import text
+
+from app.core.db import SessionLocal
+
+
+@pytest.mark.asyncio
+async def test_ai_completions_is_hypertable() -> None:
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text(
+                "SELECT hypertable_name FROM timescaledb_information.hypertables "
+                "WHERE hypertable_name = 'ai_completions'"
+            )
+        )
+        assert result.scalar_one() == "ai_completions"
+
+
+@pytest.mark.asyncio
+async def test_ai_completions_columns_present() -> None:
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'ai_completions' ORDER BY ordinal_position"
+            )
+        )
+        cols = {row[0] for row in result.fetchall()}
+    expected = {
+        "ts", "request_id", "jwt_subject", "capability", "provider",
+        "model", "host", "prompt_tokens", "completion_tokens",
+        "wall_time_ms", "wol_warmup_ms", "outcome", "error_class", "caller",
+    }
+    missing = expected - cols
+    assert not missing, f"missing columns: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_ai_completions_retention_policy() -> None:
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text(
+                "SELECT config FROM timescaledb_information.jobs "
+                "WHERE proc_name = 'policy_retention' "
+                "  AND hypertable_name = 'ai_completions'"
+            )
+        )
+        config = result.scalar_one()
+        assert "drop_after" in config
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd backend && uv run pytest tests/migrations/test_0041_ai_completions.py -v`
+Expected: FAIL with `relation "ai_completions" does not exist` or similar.
+
+- [ ] **Step 3: Author the migration**
+
+Create `backend/alembic/versions/0041_phase11a_ai_completions.py`:
+
+```python
+"""phase11a ai_completions hypertable
+
+Revision ID: 0041
+Revises: 0040
+Create Date: 2026-05-12
+
+Phase 11a-A1 §6: cost ledger hypertable (chunk 7d, retention 1y,
+compress after 90d per LOW-5). Captures every AI call attempt
+including failures so capacity planning is honest.
+"""
+from __future__ import annotations
+
+from alembic import op
+
+
+# revision identifiers
+revision = "0041"
+down_revision = "0040"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.execute(
+        """
+        CREATE TABLE ai_completions (
+            ts            TIMESTAMPTZ NOT NULL,
+            request_id    UUID        NOT NULL,
+            jwt_subject   TEXT        NOT NULL,
+            capability    TEXT        NOT NULL,
+            provider      TEXT        NOT NULL,
+            model         TEXT        NOT NULL,
+            host          TEXT        NOT NULL,
+            prompt_tokens INTEGER     NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            wall_time_ms  INTEGER     NOT NULL DEFAULT 0,
+            wol_warmup_ms INTEGER     NOT NULL DEFAULT 0,
+            outcome       TEXT        NOT NULL,
+            error_class   TEXT,
+            caller        TEXT        NOT NULL,
+            CHECK (outcome IN ('ok', 'failed', 'timeout', 'rate_limited', 'fallback')),
+            CHECK (capability ~ '^[A-Z_]+$'),
+            CHECK (host IN ('nuc', 'heavy', 'cloud'))
+        );
+        """
+    )
+    op.execute(
+        "SELECT create_hypertable('ai_completions', 'ts', "
+        "chunk_time_interval => INTERVAL '7 days');"
+    )
+    op.execute(
+        "SELECT add_retention_policy('ai_completions', INTERVAL '1 year');"
+    )
+    op.execute(
+        "ALTER TABLE ai_completions SET ("
+        "  timescaledb.compress, "
+        "  timescaledb.compress_segmentby = 'provider, capability'"
+        ");"
+    )
+    op.execute(
+        "SELECT add_compression_policy('ai_completions', INTERVAL '90 days');"
+    )
+    op.execute(
+        "CREATE INDEX idx_ai_completions_subject_ts "
+        "ON ai_completions (jwt_subject, ts DESC);"
+    )
+    op.execute(
+        "CREATE INDEX idx_ai_completions_caller_ts "
+        "ON ai_completions (caller, ts DESC);"
+    )
+
+
+def downgrade() -> None:
+    op.execute("DROP TABLE IF EXISTS ai_completions CASCADE;")
+```
+
+- [ ] **Step 4: Apply the migration**
+
+Run: `docker compose exec backend alembic upgrade head`
+Expected: `Running upgrade 0040 -> 0041, phase11a ai_completions hypertable`.
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `cd backend && uv run pytest tests/migrations/test_0041_ai_completions.py -v`
+Expected: all 3 tests PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/alembic/versions/0041_phase11a_ai_completions.py backend/tests/migrations/test_0041_ai_completions.py
+git commit -m "feat(phase11a-A1): alembic 0041 ai_completions hypertable + retention + compression"
+```
+
+### Task 6: Alembic 0042 — ai_jobs table
+
+**Files:**
+- Create: `backend/alembic/versions/0042_phase11a_ai_jobs.py`
+- Test: `backend/tests/migrations/test_0042_ai_jobs.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `backend/tests/migrations/test_0042_ai_jobs.py`:
+
+```python
+"""Phase 11a-A1: ai_jobs table migration test."""
+from __future__ import annotations
+
+import pytest
+from sqlalchemy import text
+
+from app.core.db import SessionLocal
+
+
+@pytest.mark.asyncio
+async def test_ai_jobs_columns_and_indices() -> None:
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'ai_jobs'"
+            )
+        )
+        cols = {row[0] for row in result.fetchall()}
+    expected = {
+        "id", "jwt_subject", "status", "capability",
+        "request_jsonb", "response_jsonb", "error",
+        "started_at", "warming_started_at", "inferring_started_at",
+        "completed_at", "cancel_requested",
+    }
+    missing = expected - cols
+    assert not missing, f"missing columns: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_ai_jobs_has_status_started_at_index() -> None:
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'ai_jobs' "
+                "  AND indexname = 'idx_ai_jobs_status_started_at'"
+            )
+        )
+        assert result.scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+async def test_ai_jobs_is_not_hypertable() -> None:
+    """LOW-6: ai_jobs deliberately NOT a hypertable."""
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text(
+                "SELECT COUNT(*) FROM timescaledb_information.hypertables "
+                "WHERE hypertable_name = 'ai_jobs'"
+            )
+        )
+        assert result.scalar_one() == 0
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `cd backend && uv run pytest tests/migrations/test_0042_ai_jobs.py -v`
+Expected: FAIL — table doesn't exist.
+
+- [ ] **Step 3: Author the migration**
+
+Create `backend/alembic/versions/0042_phase11a_ai_jobs.py`:
+
+```python
+"""phase11a ai_jobs async-job store
+
+Revision ID: 0042
+Revises: 0041
+Create Date: 2026-05-12
+
+Phase 11a-A1 §6 (HIGH-8): per-state-transition timestamps for split
+orphan-recovery thresholds (warming 90s, inferring 10min). Plain
+table not hypertable per LOW-6 (job volume is small + queries are by
+status not time-range).
+"""
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+
+
+revision = "0042"
+down_revision = "0041"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.execute(
+        """
+        CREATE TABLE ai_jobs (
+            id                    UUID PRIMARY KEY,
+            jwt_subject           TEXT NOT NULL,
+            status                TEXT NOT NULL,
+            capability            TEXT NOT NULL,
+            request_jsonb         JSONB NOT NULL,
+            response_jsonb        JSONB,
+            error                 TEXT,
+            started_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+            warming_started_at    TIMESTAMPTZ,
+            inferring_started_at  TIMESTAMPTZ,
+            completed_at          TIMESTAMPTZ,
+            cancel_requested      BOOLEAN NOT NULL DEFAULT false,
+            CHECK (status IN ('pending','warming','inferring','completed','failed','cancelled'))
+        );
+        """
+    )
+    op.execute(
+        "CREATE INDEX idx_ai_jobs_status_started_at "
+        "ON ai_jobs (status, started_at) "
+        "WHERE status IN ('pending','warming','inferring');"
+    )
+    op.execute(
+        "CREATE INDEX idx_ai_jobs_subject_started_at "
+        "ON ai_jobs (jwt_subject, started_at DESC);"
+    )
+
+
+def downgrade() -> None:
+    op.execute("DROP TABLE IF EXISTS ai_jobs;")
+```
+
+- [ ] **Step 4: Apply**
+
+Run: `docker compose exec backend alembic upgrade head`
+Expected: `Running upgrade 0041 -> 0042`.
+
+- [ ] **Step 5: Run test to verify pass**
+
+Run: `cd backend && uv run pytest tests/migrations/test_0042_ai_jobs.py -v`
+Expected: 3 PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/alembic/versions/0042_phase11a_ai_jobs.py backend/tests/migrations/test_0042_ai_jobs.py
+git commit -m "feat(phase11a-A1): alembic 0042 ai_jobs table + split-orphan timestamps"
+```
+
+### Task 7: Capability map in app_config
+
+**Files:**
+- Create: `backend/app/services/ai/__init__.py`
+- Create: `backend/app/services/ai/capabilities.py`
+- Create: `backend/app/services/ai/exceptions.py`
+- Create: `backend/app/services/ai/types.py`
+- Test: `backend/tests/services/ai/__init__.py`
+- Test: `backend/tests/services/ai/test_capabilities.py`
+
+- [ ] **Step 1: Create empty module markers**
+
+Create `backend/app/services/ai/__init__.py`:
+
+```python
+"""Phase 11 — services/ai/ module.
+
+Single boundary between consumers (alerts, telegram, trade ticket, chat,
+future Phase 18 scanner + Phase 21 bot-engine) and the LiteLLM proxy.
+Anyone who needs an LLM completion imports AICompletionClient from here.
+"""
+from __future__ import annotations
+
+from app.services.ai.capabilities import AICapability
+from app.services.ai.exceptions import (
+    AIProxyUnavailableError,
+    AITimeoutError,
+    AIToolCallingNotSupportedError,
+    LocalModelsUnavailableError,
+    StructuredOutputFailedError,
+)
+
+__all__ = [
+    "AICapability",
+    "AIProxyUnavailableError",
+    "AITimeoutError",
+    "AIToolCallingNotSupportedError",
+    "LocalModelsUnavailableError",
+    "StructuredOutputFailedError",
+]
+```
+
+Create `backend/tests/services/ai/__init__.py` as empty.
+
+- [ ] **Step 2: Create exceptions module**
+
+Create `backend/app/services/ai/exceptions.py`:
+
+```python
+"""Phase 11a-B: typed exceptions for services/ai/ (LOW-2 — Error suffix
+consistent with Phase 10a RiskGateBlockedError style)."""
+from __future__ import annotations
+
+
+class AIError(Exception):
+    """Base for all services/ai/ errors."""
+
+
+class LocalModelsUnavailableError(AIError):
+    """LOCAL_ONLY request but no local models reachable (CRIT-3 fail path)."""
+
+
+class AIProxyUnavailableError(AIError):
+    """LiteLLM proxy unreachable after retries."""
+
+
+class StructuredOutputFailedError(AIError):
+    """Model returned non-JSON-schema-conformant output twice in a row."""
+
+    def __init__(self, raw_text: str, schema_error: str) -> None:
+        super().__init__(f"structured output failed: {schema_error}")
+        self.raw_text = raw_text
+        self.schema_error = schema_error
+
+
+class AITimeoutError(AIError):
+    """Request exceeded the configured timeout window."""
+
+
+class AIToolCallingNotSupportedError(AIError):
+    """HIGH-4 forward-compat: tools param present but v0.11.0 rejects it."""
+```
+
+- [ ] **Step 3: Write the failing capability test**
+
+Create `backend/tests/services/ai/test_capabilities.py`:
+
+```python
+"""Phase 11a-A1: capability-map resolution tests."""
+from __future__ import annotations
+
+import pytest
+
+from app.services.ai.capabilities import (
+    AICapability,
+    resolve_models,
+)
+
+
+def test_capability_enum_has_eight_values() -> None:
+    assert {c.value for c in AICapability} == {
+        "LOCAL_ONLY",
+        "LONG_CONTEXT",
+        "REALTIME_SENTIMENT",
+        "STRUCTURED_OUTPUT",
+        "BULK_CHEAP",
+        "REASONING",
+        "NUMERICAL",
+        "CODING",
+    }
+
+
+def test_local_only_excludes_cloud_models() -> None:
+    capability_map = {
+        "LOCAL_ONLY": [
+            {"provider": "ollama-nuc", "model": "qwen2.5:7b"},
+            {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+            {"provider": "ollama-heavy", "model": "qwen2.5:32b"},
+        ],
+    }
+    available_providers = {"ollama-nuc", "anthropic", "ollama-heavy"}
+    models = resolve_models(
+        AICapability.LOCAL_ONLY,
+        capability_map=capability_map,
+        available_providers=available_providers,
+    )
+    assert [(m.provider, m.model) for m in models] == [
+        ("ollama-nuc", "qwen2.5:7b"),
+        ("ollama-heavy", "qwen2.5:32b"),
+    ]
+
+
+def test_force_local_only_overrides_capability_default() -> None:
+    """CRIT-3: parser passes force_local_only=True even when capability
+    is STRUCTURED_OUTPUT (which would otherwise allow cloud)."""
+    capability_map = {
+        "STRUCTURED_OUTPUT": [
+            {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+            {"provider": "ollama-nuc", "model": "qwen2.5:7b"},
+        ],
+    }
+    available_providers = {"anthropic", "ollama-nuc"}
+    models = resolve_models(
+        AICapability.STRUCTURED_OUTPUT,
+        capability_map=capability_map,
+        available_providers=available_providers,
+        force_local_only=True,
+    )
+    assert [(m.provider, m.model) for m in models] == [
+        ("ollama-nuc", "qwen2.5:7b")
+    ]
+
+
+def test_missing_provider_key_drops_entry() -> None:
+    capability_map = {
+        "REASONING": [
+            {"provider": "anthropic", "model": "claude-opus-4-7"},
+            {"provider": "ollama-heavy", "model": "qwen2.5:32b"},
+        ],
+    }
+    available_providers = {"ollama-heavy"}  # anthropic key missing
+    models = resolve_models(
+        AICapability.REASONING,
+        capability_map=capability_map,
+        available_providers=available_providers,
+    )
+    assert [(m.provider, m.model) for m in models] == [
+        ("ollama-heavy", "qwen2.5:32b")
+    ]
+
+
+def test_unknown_capability_returns_empty() -> None:
+    models = resolve_models(
+        AICapability.NUMERICAL,
+        capability_map={},
+        available_providers={"anthropic"},
+    )
+    assert models == []
+```
+
+- [ ] **Step 4: Run test to verify failure**
+
+Run: `cd backend && uv run pytest tests/services/ai/test_capabilities.py -v`
+Expected: FAIL — `capabilities` module doesn't exist yet.
+
+- [ ] **Step 5: Author the capability module**
+
+Create `backend/app/services/ai/capabilities.py`:
+
+```python
+"""Phase 11a-A1: AICapability enum + resolve_models() pure function.
+
+Each consumer asks for completion by capability rather than by exact
+model. The router consults app_config:ai_router to map capability →
+ordered model list, then walks it with LOCAL_ONLY filter applied and
+missing-provider-key entries removed.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+# Providers whose endpoint sits inside the WG/LAN — used by LOCAL_ONLY
+# privacy floor. Centralising the membership in one constant means the
+# router cannot accidentally route a LOCAL_ONLY request to a cloud
+# provider by misclassifying.
+LOCAL_PROVIDERS: frozenset[str] = frozenset(
+    {"ollama-nuc", "ollama-heavy"}
+)
+
+
+class AICapability(StrEnum):
+    """Capability tags consumers attach to a CompletionRequest."""
+
+    LOCAL_ONLY = "LOCAL_ONLY"
+    LONG_CONTEXT = "LONG_CONTEXT"
+    REALTIME_SENTIMENT = "REALTIME_SENTIMENT"
+    STRUCTURED_OUTPUT = "STRUCTURED_OUTPUT"
+    BULK_CHEAP = "BULK_CHEAP"
+    REASONING = "REASONING"
+    NUMERICAL = "NUMERICAL"
+    CODING = "CODING"
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    provider: str
+    model: str
+
+
+def resolve_models(
+    capability: AICapability,
+    *,
+    capability_map: dict[str, list[dict[str, str]]],
+    available_providers: set[str] | frozenset[str],
+    force_local_only: bool = False,
+) -> list[ResolvedModel]:
+    """Return the ordered fallback chain for a capability.
+
+    Args:
+        capability: tag from the consumer.
+        capability_map: from app_config:ai_router; each value is an
+          ordered list of ``{"provider": str, "model": str}`` entries.
+        available_providers: set of providers whose api_key is configured.
+        force_local_only: CRIT-3 — parser sets this regardless of the
+          capability so the rule-NL stays inside the WG.
+
+    Returns:
+        Empty list if no entries survive both filters.
+    """
+    entries = capability_map.get(capability.value, [])
+    out: list[ResolvedModel] = []
+    enforce_local = force_local_only or capability is AICapability.LOCAL_ONLY
+    for entry in entries:
+        provider = entry["provider"]
+        model = entry["model"]
+        if provider not in available_providers:
+            continue
+        if enforce_local and provider not in LOCAL_PROVIDERS:
+            continue
+        out.append(ResolvedModel(provider=provider, model=model))
+    return out
+```
+
+- [ ] **Step 6: Create the types module**
+
+Create `backend/app/services/ai/types.py`:
+
+```python
+"""Phase 11a-B: request/response shapes for services/ai/."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+from app.services.ai.capabilities import AICapability
+
+
+class ToolDef(BaseModel):
+    """HIGH-4 forward-compat placeholder. v0.11.0 rejects non-None."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+class CompletionRequest(BaseModel):
+    messages: list[dict[str, str]] = Field(..., min_length=1)
+    capability: AICapability
+    caller: str = Field(..., description="consumer name for cost ledger")
+    response_format: dict[str, Any] | None = None
+    max_tokens: int = Field(default=1024, ge=1, le=32768)
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    tools: list[ToolDef] | None = None  # HIGH-4 — rejected with 501 at v0.11.0
+    force_local_only: bool = False  # CRIT-3 — parser path
+
+
+class CompletionResult(BaseModel):
+    request_id: UUID
+    text: str
+    provider: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    wall_time_ms: int
+    fallback_chain: list["FallbackHop"] = Field(default_factory=list)
+
+
+class FallbackHop(BaseModel):
+    """MED-8 — record each attempted provider/model + reason for skipping."""
+
+    from_provider: str
+    from_model: str
+    reason: str
+
+
+class Chunk(BaseModel):
+    """Streaming chunk shape."""
+
+    delta: str
+    finish_reason: Literal["stop", "length", "tool_calls", None] = None
+
+
+class JobStatus(BaseModel):
+    id: UUID
+    status: Literal[
+        "pending", "warming", "inferring", "completed", "failed", "cancelled"
+    ]
+    response: CompletionResult | None = None
+    error: str | None = None
+
+
+CompletionResult.model_rebuild()
+```
+
+- [ ] **Step 7: Run the test to verify it passes**
+
+Run: `cd backend && uv run pytest tests/services/ai/test_capabilities.py -v`
+Expected: 5 PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add backend/app/services/ai/__init__.py backend/app/services/ai/capabilities.py backend/app/services/ai/exceptions.py backend/app/services/ai/types.py backend/tests/services/ai/__init__.py backend/tests/services/ai/test_capabilities.py
+git commit -m "feat(phase11a-A1): AICapability enum + resolve_models() + exceptions + types"
+```
+
+### Task 8: Seed default capability map in app_config
+
+**Files:**
+- Modify: `backend/app/services/config_defaults.py`
+- Test: extend `backend/tests/services/ai/test_capabilities.py`
+
+- [ ] **Step 1: Locate the config_defaults module**
+
+Run: `grep -n "DEFAULT" /home/joseph/dashboard/backend/app/services/config_defaults.py | head -10`
+Expected: existing defaults map shape — read enough to mimic.
+
+- [ ] **Step 2: Add ai_router defaults**
+
+Append to `backend/app/services/config_defaults.py` (after the last `DEFAULT_*` constant; the engineer reads the existing file to confirm append point):
+
+```python
+# Phase 11a-A1: AI router capability map default.
+#
+# Ordering matters: first entry is preferred, subsequent entries are
+# fallbacks. Provider keys that aren't configured at runtime are
+# automatically removed by resolve_models().
+DEFAULT_AI_ROUTER_CAPABILITY_MAP: dict[str, list[dict[str, str]]] = {
+    "LOCAL_ONLY": [
+        {"provider": "ollama-nuc", "model": "qwen2.5:7b"},
+        {"provider": "ollama-nuc-llama", "model": "llama3.2:8b"},
+        {"provider": "ollama-heavy", "model": "qwen2.5:32b"},
+    ],
+    "STRUCTURED_OUTPUT": [
+        {"provider": "ollama-nuc", "model": "qwen2.5:7b"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+        {"provider": "openai-gpt4o", "model": "gpt-4o"},
+    ],
+    "LONG_CONTEXT": [
+        {"provider": "gemini-pro", "model": "gemini-2.5-pro"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+    "REALTIME_SENTIMENT": [
+        {"provider": "xai-grok", "model": "grok-2-latest"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+    "REASONING": [
+        {"provider": "ollama-heavy-70b", "model": "llama3.3:70b"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+        {"provider": "ollama-heavy", "model": "qwen2.5:32b"},
+    ],
+    "BULK_CHEAP": [
+        {"provider": "gemini-pro", "model": "gemini-2.5-flash"},
+        {"provider": "openai-gpt4o", "model": "gpt-4o-mini"},
+    ],
+    "NUMERICAL": [
+        {"provider": "openai-gpt4o", "model": "gpt-4o"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+    "CODING": [
+        {"provider": "ollama-heavy", "model": "qwen2.5-coder:32b"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+}
+```
+
+- [ ] **Step 3: Wire the default into the boot-time seeding code**
+
+Run: `grep -n "DEFAULT.*= " /home/joseph/dashboard/backend/app/services/config_defaults.py | head -20` to identify the seeding function. Add the new namespace entry into whatever dict drives app_config seeding (mirror existing entries). Specifically, locate `seed_app_config(...)` or equivalent function and add:
+
+```python
+await config_svc.set_namespace(
+    "ai_router", {"capability_map": DEFAULT_AI_ROUTER_CAPABILITY_MAP}
+)
+```
+
+inside the existing seeding flow.
+
+- [ ] **Step 4: Add an integration test**
+
+Append to `backend/tests/services/ai/test_capabilities.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_default_capability_map_loaded_on_seed() -> None:
+    from app.services.config import get_config_service
+    cfg = await get_config_service()
+    val = await cfg.get_namespace("ai_router")
+    assert "capability_map" in val
+    assert "LOCAL_ONLY" in val["capability_map"]
+    assert val["capability_map"]["LOCAL_ONLY"][0]["provider"] == "ollama-nuc"
+```
+
+- [ ] **Step 5: Run all capability tests**
+
+Run: `cd backend && uv run pytest tests/services/ai/test_capabilities.py -v`
+Expected: 6 PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/app/services/config_defaults.py backend/tests/services/ai/test_capabilities.py
+git commit -m "feat(phase11a-A1): seed default ai_router capability map in app_config"
+```
+
+### Task 9: Chunk-A1 reviewer chain + tag
+
+- [ ] **Step 1: Dispatch reviewers**
+
+Per CLAUDE.md routing: spec-compliance (haiku), python-reviewer (haiku), database-reviewer (sonnet) — mandatory on chunks with new migrations. Inline spec slice for 11a-A1.
+
+- [ ] **Step 2: Apply CRIT+HIGH+MED findings inline**
+
+- [ ] **Step 3: Tag**
+
+```bash
+git tag -a v0.11.0.a1 -m "phase11a-A1 proxy + migrations + capability map shipped"
+git push --tags
+```
+
+---
+
+## The remaining chunks (A.5, A2, B, C, D) are scaffolded below as task-block stubs
+
+**This plan is intentionally split.** Chunks A0 + A1 land first as an independent reviewable milestone. The remaining chunks each get their detailed task list once A1 closes — because:
+
+1. **A.5 LiteLLM auth-callback** depends on knowing whether the spike validated request-body keys for all providers (drives whether the auth-callback also has to handle per-provider routing decisions).
+2. **A2 WoL** depends on heavy-box install runbook outcomes from operator (we don't know yet if heavy box is Linux or Windows-native).
+3. **B services/ai/ core** depends on the `litellm_auth_callback.py` interface decided in A.5.
+4. **C endpoints** depend on the final `AICompletionClient` ABC shape from B.
+5. **D frontend** depends on the OpenAPI schema regenerated after C.
+
+Writing detailed tasks for D before B closes would require placeholder types that A.5/B might refactor. Per writing-plans skill: *"every step must contain the actual content an engineer needs"* — speculative tasks would violate that.
+
+### Chunk A.5 — LiteLLM auth-callback (sketch)
+
+**Files to create:** `backend/app/services/ai/litellm_auth_callback.py`, `backend/app/api/internal_litellm.py`, tests.
+
+**Task outline:**
+1. Add `ai:litellm_master_key` Redis bootstrap to backend lifespan.
+2. Author `services/ai/litellm_auth_callback.py` with the `user_api_key_auth` function signature LiteLLM expects.
+3. Add `POST /internal/litellm/verify` endpoint (called by the callback over docker network).
+4. Add `PUT /api/admin/secrets/ai/litellm_master_key` admin rotation endpoint with CSRF nonce.
+5. Test: unauthorized header rejected; current key accepted; rotation visible without restart; LOCAL_ONLY-tagged request rejected if routes to cloud (third defence layer).
+6. Reviewer chain (haiku + sonnet for security).
+7. Tag `v0.11.0.a5`.
+
+### Chunk A2 — WoL + Ollama service installs (sketch)
+
+**Files to create:** `backend/app/services/ai/wol.py`, `deploy/nuc/install-ollama.ps1`, `deploy/heavybox/install-ollama.sh`, `deploy/heavybox/idle-suspend.service`, tests.
+
+**Task outline:**
+1. Operator runbook task: install Ollama Windows service on NUC; pull `qwen2.5:7b` + `llama3.2:8b`; verify `curl http://10.10.0.2:11434/api/tags` returns model list.
+2. Operator runbook task: install Ollama on heavy box; pull `qwen2.5:32b` + `llama3.3:70b` + `qwen2.5-coder:32b`; install idle-suspend timer.
+3. Verify WoL packet path: VPS → NUC → heavy box (LAN broadcast). If two-hop fails, create NUC-side WoL helper PowerShell.
+4. TDD: `services/ai/wol.py::HeavyBoxWoL` magic packet shape; model-ready probe via `GET /api/tags`; circuit-breaker open after 3 failures in 10min.
+5. Metrics: `ai_router_wol_wake_total`, `wol_wake_latency_seconds`, `wol_warm_to_ready_seconds`, `wol_wake_failures_total`, `wol_circuit_breaker_state{host}`.
+6. Reviewer chain (haiku + sonnet for code-quality).
+7. Tag `v0.11.0.a2`.
+
+### Chunk B — services/ai/ core (sketch)
+
+**Files to create:** `backend/app/services/ai/router.py`, `secrets.py`, `cost_ledger.py`, `jobs.py`, `rate_limiter.py`, `services/common/rate_limiter.py`, `services/common/ws_envelope.py`, tests.
+
+**Task outline:**
+1. Extract `SlidingWindowRateLimiter[K]` generic from `portfolio_rate_limiter` + `position_sizing_rate_limiter` (MED-3 — no-op refactor; existing tests stay green).
+2. Extract `make_ws_endpoint(...)` from `ws_portfolio` patterns (MED-4).
+3. Author `services/ai/secrets.py` with 60s TTL cache + pubsub-invalidation listener.
+4. Author `services/ai/cost_ledger.py` fire-and-forget batched writer (HIGH-2). Bounded queue + drop-oldest + counters + fail-OPEN.
+5. Author `services/ai/jobs.py` PG-backed async-job store + pubsub `ai:job:{id}` + orphan recovery (HIGH-8).
+6. Author `services/ai/router.py` `AICompletionClient` ABC + `LiteLLMClient` impl with:
+   - `complete`, `stream`, `batch_complete`, `submit_job`, `get_job`, `cancel_job` (HIGH-4 batch + tools)
+   - Router-level fallback walk
+   - Per-capability semaphore (HIGH-9)
+   - 501 on `tools is not None`
+   - Per-request `api_key` injection from `secrets.py`
+   - Fallback-chain metadata on `CompletionResult` (MED-8)
+7. Wire all three into lifespan (`app.state.ai_router`).
+8. Add 24 new metric series (§6 of spec).
+9. Reviewer chain (haiku + sonnet for code-quality + sonnet for silent-failure-hunter).
+10. Tag `v0.11.0.b`.
+
+### Chunk C — REST + WS endpoints (sketch)
+
+**Files to create:** `backend/app/api/ai.py`, `backend/app/api/ws_ai.py`, tests.
+
+**Task outline:**
+1. `POST /api/ai/complete` with LOCAL_ONLY API-boundary check (defence layer 1) + rate-limit + 501 on tools.
+2. `POST /api/ai/jobs` returns 202 + `{job_id}`.
+3. `GET /api/ai/jobs/{id}` polls status.
+4. `DELETE /api/ai/jobs/{id}` sets cancel flag.
+5. `WS /ws/ai/chat` via `make_ws_endpoint` with per-conn turn limiter (5/min) and 10s send timeout.
+6. `WS /ws/ai/jobs/{id}` pushes state changes via pubsub.
+7. Integration tests covering each failure mode in Flow A + B from the spec.
+8. Regenerate `api-generated.ts` via `scripts/gen-types.sh`.
+9. Reviewer chain (haiku + sonnet code + sonnet security).
+10. Tag `v0.11.0.c`.
+
+### Chunk D — Frontend (sketch)
+
+**Files to create:** all `frontend/src/features/ai/`, `services/ai/`, routes, store.
+
+**Task outline:**
+1. `services/ai/api.ts` + `types.ts` (re-exports).
+2. `useChatStream.ts` with bounded backoff reconnect + mountedRef + per-turn-limit UI feedback.
+3. `useAiJob.ts` with WS push + REST fallback poll.
+4. `useTradeContext.ts` one-shot with graceful-degrade failure mode.
+5. `ChatPage.tsx` + `ChatMessage.tsx` + `ModelPicker.tsx`.
+6. `TradeTicketAiSection.tsx` + insert into TradeTicketModal.
+7. `AdminAiPage.tsx` with capability map editor + provider-key CRUD (CSRF nonce) + cost-ledger view + heavy-box state.
+8. `stores/global/ai.ts` zustand-persist for chat + default model.
+9. Frontend Vitest tests for each component + hook.
+10. 2 Playwright smokes.
+11. Reviewer chain (haiku spec + haiku typescript + sonnet code).
+12. Tag `v0.11.0` — phase 11a close.
+
+---
+
+## Phase 11a close-out tasks
+
+After Chunk D tag:
+
+1. Update `CLAUDE.md` — add Phase 11a load-bearing rule block describing `services/ai/`, LiteLLM proxy, WoL.
+2. Update `CHANGELOG.md` with v0.11.0 section.
+3. Update `TASKS.md` — flip Phase 11a row to ✅.
+4. Write memory `phase11a_shipped.md`.
+5. Push tag + final close-out commit.
+
+---
+
+## Self-review notes for the engineer
+
+- **Spec coverage:** Chunks A0 + A1 cover spec §2 11a-A0 + 11a-A1 in full. Subsequent chunks documented as sketches with task outlines; each gets a detailed task block written when its predecessor closes (this keeps the plan honest — speculative tasks for D before B's ABC shape is final would create rework).
+- **TDD discipline:** every chunk uses test-first; tests fail before implementation.
+- **Frequent commits:** each task ends with a commit; chunks tag at close.
+- **Reviewer chain:** every chunk dispatches the spec-routed reviewer set per CLAUDE.md before tag.
+- **CRIT/HIGH/MED architect findings:** baked into the task content directly — see references like `(CRIT-3)`, `(HIGH-2)` in code comments and module docstrings.
