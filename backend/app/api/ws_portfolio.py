@@ -85,13 +85,31 @@ async def ws_portfolio_rollup(ws: WebSocket, base: str = Query(default="GBP")) -
     pubsub = redis.pubsub()
     await pubsub.subscribe(_DIRTY_CHANNEL)
     dirty = asyncio.Event()
+    disconnected = asyncio.Event()
 
     listener_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
+    recv_task: asyncio.Task[None] | None = None
 
     async def _listen() -> None:
         async for _msg in pubsub.listen():
             dirty.set()
+
+    async def _recv_drain() -> None:
+        """Drain incoming frames to surface WebSocketDisconnect promptly.
+
+        The gateway is push-only — clients aren't expected to send frames —
+        but without a recv() the FastAPI WebSocket never sees the client's
+        close frame and the loop only notices via send-side errors. Mirror
+        the pattern used by bars.py:489 (poll-and-discard).
+        """
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            disconnected.set()
+        except Exception:
+            disconnected.set()
 
     async def _heartbeat() -> None:
         while ws.client_state == WebSocketState.CONNECTED:
@@ -115,6 +133,7 @@ async def ws_portfolio_rollup(ws: WebSocket, base: str = Query(default="GBP")) -
     try:
         listener_task = asyncio.create_task(_listen())
         heartbeat_task = asyncio.create_task(_heartbeat())
+        recv_task = asyncio.create_task(_recv_drain())
 
         # Initial snapshot
         last_payload: dict[str, Any] | None = None
@@ -139,11 +158,21 @@ async def ws_portfolio_rollup(ws: WebSocket, base: str = Query(default="GBP")) -
             return
 
         # Main push loop
-        while ws.client_state == WebSocketState.CONNECTED:
-            try:
-                await asyncio.wait_for(dirty.wait(), timeout=_DEBOUNCE_S)
-            except TimeoutError:
-                pass
+        while ws.client_state == WebSocketState.CONNECTED and not disconnected.is_set():
+            # Wait for either a dirty pubsub signal or the recv drain task
+            # raising WebSocketDisconnect (sets disconnected). Either wakes us.
+            wait_for_dirty = asyncio.create_task(dirty.wait())
+            wait_for_disc = asyncio.create_task(disconnected.wait())
+            _done, pending = await asyncio.wait(
+                (wait_for_dirty, wait_for_disc),
+                timeout=_DEBOUNCE_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for p in pending:
+                p.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if disconnected.is_set():
+                break
             dirty.clear()
 
             now = time.monotonic()
@@ -182,12 +211,11 @@ async def ws_portfolio_rollup(ws: WebSocket, base: str = Query(default="GBP")) -
         if ws.client_state == WebSocketState.CONNECTED:
             await ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="unhandled")
     finally:
-        if listener_task is not None:
-            listener_task.cancel()
-        if heartbeat_task is not None:
-            heartbeat_task.cancel()
+        for t in (listener_task, heartbeat_task, recv_task):
+            if t is not None:
+                t.cancel()
         await asyncio.gather(
-            *(t for t in (listener_task, heartbeat_task) if t is not None),
+            *(t for t in (listener_task, heartbeat_task, recv_task) if t is not None),
             return_exceptions=True,
         )
         try:
