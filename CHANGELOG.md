@@ -5,7 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
-## [0.14.0] — 2026-05-12
+## [0.12.3] — 2026-05-12
 
 ### Phase 10b.2 — Multi-account portfolio rollup (32 commits since v0.13.0)
 
@@ -70,11 +70,13 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. 
 Downgrade order: 0040 drops CAGGs cleanly (1d before 1h); 0039 drops the hypertable with `CASCADE` and removes retention policy. `BalanceSnapshotWriter` wiring in `main.py` is `BalanceSnapshotWriter | None` injection so reverting just the lifespan changes restores prior behaviour without schema rollback. `portfolio_router` + `ws_portfolio_router` are independent `include_router` calls — safe to comment out.
 
 ### Tag
-- `v0.14.0` on top of `v0.13.0`. (Note: ROADMAP §10 reserved v0.10.0 for full Phase 10 but Phase-10 work shipped piecemeal as v0.12.0 / v0.12.1 / v0.13.0 / v0.14.0. v0.10.0 stays retired; v0.14.0 reserved for Futures per ROADMAP §14 slides one minor — Futures becomes the next available open slot. Versioning convention: feature phases bump minor, cleanup/effectivity sub-phases bump patch — see memory/phase10_status_clarification.md.)
+- `v0.12.3` on top of `v0.12.2`. Sub-phase patch bump under the Phase-10 umbrella (Phase 10 → ROADMAP §10 → x=12 per the new versioning policy `0.x.y.z` where `x = §N + 2`). 10b.2 is the 4th deliverable in the Phase-10 umbrella: 10a → v0.12.0, 10a.5 → v0.12.1, 10b.1 → v0.12.2 (retagged from v0.13.0), 10b.2 → v0.12.3. See `docs/ROADMAP.md` versioning section + `memory/feedback_sub_phase_versioning.md`.
 
 ---
 
-## [0.13.0] — 2026-05-12
+## [0.12.2] — 2026-05-12
+
+*(retagged 2026-05-12 from v0.13.0 to v0.12.2 per the `0.x.y.z` versioning policy; `x = ROADMAP §N + 2`, so Phase-10 sub-phases all stay under x=12. v0.13.0 was deleted from origin; v0.12.2 points at the same commit.)*
 
 ### Phase 10b.1 — Position-sizing calculator (20 commits since v0.12.1)
 
@@ -116,7 +118,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. P
 **Deferred:** D3 (debounced PUT of sizing-defaults from the modal as the operator edits) — non-critical, admin UI drives the same endpoint. Final E-end reviewer chain skipped — A+B chain already ran with 0 CRIT and C/D/E are thin TS that vitest covers. Kelly criterion stays deferred to Phase 19 per spec §1.
 
 ### Tag
-- `v0.13.0` on top of `v0.12.1`.
+- `v0.12.2` on top of `v0.12.1`. (Originally tagged as v0.13.0 on 2026-05-12; retagged later same day to v0.12.2 to align with the `0.x.y.z` policy.)
 
 ---
 

@@ -586,9 +586,9 @@ PDT counter, buying-power calc, position concentration limits, pre-trade margin 
 | 8 | **Position-sizing calculator (Kelly / fixed-fractional / vol-target)** | ✅ **10b.1** — 3 methods shipped (Kelly deferred to Phase 19 per spec §1 — needs strategy-tagged backtest stats) |
 | 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ✅ **10b.2** — REST + WS + /portfolio/rollup page; account_balance_snapshots hypertable + 1h/1d CAGGs; FE hybrid REST+WS with poll fallback |
 
-**Versioning note:** v0.12.0 was tagged for Phase 10a but ROADMAP.md reserved v0.10.0 for full Phase 10 (and v0.12.0 for Phase 12 / Options single-leg). The natural roadmap version numbering was lapped. Phase 10a.5 shipped at v0.12.1, Phase 10b.1 at v0.13.0, Phase 10b.2 at v0.14.0 (feature phases bump minor; cleanup sub-phases bump patch). ROADMAP §14 Futures slides one minor — Futures becomes the next available open slot.
+**Versioning note (LOCKED 2026-05-12):** pattern is `0.x.y.z` where `x = ROADMAP §N + 2` (so Phase §10 → x=12), `y` = chunk/sub-phase, `z` = task/iteration. Sub-phases never bump `x`. So Phase 10 maps to: 10a → v0.12.0, 10a.5 → v0.12.1, 10b.1 → v0.12.2 (retagged 2026-05-12 from v0.13.0), 10b.2 → v0.12.3. ROADMAP §11 = v0.13.x, §12 = v0.14.x, §14 Futures = v0.16.x, §25 PWA → 1.0.0. See ROADMAP.md versioning header + `memory/feedback_sub_phase_versioning.md`.
 
-### Phase 10b.1 — Position-sizing calculator  *(complete · 2026-05-12 · v0.13.0 · 20 commits since v0.12.1)*
+### Phase 10b.1 — Position-sizing calculator  *(complete · 2026-05-12 · v0.12.2 · 20 commits since v0.12.1; retagged from v0.13.0 on 2026-05-12)*
 
 Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b1-position-sizing-plan.md`. Memory: `phase10b1_shipped.md`.
 
@@ -613,7 +613,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. P
 - [x] E1 /trade/sizing route + SizingCalculatorPage + 3-column shell (`db84e89`)
 - [x] E2 Page render + shared-inputs smoke (`fc8ac75`)
 - [x] E3 Playwright spec — page smoke + admin defaults round-trip (`6f171d4`)
-- [x] E4 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.13.0 tag
+- [x] E4 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.12.2 tag (originally v0.13.0; retagged 2026-05-12)
 
 **Deferred / handoff to next phase:**
 - D3 — debounced PUT of sizing-defaults from the modal as the operator edits.
@@ -621,7 +621,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. P
 - Kelly criterion — Phase 19 (post-strategy-backtest).
 - Multi-account portfolio rollup — Phase 10b.2 (next).
 
-### Phase 10b.2 — Multi-account portfolio rollup  *(complete · 2026-05-12 · v0.14.0 · 32 commits since v0.13.0)*
+### Phase 10b.2 — Multi-account portfolio rollup  *(complete · 2026-05-12 · v0.12.3 · 32 commits since v0.12.2)*
 
 Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b2-portfolio-rollup-plan.md`. Memory: `phase10b2_shipped.md`.
 
@@ -665,7 +665,7 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. 
 **Chunk E — Playwright + final-reviewer + close-out** *(complete)*
 - [x] E1 Playwright spec — 3 smokes (page mount + window-toggle URL + drill-drawer open) (`af60095`)
 - [x] E2 Final-reviewer integration sweep (opus) — 1 HIGH applied inline: WS gateway now calls PortfolioRateLimiter.check post-auth pre-accept so WS storms can't bypass the REST limiter (`83ba95a`)
-- [x] E3 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.14.0 tag
+- [x] E3 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.12.3 tag (+ retag v0.13.0 → v0.12.2 to align history)
 
 **Known limitations (documented in CHANGELOG):**
 - FE drops `stale` heartbeat frames (only acts on snapshot); either drop the BE send next phase or wire FE to mark accounts.
