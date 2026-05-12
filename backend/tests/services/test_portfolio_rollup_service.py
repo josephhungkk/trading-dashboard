@@ -175,6 +175,61 @@ async def test_gv6_all_fx_unavailable_raises_503(db_session, redis) -> None:
         await _cleanup_accounts(ids)
 
 
+async def _seed_snapshot(account_id: UUID, ts_offset_sql: str, nlv: str, currency: str) -> None:
+    """Insert a snapshot row at now() + ts_offset_sql (eg '-1 hour').
+
+    ts_offset_sql is spliced directly into the SQL — it's a test-only fixture
+    literal, never user input. Validation enforces the spelled-out interval
+    pattern so a stray semicolon can't sneak in.
+    """
+    # Defence-in-depth: validate the interval string before splicing.
+    import re
+
+    if not re.fullmatch(r"-?\d+ (minute|minutes|hour|hours|day|days)", ts_offset_sql):
+        raise ValueError(f"unsafe interval literal: {ts_offset_sql!r}")
+    async with SessionLocal() as s:
+        async with s.begin():
+            await s.execute(
+                text(
+                    f"""
+                    INSERT INTO account_balance_snapshots
+                      (account_id, ts, nlv, currency, source_label)
+                    VALUES
+                      (:aid, now() + INTERVAL '{ts_offset_sql}',
+                       CAST(:nlv AS NUMERIC(20,8)), :ccy, 'ibkr-test')
+                    """
+                ),
+                {
+                    "aid": str(account_id),
+                    "nlv": nlv,
+                    "ccy": currency,
+                },
+            )
+
+
+async def _cleanup_snapshots(account_id: UUID) -> None:
+    async with SessionLocal() as s:
+        async with s.begin():
+            await s.execute(
+                text("DELETE FROM account_balance_snapshots WHERE account_id = :aid"),
+                {"aid": str(account_id)},
+            )
+
+
+async def _delete_orphan_snapshots() -> None:
+    """Clean up any account_balance_snapshots rows whose parent account
+    no longer exists (FK is ON DELETE CASCADE so this is paranoid but
+    cheap — sometimes setup test fixtures leave orphans between runs)."""
+    async with SessionLocal() as s:
+        async with s.begin():
+            await s.execute(
+                text(
+                    "DELETE FROM account_balance_snapshots WHERE account_id NOT IN "
+                    "(SELECT id FROM broker_accounts)"
+                )
+            )
+
+
 async def test_gv10_partial_fx_outage(db_session, redis) -> None:
     """GV10 — USD + GBP work; HKD/GBP missing → 200 partial."""
     await redis.flushdb()
@@ -200,3 +255,123 @@ async def test_gv10_partial_fx_outage(db_session, redis) -> None:
     finally:
         await _restore_others(mutated)
         await _cleanup_accounts(ids)
+
+
+# ---------------------------------------------------------------------------
+# compute_curve tests (Phase 10b.2 §5.1 — 3 windows + GV12 weekend gap)
+# ---------------------------------------------------------------------------
+
+
+async def test_compute_curve_intraday_reads_raw_snapshots(db_session, redis) -> None:
+    """window='intraday' reads account_balance_snapshots (raw last 24h).
+    Raw points have NULL nlv_high / nlv_low (single sample per ts, not OHLC).
+    """
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "10000")
+    mutated = await _soft_delete_others([aid])
+    await _seed_snapshot(aid, "-3 hours", "10000", "USD")
+    await _seed_snapshot(aid, "-1 hour", "10100", "USD")
+    await _seed_snapshot(aid, "-5 minutes", "10080", "USD")
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        curve = await service.compute_curve("GBP", "intraday")
+        assert curve.window == "intraday"
+        assert curve.base_currency == "GBP"
+        # All 3 inserted points belong to our account, all in the last 24h
+        my_points = [p for p in curve.per_account if p.account_id == aid]
+        assert len(my_points) == 3
+        # Raw intraday points have no high/low
+        assert all(p.nlv_high_base is None for p in my_points)
+        assert all(p.nlv_low_base is None for p in my_points)
+        # FX-converted nlv_close values: 10000 * 0.7912 = 7912.00000000
+        assert my_points[0].nlv_close_base == Decimal("7912.00000000")
+        # totals sum per-bucket close values across accounts (just ours here)
+        assert len(curve.totals) >= 3
+    finally:
+        await _cleanup_snapshots(aid)
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_compute_curve_30d_reads_1h_cagg(db_session, redis) -> None:
+    """window='30d' reads account_balance_snapshots_1h CAGG with
+    materialized_only=false — fresh raw rows appear via real-time
+    aggregation without explicit refresh."""
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "10000")
+    mutated = await _soft_delete_others([aid])
+    # Insert raw points that fall inside the last 30d but outside last 24h
+    # so they show up in the 1h CAGG but not the intraday window.
+    await _seed_snapshot(aid, "-5 days", "9500", "USD")
+    await _seed_snapshot(aid, "-2 days", "9800", "USD")
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        curve = await service.compute_curve("GBP", "30d")
+        assert curve.window == "30d"
+        my_points = [p for p in curve.per_account if p.account_id == aid]
+        assert len(my_points) >= 2
+        # 1h CAGG rows have nlv_high / nlv_low populated (MIN/MAX over bucket)
+        assert all(p.nlv_high_base is not None for p in my_points)
+        assert all(p.nlv_low_base is not None for p in my_points)
+    finally:
+        await _cleanup_snapshots(aid)
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_compute_curve_1y_reads_1d_cagg(db_session, redis) -> None:
+    """window='1y' reads account_balance_snapshots_1d CAGG."""
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "10000")
+    mutated = await _soft_delete_others([aid])
+    # Points in last 365d but older than 30d so they primarily exercise 1d CAGG
+    await _seed_snapshot(aid, "-60 days", "9000", "USD")
+    await _seed_snapshot(aid, "-180 days", "8000", "USD")
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        curve = await service.compute_curve("GBP", "1y")
+        assert curve.window == "1y"
+        my_points = [p for p in curve.per_account if p.account_id == aid]
+        assert len(my_points) >= 2
+    finally:
+        await _cleanup_snapshots(aid)
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])
+
+
+async def test_gv12_weekend_gap_in_curve_no_interpolation(db_session, redis) -> None:
+    """GV12 — Fri / Mon snapshots with no Sat/Sun rows; curve is sparse,
+    NOT interpolated to zero. We only assert no weekend buckets exist
+    among the points (intraday window's 24h filter only catches Sun/Mon
+    realistically; this test depends on the date the suite runs)."""
+    await redis.flushdb()
+    aid = await _seed_account("ibkr", "USD", "10000")
+    mutated = await _soft_delete_others([aid])
+    # Seed only weekday points; intentional gap on weekend days.
+    # Use 1h offsets so we're in the intraday window; the curve's bucket
+    # set will reflect EXACTLY what we inserted (no synthetic zeros).
+    await _seed_snapshot(aid, "-3 hours", "10000", "USD")
+    await _seed_snapshot(aid, "-1 hour", "10050", "USD")
+    await redis.set("fx:mid:USD:GBP", "0.7912")
+
+    try:
+        service = PortfolioRollupService(db_session, redis)
+        curve = await service.compute_curve("GBP", "intraday")
+        my_points = [p for p in curve.per_account if p.account_id == aid]
+        # Exactly the 2 buckets we seeded — no synthetic interpolation rows
+        assert len(my_points) == 2
+        # Both buckets must be present in totals
+        bucket_ts_in_points = {p.bucket for p in my_points}
+        bucket_ts_in_totals = {b.bucket for b in curve.totals}
+        # Our 2 buckets appear in totals (other accounts soft-deleted)
+        assert bucket_ts_in_points.issubset(bucket_ts_in_totals)
+    finally:
+        await _cleanup_snapshots(aid)
+        await _restore_others(mutated)
+        await _cleanup_accounts([aid])

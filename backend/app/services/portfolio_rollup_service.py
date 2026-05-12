@@ -18,7 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.portfolio import (
     AssetClassExposure,
+    BucketTotal,
+    CurvePoint,
     PerAccount,
+    RollupCurve,
     RollupLive,
 )
 from app.services.orders_service import PreviewUnavailable, RedisLike, _fx_rate
@@ -298,3 +301,129 @@ class PortfolioRollupService:
                 )
             )
         return exposures
+
+    async def compute_curve(
+        self,
+        base_currency: str,
+        window: Literal["intraday", "30d", "1y"],
+    ) -> RollupCurve:
+        """Time-series curve. intraday = raw last 24h; 30d = 1h CAGG; 1y = 1d CAGG.
+
+        FX applied at read time using CURRENT rates — spec §5.1 caveat "values
+        in current GBP". Per-bucket historical FX deferred to Phase 23.
+
+        Per-currency FX failures downgrade silently: rows whose native currency
+        has no FX rate are skipped from both per_account points and bucket
+        totals. The curve is informational (not gate-load-bearing), so partial
+        coverage is preferred over a 503 for the whole window.
+        """
+        if base_currency not in SUPPORTED_BASE:
+            raise ValueError(f"unsupported base currency: {base_currency}")
+
+        if window == "intraday":
+            source_sql = """
+                -- Raw hypertable, last 24h. nlv_close = nlv, no high/low (single sample).
+                SELECT
+                  abs_rows.account_id AS account_id,
+                  abs_rows.ts         AS bucket,
+                  abs_rows.nlv        AS nlv_close,
+                  abs_rows.currency   AS currency,
+                  NULL::NUMERIC(20,8) AS nlv_high,
+                  NULL::NUMERIC(20,8) AS nlv_low
+                FROM account_balance_snapshots abs_rows
+                JOIN broker_accounts ba ON ba.id = abs_rows.account_id
+                   AND ba.deleted_at IS NULL
+                WHERE abs_rows.ts > now() - INTERVAL '24 hours'
+                ORDER BY abs_rows.account_id, abs_rows.ts
+            """
+        elif window == "30d":
+            source_sql = """
+                SELECT
+                  cagg.account_id AS account_id,
+                  cagg.bucket     AS bucket,
+                  cagg.nlv_close  AS nlv_close,
+                  cagg.currency   AS currency,
+                  cagg.nlv_high   AS nlv_high,
+                  cagg.nlv_low    AS nlv_low
+                FROM account_balance_snapshots_1h cagg
+                JOIN broker_accounts ba ON ba.id = cagg.account_id
+                   AND ba.deleted_at IS NULL
+                WHERE cagg.bucket > now() - INTERVAL '30 days'
+                ORDER BY cagg.account_id, cagg.bucket
+            """
+        elif window == "1y":
+            source_sql = """
+                SELECT
+                  cagg.account_id AS account_id,
+                  cagg.bucket     AS bucket,
+                  cagg.nlv_close  AS nlv_close,
+                  cagg.currency   AS currency,
+                  cagg.nlv_high   AS nlv_high,
+                  cagg.nlv_low    AS nlv_low
+                FROM account_balance_snapshots_1d cagg
+                JOIN broker_accounts ba ON ba.id = cagg.account_id
+                   AND ba.deleted_at IS NULL
+                WHERE cagg.bucket > now() - INTERVAL '365 days'
+                ORDER BY cagg.account_id, cagg.bucket
+            """
+        else:
+            raise ValueError(f"invalid window: {window}")
+
+        rows = (await self._db.execute(text(source_sql))).mappings().all()
+
+        # Per-currency FX cache to avoid N round-trips on Redis for the same pair.
+        fx_cache: dict[str, Decimal | None] = {}
+
+        async def _get_fx(native_ccy: str) -> Decimal | None:
+            if native_ccy not in fx_cache:
+                try:
+                    fx_cache[native_ccy] = await _fx_rate(self._redis, native_ccy, base_currency)
+                except PreviewUnavailable:
+                    fx_cache[native_ccy] = None
+                    log.info(
+                        "portfolio_rollup_curve_fx_unavailable",
+                        native_ccy=native_ccy,
+                        base_currency=base_currency,
+                        window=window,
+                    )
+            return fx_cache[native_ccy]
+
+        per_account: list[CurvePoint] = []
+        bucket_totals: dict[Any, Decimal] = {}
+
+        for r in rows:
+            fx = await _get_fx(r["currency"])
+            if fx is None:
+                continue
+            close_base = (Decimal(r["nlv_close"]) * fx).quantize(_QUANTIZE_8DP)
+            high_base = (
+                (Decimal(r["nlv_high"]) * fx).quantize(_QUANTIZE_8DP)
+                if r["nlv_high"] is not None
+                else None
+            )
+            low_base = (
+                (Decimal(r["nlv_low"]) * fx).quantize(_QUANTIZE_8DP)
+                if r["nlv_low"] is not None
+                else None
+            )
+            per_account.append(
+                CurvePoint(
+                    account_id=r["account_id"],
+                    bucket=r["bucket"],
+                    nlv_close_base=close_base,
+                    nlv_high_base=high_base,
+                    nlv_low_base=low_base,
+                )
+            )
+            bucket_totals[r["bucket"]] = bucket_totals.get(r["bucket"], Decimal(0)) + close_base
+
+        totals = [
+            BucketTotal(bucket=b, total_nlv_base=v.quantize(_QUANTIZE_2DP))
+            for b, v in sorted(bucket_totals.items())
+        ]
+        return RollupCurve(
+            base_currency=base_currency,
+            window=window,
+            per_account=per_account,
+            totals=totals,
+        )
