@@ -33,6 +33,11 @@ _ACCOUNT_KEYS = frozenset(
         "authorization",
         "access_token",
         "refresh_token",
+        # Phase 11a-A.5 security-reviewer LOW-1: belt-and-suspenders so a
+        # future log call that accidentally surfaces the LiteLLM master
+        # key as a structlog kwarg gets redacted at the processor.
+        "master_key",
+        "litellm_master_key",
     }
 )
 _REDACTED = "<redacted>"

@@ -105,3 +105,69 @@ async def test_put_litellm_master_key_rejects_short_value(
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_put_litellm_master_key_rejects_bootstrap_placeholder(
+    admin_client: AsyncClient,
+) -> None:
+    """security-reviewer M1: the bootstrap placeholder is committed to
+    source; the rotation endpoint must reject it so an operator who
+    accidentally pastes it back cannot re-arm the known-public default."""
+    nonce = await _mint_nonce(admin_client)
+
+    response = await admin_client.put(
+        "/api/admin/secrets/ai/litellm_master_key",
+        json={"value": "sk-bootstrap-rotate-me"},
+        headers={"X-Confirm-Nonce": nonce},
+    )
+
+    # 422 from pydantic validator OR 400 from a custom validator handler
+    assert response.status_code in (400, 422), response.text
+
+
+@pytest.mark.asyncio
+async def test_put_litellm_master_key_503_on_redis_failure(
+    admin_client: AsyncClient,
+    config_service: ConfigService,
+    redis: fakeredis_async.FakeRedis,
+) -> None:
+    """silent-failure M1: a Redis write failure surfaces as 503 with an
+    actionable detail, not a 500. app_secrets must NOT be updated when
+    Redis fails (Redis-first write order per security-reviewer H2)."""
+    # Mint the nonce against the still-healthy fakeredis BEFORE we
+    # break it — the nonce flow uses the same Redis dep.
+    nonce = await _mint_nonce(admin_client)
+
+    # Wrap fakeredis so the master-key key path raises while nonce
+    # consumption (DELETE on csrf:order-cap:...) still works.
+    class _SelectiveRaiser:
+        def __init__(self, real: fakeredis_async.FakeRedis) -> None:
+            self._real = real
+
+        async def set(self, key: str, value: object, *a: object, **k: object) -> None:
+            if key == "ai:litellm_master_key":
+                raise RuntimeError("simulated redis outage")
+            await self._real.set(key, value, *a, **k)
+
+        async def get(self, key: str) -> object:
+            return await self._real.get(key)
+
+        async def delete(self, key: str) -> int:
+            return await self._real.delete(key)
+
+    app.dependency_overrides[get_redis] = lambda: _SelectiveRaiser(redis)
+
+    new_value = "litellm-master-key-redis-fail-alpha-001"
+    response = await admin_client.put(
+        "/api/admin/secrets/ai/litellm_master_key",
+        json={"value": new_value},
+        headers={"X-Confirm-Nonce": nonce},
+    )
+
+    assert response.status_code == 503, response.text
+    detail = response.json().get("detail", "")
+    assert "redis" in str(detail).lower() and "retry" in str(detail).lower()
+    # security-reviewer H2: app_secrets MUST remain at the prior value.
+    stored = await config_service.reveal_secret("ai", "litellm_master_key")
+    assert stored != new_value

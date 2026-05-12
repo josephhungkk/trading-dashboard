@@ -27,7 +27,7 @@ def fake_request() -> MagicMock:
 def fake_redis_with_key() -> AsyncMock:
     """Redis returns the master key for `ai:litellm_master_key`."""
     r = AsyncMock()
-    r.get = AsyncMock(return_value=b"sk-master-current")
+    r.get = AsyncMock(return_value=b"test-master-key-alpha-001")
     return r
 
 
@@ -37,9 +37,11 @@ async def test_callback_accepts_matching_key(
 ) -> None:
     from app.services.ai.litellm_auth_callback import user_api_key_auth
 
-    result = await user_api_key_auth(fake_request, "sk-master-current", _redis=fake_redis_with_key)
+    result = await user_api_key_auth(
+        fake_request, "test-master-key-alpha-001", _redis=fake_redis_with_key
+    )
     assert result is not None
-    assert getattr(result, "api_key", None) == "sk-master-current"
+    assert getattr(result, "api_key", None) == "test-master-key-alpha-001"
 
 
 @pytest.mark.asyncio
@@ -51,7 +53,9 @@ async def test_callback_rejects_mismatched_key(
     from app.services.ai.litellm_auth_callback import user_api_key_auth
 
     with pytest.raises(ProxyException) as exc:
-        await user_api_key_auth(fake_request, "sk-master-wrong", _redis=fake_redis_with_key)
+        await user_api_key_auth(
+            fake_request, "test-master-key-mismatch", _redis=fake_redis_with_key
+        )
     assert exc.value.code == 401
 
 
@@ -66,7 +70,7 @@ async def test_callback_rejects_when_redis_unset(fake_request: MagicMock) -> Non
     fake_redis = AsyncMock()
     fake_redis.get = AsyncMock(return_value=None)
     with pytest.raises(ProxyException) as exc:
-        await user_api_key_auth(fake_request, "sk-master-anything", _redis=fake_redis)
+        await user_api_key_auth(fake_request, "test-master-key-anything", _redis=fake_redis)
     assert exc.value.code == 401
 
 
@@ -81,7 +85,7 @@ async def test_callback_rejects_when_redis_errors(fake_request: MagicMock) -> No
     fake_redis = AsyncMock()
     fake_redis.get = AsyncMock(side_effect=RuntimeError("redis hiccup"))
     with pytest.raises(ProxyException) as exc:
-        await user_api_key_auth(fake_request, "sk-master-current", _redis=fake_redis)
+        await user_api_key_auth(fake_request, "test-master-key-alpha-001", _redis=fake_redis)
     assert exc.value.code == 401
 
 
@@ -96,6 +100,40 @@ async def test_callback_constant_time_compare(
 
     from app.services.ai.litellm_auth_callback import user_api_key_auth
 
-    for wrong in ("Xk-master-current", "sk-master-currenX", ""):
+    for wrong in ("Xest-master-key-alpha-001", "test-master-key-alpha-00X", ""):
         with pytest.raises(ProxyException):
             await user_api_key_auth(fake_request, wrong, _redis=fake_redis_with_key)
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_on_asyncio_timeout(fake_request: MagicMock) -> None:
+    """silent-failure M2: asyncio.TimeoutError is NOT a RuntimeError
+    subclass; verify it still hits the fail-CLOSED branch via the broad
+    Exception catch."""
+
+    from litellm.proxy._types import ProxyException
+
+    from app.services.ai.litellm_auth_callback import user_api_key_auth
+
+    fake_redis = AsyncMock()
+    fake_redis.get = AsyncMock(side_effect=TimeoutError())
+    with pytest.raises(ProxyException) as exc:
+        await user_api_key_auth(fake_request, "test-master-key-alpha-001", _redis=fake_redis)
+    assert exc.value.code == 401
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_when_stored_value_not_utf8(fake_request: MagicMock) -> None:
+    """silent-failure L1: a corrupted/non-UTF8 Redis value must produce
+    a clean 401 not a 500. The decode happens inside the fail-CLOSED
+    envelope."""
+    from litellm.proxy._types import ProxyException
+
+    from app.services.ai.litellm_auth_callback import user_api_key_auth
+
+    fake_redis = AsyncMock()
+    # 0xFF is an invalid leading byte in UTF-8.
+    fake_redis.get = AsyncMock(return_value=b"\xff\xfe\xfd")
+    with pytest.raises(ProxyException) as exc:
+        await user_api_key_auth(fake_request, "test-master-key-alpha-001", _redis=fake_redis)
+    assert exc.value.code == 401

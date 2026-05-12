@@ -74,8 +74,26 @@ class OrderCapabilityWrite(BaseModel):
         return v
 
 
+_LITELLM_PLACEHOLDER_KEY = "sk-bootstrap-rotate-me"
+
+
 class LiteLLMMasterKeyRotate(BaseModel):
-    value: str = Field(min_length=16)
+    # security-reviewer M2: 32 chars is the conventional minimum for
+    # bearer tokens used in API auth (NIST SP 800-63B guidance for 16
+    # bytes of random entropy expressed in base64-ish form).
+    value: str = Field(min_length=32, max_length=256)
+
+    @field_validator("value")
+    @classmethod
+    def _reject_bootstrap_placeholder(cls, v: str) -> str:
+        # security-reviewer M1: the bootstrap placeholder is committed
+        # to source; rejecting it on rotation keeps an operator who
+        # accidentally pastes it from re-arming the known-public default.
+        if v == _LITELLM_PLACEHOLDER_KEY:
+            raise ValueError(
+                "value must not equal the bootstrap placeholder; choose a fresh random key"
+            )
+        return v
 
 
 async def parse_order_capability_write(
@@ -294,12 +312,34 @@ async def put_litellm_master_key(
     redis: RedisDep,
     _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
 ) -> dict[str, bool]:
+    """Phase 11a-A.5 HIGH-5: zero-restart rotation.
+
+    Write order is Redis-first then app_secrets (security-reviewer H2):
+    Redis is the live source LiteLLM reads, app_secrets is the recovery
+    source the lifespan reads at startup. Writing Redis first means a
+    failure during Redis.set leaves both stores at the OLD value
+    (safe — operator can retry). Writing app_secrets first would have
+    left app_secrets ahead of Redis on a Redis.set failure (silent
+    divergence; lifespan would later reconcile but only after restart).
+    """
+    try:
+        await redis.set("ai:litellm_master_key", body.value)
+    except Exception as exc:  # silent-failure M1: surface Redis failure as 503
+        log.error(
+            "admin_litellm_master_key_redis_set_failed",
+            actor=identity.email,
+            kind=identity.kind,
+            error_class=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="redis write failed; rotation not applied — retry",
+        ) from exc
     await cfg.set_secret("ai", "litellm_master_key", body.value, "str")
-    await redis.set("ai:litellm_master_key", body.value)
     log.info(
-        "admin_litellm_master_key_put actor=%s kind=%s",
-        identity.email,
-        identity.kind,
+        "admin_litellm_master_key_put",
+        actor=identity.email,
+        kind=identity.kind,
     )
     return {"ok": True}
 

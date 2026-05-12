@@ -129,14 +129,34 @@ async def lifespan(_app: FastAPI) -> Any:
     # Phase 11a-A.5 (HIGH-5): bootstrap LiteLLM master-key in Redis so
     # the auth-callback in deploy/litellm/config.yaml sees it. Operator
     # rotates via PUT /api/admin/secrets/ai/litellm_master_key.
+    litellm_placeholder = "sk-bootstrap-rotate-me"
     master_key = await svc.reveal_secret("ai", "litellm_master_key")
     if master_key is None:
-        master_key = "sk-bootstrap-rotate-me"
+        master_key = litellm_placeholder
         await svc.set_secret("ai", "litellm_master_key", master_key)
+    if master_key == litellm_placeholder:
+        # security-reviewer M1: the placeholder is committed to source;
+        # surface it every startup so operators can't miss the unrotated
+        # default by skim-reading logs once at first boot.
+        log.warning(
+            "litellm_master_key_placeholder_active",
+            remedy="PUT /api/admin/secrets/ai/litellm_master_key with a fresh 32+ char value",
+        )
     try:
         await redis.set("ai:litellm_master_key", master_key)
     except Exception as exc:
-        log.warning("litellm_master_key_redis_set_failed", error=str(exc))
+        # silent-failure H2: this leaves LiteLLM unauthenticatable until
+        # an admin rotation reaches Redis. Error-level (not warning) +
+        # remedy hint so the operator has an actionable next step.
+        log.error(
+            "litellm_master_key_redis_set_failed",
+            error_class=type(exc).__name__,
+            error=str(exc),
+            remedy=(
+                "check redis health; "
+                "call PUT /api/admin/secrets/ai/litellm_master_key once redis is up"
+            ),
+        )
 
     listener_config = asyncio.create_task(config_cache.run_listener())
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
