@@ -842,6 +842,47 @@ Real-time Section 104 pool tracker (mirrors `fills` table on every fill). Same-d
 
 Service worker. Install-to-home-screen. FCM / Web Push notifications. Mobile-only chart UX. Offline order queue. Biometric lock via WebAuthn. **Tag v1.0.0.**
 
+## Phase 26 — Pre-launch DB reset (one-shot ritual, immediately before v1.0.0 cut)
+
+**Why:** during dev (Phase 0 → Phase 25) the prod PG at `10.10.0.2:5432` accumulated test residue — orders from chain test runs, audit rows from the Phase 10a bugs we silently-BLOCK'd against, balance snapshots from broken sidecars, etc. The plan from the start (user decision 2026-05-12) was to leave it untouched during dev and wipe operational state cleanly once, right before going live with real money. Schema + config + secrets are preserved; everything else is rebuilt from broker discovery / lifespan seed.
+
+**Approach: save → drop → recreate → replay** (chosen 2026-05-12 from save-and-replay vs surgical-DELETE alternatives):
+
+- [ ] **`scripts/go-live/save.sh`** — `pg_dump --data-only --table=X` to `scripts/go-live/dumps/<timestamp>/` for each preserve-table:
+  - `app_config` (operator-tuned runtime settings)
+  - `app_secrets` (Fernet-encrypted broker creds, mTLS certs, Schwab OAuth refresh tokens, LiteLLM master key)
+  - `risk_limits` + `risk_limits_history` (tuned risk caps)
+  - `account_kill_switches` + `account_kill_switches_history`
+  - `broker_order_capability` (per-broker × per-instrument-type matrix, ~400 rows)
+  - `order_types` + `time_in_force` (DB-driven enums, seed data)
+  - `broker_features` (broker capability matrix, seed data)
+  - Optionally `instruments` + `symbol_aliases` if any non-position-derived aliases exist (otherwise let `seed_instruments_from_positions` rebuild)
+
+- [ ] **`scripts/go-live/rebuild.sh`** — DROP DATABASE dashboard + CREATE + `alembic upgrade head` + `CREATE EXTENSION timescaledb`. Requires PG superuser for the DROP/CREATE; non-trivial coordination with backend down.
+
+- [ ] **`scripts/go-live/replay.sh`** — `psql < dumps/<timestamp>/<table>.sql` in dependency-correct order (order_types + time_in_force before broker_order_capability; broker_features before anything that FKs to it).
+
+- [ ] **`scripts/go-live/verify.sh`** — print row count per table; flag any expected-empty tables with rows (orders, order_events, risk_decisions, etc.) and any expected-non-empty tables with 0 rows (app_secrets, broker_order_capability).
+
+- [ ] **`docs/GO-LIVE.md`** — operator runbook: pre-flight checks (backend stopped, no live sidecar streams), exact command sequence, recovery procedure if any step fails (the timestamped pg_dump is the rollback point).
+
+**Tables intentionally lost (auto-rebuild or operational history):**
+- `orders`, `order_events`, `fills`, `pending_fills`, `oco_links` — operational; pre-launch is residue
+- `risk_decisions` — pre-launch audit log is residue
+- `pnl_intraday` — pre-launch P&L is residue
+- `positions` — broker callback stream snapshots on connect
+- `account_balance_snapshots` — `BalanceSnapshotWriter` writes on every NLV tick within ~60s of restart
+- `bars_1s`, `bars_1m`, `bar_backfill_jobs` — bar aggregator backfills from broker / Schwab CHART_EQUITY
+- `chart_layouts`, `watchlist_entries` — FE-saved settings; user accepts losing these (CLAUDE.md: single-user, easy to recreate)
+- `ai_completions`, `ai_jobs` — operational; replay would be meaningless
+- `broker_accounts` — `BrokerDiscoverer` fan-in repopulates on first tick from all 4 sidecars (~30s)
+- `instruments` + `symbol_aliases` — `seed_instruments_from_positions` runs on lifespan startup
+
+**Operator notes:**
+- Run AFTER Phase 25 ships, BEFORE the first live (non-paper) order. The whole ritual is ~15 min if everything works first time.
+- **Schwab OAuth tokens replay through `app_secrets`** as ciphertext. If `APP_SECRET_KEY` is rotated at the same time (legitimate launch hardening), need a decrypt-with-old-key / re-encrypt-with-new-key pass before save → see Phase 24's PG-cert-auth notes for parallel rotation guidance.
+- Verify the Schwab `account_hash` survives the round trip (it lives in `broker_accounts` which is *not* preserved — but BrokerDiscoverer's first tick rebuilds it from the live `ListManagedAccounts` RPC, so the user's `SCHWAB_PAPER_ACCOUNT_HASH` env var stays valid).
+
 ## Phase 2.x — follow-ups discovered during v0.2.0 verify
 
 - [ ] nginx: add `location = /metrics { proxy_pass http://backend:8000/metrics; }` so Prometheus / Grafana can scrape through CF Access + service token. Backend endpoint exists and is auth-gated; only nginx is missing the proxy. Verified in prod 2026-04-23.
