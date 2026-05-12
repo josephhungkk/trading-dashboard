@@ -16,12 +16,13 @@ import time
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException, status
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.websockets import WebSocketState
 
 from app.api.ws_auth import require_admin_jwt_ws
 from app.core import metrics
 from app.core.db import SessionLocal
+from app.services.common.ws_envelope import WSEnvelopeConfig, make_ws_endpoint
 from app.services.orders_service import PreviewUnavailable
 from app.services.portfolio_rate_limiter import (
     PortfolioRateLimitExceededError,
@@ -43,22 +44,6 @@ _MAX_WS_CONNECTIONS = 20
 _active_connections = 0
 
 
-def _allowed_origin(ws: WebSocket, allowed: list[str]) -> bool:
-    """CSWSH protection — mirrors ws_quotes._allowed_origin.
-
-    Empty Origin permitted only when peer is the WG dev gateway (10.10.0.1),
-    which is a trusted non-browser network path. Reviewer HIGH (sec-c1):
-    this bypass is CSWSH-only — require_admin_jwt_ws still runs after it,
-    so unauthenticated raw-TCP peers cannot upgrade. The invariant: never
-    skip auth on the WG path, only skip the CSWSH Origin check.
-    """
-    origin = ws.headers.get("origin", "")
-    if not origin:
-        client_host = ws.client.host if ws.client else ""
-        return client_host == "10.10.0.1"
-    return origin in allowed
-
-
 @router.websocket("/ws/portfolio/rollup")
 async def ws_portfolio_rollup(
     ws: WebSocket,
@@ -66,25 +51,25 @@ async def ws_portfolio_rollup(
 ) -> None:
     global _active_connections
 
-    # 1. Pre-accept connection cap
-    if _active_connections >= _MAX_WS_CONNECTIONS:
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="capacity")
-        return
-
-    # 2. CSWSH origin check (prefer app.state, fall back to settings)
     from app.core.config import settings as _settings  # local import avoids circular
 
     state_origins = getattr(ws.app.state, "cors_origins", None)
-    allowed_origins = list(state_origins if state_origins is not None else _settings.cors_origins)
-    if not _allowed_origin(ws, allowed_origins):
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="origin")
+    allowed_origins = frozenset(
+        state_origins if state_origins is not None else _settings.cors_origins
+    )
+    cfg = WSEnvelopeConfig(
+        allowed_origins=allowed_origins,
+        max_connections=_MAX_WS_CONNECTIONS,
+        active_counter=lambda: _active_connections,
+        send_timeout_s=_SEND_TIMEOUT_S,
+        heartbeat_s=_HEARTBEAT_S,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    accepted = await env.handshake(auth=require_admin_jwt_ws)
+    if not accepted:
         return
-
-    # 3. Auth — helper raises WebSocketException on miss
-    try:
-        jwt_subject = await require_admin_jwt_ws(ws)
-    except WebSocketException:
-        return
+    assert env.jwt_subject is not None
+    jwt_subject: str = env.jwt_subject
 
     # 3a. Rate limit (final-reviewer HIGH #1) — share the bucket with the 3
     # REST endpoints. The initial-snapshot compute is identical work to
@@ -99,8 +84,6 @@ async def ws_portfolio_rollup(
         return
     limiter.evict_stale(jwt_subject)
 
-    # 4. Accept + bookkeeping
-    await ws.accept()
     _active_connections += 1
     metrics.portfolio_rollup_ws_connections.set(_active_connections)
 
@@ -108,36 +91,12 @@ async def ws_portfolio_rollup(
     pubsub = redis.pubsub()
     await pubsub.subscribe(_DIRTY_CHANNEL)
     dirty = asyncio.Event()
-    disconnected = asyncio.Event()
 
     listener_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
-    recv_task: asyncio.Task[None] | None = None
 
     async def _listen() -> None:
         async for _msg in pubsub.listen():
-            dirty.set()
-
-    async def _recv_drain() -> None:
-        """Drain incoming frames to surface WebSocketDisconnect promptly.
-
-        The gateway is push-only — clients aren't expected to send frames —
-        but without a recv() the FastAPI WebSocket never sees the client's
-        close frame and the loop only notices via send-side errors. Mirror
-        the pattern used by bars.py:489 (poll-and-discard).
-        """
-        try:
-            while True:
-                await ws.receive_text()
-        except WebSocketDisconnect:
-            disconnected.set()
-            dirty.set()  # wake the main loop's wait_for immediately
-        except (ConnectionResetError, RuntimeError) as exc:
-            # ConnectionResetError: client TCP reset. RuntimeError: socket
-            # closed mid-recv (Starlette raises this for the half-closed
-            # transition). Both end the connection — wake the main loop.
-            log.debug("portfolio_ws_recv_drain_ended", exc=str(exc))
-            disconnected.set()
             dirty.set()
 
     async def _heartbeat() -> None:
@@ -146,7 +105,7 @@ async def ws_portfolio_rollup(
         # the check is a snapshot that races with the recv_drain → close
         # transition. The TimeoutError / WebSocketDisconnect handlers below
         # are the actual exit criterion (reviewer HIGH).
-        while not disconnected.is_set():
+        while not env.disconnected.is_set():
             await asyncio.sleep(_HEARTBEAT_S)
             try:
                 async with SessionLocal() as session:
@@ -154,20 +113,15 @@ async def ws_portfolio_rollup(
             except PreviewUnavailable:
                 continue
             stale_ids = [str(uid) for uid in rollup.stale_accounts]
-            try:
-                await asyncio.wait_for(
-                    ws.send_json({"version": 1, "type": "stale", "account_ids": stale_ids}),
-                    timeout=_SEND_TIMEOUT_S,
-                )
-            except TimeoutError:
-                return
-            except WebSocketDisconnect:
+            if not await env.send_or_close(
+                {"version": 1, "type": "stale", "account_ids": stale_ids}
+            ):
                 return
 
     try:
         listener_task = asyncio.create_task(_listen())
         heartbeat_task = asyncio.create_task(_heartbeat())
-        recv_task = asyncio.create_task(_recv_drain())
+        env.start_recv_drain()
 
         # Initial snapshot
         last_payload: dict[str, Any] | None = None
@@ -178,30 +132,27 @@ async def ws_portfolio_rollup(
                 initial = await PortfolioRollupService(session, redis).compute_live(base)
             last_payload = initial.model_dump(mode="json")
             last_compute = time.monotonic()
-            await asyncio.wait_for(
-                ws.send_json({"version": 1, "type": "snapshot", "payload": last_payload}),
-                timeout=_SEND_TIMEOUT_S,
-            )
+            if not await env.send_or_close(
+                {"version": 1, "type": "snapshot", "payload": last_payload}
+            ):
+                metrics.portfolio_rollup_ws_send_timeout_total.inc()
+                return
             metrics.portfolio_rollup_ws_publish_total.inc()
             last_send = time.monotonic()
         except PreviewUnavailable:
             log.warning("portfolio_ws_initial_skip_preview_unavailable")
-        except TimeoutError:
-            metrics.portfolio_rollup_ws_send_timeout_total.inc()
-            await ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="send-timeout")
-            return
 
         # Main push loop.
         # Reviewer MED: don't spawn 2 short-lived tasks per iteration. Use
         # asyncio.wait_for(dirty.wait()) for the debounce window and check
         # disconnected.is_set() immediately — recv_drain sets BOTH events on
         # disconnect (we add a `dirty.set()` there) so the wait wakes promptly.
-        while ws.client_state == WebSocketState.CONNECTED and not disconnected.is_set():
+        while ws.client_state == WebSocketState.CONNECTED and not env.disconnected.is_set():
             try:
                 await asyncio.wait_for(dirty.wait(), timeout=_DEBOUNCE_S)
             except TimeoutError:
                 pass
-            if disconnected.is_set():
+            if env.disconnected.is_set():
                 break
             dirty.clear()
 
@@ -222,14 +173,10 @@ async def ws_portfolio_rollup(
                 last_payload = payload_dict
                 last_compute = now
 
-            try:
-                await asyncio.wait_for(
-                    ws.send_json({"version": 1, "type": "snapshot", "payload": payload_dict}),
-                    timeout=_SEND_TIMEOUT_S,
-                )
-            except TimeoutError:
+            if not await env.send_or_close(
+                {"version": 1, "type": "snapshot", "payload": payload_dict}
+            ):
                 metrics.portfolio_rollup_ws_send_timeout_total.inc()
-                await ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="send-timeout")
                 return
             metrics.portfolio_rollup_ws_publish_total.inc()
             last_send = now
@@ -241,13 +188,14 @@ async def ws_portfolio_rollup(
         if ws.client_state == WebSocketState.CONNECTED:
             await ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="unhandled")
     finally:
-        for t in (listener_task, heartbeat_task, recv_task):
+        for t in (listener_task, heartbeat_task):
             if t is not None:
                 t.cancel()
         await asyncio.gather(
-            *(t for t in (listener_task, heartbeat_task, recv_task) if t is not None),
+            *(t for t in (listener_task, heartbeat_task) if t is not None),
             return_exceptions=True,
         )
+        await env.cleanup()
         try:
             await pubsub.unsubscribe(_DIRTY_CHANNEL)
         except Exception:
