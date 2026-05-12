@@ -27,9 +27,16 @@ mkdir -p "$DEPLOY_DST"
 rsync -a --delete "$DEPLOY_SRC" "$DEPLOY_DST"
 echo "[sync] deploy/nuc -> $(find "$DEPLOY_DST" -type f | wc -l) files"
 
-# 2. sidecar_ibkr/ — Phase 4 IBKR sidecar (PyInstaller build, golden-trace recorder, Scheduled
-#    Task launchers all run from C:\dashboard\sidecar\). Exclude Linux-built artifacts so
-#    we don't push WSL binaries/caches to a Windows path.
+# 2. sidecar_ibkr/ — Phase 4 IBKR sidecar (PyInstaller build, golden-trace recorder).
+#    NOTE (2026-05-12): the WSL source dir was renamed sidecar/ -> sidecar_ibkr/ on
+#    2026-05-04, but the Windows-side launchers (Launch-IBKRSidecar.vbs:38,
+#    Probe-Sidecar.ps1) still reference C:\dashboard\sidecar\dist\... — meaning
+#    production sidecars currently run from the OLD path. The launcher-path
+#    cutover is a separate operator runbook (see memory windows_sidecar_path_drift).
+#    Until then, this sync pushes WSL source to C:\dashboard\sidecar_ibkr\ but
+#    the prod .exe is still served from C:\dashboard\sidecar\dist\. After cutover,
+#    delete the orphan C:\dashboard\sidecar\ directory.
+#    Exclude Linux-built artifacts so we don't push WSL binaries/caches to a Windows path.
 SIDECAR_SRC="/home/joseph/dashboard/sidecar_ibkr/"
 SIDECAR_DST="/mnt/c/dashboard/sidecar_ibkr/"
 mkdir -p "$SIDECAR_DST"
@@ -48,7 +55,8 @@ echo "[sync] sidecar -> $(find "$SIDECAR_DST" -type f | wc -l) files"
 
 # 3. proto/ - gRPC contract source consumed by sidecar_ibkr/scripts/build-windows.ps1
 #    (uv run python -m grpc_tools.protoc --proto_path=../proto ...). The build
-#    script runs from C:\dashboard\sidecar\, so it expects ../proto = C:\dashboard\proto.
+#    script runs from C:\dashboard\sidecar_ibkr\ (post-cutover) or C:\dashboard\sidecar\
+#    (pre-cutover); either way it expects ../proto = C:\dashboard\proto.
 PROTO_SRC="/home/joseph/dashboard/proto/"
 PROTO_DST="/mnt/c/dashboard/proto/"
 mkdir -p "$PROTO_DST"
