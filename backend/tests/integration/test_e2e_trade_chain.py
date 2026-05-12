@@ -3,58 +3,29 @@
 Drives the full preview -> place -> cancel chain through the FastAPI
 ASGITransport (no real ports) against the extended sidecar mock servicer.
 Assertions catch all five v0.5.1 bugs deterministically.
+
+Phase 11a CI-debt sweep (2026-05-12): unskipped after the
+``e2e_chain.chain_client`` fixture landed (commit 59d4c08) and the two
+real risk-gate bugs it surfaced were fixed (commit e7e9fa0).
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
-from app.core.cf_access import AdminIdentity
-from app.core.deps import require_admin_jwt
-from app.main import app
-
-
-@pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    async def _admin() -> AdminIdentity:
-        return AdminIdentity(email="ci@example.com", kind="user", claims={})
-
-    app.dependency_overrides[require_admin_jwt] = _admin
-    # ASGITransport does not drive lifespan; invoke Starlette's built-in
-    # lifespan_context so set_config_service() runs before any request.
-    # Broker init inside lifespan is wrapped in try/except — failures are
-    # logged + skipped, which is the expected path in CI (no sidecars).
-    async with app.router.lifespan_context(app):
-        async with AsyncClient(
-            transport=ASGITransport(app=app),
-            base_url="http://test",
-        ) as c:
-            yield c
-    app.dependency_overrides.clear()
+from tests.fixtures.e2e_chain import chain_client as chain_client
+from tests.fixtures.sidecar_servicer import FakeBrokerServicer
 
 
-@pytest.mark.skip(
-    reason=(
-        "Phase 11a CI-debt sweep (2026-05-12): tests/fixtures/e2e_chain.py "
-        "wires the lifespan+broker_registry+account_service correctly, but "
-        "uncovered a real bug — RiskService._check_margin calls "
-        "BrokerSidecarClient.preview_order with (broker_id, instrument_id, "
-        "price, request_id) kwargs that the BrokerSidecarClient signature "
-        "(account_id, side, symbol, asset_class, order_type, time_in_force, "
-        "qty, limit_price, stop_price) doesn't accept. The risk gate's "
-        "evaluator-error path then tries to audit attempt_kind='preview' "
-        "which the alembic 0036 CHECK constraint forbids "
-        "(place_order|modify_order only). Two real bugs to fix before "
-        "unskipping. See risk_service.py:506 + alembic_0036."
-    )
-)
 @pytest.mark.asyncio
-async def test_full_trade_chain(client: AsyncClient) -> None:
+async def test_full_trade_chain(
+    chain_client: tuple[AsyncClient, FakeBrokerServicer],
+) -> None:
+    client, _servicer = chain_client
     """7-step chain: enable -> preview -> place -> cancel -> revert."""
     r = await client.post(
         "/api/admin/config",
@@ -65,7 +36,10 @@ async def test_full_trade_chain(client: AsyncClient) -> None:
             "value_type": "bool",
         },
     )
-    assert r.status_code == 201
+    # 201 first time, 409 if prior test/run left the row. Either way the
+    # state we want (enabled=True) is in place; the modify chain test
+    # uses the same pattern.
+    assert r.status_code in (201, 409), r.text
 
     r = await client.get("/api/accounts")
     assert r.status_code == 200

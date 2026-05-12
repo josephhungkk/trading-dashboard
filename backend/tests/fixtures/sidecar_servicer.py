@@ -109,6 +109,7 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         self._accounts_override = accounts
         self.place_order_response: broker_pb2.PlaceOrderResponse | None = None
         self.cancel_order_response: broker_pb2.CancelOrderResponse | None = None
+        self.preview_order_response: broker_pb2.PreviewOrderResponse | None = None
         self.search_contracts_response: broker_pb2.SearchContractsResponse | None = None
         self.order_event_messages: list[broker_pb2.OrderEventMessage] = []
         # Default: OrderEvent stream returns after yielding canned messages.
@@ -235,6 +236,33 @@ class FakeBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 multiplier="1",
                 local_symbol="AAPL",
             )
+        )
+
+    async def PreviewOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PreviewOrderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PreviewOrderResponse:
+        """Phase 11a CI-debt: simple PreviewOrder that always accepts.
+
+        The risk gate's _check_margin uses ``accepted`` + numeric margin
+        fields to decide WARN vs BLOCK. Default to ``accepted=True`` so
+        chain tests pass through the gate; tests that need to exercise
+        BLOCK can set ``self.preview_order_response`` to override.
+        """
+        del request
+        await self._before_rpc("PreviewOrder", context)
+        if self.preview_order_response is not None:
+            return self.preview_order_response
+        return broker_pb2.PreviewOrderResponse(
+            accepted=True,
+            reject_reason="",
+            initial_margin="500",
+            maintenance_margin="250",
+            commission="0.50",
+            available_funds_after="99499.50",
+            buying_power_after="99499.50",
+            raw_provider_payload="{}",
         )
 
     async def PlaceOrder(  # noqa: N802
@@ -473,6 +501,13 @@ class _DispatchingBrokerServicer(broker_pb2_grpc.BrokerServicer):  # type: ignor
         context: grpc.aio.ServicerContext,
     ) -> broker_pb2.ContractResponse:
         return await self._servicer.GetContract(request, context)
+
+    async def PreviewOrder(  # noqa: N802
+        self,
+        request: broker_pb2.PreviewOrderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PreviewOrderResponse:
+        return await self._servicer.PreviewOrder(request, context)
 
     async def PlaceOrder(  # noqa: N802
         self,

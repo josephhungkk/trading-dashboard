@@ -350,12 +350,20 @@ class BrokerSidecarClient:
         # ModifyOrderRequest expects Money protos for prices (vs PlaceOrderRequest
         # which takes plain strings). Wrap with the contract's currency so the
         # sidecar can echo it back on fills.
+        #
+        # Phase 11a CI-debt: ModifyOrderRequest.side/order_type/tif are
+        # proto enums (OrderSide/OrderType/TimeInForce), NOT strings
+        # (which is what PlaceOrderRequest accepts). Coerce the call-site
+        # string values ("LIMIT", "DAY", "BUY") to their enum int values
+        # so the broker request actually constructs — without this, every
+        # IBKR/Schwab modify_order raises `ValueError: unknown enum
+        # label "LIMIT"`.
         request = broker_pb2.ModifyOrderRequest(
             broker_order_id=broker_order_id,
             account_number=account_number,
-            side=side,
-            order_type=order_type,
-            tif=tif,
+            side=_coerce_order_side(side),
+            order_type=_coerce_order_type(order_type),
+            tif=_coerce_time_in_force(tif),
             qty=qty,
             limit_price=broker_pb2.Money(value=limit_price or "0", currency=contract.currency),
             stop_price=broker_pb2.Money(value=stop_price or "0", currency=contract.currency),
@@ -594,6 +602,61 @@ class BrokerSidecarClient:
 
 def _latency_ms(started: float) -> int:
     return round((time.perf_counter() - started) * 1000)
+
+
+# Phase 11a CI-debt: coerce free-form string side/order_type/tif used at the
+# Python call sites ("BUY", "LIMIT", "DAY") to the proto-generated enum
+# int values that ModifyOrderRequest's strict-typed fields require. The
+# PlaceOrderRequest counterparts accept strings directly so they don't
+# need this; modify went out with a schema-newer proto and the call site
+# was never updated.
+
+_ORDER_SIDE_MAP: dict[str, int] = {
+    "BUY": broker_pb2.OrderSide.BUY,
+    "SELL": broker_pb2.OrderSide.SELL,
+}
+
+_ORDER_TYPE_MAP: dict[str, int] = {
+    "MARKET": broker_pb2.OrderType.ORDER_TYPE_MARKET,
+    "LIMIT": broker_pb2.OrderType.ORDER_TYPE_LIMIT,
+    "STOP": broker_pb2.OrderType.ORDER_TYPE_STOP,
+    "STOP_LIMIT": broker_pb2.OrderType.ORDER_TYPE_STOP_LIMIT,
+    "TRAIL": broker_pb2.OrderType.ORDER_TYPE_TRAIL,
+    "TRAIL_LIMIT": broker_pb2.OrderType.ORDER_TYPE_TRAIL_LIMIT,
+    "MOC": broker_pb2.OrderType.ORDER_TYPE_MOC,
+    "MOO": broker_pb2.OrderType.ORDER_TYPE_MOO,
+    "LOC": broker_pb2.OrderType.ORDER_TYPE_LOC,
+    "LOO": broker_pb2.OrderType.ORDER_TYPE_LOO,
+}
+
+_TIME_IN_FORCE_MAP: dict[str, int] = {
+    "DAY": broker_pb2.TimeInForce.TIF_DAY,
+    "GTC": broker_pb2.TimeInForce.TIF_GTC,
+    "IOC": broker_pb2.TimeInForce.TIF_IOC,
+    "FOK": broker_pb2.TimeInForce.TIF_FOK,
+    "GTD": broker_pb2.TimeInForce.TIF_GTD,
+}
+
+
+def _coerce_order_side(value: str) -> Any:
+    try:
+        return _ORDER_SIDE_MAP[value.upper()]
+    except KeyError as exc:
+        raise ValueError(f"unknown OrderSide {value!r}") from exc
+
+
+def _coerce_order_type(value: str) -> Any:
+    try:
+        return _ORDER_TYPE_MAP[value.upper()]
+    except KeyError as exc:
+        raise ValueError(f"unknown OrderType {value!r}") from exc
+
+
+def _coerce_time_in_force(value: str) -> Any:
+    try:
+        return _TIME_IN_FORCE_MAP[value.upper()]
+    except KeyError as exc:
+        raise ValueError(f"unknown TimeInForce {value!r}") from exc
 
 
 def _timestamp_from_proto(timestamp: _Timestamp) -> datetime | None:

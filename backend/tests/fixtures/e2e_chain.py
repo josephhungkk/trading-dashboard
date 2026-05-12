@@ -19,6 +19,7 @@ from __future__ import annotations
 import socket
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import grpc
 import pytest_asyncio
@@ -116,6 +117,28 @@ async def chain_client() -> AsyncIterator[tuple[AsyncClient, FakeBrokerServicer]
             ),
             {"account_number": account_number},
         )
+        # Seed an instrument + symbol alias for the AAPL conid the chain
+        # tests use. Pre-seeding the alias avoids the cold-path
+        # _resolve_instrument_id eager-create branch, which expects a
+        # proto Contract shape (canonical_id/primary_exchange) that
+        # BrokerSidecarClient.get_contract doesn't actually emit — that
+        # mismatch is a separate bug. The conftest seed already inserts
+        # 'equity_us:AAPL:NASDAQ'; just bind the alias here.
+        instrument_id_row = await s.execute(
+            text("SELECT id FROM instruments WHERE canonical_id = 'equity_us:AAPL:NASDAQ'")
+        )
+        instrument_id = instrument_id_row.scalar_one_or_none()
+        if instrument_id is not None:
+            await s.execute(
+                text(
+                    """
+                    INSERT INTO symbol_aliases (source, raw_symbol, instrument_id)
+                    VALUES ('ibkr', '265598', :iid)
+                    ON CONFLICT (source, raw_symbol) DO NOTHING
+                    """
+                ),
+                {"iid": instrument_id},
+            )
         await s.commit()
 
     async def _admin() -> AdminIdentity:
@@ -123,6 +146,7 @@ async def chain_client() -> AsyncIterator[tuple[AsyncClient, FakeBrokerServicer]
 
     app.dependency_overrides[require_admin_jwt] = _admin
 
+    order_consumer = None
     try:
         async with app.router.lifespan_context(app):
             # lifespan tries to build_broker_registry() and probably fails
@@ -131,21 +155,47 @@ async def chain_client() -> AsyncIterator[tuple[AsyncClient, FakeBrokerServicer]
             # MissingBrokerSecrets path's set_*() (if any) is overridden.
             set_broker_registry(registry)
             set_account_service(account_service)
+
+            # Start an OrderEventConsumer against the fake broker so
+            # the FakeBrokerServicer's CancelOrder / ModifyOrder events
+            # flow into the orders table — without this the trade
+            # chain's "wait for status=cancelled" poll hangs.
+            from app.services.order_event_consumer import OrderEventConsumer
+
+            order_consumer = OrderEventConsumer(
+                registry,
+                factory,
+                cast("Any", app.state.redis),
+            )
+            await order_consumer.start()
+
             async with AsyncClient(
                 transport=ASGITransport(app=app),
                 base_url="http://test",
             ) as c:
                 yield c, servicer
     finally:
+        if order_consumer is not None:
+            await order_consumer.stop()
         app.dependency_overrides.clear()
         await sidecar_client_obj.close()
         await grpc_server.stop(grace=1.0)
         async with factory() as s:
+            # Drop FK dependents first: order_events references both
+            # orders and broker_accounts; risk_decisions references
+            # broker_accounts. Cleanup order: order_events ->
+            # risk_decisions -> orders -> broker_accounts.
+            account_subq = "(SELECT id FROM broker_accounts WHERE account_number = :a)"
             await s.execute(
-                text(
-                    "DELETE FROM orders WHERE account_id IN "
-                    "(SELECT id FROM broker_accounts WHERE account_number = :a)"
-                ),
+                text(f"DELETE FROM order_events WHERE account_id IN {account_subq}"),
+                {"a": account_number},
+            )
+            await s.execute(
+                text(f"DELETE FROM risk_decisions WHERE account_id IN {account_subq}"),
+                {"a": account_number},
+            )
+            await s.execute(
+                text(f"DELETE FROM orders WHERE account_id IN {account_subq}"),
                 {"a": account_number},
             )
             await s.execute(

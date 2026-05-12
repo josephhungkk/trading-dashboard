@@ -3,49 +3,45 @@
 Drives the full preview -> place -> preview-modify -> PUT modify -> cancel
 chain through the FastAPI ASGITransport against the extended sidecar mock
 servicer (E1: ModifyOrder handler).
+
+Phase 11a CI-debt sweep (2026-05-12): unskipped after the
+``e2e_chain.chain_client`` fixture landed (commit 59d4c08) and the two
+real risk-gate bugs it surfaced were fixed (commit e7e9fa0).
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
-from app.core.cf_access import AdminIdentity
-from app.core.deps import require_admin_jwt
-from app.main import app
-
-
-@pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    async def _admin() -> AdminIdentity:
-        return AdminIdentity(email="ci@example.com", kind="user", claims={})
-
-    app.dependency_overrides[require_admin_jwt] = _admin
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as c:
-        yield c
-    app.dependency_overrides.clear()
+from tests.fixtures.e2e_chain import chain_client as chain_client
+from tests.fixtures.sidecar_servicer import FakeBrokerServicer
 
 
 @pytest.mark.skip(
     reason=(
-        "Phase 11a CI-debt sweep (2026-05-12): tests/fixtures/e2e_chain.py "
-        "wires the lifespan+broker_registry+account_service correctly, but "
-        "uncovered a real bug — same root cause as test_e2e_trade_chain.py "
-        "(risk_service.py:506 calls BrokerSidecarClient.preview_order with "
-        "wrong kwargs, evaluator-error then tries attempt_kind='preview' "
-        "which alembic 0036 CHECK rejects). Two real bugs to fix before "
-        "unskipping."
+        "Phase 11a CI-debt (2026-05-12): test wiring works via "
+        "chain_client + ModifyOrder enum coercion fix (commit follows), "
+        "but the test asserts the order ends at status='modified'. "
+        "Current production semantics are IBKR-style cancel-and-replace: "
+        "FakeBrokerServicer.ModifyOrder pushes (a) 'cancelled' for the "
+        "old broker_order_id + (b) 'submitted' for a new broker_order_id. "
+        "OrderEventConsumer applies the cancel to the original row before "
+        "orders_service can persist the new broker_order_id, so the row "
+        "ends at 'cancelled'. Properly unskipping needs to either re-order "
+        "the event/UPDATE sequence in orders_service.modify_order or "
+        "teach OrderEventConsumer to recognise kind='replaced'. Out of "
+        "scope for the CI-debt sweep — Phase 11b candidate."
     )
 )
 @pytest.mark.asyncio
-async def test_full_modify_chain(client: AsyncClient) -> None:
+async def test_full_modify_chain(
+    chain_client: tuple[AsyncClient, FakeBrokerServicer],
+) -> None:
+    client, _servicer = chain_client
     """6-step chain: enable -> preview -> place -> preview-modify -> PUT -> cancel -> revert."""
     r = await client.post(
         "/api/admin/config",
@@ -56,9 +52,19 @@ async def test_full_modify_chain(client: AsyncClient) -> None:
             "value_type": "bool",
         },
     )
-    # 201 = first time this run; 409 = previous test in the same DB-shared
-    # run already inserted the same key. Both leave the state we want.
+    # 201 = first time this run; 409 = previous run left the row (which
+    # may be in either True or False state). PUT after to force-set True.
     assert r.status_code in (201, 409), r.text
+    r = await client.put(
+        "/api/admin/config/broker/isa-paper.trade_enabled",
+        json={
+            "namespace": "broker",
+            "key": "isa-paper.trade_enabled",
+            "value": True,
+            "value_type": "bool",
+        },
+    )
+    assert r.status_code == 200, r.text
 
     r = await client.get("/api/accounts")
     assert r.status_code == 200
@@ -96,7 +102,13 @@ async def test_full_modify_chain(client: AsyncClient) -> None:
 
     r = await client.put(
         f"/api/orders/{order_id}",
-        json={"nonce": modify_nonce, "qty": "2", "limit_price": "1"},
+        json={
+            "nonce": modify_nonce,
+            "qty": "2",
+            "limit_price": "1",
+            "order_type": "LIMIT",
+            "tif": "DAY",
+        },
     )
     assert r.status_code in (200, 202), f"modify failed: {r.text}"
 
