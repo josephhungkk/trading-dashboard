@@ -759,3 +759,41 @@ portfolio_rollup_ws_send_timeout_total = Counter(
     "WS send timeouts on /ws/portfolio/rollup; connection closed on timeout.",
     registry=registry,
 )
+
+# Phase 11a-A2 — AI router WoL + Ollama health metrics
+AI_ROUTER_WOL_WAKE_TOTAL = Counter(
+    "ai_router_wol_wake_total",
+    "Heavy-box wake attempts by host and outcome.",
+    labelnames=["host", "outcome"],
+    registry=registry,
+)
+AI_ROUTER_WOL_WAKE_LATENCY_SECONDS = Histogram(
+    "ai_router_wol_wake_latency_seconds",
+    "Elapsed seconds from wake start until heavy-box Ollama TCP/API responds.",
+    labelnames=["host"],
+    registry=registry,
+)
+AI_ROUTER_WOL_WARM_TO_READY_SECONDS = Histogram(
+    "ai_router_wol_warm_to_ready_seconds",
+    "Elapsed seconds from wake start until requested model is listed by Ollama.",
+    labelnames=["host"],
+    registry=registry,
+)
+AI_ROUTER_WOL_WAKE_FAILURES_TOTAL = Counter(
+    "ai_router_wol_wake_failures_total",
+    "Heavy-box wake failures by host and reason.",
+    labelnames=["host", "reason"],
+    registry=registry,
+)
+AI_ROUTER_WOL_CIRCUIT_BREAKER_STATE = Gauge(
+    "ai_router_wol_circuit_breaker_state",
+    "Heavy-box WoL circuit breaker state: 0=closed, 1=half-open, 2=open.",
+    labelnames=["host"],
+    registry=registry,
+)
+AI_ROUTER_OLLAMA_HEALTH_FAILURES_TOTAL = Counter(
+    "ai_router_ollama_health_failures_total",
+    "Raw Ollama health-check failures by host.",
+    labelnames=["host"],
+    registry=registry,
+)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -157,6 +158,20 @@ async def lifespan(_app: FastAPI) -> Any:
                 "call PUT /api/admin/secrets/ai/litellm_master_key once redis is up"
             ),
         )
+
+    from app.services.ai.ollama_health_watcher import OllamaHealthWatcher
+    from app.services.ai.wol import HeavyBoxWoL
+
+    _app.state.heavy_wol = HeavyBoxWoL(
+        helper_url=os.environ.get("WOL_HELPER_URL", "http://10.10.0.2:11900"),
+        heavy_url=os.environ.get("OLLAMA_HEAVY_URL", "http://10.10.0.3:11434"),
+    )
+    _ollama_watcher = OllamaHealthWatcher(
+        hosts={"nuc": os.environ.get("OLLAMA_NUC_URL", "http://10.10.0.2:11434")},
+        redis=redis,
+    )
+    await _ollama_watcher.start()
+    _app.state.ollama_health_watcher = _ollama_watcher
 
     listener_config = asyncio.create_task(config_cache.run_listener())
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
@@ -375,6 +390,7 @@ async def lifespan(_app: FastAPI) -> Any:
             await callback_server.stop(grace=5)
         except Exception:
             log.exception("callback_server_stop_failed")
+        await _app.state.ollama_health_watcher.stop()
         await redis.aclose()
         _app.state.redis = None
         await engine.dispose()
