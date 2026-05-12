@@ -52,9 +52,18 @@ async def _backend_reachable() -> bool:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not E2E_BACKEND_CONFIGURED, reason="requires E2E_BACKEND_URL")
 async def test_bars_p95_under_100ms() -> None:
+    """Hit a live backend's /api/bars 100 times and assert p95 <= 100ms.
+
+    Gated on E2E_BACKEND_URL like its 2 siblings — the suite previously
+    fell through to ``localhost:8000`` (the dev backend on the NUC) and
+    skipped on the broker-503 path, which generated a non-deterministic
+    SKIPPED line every run. Run explicitly via E2E_BACKEND_URL=... when
+    you want perf coverage.
+    """
     if not await _backend_reachable():
-        pytest.skip("backend is not reachable on E2E_BACKEND_URL or localhost:8000")
+        pytest.skip("backend is not reachable on E2E_BACKEND_URL")
 
     durations_ms: list[float] = []
     async with httpx.AsyncClient(
