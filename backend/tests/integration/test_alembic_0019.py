@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alembic import command
@@ -20,14 +20,13 @@ QTY_COLUMNS = (
 )
 
 
-def _sync_url() -> str:
-    return settings.database_url.replace("+asyncpg", "")
-
-
 def _alembic_config() -> Config:
+    """Alembic Config wired at the +asyncpg URL — env.py uses
+    async_engine_from_config so the +asyncpg driver works directly.
+    """
     cfg = Config("alembic.ini")
     cfg.set_main_option("script_location", "alembic")
-    cfg.set_main_option("sqlalchemy.url", _sync_url())
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
     return cfg
 
 
@@ -101,62 +100,73 @@ async def test_qty_columns_are_10dp(db_session: AsyncSession) -> None:
     assert round_trip == qty
 
 
-@pytest.mark.skip(
-    reason=(
-        "create_engine(postgresql://...) requires psycopg2, which is not in the "
-        "backend's runtime/dev deps (we use asyncpg). Rewrite as async via "
-        "create_async_engine on the +asyncpg URL when revisited."
-    )
-)
-def test_downgrade_fail_closed() -> None:
-    engine = create_engine(_sync_url())
+@pytest.mark.asyncio
+async def test_downgrade_fail_closed(db_session: AsyncSession) -> None:
+    """Verify that 0019 downgrade refuses when rows have >8dp qty values.
+
+    Async rewrite (Phase 11a-CI-debt-2): the original used
+    sqlalchemy.create_engine + psycopg2, which isn't in this project's
+    dependency set. The migration's downgrade hook itself runs through
+    alembic.command.downgrade (sync, with its own DBAPI connection), so
+    we drive that part on a thread via asyncio.to_thread.
+    """
+    import asyncio
+
     cfg = _alembic_config()
     order_id = uuid4()
     account_number = f"UTEST_0019_DOWN_{uuid4().hex}"
 
-    try:
-        with engine.begin() as conn:
-            account_id = conn.execute(
-                text(
-                    """
-                    INSERT INTO broker_accounts (
-                      broker_id, account_number, mode, gateway_label, currency_base, last_seen_via
-                    )
-                    VALUES ('ibkr', :account_number, 'paper', 'test', 'USD', 'test')
-                    RETURNING id
-                    """
-                ),
-                {"account_number": account_number},
-            ).scalar_one()
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO orders (
-                      id, account_id, client_order_id, conid, symbol, side, order_type, tif,
-                      qty, filled_qty, status, notional
-                    )
-                    VALUES (
-                      :id, :account_id, :client_order_id, '265598', 'AAPL', 'BUY',
-                      'MARKET', 'DAY', :qty, 0, 'pending_submit', 0
-                    )
-                    """
-                ),
-                {
-                    "id": order_id,
-                    "account_id": account_id,
-                    "client_order_id": uuid4(),
-                    "qty": Decimal("0.0000000001"),
-                },
+    # Insert a row with 9dp qty to force the downgrade check to fail.
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO broker_accounts (
+              broker_id, account_number, mode, gateway_label, currency_base, last_seen_via
             )
+            VALUES ('ibkr', :account_number, 'paper', 'test', 'USD', 'test')
+            """
+        ),
+        {"account_number": account_number},
+    )
+    account_id = (
+        await db_session.execute(
+            text("SELECT id FROM broker_accounts WHERE account_number = :a"),
+            {"a": account_number},
+        )
+    ).scalar_one()
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO orders (
+              id, account_id, client_order_id, conid, symbol, side, order_type, tif,
+              qty, filled_qty, status, notional
+            )
+            VALUES (
+              :id, :account_id, :client_order_id, '265598', 'AAPL', 'BUY',
+              'MARKET', 'DAY', :qty, 0, 'pending_submit', 0
+            )
+            """
+        ),
+        {
+            "id": order_id,
+            "account_id": account_id,
+            "client_order_id": uuid4(),
+            "qty": Decimal("0.0000000001"),
+        },
+    )
+    await db_session.commit()
 
+    try:
+        # Target 0018 explicitly — `-1` from current head (0042) would just
+        # walk back one revision (to 0041), not all the way to 0018 where
+        # the 0019 downgrade hook lives.
         with pytest.raises(RuntimeError, match="Cannot downgrade: rows with >8dp qty values exist"):
-            command.downgrade(cfg, "-1")
+            await asyncio.to_thread(command.downgrade, cfg, "0018_pk_widen_asset_class")
     finally:
-        with engine.begin() as conn:
-            conn.execute(text("DELETE FROM orders WHERE id = :id"), {"id": order_id})
-            conn.execute(
-                text("DELETE FROM broker_accounts WHERE account_number = :account_number"),
-                {"account_number": account_number},
-            )
-        command.upgrade(cfg, "head")
-        engine.dispose()
+        await db_session.execute(text("DELETE FROM orders WHERE id = :id"), {"id": order_id})
+        await db_session.execute(
+            text("DELETE FROM broker_accounts WHERE account_number = :a"),
+            {"a": account_number},
+        )
+        await db_session.commit()
+        await asyncio.to_thread(command.upgrade, cfg, "head")

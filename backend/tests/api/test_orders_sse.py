@@ -289,39 +289,75 @@ async def test_sse_closes_on_client_disconnect() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Hangs past asyncio.wait_for timeout — likely Python 3.14 async-gen + "
-    "wait_for cancellation interaction. Slow-client P15 behavior is exercised by "
-    "the orders_sse._pubsub_pump QueueFull → return contract; needs a refactor to "
-    "drive the generator manually rather than via _collect + wait_for. TODO Phase 5c."
-)
 @pytest.mark.asyncio
-async def test_sse_drops_slow_client_via_per_client_queue() -> None:
-    """Queue overflow -> final error event + sse_dropped_clients_total incremented."""
-    db = _make_db()
+async def test_sse_pubsub_pump_returns_on_queue_full() -> None:
+    """The slow-client guard fires when ``_pubsub_pump`` cannot enqueue
+    a message — `queue.put_nowait` raises QueueFull and the pump returns
+    early. We exercise that contract directly with a maxsize=0 queue so
+    the very first message overflows.
+
+    Rewritten 2026-05-12 (Phase 11a-CI-debt-2): the previous test wired
+    the whole generator with a maxsize=1 queue + 5 messages, but the main
+    loop drained one-at-a-time fast enough that the queue never
+    overflowed and the generator never reached the slow-client branch.
+    Testing _pubsub_pump in isolation is the right unit of behavior.
+    """
+    from app.services.orders_sse import _pubsub_pump
 
     event_data = json.dumps({"event_id": 1, "status": "submitted"})
-    messages = [{"type": "message", "data": event_data}] * 5
+    pubsub = _make_pubsub([{"type": "message", "data": event_data}])
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=0)
 
-    pubsub = _make_pubsub(messages)
+    # maxsize=0 == unbounded. Override put_nowait to raise immediately
+    # so we exercise the QueueFull → return contract.
+    def _full(_item: str) -> None:
+        raise asyncio.QueueFull
+
+    queue.put_nowait = _full  # type: ignore[method-assign]
+
+    # The pump should return cleanly (not hang) on QueueFull.
+    await asyncio.wait_for(_pubsub_pump(pubsub, queue), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_sse_generator_emits_slow_client_error_when_pump_returns() -> None:
+    """End-to-end: when the pump task finishes early (slow client), the
+    main generator yields the slow_client error frame and increments
+    sse_dropped_clients_total."""
+    db = _make_db()
+
+    pubsub = _make_pubsub([])  # no messages — pump will just hang on listen()
     redis = _make_redis(pubsub)
 
     req = MagicMock()
-    req.is_disconnected = AsyncMock(return_value=False)
+    is_disconnected_calls = [0]
+
+    async def _is_disconnected() -> bool:
+        is_disconnected_calls[0] += 1
+        # Stay connected for the first tick, disconnect immediately after
+        # so the main loop exits cleanly even when no messages arrive.
+        # The slow-client path is exercised by manually finishing the pump
+        # before the disconnect signal.
+        return is_disconnected_calls[0] > 5
+
+    req.is_disconnected = _is_disconnected
 
     dropped_before = metrics.sse_dropped_clients_total._value.get()
 
-    with patch("app.services.orders_sse.asyncio.Queue") as mock_queue_cls:
-        real_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
-        mock_queue_cls.return_value = real_queue
+    # Patch the pump to return immediately (simulates the QueueFull early
+    # return). The generator should observe pump_task.done() and set
+    # slow_client = True.
+    async def _pump_returns_immediately(*_a: Any, **_kw: Any) -> None:
+        return None
 
+    with patch("app.services.orders_sse._pubsub_pump", _pump_returns_immediately):
         frames = await asyncio.wait_for(
             _collect(order_events_generator(req, db, redis, last_event_id=0, account_id=None)),
             timeout=3.0,
         )
 
     error_frames = [f for f in frames if "slow_client" in f]
-    assert error_frames, f"Expected slow_client error frame, got: {frames}"
+    assert error_frames, f"expected slow_client error frame, got: {frames}"
 
     dropped_after = metrics.sse_dropped_clients_total._value.get()
     assert dropped_after == dropped_before + 1
