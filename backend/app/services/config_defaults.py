@@ -52,3 +52,54 @@ DEFAULT_IBKR_GATEWAY_QUOTE_FALLBACK: Final[list[str]] = [
     "normal-paper",
     "isa-paper",
 ]
+
+
+# Phase 11a-A1: AI router capability map default.
+#
+# Per-capability fallback chain. Each entry is an ordered list — first
+# is preferred, subsequent are tried only when the first is unavailable
+# (rate-limited, provider key missing, GPU contended, etc.). Cloud
+# entries are auto-removed by resolve_models() when capability is
+# LOCAL_ONLY or force_local_only=True.
+#
+# Read-only fallback table, same pattern as DEFAULT_QUOTE_SOURCE_PRIORITY:
+# operators override per-capability via PUT /api/admin/config namespace
+# ``ai_router.capability_map``; resolve_models() consults the override
+# first, then this constant when a capability isn't overridden.
+DEFAULT_AI_ROUTER_CAPABILITY_MAP: Final[dict[str, list[dict[str, str]]]] = {
+    "LOCAL_ONLY": [
+        {"provider": "ollama-nuc", "model": "qwen2.5:7b"},
+        {"provider": "ollama-nuc-llama", "model": "llama3.2:8b"},
+        {"provider": "ollama-heavy", "model": "qwen2.5:32b"},
+    ],
+    "STRUCTURED_OUTPUT": [
+        {"provider": "ollama-nuc", "model": "qwen2.5:7b"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+        {"provider": "openai-gpt4o", "model": "gpt-4o"},
+    ],
+    "LONG_CONTEXT": [
+        {"provider": "gemini-pro", "model": "gemini-2.5-pro"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+    "REALTIME_SENTIMENT": [
+        {"provider": "xai-grok", "model": "grok-2-latest"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+    "REASONING": [
+        {"provider": "ollama-heavy-70b", "model": "llama3.3:70b"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+        {"provider": "ollama-heavy", "model": "qwen2.5:32b"},
+    ],
+    "BULK_CHEAP": [
+        {"provider": "gemini-pro", "model": "gemini-2.5-flash"},
+        {"provider": "openai-gpt4o", "model": "gpt-4o-mini"},
+    ],
+    "NUMERICAL": [
+        {"provider": "openai-gpt4o", "model": "gpt-4o"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+    "CODING": [
+        {"provider": "ollama-heavy", "model": "qwen2.5-coder:32b"},
+        {"provider": "anthropic-sonnet", "model": "claude-sonnet-4-6"},
+    ],
+}

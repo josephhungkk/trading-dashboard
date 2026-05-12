@@ -14,8 +14,12 @@ from enum import StrEnum
 # Providers whose endpoint sits inside the WG/LAN — used by LOCAL_ONLY
 # privacy floor. Centralising the membership in one constant means the
 # router cannot accidentally route a LOCAL_ONLY request to a cloud
-# provider by misclassifying.
-LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama-nuc", "ollama-heavy"})
+# provider by misclassifying. All entries must point at an Ollama
+# instance reachable only via WireGuard (NUC at 10.10.0.2, heavy box
+# at 10.10.0.3) — never a public endpoint.
+LOCAL_PROVIDERS: frozenset[str] = frozenset(
+    {"ollama-nuc", "ollama-nuc-llama", "ollama-heavy", "ollama-heavy-70b"}
+)
 
 
 class AICapability(StrEnum):
