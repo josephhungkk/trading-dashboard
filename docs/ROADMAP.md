@@ -114,6 +114,15 @@ later phase. Each is anchored to its target phase below.
 
 ### Phase 24 (Infra hardening)
 
+- **`account_balances` table decoupling** — `broker_accounts.last_nlv` /
+  `last_nlv_currency` / `last_nlv_at` are read by 5+ services (brokers
+  discoverer, orders_service, risk_service, position_sizing_service,
+  sizing API). Future additions (cash-by-currency, buying-power
+  components, margin used) won't bolt cleanly onto `broker_accounts`.
+  Move to a dedicated `account_balances` current-state table alongside
+  the Phase 10b.2 `account_balance_snapshots` history hypertable. Deferred
+  from Phase 10b.2 to avoid touching 5+ already-shipped services in a
+  single phase (10a/10a.5/10b.1 audited them and shipped clean).
 - **Phase 9 Task 18 CAGGs** (10 continuous aggregates 5s/10s/15s/30s/45s
   + 5m/15m/30m/1h/1d) — needs production `bars_1s` traffic to validate
   refresh cadence and storage-vs-compute trade-off. Originally Phase 9
