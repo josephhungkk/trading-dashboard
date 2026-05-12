@@ -584,9 +584,9 @@ PDT counter, buying-power calc, position concentration limits, pre-trade margin 
 | 6 | Account-level kill switch | ✅ 10a B2 + D8 (admin CRUD) |
 | 7 | Pre-trade gate as chokepoint | ✅ 10a D3-D5 (preview / place_order / modify_order at station 4) |
 | 8 | **Position-sizing calculator (Kelly / fixed-fractional / vol-target)** | ✅ **10b.1** — 3 methods shipped (Kelly deferred to Phase 19 per spec §1 — needs strategy-tagged backtest stats) |
-| 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ❌ **Phase 10b.2** (not started) |
+| 9 | **Multi-account portfolio rollup (cross-broker NLV / exposure / Δ)** | ✅ **10b.2** — REST + WS + /portfolio/rollup page; account_balance_snapshots hypertable + 1h/1d CAGGs; FE hybrid REST+WS with poll fallback |
 
-**Versioning note:** v0.12.0 was tagged for Phase 10a but ROADMAP.md reserved v0.10.0 for full Phase 10 (and v0.12.0 for Phase 12 / Options single-leg). The natural roadmap version numbering was lapped. Phase 10a.5 shipped at v0.12.1, Phase 10b.1 at v0.13.0; Phase 10b.2 will land at v0.13.x.
+**Versioning note:** v0.12.0 was tagged for Phase 10a but ROADMAP.md reserved v0.10.0 for full Phase 10 (and v0.12.0 for Phase 12 / Options single-leg). The natural roadmap version numbering was lapped. Phase 10a.5 shipped at v0.12.1, Phase 10b.1 at v0.13.0, Phase 10b.2 at v0.14.0 (feature phases bump minor; cleanup sub-phases bump patch). ROADMAP §14 Futures slides one minor — Futures becomes the next available open slot.
 
 ### Phase 10b.1 — Position-sizing calculator  *(complete · 2026-05-12 · v0.13.0 · 20 commits since v0.12.1)*
 
@@ -621,9 +621,59 @@ Spec: `docs/superpowers/specs/2026-05-12-phase10b1-position-sizing-design.md`. P
 - Kelly criterion — Phase 19 (post-strategy-backtest).
 - Multi-account portfolio rollup — Phase 10b.2 (next).
 
-### Phase 10b.2 — Multi-account portfolio rollup  *(not started)*
+### Phase 10b.2 — Multi-account portfolio rollup  *(complete · 2026-05-12 · v0.14.0 · 32 commits since v0.13.0)*
 
-Cross-broker NLV / exposure / Δ aggregator across all accounts. Open scope.
+Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b2-portfolio-rollup-plan.md`. Memory: `phase10b2_shipped.md`.
+
+**Chunk A — TimescaleDB hypertable + CAGGs + writer** *(complete)*
+- [x] A1 Alembic 0039 — account_balance_snapshots hypertable + retention 2y + currency/source_label CHECKs (no nlv>=0 CHECK per architect CRIT #1) (`280d39d`)
+- [x] A2 Alembic 0040 — 1h + 1d CAGGs with autocommit_block backfill + materialized_only=false (`0d50397`)
+- [x] A3 BalanceSnapshotWriter service + 9 prometheus metrics + tracked publish-task set (`3ad822b`)
+- [x] A4 Writer hook in brokers.py:1449 NLV UPDATE savepoint + lifespan wiring + _pending_publish_account_ids buffer (`a29ee15`)
+- [x] A5 5 writer unit tests — happy insert, ON CONFLICT no-op, fail-OPEN nested SAVEPOINT, schedule_publish tracking, publish-failure metric (`5fb31fd`)
+- [x] A6 Chunk-A reviewer chain — 4 HIGH + 2 MED inline (clock_timestamp() not now(); pending-publish reset top-of-tick; nlv_update_count only on RETURNING id; defensive elif stop()) (`1f1e1db`)
+
+**Chunk B' — Service compute_live + schemas** *(complete)*
+- [x] Bp1 Pydantic v2 schemas — 8 models with ConfigDict(extra="forbid") (`7bfc926`)
+- [x] Bp2 compute_live + 4 goldens (GV1/2/6/10) — per-account FX fault isolation, partial 200 not whole-rollup 503 (`81253c2`)
+- [x] Bp3 Chunk-B' reviewer chain — 4 HIGH + 3 MED inline (`7091e3c`)
+
+**Chunk B'' — compute_curve + drill_asset_class** *(complete)*
+- [x] Bpp1 compute_curve over 3 windows + 4 tests + per-currency FX cache (`217ea5c`)
+- [x] Bpp2 drill_asset_class + 4 tests + long_native + short_native CASE (HIGH — was netting) (`594825e`)
+- [x] Bpp3 Remaining 4 goldens (GV3/5/9/11) (`6229700`)
+- [x] Bpp4 Chunk-B'' reviewer chain — 4 HIGH + 3 MED inline (boundary-stripping + sanitised error messages + _compute_total_nlv_base helper to avoid drill double-firing) (`f03bf8d`)
+
+**Chunk B''' — Rate limiter + REST endpoints** *(complete)*
+- [x] Bppp1 PortfolioRateLimiter (jwt_subject only key, NOT (subject, account_id) like sizing) + 3 unit tests (`9be84ba`)
+- [x] Bppp2 3 REST endpoints + 5 integration tests (rollup shape, 3 curve windows, drill, 429 burst, 503 all-FX-down) (`817f5a7`)
+- [x] Bppp3 Chunk-B''' reviewer chain — 4 MED inline (empty-subject guard, evict_stale call site, fixture yield+post-cleanup, PreviewUnavailable handler on curve+drill) (`a8f4189`)
+
+**Chunk C — WS gateway** *(complete)*
+- [x] C1 /ws/portfolio/rollup gateway — CSWSH origin pre-accept, pubsub.listen() pattern, 250ms compute cache + 500ms debounce, 2s send timeout, heartbeat 30s, v=1 frame schema, cap 20, recv-drain task (`8fc2395`)
+- [x] C2 4 WS integration tests (initial snapshot, CSWSH reject, capacity reject, disconnect cleanup) + recv-drain task wiring (`a9a48a1`)
+- [x] C3 Chunk-C reviewer chain — 2 HIGH + 2 MED inline (recv_drain exception narrowing, heartbeat false-safety while removed, base param regex pattern, CSWSH WG-bypass invariant docstring, ephemeral tasks per iter eliminated) (`a326358`)
+
+**Chunk D — Frontend** *(complete)*
+- [x] D1 Regenerate api-generated.ts (`b2f59d7`)
+- [x] D2 services/portfolio module (types, api, useRollupLive/Curve/Drill) + zustand-persist store (`9da16a8`)
+- [x] D3 6 hook tests (4 useRollupLive + 2 useRollupDrill) (`bceaa57`)
+- [x] D4/D5 /portfolio/rollup route + RollupPage + 5 components (KpiBar, CurveChart, PerAccountTable, ExposureList, DrillDrawer) (`6bba0e4`)
+- [x] D5-tests Drill drawer (3) + RollupPage (2) component tests (`ef5b2c2`)
+- [x] D6 Chunk-D reviewer chain — 4 HIGH + 4 MED inline (typeof guard on migrate, aria-modal, WS reconnect with backoff, mountedRef guard, useRollupDrill simplified narrowing, encodeURIComponent across all params, stroke via Tailwind, distinct 503 banner, useCallback for closeDrill) (`e4de506`)
+
+**Chunk E — Playwright + final-reviewer + close-out** *(complete)*
+- [x] E1 Playwright spec — 3 smokes (page mount + window-toggle URL + drill-drawer open) (`af60095`)
+- [x] E2 Final-reviewer integration sweep (opus) — 1 HIGH applied inline: WS gateway now calls PortfolioRateLimiter.check post-auth pre-accept so WS storms can't bypass the REST limiter (`83ba95a`)
+- [x] E3 Close-out: CHANGELOG / CLAUDE.md / TASKS.md / memory + v0.14.0 tag
+
+**Known limitations (documented in CHANGELOG):**
+- FE drops `stale` heartbeat frames (only acts on snapshot); either drop the BE send next phase or wire FE to mark accounts.
+- No end-to-end brokers→writer→pubsub→WS integration test; each leg is unit-tested but the seam is manual. FE poll fallback masks regressions for ~10s.
+- Cost-basis exposure (not mark-to-market) — `positions.market_value_base` doesn't exist (architect CRIT #2).
+- Single-replica rate limiter + WS connection cap; multi-worker deferred to Phase 24.
+- `portfolio_rollup_ws_publish_total` is overloaded (Redis-publish + WS-send); split next phase.
+- 0040 backfill is synchronous; safe today because 0039 creates an empty table.
 
 
 

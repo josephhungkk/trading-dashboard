@@ -5,6 +5,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-05-12
+
+### Phase 10b.2 — Multi-account portfolio rollup (32 commits since v0.13.0)
+
+Spec: `docs/superpowers/specs/2026-05-12-phase10b2-portfolio-rollup-design.md`. Plan: `docs/superpowers/plans/2026-05-12-phase10b2-portfolio-rollup-plan.md`. Adds a cross-broker NLV / intraday-30d-1y curve / exposure-by-asset-class / per-instrument drill view at `/portfolio/rollup`. Hybrid REST + WS: TanStack-Query owns the cache, WebSocket pushes overwrite via `setQueryData`, 10s REST poll covers the WS-down window.
+
+**Chunk A — TimescaleDB hypertable + CAGGs (6 commits)**
+
+- Alembic 0039: `account_balance_snapshots` hypertable (`chunk_time_interval=7d`, retention 2y). Constraints: `ck_abs_currency_iso3`, `ck_abs_source_label` (regex `^[a-z0-9-]+$`, ≤64 chars). NO `nlv >= 0` CHECK (architect CRIT #1 — debit balances are real).
+- Alembic 0040: 1h CAGG (schedule 30min, retention 1y) + 1d CAGG (schedule 6h, retention 10y), both `materialized_only=false` for real-time aggregation. Sync backfill via `op.get_context().autocommit_block()` (TimescaleDB's `CALL refresh_continuous_aggregate(...)` is a PROCEDURE that issues internal COMMIT; can't run inside Alembic's transaction-per-migration).
+- `BalanceSnapshotWriter` service — two-level nested SAVEPOINT INSERT with fail-OPEN (writer-side errors don't break the broker NLV path). `clock_timestamp()` not `now()` so multi-account snapshots in the same outer TX get distinct `ts` (review HIGH #6 — `ON CONFLICT (account_id, ts) DO NOTHING` was silently collapsing them).
+- Wired into `brokers.py:1449` inside the NLV `UPDATE` savepoint with `RETURNING id` and a tracked `_pending_publish_account_ids` buffer cleared at top of every tick (HIGH #4 — fixes stale-position publish-bursts across ticks). 9 new Prometheus metrics (`portfolio_rollup_*`).
+- 5 unit tests + chunk-A reviewer chain (4 HIGH + 2 MED applied inline).
+
+**Chunk B' — Service compute_live (3 commits)**
+
+- 8 Pydantic v2 models (`schemas/portfolio.py`) with `ConfigDict(extra="forbid")`. `RollupLive.partial` + `RollupLive.fx_stale_accounts` for HIGH #4 partial-200 surface.
+- `PortfolioRollupService.compute_live(base)` — per-account FX fault isolation: a single un-priceable account doesn't blow up the whole rollup; only when ALL non-init accounts fail does the service raise `PreviewUnavailable(503, {"error":"fx_rate_unavailable","pair":"all"})`. Init-state accounts pass through with `status="initialising"`. Cost-basis exposure approximation (`qty * avg_cost * multiplier`, FX-converted) — `positions.market_value_base` doesn't exist (architect CRIT #2).
+- 4 golden tests (GV1/2/6/10). Chunk-B' reviewer chain (4 HIGH + 3 MED applied inline).
+
+**Chunk B'' — compute_curve + drill_asset_class (4 commits)**
+
+- `compute_curve(base, window)` — 3 windows: `intraday` (raw `account_balance_snapshots`), `30d` (1h CAGG), `1y` (1d CAGG). Per-currency FX cache; per-account FX failures degrade silently (curve is informational, not gate-load-bearing).
+- `drill_asset_class(asset_class, base)` — per-instrument exposure with long_native + short_native CASE branches (HIGH — was netting them and losing the sign). Global-scope cap from `risk_limits` table.
+- 8 more tests (4 curve + 4 drill) + 4 remaining goldens (GV3/5/9/11). Chunk-B'' reviewer chain (4 HIGH + 3 MED applied inline) including boundary-stripping fixes and error-message sanitisation.
+
+**Chunk B''' — Rate limiter + REST endpoints (3 commits)**
+
+- `PortfolioRateLimiter` — sliding-window 10/s burst per `jwt_subject` (HIGH #6 — NOT per `(subject, account_id)` like position-sizing; portfolio endpoints are cross-account so all 3 share the bucket).
+- `/api/portfolio/rollup`, `/rollup/curve`, `/rollup/drill` — 3 GET endpoints, JWT-authenticated, shared limiter. `base` validated against `SUPPORTED_BASE = {"GBP","USD","EUR","HKD","JPY","AUD"}`. Errors normalised to `{"error":"..."}`. 5 integration tests. Chunk-B''' reviewer chain (4 MED applied inline including limiter `evict_stale` call site, fixture yield+post-cleanup, PreviewUnavailable handler on curve+drill).
+
+**Chunk C — WebSocket gateway (3 commits)**
+
+- `/ws/portfolio/rollup` (`app/api/ws_portfolio.py`): CSWSH origin check pre-accept (HIGH #2); pubsub.listen() pattern not get_message polling (HIGH #3); 250ms per-conn compute cache + 500ms debounce; 2s send timeout via `asyncio.wait_for`; `WS_1011_INTERNAL_ERROR` close on timeout. Heartbeat every 30s emits `{type:"stale", account_ids:[...]}` diff. v=1 frame schema (MED #4). Connection cap 20 (pre-accept 1008 capacity). recv-drain task (added in C2) surfaces `WebSocketDisconnect` so the main push loop breaks promptly. Bounded set of 3 tracked tasks (listener + heartbeat + recv) cancelled+gathered in finally.
+- 4 integration tests (raw-ASGI pattern mirroring `test_ws_bars.py`). Chunk-C reviewer chain (2 HIGH + 2 MED applied inline including limiter empty-subject guard and `_recv_drain` exception narrowing).
+
+**Chunk D — Frontend (5 commits)**
+
+- `services/portfolio/` — types from regenerated `api-generated.ts`; `api.ts` mirrors `services/sizing/api.ts` shape; `useRollupLive` (hybrid REST + WS, bounded exponential backoff reconnect 500ms/1.5s/5s/15s after chunk-D reviewer HIGH); `useRollupCurve` (pure useQuery); `useRollupDrill` (lazy, `enabled`-gated).
+- `stores/global/portfolio.ts` — zustand-persist with migrate callback validating `portfolioRollupBase` against `SUPPORTED_BASES` (architect MED #7 + reviewer HIGH `typeof === 'string'` guard).
+- `/portfolio/rollup` route + `RollupPage` with 5 components: `RollupKpiBar` (NLV + WS-Live/Polling badge + partial-mode FX-stale badge + base select), `RollupCurveChart` (SVG sparkline + window toggle — klinecharts skipped for bundle weight), `PerAccountTable`, `AssetClassExposureList` (clickable rows fire drill), `AssetClassDrillDrawer` (lazy fetch, verdict-coloured rows red/amber, `aria-modal=true`, Escape closes).
+- 11 frontend tests (4 hook + 2 hook + 3 drawer + 2 page) + chunk-D reviewer chain (4 HIGH + 4 MED applied inline including encodeURIComponent on all query params, distinct 503 fx_rate_unavailable amber banner, `useCallback` for drawer onClose).
+
+**Chunk E — Playwright spec + final-reviewer integration sweep (2 commits)**
+
+- 3 Playwright smokes against `/portfolio/rollup` (page mount + window-toggle URL persistence + drill-drawer open).
+- Final-reviewer (opus) integration sweep returned 1 HIGH fixed inline: `/ws/portfolio/rollup` now calls `PortfolioRateLimiter.check(jwt_subject)` post-auth pre-accept so a WS upgrade storm can't bypass the REST limiter.
+
+### Known limitations (documented for follow-up)
+
+1. **Heartbeat `stale` frames are emitted by the WS but ignored by the FE.** `useRollupLive` only acts on `type === 'snapshot'`. Either drop the BE heartbeat send next phase or wire FE to mark accounts in the table.
+2. **No end-to-end integration test covers brokers.py → BalanceSnapshotWriter → pubsub → WS push.** Each leg is unit-tested; the seam is verified manually. FE poll fallback masks a regression for ~10s. Follow-up ticket required.
+3. **Cost-basis exposure (not mark-to-market).** Architect CRIT #2 — `positions.market_value_base` doesn't exist yet. UI is correct (matches `risk_service.py` concentration math).
+4. **Single-replica rate limiter + WS connection cap.** Module globals; multi-worker locking deferred to Phase 24 (same constraint as position-sizing-rate-limiter).
+5. **`portfolio_rollup_ws_publish_total` is overloaded** — incremented both by the writer's Redis publish AND by the WS gateway's `send_json`. Split into `_redis_publishes_total` + `_ws_frames_sent_total` next phase.
+6. **`migration 0040 backfill`** — synchronous `refresh_continuous_aggregate(NULL, NULL)` blocks the migration on a populated table. Safe today because 0039 creates an empty table; document for redeploys if backfilled separately.
+
+### Migrations
+
+- `0039_phase10b2_balance_snapshots` — hypertable + retention policy (2y)
+- `0040_phase10b2_balance_snapshots_caggs` — 1h + 1d CAGGs with backfill + retention policies (1y / 10y) and refresh schedules
+
+Downgrade order: 0040 drops CAGGs cleanly (1d before 1h); 0039 drops the hypertable with `CASCADE` and removes retention policy. `BalanceSnapshotWriter` wiring in `main.py` is `BalanceSnapshotWriter | None` injection so reverting just the lifespan changes restores prior behaviour without schema rollback. `portfolio_router` + `ws_portfolio_router` are independent `include_router` calls — safe to comment out.
+
+### Tag
+- `v0.14.0` on top of `v0.13.0`. (Note: ROADMAP §10 reserved v0.10.0 for full Phase 10 but Phase-10 work shipped piecemeal as v0.12.0 / v0.12.1 / v0.13.0 / v0.14.0. v0.10.0 stays retired; v0.14.0 reserved for Futures per ROADMAP §14 slides one minor — Futures becomes the next available open slot. Versioning convention: feature phases bump minor, cleanup/effectivity sub-phases bump patch — see memory/phase10_status_clarification.md.)
+
+---
+
 ## [0.13.0] — 2026-05-12
 
 ### Phase 10b.1 — Position-sizing calculator (20 commits since v0.12.1)
