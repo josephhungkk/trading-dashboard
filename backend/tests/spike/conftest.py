@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import socket
 import time
+from collections.abc import Iterator
 
 import httpx
 import pytest
@@ -42,9 +43,10 @@ def litellm_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def litellm_client(litellm_url: str) -> httpx.Client:
-    return httpx.Client(
+def litellm_client(litellm_url: str) -> Iterator[httpx.Client]:
+    with httpx.Client(
         base_url=litellm_url,
         headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
         timeout=60.0,
-    )
+    ) as client:
+        yield client
