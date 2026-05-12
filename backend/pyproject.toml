@@ -81,6 +81,12 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Deselect live-broker / env-gated tests by default. Run them explicitly via:
+#   pytest -m real_broker  (or real_schwab/real_futu/real_ibkr/real_alpaca_equity)
+# They're not "skipped" — they're invisible unless you opt in, so the
+# default test run isn't polluted with SKIPPED noise for tests that
+# couldn't possibly pass without external credentials.
+addopts = "-m 'not real_broker and not real_schwab and not real_futu and not real_ibkr and not real_alpaca_equity'"
 # Per-test timeout — any test hanging > 60s fails fast instead of pinning
 # the runner. Override per-test with @pytest.mark.timeout(N) when needed.
 timeout = 60
