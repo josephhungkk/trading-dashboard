@@ -30,6 +30,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "alpaca-py>=0.30",
     "fakeredis[asyncio,lua]>=2.35.1",
     "mypy>=1.20.1",
     "pip-audit>=2.10.0",
@@ -39,12 +40,14 @@ dev = [
     "pytest-httpx>=0.36.2",
     "pytest-timeout>=2.4.0",
     "ruff>=0.15.11",
+    "schwabdev==3.0.3",
     "syrupy>=5.1.0",
 ]
-# Phase 10a.5.1 C4: broker SDKs (alpaca-py, schwabdev) split into a standalone
-# uv project at backend/tests/real_broker/pyproject.toml. Nightly workflows
-# point at that path. The split keeps the main `uv sync` lean (the SDKs pull
-# large C extensions) and isolates schwabdev's dependency pins.
+# Phase 11a CI-debt (2026-05-12): added alpaca-py + schwabdev to dev deps so
+# the 4 sidecar-SDK tests (tests/test_oco_alpaca_*, tests/unit/test_schwab_*)
+# don't skip on the main backend suite. The standalone nightly project at
+# backend/tests/real_broker/ keeps its own pins for real-broker E2E runs
+# (those need broker-specific credentials and stricter version control).
 
 [tool.ruff]
 line-length = 100

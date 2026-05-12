@@ -54,6 +54,17 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./backend/tests:/app/tests
+      # Phase 11a CI-debt: mount alembic so new migrations don't require a
+      # full image rebuild. The image's /app/alembic snapshot can drift
+      # (e.g. 0042_phase11a_ai_jobs landed after the last build).
+      - ./backend/alembic:/app/alembic
+      # Phase 11a CI-debt: mount sidecar_schwab so unit tests that import
+      # sidecar_schwab._generated.broker.v1.broker_pb2 (proto stubs) resolve.
+      # Backend image otherwise has no knowledge of the schwab sidecar pkg.
+      - ./sidecar_schwab:/app/sidecar_schwab
+      # Phase 11a CI-debt: mount deploy/prometheus so test_metrics_orders
+      # tests find alerts.yml at /deploy/prometheus/alerts.yml.
+      - ./deploy/prometheus:/deploy/prometheus
     command: ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   frontend:
