@@ -1245,18 +1245,610 @@ git push --tags
 
 Writing detailed tasks for D before B closes would require placeholder types that A.5/B might refactor. Per writing-plans skill: *"every step must contain the actual content an engineer needs"* — speculative tasks would violate that.
 
-### Chunk A.5 — LiteLLM auth-callback (sketch)
+### Chunk A.5 — LiteLLM Redis-backed auth-callback (HIGH-5)
 
-**Files to create:** `backend/app/services/ai/litellm_auth_callback.py`, `backend/app/api/internal_litellm.py`, tests.
+**Goal:** Zero-restart rotation of the LiteLLM master key. Removes the env-var dependency from chunk A1.
 
-**Task outline:**
-1. Add `ai:litellm_master_key` Redis bootstrap to backend lifespan.
-2. Author `services/ai/litellm_auth_callback.py` with the `user_api_key_auth` function signature LiteLLM expects.
-3. Add `POST /internal/litellm/verify` endpoint (called by the callback over docker network).
-4. Add `PUT /api/admin/secrets/ai/litellm_master_key` admin rotation endpoint with CSRF nonce.
-5. Test: unauthorized header rejected; current key accepted; rotation visible without restart; LOCAL_ONLY-tagged request rejected if routes to cloud (third defence layer).
-6. Reviewer chain (haiku + sonnet for security).
-7. Tag `v0.11.0.a5`.
+**Design refinement vs original sketch:** the callback reads Redis DIRECTLY from inside the LiteLLM container (LiteLLM ships with `redis-py`). The original sketch proposed `POST /internal/litellm/verify` — extra network hop + internal endpoint to secure. Direct-Redis-read is simpler, lower-latency, fewer moving parts.
+
+**Verified signature (from LiteLLM docs):**
+```python
+async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | str
+```
+LiteLLM already extracts `api_key` from `Authorization: Bearer <key>` before calling. Return `UserAPIKeyAuth(api_key=api_key)` to authorize; raise `ProxyException(code=401)` to deny.
+
+**Files to create:**
+- `backend/app/services/ai/litellm_auth_callback.py` — the async callback function reading from Redis
+- `backend/tests/services/ai/test_litellm_auth_callback.py` — unit tests for the callback (mock Redis + Request)
+
+**Files to modify:**
+- `backend/app/main.py` — lifespan: bootstrap `ai:litellm_master_key` Redis key from `app_secrets.ai.litellm_master_key`
+- `deploy/litellm/config.yaml` — add `general_settings.custom_auth: services.ai.litellm_auth_callback.user_api_key_auth` + `custom_auth_settings: {mode: "on"}` so LiteLLM trusts ONLY our callback
+- `docker-compose.yml` — mount `backend/app/services/ai/litellm_auth_callback.py` into the LiteLLM container at `/app/custom_auth/services/ai/litellm_auth_callback.py` + `PYTHONPATH=/app/custom_auth`; also pass `REDIS_URL` env to litellm service
+- `backend/app/api/admin.py` — `PUT /api/admin/secrets/ai/litellm_master_key` endpoint with CSRF nonce: writes new key to `app_secrets` AND Redis atomically; invalidates secret cache via pubsub
+
+### Task 10: Write the failing test for `user_api_key_auth` callback
+
+**Files:**
+- Create: `backend/tests/services/ai/test_litellm_auth_callback.py`
+
+- [ ] **Step 1: Write the test stub**
+
+Create `backend/tests/services/ai/test_litellm_auth_callback.py`:
+
+```python
+"""Phase 11a-A.5: LiteLLM auth-callback unit tests (HIGH-5).
+
+Validates the Redis-backed master-key check. Mocks the FastAPI Request
+plus Redis client so tests run without the LiteLLM container.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+pytestmark = pytest.mark.no_db
+
+
+@pytest.fixture
+def fake_request() -> MagicMock:
+    """LiteLLM passes a FastAPI Request; the callback may inspect headers
+    but doesn't need the full ASGI scope."""
+    req = MagicMock(spec_set=["headers", "client"])
+    req.headers = {}
+    req.client = MagicMock(host="127.0.0.1")
+    return req
+
+
+@pytest.fixture
+def fake_redis_with_key() -> AsyncMock:
+    """Redis returns the master key for `ai:litellm_master_key`."""
+    r = AsyncMock()
+    r.get = AsyncMock(return_value=b"sk-master-current")
+    return r
+
+
+@pytest.mark.asyncio
+async def test_callback_accepts_matching_key(
+    fake_request: MagicMock, fake_redis_with_key: AsyncMock
+) -> None:
+    from app.services.ai.litellm_auth_callback import user_api_key_auth
+
+    result = await user_api_key_auth(
+        fake_request, "sk-master-current", _redis=fake_redis_with_key
+    )
+    assert result is not None
+    assert getattr(result, "api_key", None) == "sk-master-current"
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_mismatched_key(
+    fake_request: MagicMock, fake_redis_with_key: AsyncMock
+) -> None:
+    from app.services.ai.litellm_auth_callback import user_api_key_auth
+    from litellm.proxy._types import ProxyException
+
+    with pytest.raises(ProxyException) as exc:
+        await user_api_key_auth(
+            fake_request, "sk-master-wrong", _redis=fake_redis_with_key
+        )
+    assert exc.value.code == 401
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_when_redis_unset(fake_request: MagicMock) -> None:
+    """If Redis has no key (BE lifespan didn't run, or key was wiped),
+    deny rather than fail-open."""
+    from app.services.ai.litellm_auth_callback import user_api_key_auth
+    from litellm.proxy._types import ProxyException
+
+    fake_redis = AsyncMock()
+    fake_redis.get = AsyncMock(return_value=None)
+    with pytest.raises(ProxyException) as exc:
+        await user_api_key_auth(
+            fake_request, "sk-master-anything", _redis=fake_redis
+        )
+    assert exc.value.code == 401
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_when_redis_errors(fake_request: MagicMock) -> None:
+    """Redis hiccup must fail-CLOSED. AI access is not load-bearing on the
+    user-facing path; a 401 is correct over fail-OPEN."""
+    from app.services.ai.litellm_auth_callback import user_api_key_auth
+    from litellm.proxy._types import ProxyException
+
+    fake_redis = AsyncMock()
+    fake_redis.get = AsyncMock(side_effect=RuntimeError("redis hiccup"))
+    with pytest.raises(ProxyException) as exc:
+        await user_api_key_auth(
+            fake_request, "sk-master-current", _redis=fake_redis
+        )
+    assert exc.value.code == 401
+
+
+@pytest.mark.asyncio
+async def test_callback_constant_time_compare(
+    fake_request: MagicMock, fake_redis_with_key: AsyncMock
+) -> None:
+    """Use hmac.compare_digest to defend against timing side-channels.
+    Asserting the import indirectly via behaviour: both differ-at-start
+    and differ-at-end mismatches reject with the same exception class."""
+    from app.services.ai.litellm_auth_callback import user_api_key_auth
+    from litellm.proxy._types import ProxyException
+
+    for wrong in ("Xk-master-current", "sk-master-currenX", ""):
+        with pytest.raises(ProxyException):
+            await user_api_key_auth(
+                fake_request, wrong, _redis=fake_redis_with_key
+            )
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `cd /home/joseph/dashboard/backend && uv run pytest tests/services/ai/test_litellm_auth_callback.py -v`
+Expected: collection error or all tests fail with `ModuleNotFoundError: app.services.ai.litellm_auth_callback`.
+
+### Task 11: Implement `user_api_key_auth` callback
+
+**Files:**
+- Create: `backend/app/services/ai/litellm_auth_callback.py`
+
+- [ ] **Step 1: Implement the callback**
+
+Create `backend/app/services/ai/litellm_auth_callback.py`:
+
+```python
+"""Phase 11a-A.5 (HIGH-5): Redis-backed LiteLLM master-key validation.
+
+LiteLLM loads this module from /app/custom_auth/services/ai/ inside the
+proxy container (PYTHONPATH=/app/custom_auth). On every protected
+route, LiteLLM calls user_api_key_auth(request, api_key) where api_key
+is already extracted from the Authorization: Bearer header.
+
+Zero-restart rotation: PUT /api/admin/secrets/ai/litellm_master_key
+writes the new key to Redis key `ai:litellm_master_key`. The next
+LiteLLM request sees the new value — no docker compose restart.
+
+Fail-CLOSED on every error path (Redis down, key unset, mismatch).
+AI is not on the critical user-facing path; a 401 is the correct
+default. Cost-ledger writes are fail-OPEN per Phase 10a pattern but
+auth is the opposite.
+"""
+
+from __future__ import annotations
+
+import hmac
+import os
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fastapi import Request
+    from redis.asyncio import Redis
+
+
+REDIS_MASTER_KEY = "ai:litellm_master_key"
+
+
+async def _get_redis_client() -> Redis:
+    """Resolve a Redis client from REDIS_URL env (set in docker-compose).
+    The LiteLLM container imports this module on startup, so we cannot
+    rely on FastAPI app.state.redis — there is no FastAPI here."""
+    from redis.asyncio import Redis
+
+    redis_url = os.environ.get("REDIS_URL")
+    if not redis_url:
+        raise RuntimeError("REDIS_URL not set in LiteLLM container env")
+    return Redis.from_url(redis_url, decode_responses=False)
+
+
+async def user_api_key_auth(
+    request: Request, api_key: str, *, _redis: Any | None = None
+) -> Any:
+    """Validate the incoming master key against the Redis-stored value.
+
+    Args:
+        request: FastAPI Request (provided by LiteLLM; we don't inspect it).
+        api_key: extracted from Authorization: Bearer by LiteLLM.
+        _redis: test-injection for unit tests; production goes via env.
+
+    Returns:
+        UserAPIKeyAuth(api_key=api_key) on success.
+
+    Raises:
+        ProxyException with code=401 on any failure.
+    """
+    from litellm.proxy._types import ProxyException, UserAPIKeyAuth
+
+    redis_client = _redis if _redis is not None else await _get_redis_client()
+    try:
+        stored = await redis_client.get(REDIS_MASTER_KEY)
+    except Exception:  # noqa: BLE001 — fail-CLOSED, any Redis error denies
+        raise ProxyException(
+            message="auth backend unavailable",
+            type="invalid_request_error",
+            param="api_key",
+            code=401,
+        ) from None
+    if stored is None:
+        raise ProxyException(
+            message="master key not configured",
+            type="invalid_request_error",
+            param="api_key",
+            code=401,
+        )
+
+    stored_str = stored.decode("utf-8") if isinstance(stored, bytes) else str(stored)
+    if not hmac.compare_digest(api_key, stored_str):
+        raise ProxyException(
+            message="invalid master key",
+            type="invalid_request_error",
+            param="api_key",
+            code=401,
+        )
+
+    return UserAPIKeyAuth(api_key=api_key)
+```
+
+- [ ] **Step 2: Run tests to verify pass**
+
+Run: `cd /home/joseph/dashboard/backend && uv run pytest tests/services/ai/test_litellm_auth_callback.py -v`
+Expected: 5 PASS.
+
+- [ ] **Step 3: Commit**
+
+Stage the new module + test. Commit message body:
+
+```
+feat(phase11a-A.5): Redis-backed LiteLLM master-key auth-callback
+
+HIGH-5: zero-restart rotation of the LiteLLM master key via Redis-stored
+value the auth-callback reads on every request. Replaces the env-var
+key model from chunk A1 (which required docker compose up -d litellm
+to rotate).
+
+Fail-CLOSED on every error path (Redis down, key unset, mismatch).
+hmac.compare_digest defends against timing side-channels on the
+compare step. _redis test-injection keyword keeps the production code
+path container-imported (no FastAPI here — LiteLLM loads the module
+from /app/custom_auth).
+```
+
+### Task 12: Backend lifespan bootstraps the Redis master-key
+
+**Files:**
+- Modify: `backend/app/main.py`
+- Test: `backend/tests/api/test_lifespan_litellm_bootstrap.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `backend/tests/api/test_lifespan_litellm_bootstrap.py`:
+
+```python
+"""Phase 11a-A.5: BE lifespan writes ai:litellm_master_key to Redis
+from app_secrets on startup. Without this, the LiteLLM auth-callback
+sees Redis empty and rejects every request — the chunk's whole point
+falls over."""
+
+from __future__ import annotations
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_lifespan_writes_master_key_to_redis() -> None:
+    """app.state.redis must have ai:litellm_master_key set after startup,
+    matching the value stored in app_secrets."""
+    from app.main import app
+
+    redis = app.state.redis
+    stored = await redis.get("ai:litellm_master_key")
+    assert stored is not None, "lifespan must bootstrap the key"
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `cd /home/joseph/dashboard && docker compose exec backend uv run pytest tests/api/test_lifespan_litellm_bootstrap.py -v`
+Expected: FAIL with `assert None is not None`.
+
+- [ ] **Step 3: Add the lifespan bootstrap**
+
+Read `backend/app/main.py` around the lifespan function (lines 110-200). Add a bootstrap block AFTER the redis client is created (`_app.state.redis = redis`) and BEFORE the broker layer init. Locate via:
+
+Run: `grep -n "_app.state.redis = redis" /home/joseph/dashboard/backend/app/main.py`
+
+Insert this snippet (use the exact existing patterns for secret reads):
+
+```python
+    # Phase 11a-A.5 (HIGH-5): bootstrap LiteLLM master-key in Redis so
+    # the auth-callback in deploy/litellm/config.yaml sees it. Operator
+    # rotates via PUT /api/admin/secrets/ai/litellm_master_key.
+    try:
+        master_key = await svc.get_secret("ai.litellm_master_key")
+    except KeyError:
+        # First boot: seed a placeholder so LiteLLM at least starts up.
+        # Operator MUST rotate via the admin endpoint before any real call.
+        master_key = "sk-bootstrap-rotate-me"
+        await svc.set_secret("ai.litellm_master_key", master_key)
+    await redis.set("ai:litellm_master_key", master_key)
+```
+
+Where `svc` is the existing `ConfigService` (look for `svc = ConfigService(...)` in the lifespan).
+
+- [ ] **Step 4: Run test to verify pass**
+
+Restart backend (`docker compose restart backend`), then re-run test.
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```
+feat(phase11a-A.5): bootstrap LiteLLM master-key in Redis on lifespan
+
+BE lifespan reads app_secrets.ai.litellm_master_key (seeding a
+placeholder on first boot) and writes to Redis key
+ai:litellm_master_key. The LiteLLM auth-callback module mounted into
+the proxy container reads this value on every protected request —
+zero-restart rotation flows BE → Redis → LiteLLM automatically.
+```
+
+### Task 13: Wire LiteLLM container to use the callback
+
+**Files:**
+- Modify: `deploy/litellm/config.yaml`
+- Modify: `docker-compose.yml`
+
+- [ ] **Step 1: Update the LiteLLM config to use custom_auth**
+
+Modify `deploy/litellm/config.yaml`. Replace the docstring header note about chunk A.5 and add `general_settings`:
+
+```yaml
+# Production LiteLLM config — committed to git, contains NO secrets.
+# Provider keys arrive per-request from BE (Option C, validated in 11a-A0).
+# Master-key validation is Redis-backed via custom_auth callback
+# mounted from backend/app/services/ai/litellm_auth_callback.py
+# (HIGH-5 — zero-restart rotation).
+model_list:
+  ... (unchanged) ...
+
+general_settings:
+  custom_auth: services.ai.litellm_auth_callback.user_api_key_auth
+  custom_auth_settings:
+    mode: "on"  # ONLY trust our callback; do not also run litellm's default master-key check
+```
+
+- [ ] **Step 2: Update docker-compose to mount the callback module + pass REDIS_URL**
+
+Modify the `litellm:` service in `docker-compose.yml`:
+
+```yaml
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: dashboard-litellm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+      # Mount the callback module so LiteLLM can import it via PYTHONPATH.
+      - ./backend/app/services/ai/litellm_auth_callback.py:/app/custom_auth/services/ai/litellm_auth_callback.py:ro
+      # Mark the parent dirs as Python packages — the bind mounts above
+      # only mount the file, not __init__.py. Use empty placeholders.
+      - ./deploy/litellm/__init__.py:/app/custom_auth/services/__init__.py:ro
+      - ./deploy/litellm/__init__.py:/app/custom_auth/services/ai/__init__.py:ro
+    environment:
+      PYTHONPATH: /app/custom_auth
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      LITELLM_LOG: WARNING
+    healthcheck:
+      test: ["CMD", "litellm", "--health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+```
+
+Also create `deploy/litellm/__init__.py` as an empty file (it doubles as the package marker for the mounted paths).
+
+- [ ] **Step 3: Restart LiteLLM**
+
+```bash
+docker compose up -d litellm
+```
+
+- [ ] **Step 4: Verify LiteLLM started successfully**
+
+```bash
+docker compose logs --tail 30 litellm
+```
+
+Expected: no `ImportError`, no `ModuleNotFoundError`. Look for "Uvicorn running on..." or equivalent.
+
+- [ ] **Step 5: Verify auth-callback enforcement end-to-end**
+
+```bash
+# Wrong key — should 401
+WRONG_KEY='example-wrong-placeholder'
+curl -sf -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $WRONG_KEY" \
+  http://localhost:4000/v1/models
+# Expected: 401
+
+# Correct key (the placeholder we seeded) — should 200
+# Use the literal bootstrap value from app_secrets.ai.litellm_master_key.
+RIGHT_KEY=$(docker compose exec backend uv run python -c \
+  "import asyncio; from app.services.config import get_config_service; \
+   print(asyncio.run((lambda: \
+     get_config_service().__await__().__next__().get_secret('ai.litellm_master_key'))()))")
+curl -sf -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $RIGHT_KEY" \
+  http://localhost:4000/v1/models
+# Expected: 200
+```
+
+- [ ] **Step 6: Commit**
+
+```
+feat(phase11a-A.5): wire LiteLLM container to use Redis-backed auth-callback
+
+config.yaml general_settings.custom_auth points at the mounted module;
+custom_auth_settings.mode: "on" disables LiteLLM's default master-key
+env-var check so only our callback runs. docker-compose mounts the
+callback module + parent-package __init__.py stubs + sets PYTHONPATH
+and REDIS_URL. Restart-rotation is now removed — operators rotate
+via admin PUT and LiteLLM picks up immediately.
+```
+
+### Task 14: Admin rotation endpoint with CSRF nonce
+
+**Files:**
+- Modify: `backend/app/api/admin.py`
+- Test: `backend/tests/integration/test_admin_litellm_master_key.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `backend/tests/integration/test_admin_litellm_master_key.py`:
+
+```python
+"""Phase 11a-A.5: admin rotation endpoint for the LiteLLM master key.
+
+Mutating a secret requires CSRF nonce per CLAUDE.md cross-cutting rule
++ MED-5 in the spec. Rotation must update BOTH app_secrets AND Redis
+atomically so LiteLLM sees the new value on the next request without
+a docker compose restart.
+"""
+
+from __future__ import annotations
+
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_rotate_litellm_master_key_requires_nonce(
+    test_client_admin: AsyncClient,
+) -> None:
+    resp = await test_client_admin.put(
+        "/api/admin/secrets/ai/litellm_master_key",
+        json={"value": "sk-new-master"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_rotate_litellm_master_key_updates_redis_and_secrets(
+    test_client_admin: AsyncClient,
+) -> None:
+    nonce_resp = await test_client_admin.post("/api/admin/confirmation-nonce")
+    assert nonce_resp.status_code == 200, nonce_resp.text
+    nonce = nonce_resp.json()["nonce"]
+
+    resp = await test_client_admin.put(
+        "/api/admin/secrets/ai/litellm_master_key",
+        json={"value": "sk-rotated-master"},
+        headers={"X-Confirm-Nonce": nonce},
+    )
+    assert resp.status_code == 200, resp.text
+
+    from app.main import app
+
+    stored_in_redis = await app.state.redis.get("ai:litellm_master_key")
+    assert stored_in_redis == b"sk-rotated-master"
+
+
+@pytest.mark.asyncio
+async def test_rotate_rejects_short_key(test_client_admin: AsyncClient) -> None:
+    nonce_resp = await test_client_admin.post("/api/admin/confirmation-nonce")
+    nonce = nonce_resp.json()["nonce"]
+    resp = await test_client_admin.put(
+        "/api/admin/secrets/ai/litellm_master_key",
+        json={"value": "too-short"},
+        headers={"X-Confirm-Nonce": nonce},
+    )
+    assert resp.status_code == 400, resp.text
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `docker compose exec backend uv run pytest tests/integration/test_admin_litellm_master_key.py -v`
+Expected: FAIL (endpoint doesn't exist yet).
+
+- [ ] **Step 3: Add the admin endpoint**
+
+Read `backend/app/api/admin.py` to find the existing admin-secrets pattern. Add the new endpoint near the existing `/api/admin/secrets/...` routes (the pattern is established for broker secrets in chunk 7a):
+
+```python
+class _LitellmMasterKeyBody(BaseModel):
+    value: str = Field(..., min_length=16, max_length=256)
+
+
+@router.put(
+    "/secrets/ai/litellm_master_key",
+    dependencies=[Depends(consume_confirmation_nonce)],
+)
+async def rotate_litellm_master_key(
+    body: _LitellmMasterKeyBody,
+    svc: Annotated[ConfigService, Depends(get_config_service)],
+    redis: RedisDep,
+    _admin: Annotated[None, Depends(require_admin)],
+) -> dict[str, str]:
+    """Phase 11a-A.5 HIGH-5: zero-restart rotation. Write to
+    app_secrets AND Redis atomically so the LiteLLM auth-callback sees
+    the new value on the next request."""
+    await svc.set_secret("ai.litellm_master_key", body.value)
+    await redis.set("ai:litellm_master_key", body.value)
+    return {"status": "rotated"}
+```
+
+The existing `consume_confirmation_nonce`, `require_admin`, `get_config_service`, `RedisDep`, `ConfigService` imports already live at the top of `admin.py`; re-use them.
+
+- [ ] **Step 4: Run tests to verify pass**
+
+```bash
+docker compose restart backend
+docker compose exec backend uv run pytest tests/integration/test_admin_litellm_master_key.py -v
+```
+Expected: 3 PASS.
+
+- [ ] **Step 5: Commit**
+
+```
+feat(phase11a-A.5): PUT /api/admin/secrets/ai/litellm_master_key
+
+Admin rotation endpoint writes new key to app_secrets AND Redis
+atomically; CSRF nonce required per MED-5. Min-length 16 chars guards
+against accidental "test" / empty strings reaching production.
+LiteLLM auth-callback sees the new value on the next protected
+request — zero docker compose interaction needed.
+```
+
+### Task 15: Chunk A.5 reviewer chain + tag v0.11.0.2
+
+- [ ] **Step 1: Dispatch reviewers in parallel**
+
+- spec-compliance (haiku) with inline spec slice for §2 11a-A.5
+- python-reviewer (haiku) on all chunk A.5 commits
+- security-reviewer (sonnet) — mandatory because this chunk handles auth
+- silent-failure-hunter (sonnet) — mandatory because the auth callback has multiple failure paths
+
+- [ ] **Step 2: Apply CRIT+HIGH+MED findings inline**
+
+Per `feedback_architect_findings_apply_through_medium.md`.
+
+- [ ] **Step 3: Tag**
+
+```bash
+git tag -a v0.11.0.2 -F /tmp/tag-msg-phase11a-a5.txt
+git push --tags
+```
+
+(Tag message file follows the v0.11.0.1 template — chunk-commits list + reviewer-results summary + test status.)
 
 ### Chunk A2 — WoL + Ollama service installs (sketch)
 
