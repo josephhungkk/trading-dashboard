@@ -1,0 +1,28 @@
+# Phase 11a-A0 spike config — covers all 6 providers we care about.
+# NOT a production config; no real keys committed. Tests pass each
+# provider's api_key via request body and assert LiteLLM forwards it.
+model_list:
+  - model_name: ollama-nuc
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://localhost:11434
+  - model_name: ollama-heavy
+    litellm_params:
+      model: ollama/qwen2.5:32b
+      api_base: http://localhost:11434
+  - model_name: xai-grok
+    litellm_params:
+      model: xai/grok-2-latest
+      api_base: https://api.x.ai/v1
+  - model_name: gemini-pro
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+  - model_name: anthropic-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+  - model_name: openai-gpt4o
+    litellm_params:
+      model: openai/gpt-4o
+
+general_settings:
+  master_key: sk-spike-master
