@@ -883,6 +883,54 @@ Service worker. Install-to-home-screen. FCM / Web Push notifications. Mobile-onl
 - **Schwab OAuth tokens replay through `app_secrets`** as ciphertext. If `APP_SECRET_KEY` is rotated at the same time (legitimate launch hardening), need a decrypt-with-old-key / re-encrypt-with-new-key pass before save → see Phase 24's PG-cert-auth notes for parallel rotation guidance.
 - Verify the Schwab `account_hash` survives the round trip (it lives in `broker_accounts` which is *not* preserved — but BrokerDiscoverer's first tick rebuilds it from the live `ListManagedAccounts` RPC, so the user's `SCHWAB_PAPER_ACCOUNT_HASH` env var stays valid).
 
+## Recovery — 2026-05-13 operator session (Phase 11a CI-debt fallout)
+
+See **`docs/RECOVERY-2026-05-13.md`** for the full runbook. Two issues
+discovered 2026-05-12 during the test-unskipping work; both need
+operator intervention before the 15 real-broker / opt-in tests can be
+unskipped.
+
+- [ ] **Issue 1 — VPS backend lifespan crash (admin 502).** Backend
+  container restart-loops because `app/main.py:134` raises
+  `SecretDecryptError` decrypting the `ai.litellm_master_key` row with
+  the current `APP_SECRET_KEY`. Recovery: `DELETE` the placeholder row
+  from prod `app_secrets` → `docker compose restart backend nginx` on
+  VPS. Lifespan re-mints a fresh placeholder encrypted with the current
+  key on next boot. After fix, the local NUC backend may also need a
+  restart for the same reason.
+
+- [ ] **Issue 2 — prod `app_config`/`app_secrets` mostly empty.** 0 rows
+  in `app_config`, 1 row in `app_secrets` (the placeholder), 0 rows in
+  `risk_limits` / `broker_accounts`. Either wiped or never seeded.
+  Authoritative re-seed list: `docs/APP_CONFIG_INVENTORY.md`. Order:
+  IBKR mTLS (via `deploy/nuc/provision-and-publish.ps1`) → IBKR per-label
+  IBC creds → Schwab (app_key + app_secret BEFORE re-authorize) → Alpaca
+  → Futu → optional quote-source routing → per-label `trade_enabled`
+  flags → `./scripts/db/copy-prod-creds-to-test-pg.sh` to mirror into
+  test_postgres.
+
+- [ ] **Test fixture refactor** (once seeded): rewrite
+  `backend/tests/real_broker/conftest.py` to gate marker-skip on
+  `app_secrets` row presence (via ConfigService) instead of env-var
+  presence. Plus the 5 real-broker test files that do
+  `os.environ["SCHWAB_APP_KEY"]` etc. — switch to a shared `real_broker_
+  creds` fixture that calls `ConfigService.reveal_secret(...)`.
+
+- [ ] **15 tests should auto-unskip** once creds land in test_postgres
+  + conftest refactor lands: 2 Alpaca, 4 Schwab (3 e2e + 1
+  capability-drift placeholder pending business decision), 3 IBKR, 1
+  Futu, 2 real-Schwab smoke, 3 perf (needs perf-test refactor to
+  honor CF Access service-token auth instead of JWT). Suite goal:
+  1293 / 16 / 0 → 1308 / 1 / 0 (only `test_real_schwab_capability_drift`
+  remains until Schwab flips supported-set post-A5).
+
+- [ ] **2 chain-test bugs stay Phase 11b candidates** (separate from
+  this recovery): `test_full_modify_chain` (OrderEventConsumer applies
+  cancel-on-old-broker_order_id before orders_service updates it) +
+  `test_full_bracket_chain` (preview hash covers 8 fields, bracket
+  `_consume_nonce` covers 3 — never match). Both are real prod bugs
+  the chain tests would surface.
+
 ## Phase 2.x — follow-ups discovered during v0.2.0 verify
 
 - [ ] nginx: add `location = /metrics { proxy_pass http://backend:8000/metrics; }` so Prometheus / Grafana can scrape through CF Access + service token. Backend endpoint exists and is auth-gated; only nginx is missing the proxy. Verified in prod 2026-04-23.
