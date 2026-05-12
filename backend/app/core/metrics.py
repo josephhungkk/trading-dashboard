@@ -709,3 +709,53 @@ position_sizing_admin_writes_total = Counter(
     ["field"],
     registry=registry,
 )
+
+# Phase 10b.2 — portfolio rollup (multi-account NLV / exposure / drill)
+portfolio_rollup_compute_total = Counter(
+    "portfolio_rollup_compute_total",
+    "Successful portfolio rollup compute requests.",
+    labelnames=["endpoint", "base_currency"],
+    registry=registry,
+)
+portfolio_rollup_compute_latency_seconds = Histogram(
+    "portfolio_rollup_compute_latency_seconds",
+    "Latency of portfolio rollup compute paths.",
+    labelnames=["endpoint"],
+    registry=registry,
+)
+portfolio_rollup_fx_unavailable_total = Counter(
+    "portfolio_rollup_fx_unavailable_total",
+    "Count of fx_rate_unavailable raises during rollup compute.",
+    labelnames=["pair"],
+    registry=registry,
+)
+portfolio_rollup_snapshot_writes_total = Counter(
+    "portfolio_rollup_snapshot_writes_total",
+    "Successful account_balance_snapshots INSERTs from BalanceSnapshotWriter.",
+    registry=registry,
+)
+portfolio_rollup_snapshot_write_errors_total = Counter(
+    "portfolio_rollup_snapshot_write_errors_total",
+    "Failed account_balance_snapshots INSERTs (fail-OPEN; outer NLV UPDATE still commits).",
+    registry=registry,
+)
+portfolio_rollup_ws_publish_total = Counter(
+    "portfolio_rollup_ws_publish_total",
+    "Successful redis.publish on portfolio.rollup.dirty channel.",
+    registry=registry,
+)
+portfolio_rollup_publish_failures_total = Counter(
+    "portfolio_rollup_publish_failures_total",
+    "Failed redis.publish on portfolio.rollup.dirty channel.",
+    registry=registry,
+)
+portfolio_rollup_ws_connections = Gauge(
+    "portfolio_rollup_ws_connections",
+    "Current open /ws/portfolio/rollup connections.",
+    registry=registry,
+)
+portfolio_rollup_ws_send_timeout_total = Counter(
+    "portfolio_rollup_ws_send_timeout_total",
+    "WS send timeouts on /ws/portfolio/rollup; connection closed on timeout.",
+    registry=registry,
+)
