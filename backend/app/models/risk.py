@@ -136,7 +136,7 @@ class RiskDecision(Base):
         CheckConstraint("side IN ('buy', 'sell')", name="risk_decisions_side_check"),
         CheckConstraint("latency_ms >= 0", name="risk_decisions_latency_check"),
         CheckConstraint(
-            "attempt_kind IN ('place_order', 'modify_order')",
+            "attempt_kind IN ('preview', 'place_order', 'modify_order')",
             name="risk_decisions_attempt_kind_check",
         ),
     )

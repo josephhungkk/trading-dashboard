@@ -56,8 +56,15 @@ fi
 EXTRA_ENV_ARGS=()
 if [[ -f "$TEST_ENV_FILE" ]]; then
     # Inject every non-comment KEY=VALUE line into the docker exec env list.
+    # Validate shape: KEY must match the POSIX env-name pattern
+    # ^[A-Za-z_][A-Za-z0-9_]*= so a malformed line (e.g. "FOO bar=baz") is
+    # skipped with a warning rather than silently mangling docker's argv.
     while IFS= read -r line; do
         [[ -z "$line" || "$line" == \#* ]] && continue
+        if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            echo "WARN: skipping malformed .env.test line: ${line%%=*}" >&2
+            continue
+        fi
         EXTRA_ENV_ARGS+=(-e "$line")
     done < "$TEST_ENV_FILE"
 fi

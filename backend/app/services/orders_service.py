@@ -538,6 +538,29 @@ async def _audit_risk_decision(
             metrics.risk_audit_insert_failures_total.labels(attempt_kind=attempt_kind).inc()
 
 
+async def _asset_class_for_instrument(
+    db: AsyncSession,
+    instrument_id: int | None,
+) -> str | None:
+    """Phase 11a reviewer fix: look up instruments.asset_class for the modify
+    path's risk-gate margin check. ``orders`` table doesn't carry asset_class,
+    so the canonical source is the resolved instrument row. Returns ``None``
+    when instrument_id is unresolved or the row is missing — caller treats as
+    "asset_class unavailable" and the margin check falls into the documented
+    WARN/BLOCK skip branch in ``risk_service._check_margin``.
+    """
+    if instrument_id is None:
+        return None
+    result = await db.execute(
+        text("SELECT asset_class::text AS ac FROM instruments WHERE id = :id"),
+        {"id": instrument_id},
+    )
+    row = result.mappings().one_or_none()
+    if row is None:
+        return None
+    return str(row["ac"])
+
+
 async def _resolve_instrument_id(
     db: AsyncSession,
     *,
@@ -1174,6 +1197,13 @@ async def modify_order(
         conid=str(row["conid"]),
         client=client,
     )
+    # Phase 11a reviewer fix: pull asset_class from instruments table rather
+    # than hard-coding "STOCK". The pre-existing capability check upstream
+    # only passes through equities today, but margin-RPC accuracy demands
+    # the correct asset_class for any future order types reaching this path
+    # (CFD / options / futures). None falls into the documented skip branch
+    # in _check_margin which now correctly BLOCKs on place_order/modify.
+    instrument_asset_class = await _asset_class_for_instrument(db, instrument_id)
     risk_verdict = await _evaluate_risk_for_modify_order(
         cfg=config,
         db=db,
@@ -1188,11 +1218,8 @@ async def modify_order(
         tif=request.tif,
         request_id=risk_request_id,
         instrument_id=instrument_id,
-        # Modify path: orders.symbol carries the leg's symbol; asset_class
-        # is implicitly STOCK in this codepath (same assumption as the
-        # capability check on line ~1119).
         symbol=str(row["symbol"]),
-        asset_class="STOCK",
+        asset_class=instrument_asset_class,
     )
     # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
     # for modify_order. ALLOW path is deduped via 30s SETNX.

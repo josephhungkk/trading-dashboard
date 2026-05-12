@@ -674,6 +674,25 @@ risk_counter_cleanup_failures_total = Counter(
 )
 
 
+# ─── Phase 11a — margin/evaluator skip telemetry ────────────────────────
+
+risk_margin_skip_total = Counter(
+    "risk_margin_skip_total",
+    "Margin check skipped because symbol/asset_class was unavailable. "
+    "preview mode is benign; place_order is a fail-CLOSED block.",
+    labelnames=["mode", "outcome"],
+    registry=registry,
+)
+
+risk_evaluator_degraded_total = Counter(
+    "risk_evaluator_degraded_total",
+    "A fast check raised AttributeError and degraded to WARN. Test stubs "
+    "expected; sustained non-zero in prod indicates a typo'd method call.",
+    labelnames=["check", "mode"],
+    registry=registry,
+)
+
+
 # ── Phase 10b.1 — position-sizing metrics ──────────────────────────────────
 position_sizing_compute_total = Counter(
     "position_sizing_compute_total",

@@ -638,25 +638,29 @@ _TIME_IN_FORCE_MAP: dict[str, int] = {
 }
 
 
-def _coerce_order_side(value: str) -> Any:
+def _coerce_proto_enum(value: str, mapping: dict[str, int], label: str) -> Any:
+    """Return value: ``Any`` because the protobuf-generated stub types
+    (``broker_pb2.OrderSide`` etc.) advertise themselves as enum classes
+    to mypy, but at runtime they're integer constants and ProtoBuf message
+    constructors accept the raw int. Returning a concrete ``int`` would
+    fail the ModifyOrderRequest signature in mypy --strict.
+    """
     try:
-        return _ORDER_SIDE_MAP[value.upper()]
+        return mapping[value.upper()]
     except KeyError as exc:
-        raise ValueError(f"unknown OrderSide {value!r}") from exc
+        raise ValueError(f"unknown {label} {value!r}") from exc
+
+
+def _coerce_order_side(value: str) -> Any:
+    return _coerce_proto_enum(value, _ORDER_SIDE_MAP, "OrderSide")
 
 
 def _coerce_order_type(value: str) -> Any:
-    try:
-        return _ORDER_TYPE_MAP[value.upper()]
-    except KeyError as exc:
-        raise ValueError(f"unknown OrderType {value!r}") from exc
+    return _coerce_proto_enum(value, _ORDER_TYPE_MAP, "OrderType")
 
 
 def _coerce_time_in_force(value: str) -> Any:
-    try:
-        return _TIME_IN_FORCE_MAP[value.upper()]
-    except KeyError as exc:
-        raise ValueError(f"unknown TimeInForce {value!r}") from exc
+    return _coerce_proto_enum(value, _TIME_IN_FORCE_MAP, "TimeInForce")
 
 
 def _timestamp_from_proto(timestamp: _Timestamp) -> datetime | None:

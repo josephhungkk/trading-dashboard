@@ -23,6 +23,7 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.models.risk import AccountKillSwitch, RiskLimit
 from app.schemas.risk import GateBlockerEntry, GateVerdict, GateWarningEntry
 from app.services.risk_inflight_counters import inflight_bp_committed, inflight_pdt_remaining
@@ -520,17 +521,44 @@ class RiskService:
         # when symbol/asset_class aren't plumbed (legacy callers, modify
         # path with conid-only context).
         if ctx.symbol is None or ctx.asset_class is None:
+            # Preview mode: WARN is fine (UX must not block on metadata gap).
+            # Write paths (place_order/modify): fail-CLOSED — margin is the
+            # only authoritative broker-side check, and missing context means
+            # we cannot evaluate it, so the order must not slip through.
+            log.warning(
+                "risk.margin_skip",
+                broker_id=ctx.broker_id,
+                account_id=str(ctx.account_id),
+                mode=mode,
+                symbol_present=ctx.symbol is not None,
+                asset_class_present=ctx.asset_class is not None,
+            )
+            if mode == "preview":
+                metrics.risk_margin_skip_total.labels(mode=mode, outcome="warn").inc()
+                return (
+                    None,
+                    GateWarningEntry(
+                        check="margin",
+                        message=(
+                            f"{ctx.broker_id} margin preview skipped: "
+                            "symbol/asset_class unavailable, BP cache only"
+                        ),
+                        value=0.0,
+                        threshold=0.0,
+                    ),
+                )
+            metrics.risk_margin_skip_total.labels(mode=mode, outcome="block").inc()
             return (
-                None,
-                GateWarningEntry(
+                GateBlockerEntry(
                     check="margin",
                     message=(
-                        f"{ctx.broker_id} margin preview skipped: "
-                        "symbol/asset_class unavailable, BP cache only"
+                        f"margin check unavailable: {ctx.broker_id} "
+                        "symbol/asset_class missing (fail-CLOSED for "
+                        f"{mode})"
                     ),
-                    value=0.0,
-                    threshold=0.0,
+                    code="margin_check_unavailable",
                 ),
+                None,
             )
         try:
             response = await asyncio.wait_for(
@@ -629,6 +657,14 @@ class RiskService:
         "warn"; else "allow".
         """
         t0 = time.perf_counter()
+        fast_check_names = (
+            "account_kill_switch",
+            "broker_kill_switch",
+            "max_daily_loss",
+            "pdt",
+            "position_concentration",
+            "buying_power",
+        )
         fast_results = await asyncio.gather(
             self._check_account_kill_switch(ctx),
             self._check_broker_kill_switch(ctx),
@@ -643,9 +679,13 @@ class RiskService:
         except BaseException as exc:
             margin_result = exc
 
+        named_results = [
+            *zip(fast_check_names, fast_results, strict=True),
+            ("margin", margin_result),
+        ]
         blockers: list[GateBlockerEntry] = []
         warnings: list[GateWarningEntry] = []
-        for r in [*fast_results, margin_result]:
+        for check_name, r in named_results:
             if isinstance(r, BaseException):
                 # Re-raise into a live exception frame so structlog's
                 # log.exception captures the traceback (passing exc_info=r
@@ -653,12 +693,14 @@ class RiskService:
                 try:
                     raise r
                 except BaseException:
-                    log.exception("risk.check_raised")
+                    log.exception("risk.check_raised", check=check_name)
                 # AttributeError typically means a misconfigured sidecar /
                 # test stub lacks an expected method - degrade to a WARN
                 # (skipping this check) rather than fail-CLOSED to BLOCK,
-                # since it isn't a real margin/policy failure.
+                # since it isn't a real margin/policy failure. The counter
+                # distinguishes test-stub noise from prod typos.
                 if isinstance(r, AttributeError):
+                    metrics.risk_evaluator_degraded_total.labels(check=check_name, mode=mode).inc()
                     warnings.append(
                         GateWarningEntry(
                             check="evaluator",

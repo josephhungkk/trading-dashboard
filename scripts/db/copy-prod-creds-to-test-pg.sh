@@ -26,13 +26,23 @@
 
 set -euo pipefail
 
+# Resolve repo root portably — required for VPS clones, CI runners, and
+# any dev box that isn't /home/joseph/dashboard. Falls back to script
+# directory if git isn't on PATH (extreme edge case).
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ENV_FILE="${REPO_ROOT}/.env"
+
 # Tables to copy.
 TABLES=(app_config app_secrets risk_limits)
 
 # Extract prod password from main .env DATABASE_URL.
-PROD_PG_PASSWORD="$(grep '^DATABASE_URL=' /home/joseph/dashboard/.env | sed -nE 's|.*://[^:]+:([^@]+)@.*|\1|p')"
+if [[ ! -f "$ENV_FILE" ]]; then
+    echo "ERROR: .env not found at $ENV_FILE" >&2
+    exit 2
+fi
+PROD_PG_PASSWORD="$(grep '^DATABASE_URL=' "$ENV_FILE" | sed -nE 's|.*://[^:]+:([^@]+)@.*|\1|p')"
 if [[ -z "$PROD_PG_PASSWORD" ]]; then
-    echo "ERROR: could not extract prod PG password from /home/joseph/dashboard/.env DATABASE_URL" >&2
+    echo "ERROR: could not extract prod PG password from $ENV_FILE DATABASE_URL" >&2
     exit 2
 fi
 
