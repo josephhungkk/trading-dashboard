@@ -69,8 +69,11 @@ class CostLedger:
 
         try:
             self._queue.put_nowait(rec)
-        except asyncio.QueueFull as exc:
-            log.debug("cost_ledger_queue_full", exc_info=exc)
+        except asyncio.QueueFull:
+            # Silent-failure MED: drops are silent unless surfaced loudly;
+            # log at warning so production log streams show them without
+            # a separate Prometheus alert.
+            log.warning("cost_ledger_queue_full_dropping_oldest")
             try:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty as empty_exc:

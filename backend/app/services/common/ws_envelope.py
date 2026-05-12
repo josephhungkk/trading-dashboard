@@ -62,7 +62,9 @@ class WSEnvelope:
                     await self._ws.receive_text()
             except WebSocketDisconnect:
                 self.disconnected.set()
-            except ConnectionResetError, RuntimeError:
+            except ConnectionResetError:
+                self.disconnected.set()
+            except RuntimeError:
                 self.disconnected.set()
 
         self._recv_task = asyncio.create_task(_recv_drain())

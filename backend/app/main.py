@@ -206,6 +206,10 @@ async def lifespan(_app: FastAPI) -> Any:
     async def _master_key_provider() -> str:
         raw = await redis.get("ai:litellm_master_key")
         if raw is None:
+            log.warning(
+                "litellm_master_key_missing_from_redis",
+                remedy="check redis health; key should be repopulated on next restart",
+            )
             return ""
         return raw.decode() if isinstance(raw, bytes) else str(raw)
 
@@ -461,8 +465,14 @@ async def lifespan(_app: FastAPI) -> Any:
             await _app.state.ai_cost_ledger.stop()
         except Exception:
             log.exception("ai_cost_ledger_stop_failed")
-        await _app.state.ollama_health_watcher.stop()
-        await redis.aclose()
+        try:
+            await _app.state.ollama_health_watcher.stop()
+        except Exception:
+            log.exception("ollama_health_watcher_stop_failed")
+        try:
+            await redis.aclose()
+        except Exception:
+            log.exception("redis_aclose_failed")
         _app.state.redis = None
         await engine.dispose()
 

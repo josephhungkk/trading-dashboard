@@ -22,16 +22,13 @@ from app.services.ai.exceptions import (
     LocalModelsUnavailableError,
 )
 from app.services.ai.jobs import JobRecord
+from app.services.ai.secrets import ProviderKeyUnavailableError
 from app.services.ai.types import Chunk, CompletionRequest, CompletionResult, FallbackHop
 
 log = structlog.get_logger(__name__)
 
 CapabilityMap = dict[str, list[dict[str, str]]]
 ProviderSet = set[str] | frozenset[str]
-
-
-class ProviderKeyUnavailableError(Exception):
-    """Provider API key is not configured or cannot be revealed."""
 
 
 class _RetryableHTTPError(Exception):
@@ -79,7 +76,7 @@ class AICompletionClient(ABC):
     def stream(self, req: CompletionRequest, *, jwt_subject: str) -> AsyncIterator[Chunk]: ...
 
     @abstractmethod
-    async def batch_complete(
+    def batch_complete(
         self,
         reqs: Sequence[CompletionRequest],
         *,
@@ -172,6 +169,24 @@ class LiteLLMClient(AICompletionClient):
                     )
                     continue
                 except _SemanticHTTPError as exc:
+                    # Code-reviewer HIGH-3: a 4xx must still leave an audit
+                    # trail. Record the fallback hop, count the outcome,
+                    # and mark proxy_unavailable before raising so the
+                    # operator can distinguish "no providers configured"
+                    # from "configured provider returned 401".
+                    self._record_fallback(
+                        fallback_chain,
+                        chain=chain,
+                        index=index,
+                        reason=f"http_{exc.status_code}",
+                    )
+                    metrics.AI_ROUTER_COMPLETIONS_TOTAL.labels(
+                        provider=entry.provider,
+                        model=entry.model,
+                        capability=req.capability.value,
+                        outcome="semantic_error",
+                    ).inc()
+                    metrics.AI_ROUTER_PROXY_UNAVAILABLE_TOTAL.inc()
                     raise AIProxyUnavailableError(str(exc)) from exc
 
                 metrics.AI_ROUTER_COMPLETIONS_TOTAL.labels(
@@ -213,7 +228,7 @@ class LiteLLMClient(AICompletionClient):
     def stream(self, req: CompletionRequest, *, jwt_subject: str) -> AsyncIterator[Chunk]:
         raise NotImplementedError("stream is wired in chunk C with httpx async stream")
 
-    async def batch_complete(
+    def batch_complete(
         self,
         reqs: Sequence[CompletionRequest],
         *,

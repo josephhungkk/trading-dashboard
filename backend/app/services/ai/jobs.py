@@ -9,9 +9,12 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+import structlog
 from sqlalchemy import text
 
 from app.core import metrics
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -247,10 +250,14 @@ class AIJobStore:
         await self._publish_state(record.id, record.status)
 
     async def _publish_state(self, job_id: UUID, status: str) -> None:
-        await self._redis.publish(
-            f"ai:job:{job_id}",
-            json.dumps({"job_id": str(job_id), "status": status, "ts": time.time()}),
-        )
+        try:
+            await self._redis.publish(
+                f"ai:job:{job_id}",
+                json.dumps({"job_id": str(job_id), "status": status, "ts": time.time()}),
+            )
+        except Exception:
+            metrics.AI_JOBS_PUBLISH_FAILURES_TOTAL.inc()
+            log.exception("ai_jobs_publish_failed", job_id=str(job_id), status=status)
 
 
 def _record_from_row(row: Any) -> JobRecord:

@@ -870,3 +870,8 @@ AI_ROUTER_PROXY_UNAVAILABLE_TOTAL = Counter(
     "AI router requests where all retryable providers were exhausted.",
     registry=registry,
 )
+AI_JOBS_PUBLISH_FAILURES_TOTAL = Counter(
+    "ai_jobs_publish_failures_total",
+    "AI job state-transition pubsub publish failures (PG committed, WS missed).",
+    registry=registry,
+)

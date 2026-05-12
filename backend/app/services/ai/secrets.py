@@ -90,17 +90,27 @@ class AIProviderKeyCache:
         """Subscribe to invalidation channel; clear on every message.
 
         Caller owns the task lifecycle (lifespan starts; shutdown cancels).
+        Silent-failure HIGH: if the inner ``async for`` raises mid-stream
+        (Redis disconnect), log loudly and propagate so the lifespan task
+        shows as failed instead of silently going dark.
         """
         pubsub = redis.pubsub()
         await pubsub.subscribe(_INVALIDATE_CHANNEL)
         try:
-            async for msg in pubsub.listen():
-                if msg.get("type") != "message":
-                    continue
-                data = msg.get("data", b"")
-                provider = data.decode() if isinstance(data, bytes) else str(data)
-                self.invalidate(provider or None)
-                log.info("ai_provider_key_invalidated", provider=provider or "ALL")
+            try:
+                async for msg in pubsub.listen():
+                    if msg.get("type") != "message":
+                        continue
+                    data = msg.get("data", b"")
+                    provider = data.decode() if isinstance(data, bytes) else str(data)
+                    self.invalidate(provider or None)
+                    log.info("ai_provider_key_invalidated", provider=provider or "ALL")
+            except Exception:
+                log.exception(
+                    "ai_provider_key_pubsub_listener_died",
+                    remedy="restart the backend; cache falls back to TTL-only freshness",
+                )
+                raise
         finally:
             try:
                 await pubsub.unsubscribe(_INVALIDATE_CHANNEL)

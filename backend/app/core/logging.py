@@ -38,6 +38,9 @@ _ACCOUNT_KEYS = frozenset(
         # key as a structlog kwarg gets redacted at the processor.
         "master_key",
         "litellm_master_key",
+        # Phase 11a-B silent-failure MED: per-provider api_key sent in
+        # request body to LiteLLM must never appear as a structlog kwarg.
+        "api_key",
     }
 )
 _REDACTED = "<redacted>"

@@ -61,12 +61,21 @@ def resolve_models(
     Returns:
         Empty list if no entries survive both filters.
     """
-    entries = capability_map.get(capability.value, [])
+    raw = capability_map.get(capability.value, [])
+    # Defensive: an operator override stored as a non-list (e.g. a stray
+    # string or dict) must not raise TypeError mid-routing. Treat it as
+    # "no entries configured" and let the router raise its own
+    # AIProxyUnavailableError / LocalModelsUnavailableError.
+    entries = raw if isinstance(raw, list) else []
     out: list[ResolvedModel] = []
     enforce_local = force_local_only or capability is AICapability.LOCAL_ONLY
     for entry in entries:
-        provider = entry["provider"]
-        model = entry["model"]
+        if not isinstance(entry, dict):
+            continue
+        provider = entry.get("provider")
+        model = entry.get("model")
+        if not isinstance(provider, str) or not isinstance(model, str):
+            continue
         if provider not in available_providers:
             continue
         if enforce_local and provider not in LOCAL_PROVIDERS:
