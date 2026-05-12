@@ -218,6 +218,31 @@ async def _cleanup_snapshots(account_id: UUID) -> None:
             )
 
 
+async def _refresh_caggs() -> None:
+    """Force-materialize the 1h + 1d CAGGs through `now()`.
+
+    Real-time aggregation only covers `ts >= watermark`; rows inserted BEFORE
+    the watermark (e.g. seeded at `-5 days` after the policy job has advanced
+    the watermark past that point) become invisible until the next scheduled
+    materialization. Tests that depend on CAGG visibility call this helper
+    after seeding to make the rows immediately queryable.
+
+    `CALL refresh_continuous_aggregate(...)` is a PROCEDURE that issues an
+    internal COMMIT, so it can't run inside a SQLAlchemy transaction — we use
+    the raw asyncpg connection in AUTOCOMMIT mode via session_factory's bind.
+    """
+    from app.core.db import engine
+
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        await conn.execute(
+            text("CALL refresh_continuous_aggregate('account_balance_snapshots_1h', NULL, NULL)")
+        )
+        await conn.execute(
+            text("CALL refresh_continuous_aggregate('account_balance_snapshots_1d', NULL, NULL)")
+        )
+
+
 async def test_gv10_partial_fx_outage(db_session, redis) -> None:
     """GV10 — USD + GBP work; HKD/GBP missing → 200 partial."""
     await redis.flushdb()
@@ -294,6 +319,10 @@ async def test_compute_curve_30d_reads_1h_cagg(db_session, redis) -> None:
     # so they show up in the 1h CAGG but not the intraday window.
     await _seed_snapshot(aid, "-5 days", "9500", "USD")
     await _seed_snapshot(aid, "-2 days", "9800", "USD")
+    # Real-time aggregation only covers ts >= watermark; force-materialize so
+    # the just-seeded -5d / -2d rows are queryable through the CAGG even if
+    # the policy job ran moments ago and advanced the watermark past them.
+    await _refresh_caggs()
     await redis.set("fx:mid:USD:GBP", "0.7912")
 
     try:
@@ -319,6 +348,7 @@ async def test_compute_curve_1y_reads_1d_cagg(db_session, redis) -> None:
     # Points in last 365d but older than 30d so they primarily exercise 1d CAGG
     await _seed_snapshot(aid, "-60 days", "9000", "USD")
     await _seed_snapshot(aid, "-180 days", "8000", "USD")
+    await _refresh_caggs()
     await redis.set("fx:mid:USD:GBP", "0.7912")
 
     try:
