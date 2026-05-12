@@ -116,6 +116,8 @@ class PositionSizingService:
             time_in_force="day",
             request_id=f"sizer-{uuid4()}",
             currency_base=base_currency,
+            symbol=self._symbol_from_canonical(str(instrument["canonical_id"])),
+            asset_class=str(instrument["asset_class"]),
         )
         verdict = await risk.evaluate(ctx, mode="preview")
 
@@ -247,12 +249,31 @@ class PositionSizingService:
         return dict(row)
 
     async def _load_instrument(self, instrument_id: int) -> dict[str, Any]:
+        # Phase 11a CI-debt: include canonical_id + asset_class so the risk
+        # gate's margin check (RiskService._check_margin) can call the
+        # sidecar's preview_order with the correct (symbol, asset_class)
+        # kwargs. canonical_id format is "<class>:<symbol>:<exchange>";
+        # parse out the symbol for the sidecar call.
         stmt = text(
             """
-            SELECT id, display_name, currency FROM instruments WHERE id = :id
+            SELECT id, display_name, currency, canonical_id, asset_class
+              FROM instruments WHERE id = :id
             """
         )
         row = (await self._db.execute(stmt, {"id": instrument_id})).mappings().first()
         if row is None:
             raise ValueError(f"instrument not found: {instrument_id}")
         return dict(row)
+
+    @staticmethod
+    def _symbol_from_canonical(canonical_id: str) -> str | None:
+        """Parse the symbol component out of a canonical_id of shape
+        ``<class>:<symbol>:<exchange>`` (e.g. ``equity_us:AAPL:NASDAQ``).
+        Returns ``None`` when the format doesn't match so the margin check
+        falls back to the WARN-on-missing-symbol branch rather than
+        crashing.
+        """
+        parts = canonical_id.split(":")
+        if len(parts) < 2:
+            return None
+        return parts[1] or None

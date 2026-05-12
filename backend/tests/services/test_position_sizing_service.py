@@ -161,6 +161,8 @@ class _SizingSession:
                     "id": self._instrument_id,
                     "display_name": "AAPL",
                     "currency": "USD",
+                    "canonical_id": "equity_us:AAPL:NASDAQ",
+                    "asset_class": "STOCK",
                 }
             )
         raise AssertionError(f"unexpected SQL: {sql}")

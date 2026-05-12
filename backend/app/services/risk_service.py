@@ -83,6 +83,15 @@ class EvaluationContext:
     time_in_force: str
     request_id: str
     currency_base: str  # account base currency for max-loss conversion
+    # Phase 11a CI-debt: symbol + asset_class are needed by ``_check_margin``
+    # because ``BrokerSidecarClient.preview_order`` accepts (symbol,
+    # asset_class) NOT (instrument_id) — the latter is a DB-side primary
+    # key the sidecar can't resolve. None is tolerated (call sites that
+    # can't easily plumb these — e.g. fall back to instrument-id-only
+    # checks); the margin check then takes the AttributeError → WARN
+    # branch with "preview unavailable" instead of fail-CLOSED.
+    symbol: str | None = None
+    asset_class: str | None = None
 
 
 class RiskService:
@@ -501,18 +510,40 @@ class RiskService:
         rejection -> BLOCK regardless of mode.
         """
         timeout = 0.5 if mode == "preview" else 3.0
+        # Phase 11a CI-debt: call ``BrokerSidecarClient.preview_order`` with
+        # the actual signature (account_id=str, side, symbol, asset_class,
+        # order_type, time_in_force, qty, limit_price, stop_price). The
+        # previous kwargs (broker_id/instrument_id/price/request_id) did not
+        # match the BrokerSidecarClient method and silently turned every
+        # IBKR/Schwab preview/place_order into an evaluator_error BLOCK
+        # since Phase 10a. Falls back to the AttributeError WARN branch
+        # when symbol/asset_class aren't plumbed (legacy callers, modify
+        # path with conid-only context).
+        if ctx.symbol is None or ctx.asset_class is None:
+            return (
+                None,
+                GateWarningEntry(
+                    check="margin",
+                    message=(
+                        f"{ctx.broker_id} margin preview skipped: "
+                        "symbol/asset_class unavailable, BP cache only"
+                    ),
+                    value=0.0,
+                    threshold=0.0,
+                ),
+            )
         try:
             response = await asyncio.wait_for(
                 self._sidecar.preview_order(
-                    account_id=ctx.account_id,
-                    broker_id=ctx.broker_id,
-                    instrument_id=ctx.instrument_id,
+                    account_id=str(ctx.account_id),
                     side=ctx.side,
-                    qty=str(ctx.qty),
-                    price=str(ctx.price) if ctx.price is not None else None,
+                    symbol=ctx.symbol,
+                    asset_class=ctx.asset_class,
                     order_type=ctx.order_type,
                     time_in_force=ctx.time_in_force,
-                    request_id=ctx.request_id,
+                    qty=str(ctx.qty),
+                    limit_price=str(ctx.price) if ctx.price is not None else None,
+                    stop_price=None,
                 ),
                 timeout=timeout,
             )

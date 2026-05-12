@@ -32,6 +32,8 @@ def evaluation_ctx():
         time_in_force="DAY",
         request_id="req-test-001",
         currency_base="USD",
+        symbol="AAPL",
+        asset_class="STOCK",
     )
 
 

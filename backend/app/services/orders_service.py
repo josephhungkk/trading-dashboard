@@ -277,6 +277,10 @@ async def preview_order(
         account=account,
         qty=qty,
         instrument_id=instrument_id,
+        symbol=contract.symbol,
+        # AssetClass is a Literal[str] at runtime, not an Enum — pass it
+        # through directly.
+        asset_class=str(contract.asset_class),
     )
     risk_warnings = [w.model_dump(mode="json") for w in risk_verdict.warnings]
     risk_blockers = [b.model_dump(mode="json") for b in risk_verdict.blockers]
@@ -349,11 +353,18 @@ async def _evaluate_risk_for_preview(
     account: _Account,
     qty: Decimal,
     instrument_id: int | None,
+    symbol: str | None = None,
+    asset_class: str | None = None,
 ) -> GateVerdict:
     """Phase 10a D3: build EvaluationContext + run RiskService gate (preview mode).
 
     Phase 10a.5 B2: instrument_id resolved via _resolve_instrument_id at the
     call site (gate must NOT author instruments — client=None on preview).
+
+    Phase 11a CI-debt: ``symbol`` + ``asset_class`` plumbed through so
+    ``_check_margin`` can call ``BrokerSidecarClient.preview_order`` with
+    the actual signature. Defaults to None for legacy callers (the margin
+    check then takes the early-WARN branch).
     """
     from app.services.risk_service import EvaluationContext, RiskService
 
@@ -374,6 +385,8 @@ async def _evaluate_risk_for_preview(
         time_in_force=str(request.tif),
         request_id=str(uuid4()),
         currency_base=account.currency_base,
+        symbol=symbol,
+        asset_class=asset_class,
     )
     verdict = await svc.evaluate(ctx, mode="preview")
     log.info(
@@ -399,6 +412,8 @@ async def _evaluate_risk_for_place_order(
     qty: Decimal,
     request_id: str,
     instrument_id: int | None,
+    symbol: str | None = None,
+    asset_class: str | None = None,
 ) -> GateVerdict:
     """Phase 10a D4: gate evaluation for place_order path.
 
@@ -407,6 +422,9 @@ async def _evaluate_risk_for_place_order(
 
     Phase 10a.5 B2: instrument_id resolved at the call site so it can be
     threaded into the audit row too (single resolve per order).
+
+    Phase 11a CI-debt: ``symbol`` + ``asset_class`` plumbed through so
+    ``_check_margin`` can call the sidecar with the correct kwargs.
     """
     from app.services.risk_service import EvaluationContext, RiskService
 
@@ -427,6 +445,8 @@ async def _evaluate_risk_for_place_order(
         time_in_force=str(request.tif),
         request_id=request_id,
         currency_base=account.currency_base,
+        symbol=symbol,
+        asset_class=asset_class,
     )
     verdict = await svc.evaluate(ctx, mode="place_order")
     log.info(
@@ -682,6 +702,8 @@ async def _evaluate_risk_for_modify_order(
     tif: str,
     request_id: str,
     instrument_id: int | None,
+    symbol: str | None = None,
+    asset_class: str | None = None,
 ) -> GateVerdict:
     """Phase 10a D5: gate evaluation for modify_order path.
 
@@ -712,6 +734,8 @@ async def _evaluate_risk_for_modify_order(
         time_in_force=tif,
         request_id=request_id,
         currency_base=account.currency_base,
+        symbol=symbol,
+        asset_class=asset_class,
     )
     verdict = await svc.evaluate(ctx, mode="place_order")
     log.info(
@@ -857,6 +881,9 @@ async def place_order(
         qty=qty,
         request_id=risk_request_id,
         instrument_id=instrument_id,
+        symbol=contract.symbol,
+        # AssetClass is a Literal[str] at runtime, not an Enum.
+        asset_class=str(contract.asset_class),
     )
     # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
     # for place_order/modify_order. preview_order does NOT audit ALLOW
@@ -1161,6 +1188,11 @@ async def modify_order(
         tif=request.tif,
         request_id=risk_request_id,
         instrument_id=instrument_id,
+        # Modify path: orders.symbol carries the leg's symbol; asset_class
+        # is implicitly STOCK in this codepath (same assumption as the
+        # capability check on line ~1119).
+        symbol=str(row["symbol"]),
+        asset_class="STOCK",
     )
     # Phase 10a.5 A5.1: audit on every verdict (ALLOW + WARN + BLOCK)
     # for modify_order. ALLOW path is deduped via 30s SETNX.
