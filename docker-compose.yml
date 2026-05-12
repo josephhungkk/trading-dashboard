@@ -33,7 +33,9 @@ services:
     depends_on:
       redis: { condition: service_healthy }
     ports: ["8000:8000"]
-    volumes: ["./backend/app:/app/app"]
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/tests:/app/tests
     command: ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   frontend:
