@@ -36,6 +36,7 @@ from app.api.portfolio import router as portfolio_router
 from app.api.risk import router as risk_router
 from app.api.sizing import router as sizing_router
 from app.api.sse import router as sse_router
+from app.api.ws_portfolio import router as ws_portfolio_router
 from app.api.ws_quotes import router as ws_quotes_router
 from app.core.config import settings
 from app.core.crypto import get_fernet
@@ -375,6 +376,7 @@ app.include_router(oauth_router)
 app.include_router(sse_router)
 app.include_router(admin_metrics_router)
 app.include_router(ws_quotes_router)
+app.include_router(ws_portfolio_router)
 app.include_router(chart_layouts_router)
 app.include_router(bars_router)  # Task 28: GET /api/bars cursor pagination
 app.include_router(bars_ws_router)  # Task 31: WS /ws/bars live-tail
