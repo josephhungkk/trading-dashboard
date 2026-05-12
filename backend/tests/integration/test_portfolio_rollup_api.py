@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Generator
 from uuid import UUID, uuid4
 
 import pytest
@@ -28,6 +28,46 @@ def _reset_limiter() -> Generator[None]:
     get_portfolio_limiter()
     yield
     _reset_portfolio_limiter_for_tests()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _restore_orphaned_soft_deletes() -> AsyncIterator[None]:
+    """Belt-and-braces safety net for `_soft_delete_others` orphans.
+
+    Integration tests call `_soft_delete_others([keep_id])` to isolate
+    themselves from other rows, then `_restore_others(mutated)` in the
+    `finally:` block. If a test crashes BEFORE the assignment to
+    `mutated`, `_restore_others` never fires and real broker accounts
+    stay soft-deleted forever (we hit this on 2026-05-12 — 26 real
+    accounts got stranded after a session of failed integration runs).
+
+    This fixture snapshots the pre-test deleted set, runs the test, and
+    on teardown restores anything that was newly soft-deleted by the
+    test BUT NOT pre-existing. Cleanup runs even if the test body raised.
+    """
+    async with SessionLocal() as s:
+        result = await s.execute(
+            text("SELECT id FROM broker_accounts WHERE deleted_at IS NOT NULL")
+        )
+        pre_deleted = {row[0] for row in result.fetchall()}
+    yield
+    async with SessionLocal() as s:
+        async with s.begin():
+            if pre_deleted:
+                await s.execute(
+                    text(
+                        "UPDATE broker_accounts SET deleted_at = NULL "
+                        "WHERE deleted_at IS NOT NULL "
+                        "  AND id NOT IN :pre"
+                    ).bindparams(bindparam("pre", expanding=True)),
+                    {"pre": [str(i) for i in pre_deleted]},
+                )
+            else:
+                await s.execute(
+                    text(
+                        "UPDATE broker_accounts SET deleted_at = NULL WHERE deleted_at IS NOT NULL"
+                    )
+                )
 
 
 @pytest_asyncio.fixture
