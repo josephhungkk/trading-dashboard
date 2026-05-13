@@ -233,8 +233,46 @@ class AlertsEvaluator:
             await asyncio.sleep(self._debounce_sweep_seconds)
             self._sweep_debounce(now=time.monotonic())
 
+    async def _worker_loop(
+        self,
+        *,
+        process: Callable[[dict[str, object]], Awaitable[None]],
+    ) -> None:
+        """Dequeue and dispatch evaluation requests.
+
+        ``process`` is the lifespan-injected callback that owns:
+        rule load + state population + predicate evaluate + alert_fires
+        write + delivery dispatch + per-rule fail-isolation. Keeping it
+        injectable lets the evaluator stay unaware of SQLAlchemy/Redis
+        wiring details and keeps the test surface narrow.
+
+        Per-item exceptions are swallowed (logged via metrics counter).
+        One bad event must NEVER abort the worker — spec §6 fail-isolation
+        boundary.
+        """
+        while True:
+            item = await self._queue.get()
+            try:
+                await process(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._metrics.eval_errors_total += 1
+
     async def start(self) -> None:
         self._sweep_task = asyncio.create_task(self._sweep_loop())
+
+    def start_worker(
+        self,
+        *,
+        process: Callable[[dict[str, object]], Awaitable[None]],
+    ) -> None:
+        """Launch the worker task. Separate from ``start()`` so tests that
+        only exercise the producer/index don't need to supply a process
+        callback (and so the lifespan controller can construct the
+        process closure after the dispatcher + state-loader exist)."""
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._worker_loop(process=process))
 
     async def stop(self) -> None:
         for task in (self._sweep_task, self._rebuild_task, self._worker_task):
