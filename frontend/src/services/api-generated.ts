@@ -571,6 +571,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/alerts/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dry Run
+         * @description Replay a predicate against historical bars and return fire-count +
+         *     sample fires. Resolution is selected by predicate window per spec §7
+         *     (insufficient / 1m / 1d).
+         *
+         *     Rate-limited per jwt_subject by ``_DRY_RUN_LIMITER`` (10/60s burst).
+         */
+        post: operations["dry_run_api_alerts_dry_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/recent-fires": {
         parameters: {
             query?: never;
@@ -618,6 +642,53 @@ export interface paths {
         put?: never;
         /** Confirm Alert */
         post: operations["confirm_alert_api_alerts__alert_id__confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{alert_id}/fires": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Alert Fires
+         * @description Phase 11b chunk-B-close: per-rule fire history for AlertDetailPage.
+         *
+         *     Cross-subject reads return the same 404 body as unknown-id reads —
+         *     existence-oracle defence matching the rest of the surface.
+         */
+        get: operations["get_alert_fires_api_alerts__alert_id__fires_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{alert_id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Alert Status
+         * @description Phase 11b chunk-B-close: toggle a rule between active/disabled.
+         *
+         *     Allowed transitions: pending|dormant|active → disabled, and
+         *     pending|dormant|disabled → active. Unknown targets surface 400.
+         *     Cross-subject + unknown-id share the identity-404 body.
+         */
+        put: operations["put_alert_status_api_alerts__alert_id__status_put"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1642,6 +1713,13 @@ export interface components {
             nlv_high_base: string | null;
             /** Nlv Low Base */
             nlv_low_base: string | null;
+        };
+        /** DryRunRequest */
+        DryRunRequest: {
+            /** Predicate Json */
+            predicate_json: {
+                [key: string]: unknown;
+            };
         };
         /**
          * FallbackHop
@@ -2693,6 +2771,11 @@ export interface components {
             risk_verdict: components["schemas"]["GateVerdict"];
             /** Suggested Qty */
             suggested_qty: string;
+        };
+        /** StatusUpdateRequest */
+        StatusUpdateRequest: {
+            /** Status */
+            status: string;
         };
         /** Summary */
         Summary: {
@@ -4098,7 +4181,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
-                "x-csrf-nonce"?: string | null;
+                "X-Confirm-Nonce"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -4106,6 +4189,43 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CreateAlertRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dry_run_api_alerts_dry_run_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DryRunRequest"];
             };
         };
         responses: {
@@ -4202,7 +4322,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
-                "x-csrf-nonce"?: string | null;
+                "X-Confirm-Nonce"?: string | null;
             };
             path: {
                 alert_id: number;
@@ -4241,7 +4361,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
-                "x-csrf-nonce"?: string | null;
+                "X-Confirm-Nonce"?: string | null;
             };
             path: {
                 alert_id: number;
@@ -4272,7 +4392,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
-                "x-csrf-nonce"?: string | null;
+                "X-Confirm-Nonce"?: string | null;
             };
             path: {
                 alert_id: number;
@@ -4280,6 +4400,80 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_alert_fires_api_alerts__alert_id__fires_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_alert_status_api_alerts__alert_id__status_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StatusUpdateRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
