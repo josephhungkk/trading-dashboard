@@ -12,8 +12,10 @@ from uuid import UUID, uuid4
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from fastapi.websockets import WebSocketState
+from redis.exceptions import RedisError
 
 from app.api.ws_auth import require_admin_jwt_ws
+from app.core import metrics
 from app.services.ai.exceptions import (
     AIProxyUnavailableError,
     AIToolCallingNotSupportedError,
@@ -32,6 +34,7 @@ _JOBS_SEND_TIMEOUT_S = 2.0
 _TURNS_PER_MIN = 5
 _TURN_WINDOW_S = 60
 _TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+_ALLOWED_EXTRA_KEYS = frozenset({"error_code", "model", "response", "fallback_chain"})
 
 _active_chat_connections = 0
 _active_jobs_connections = 0
@@ -106,8 +109,9 @@ async def ws_ai_chat(ws: WebSocket) -> None:
                     "message": message,
                 }
             )
-        except Exception:
-            log.exception("ws_ai_chat_unhandled")
+        except Exception as exc:
+            metrics.ai_ws_chat_stream_errors_total.labels(error_class=type(exc).__name__).inc()
+            log.exception("ws_ai_chat_unhandled", error_class=type(exc).__name__)
             await env.send_or_close(
                 {
                     "version": 1,
@@ -208,11 +212,13 @@ async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
     pubsub = redis.pubsub()
     channel = f"ai:job:{job_id}"
     heartbeat_task: asyncio.Task[None] | None = None
+    subscribed = False
 
     async def _heartbeat() -> None:
         while not env.disconnected.is_set():
             await asyncio.sleep(_HEARTBEAT_S)
             if not await env.send_or_close({"version": 1, "type": "heartbeat"}):
+                metrics.ai_ws_jobs_send_timeout_total.inc()
                 return
 
     try:
@@ -222,6 +228,7 @@ async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
             return
 
         await pubsub.subscribe(channel)
+        subscribed = True
         env.start_recv_drain()
         heartbeat_task = asyncio.create_task(_heartbeat())
 
@@ -233,6 +240,7 @@ async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
                 "job_id": str(job_id),
             }
         ):
+            metrics.ai_ws_jobs_send_timeout_total.inc()
             return
         if job.status in _TERMINAL_STATES:
             await ws.close(code=status.WS_1000_NORMAL_CLOSURE, reason=job.status)
@@ -262,11 +270,7 @@ async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
             if not isinstance(state, str):
                 continue
 
-            extras = {
-                str(key): value
-                for key, value in payload.items()
-                if key not in {"version", "type", "state", "job_id"}
-            }
+            extras = {key: value for key, value in payload.items() if key in _ALLOWED_EXTRA_KEYS}
             if not await env.send_or_close(
                 {
                     "version": 1,
@@ -276,6 +280,7 @@ async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
                     **extras,
                 }
             ):
+                metrics.ai_ws_jobs_send_timeout_total.inc()
                 return
             if state in _TERMINAL_STATES:
                 await ws.close(code=status.WS_1000_NORMAL_CLOSURE, reason=state)
@@ -287,13 +292,14 @@ async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
         if ws.client_state == WebSocketState.CONNECTED:
             await ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="unhandled")
     finally:
+        _active_jobs_connections -= 1
         if heartbeat_task is not None:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat_task
         await env.cleanup()
-        with contextlib.suppress(Exception):
-            await pubsub.unsubscribe(channel)
+        if subscribed:
+            with contextlib.suppress(ConnectionError, RedisError):
+                await pubsub.unsubscribe(channel)
         with contextlib.suppress(Exception):
             await pubsub.aclose()
-        _active_jobs_connections -= 1

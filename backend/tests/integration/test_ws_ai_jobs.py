@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Iterator, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -14,6 +14,7 @@ import fakeredis.aioredis
 import pytest
 from fastapi import FastAPI
 
+import app.api.ws_ai as _ws_ai
 from app.api.ws_ai import router as ws_ai_router
 from app.services.ai.jobs import JobRecord
 
@@ -21,6 +22,15 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.no_db]
 
 Message = MutableMapping[str, Any]
 SendHook = Callable[[Message], Awaitable[None]]
+
+
+@pytest.fixture(autouse=True)
+def _reset_ws_counters() -> Iterator[None]:
+    _ws_ai._active_chat_connections = 0
+    _ws_ai._active_jobs_connections = 0
+    yield
+    _ws_ai._active_chat_connections = 0
+    _ws_ai._active_jobs_connections = 0
 
 
 @dataclass
@@ -209,3 +219,52 @@ async def test_publish_terminal_state_closes_after_emit(
     close = messages[-1]
     assert close["type"] == "websocket.close"
     assert close["code"] == 1000
+
+
+async def test_extras_allowlist_filters_unknown_keys(
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """Verify pubsub keys outside _ALLOWED_EXTRA_KEYS are stripped from frames."""
+    job_id = uuid4()
+    app = _make_app(
+        fake_redis,
+        _FakeJobRouter(jobs={job_id: _job_record(job_id=job_id, jwt_subject="dev-bypass")}),
+    )
+    channel = f"ai:job:{job_id}"
+    sends_seen = 0
+
+    async def on_send(message: Message) -> None:
+        nonlocal sends_seen
+        if message["type"] != "websocket.send":
+            return
+
+        sends_seen += 1
+        if sends_seen == 1:
+            await fake_redis.publish(
+                channel,
+                json.dumps(
+                    {
+                        "state": "inferring",
+                        "model": "local-coder",
+                        "secret": "do-not-forward",
+                    }
+                ),
+            )
+        elif sends_seen == 2:
+            await fake_redis.publish(channel, json.dumps({"state": "completed"}))
+
+    messages = await _run_ws(app, job_id, on_send=on_send)
+
+    state_frames = [
+        json.loads(message["text"])
+        for message in messages
+        if message["type"] == "websocket.send" and "text" in message
+    ]
+    assert state_frames[1] == {
+        "version": 1,
+        "type": "state",
+        "state": "inferring",
+        "job_id": str(job_id),
+        "model": "local-coder",
+    }
+    assert "secret" not in state_frames[1]

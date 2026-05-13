@@ -851,6 +851,17 @@ ai_jobs_orphan_recovered_total = Counter(
     ["phase"],
     registry=registry,
 )
+ai_ws_chat_stream_errors_total = Counter(
+    "ai_ws_chat_stream_errors_total",
+    "Unhandled exceptions during /ws/ai/chat stream forwarding.",
+    ["error_class"],
+    registry=registry,
+)
+ai_ws_jobs_send_timeout_total = Counter(
+    "ai_ws_jobs_send_timeout_total",
+    "Send timeouts on /ws/ai/jobs/{id} (client too slow or disconnected).",
+    registry=registry,
+)
 
 # Phase 11a-B7 — AI router completion/fallback metrics
 AI_ROUTER_COMPLETIONS_TOTAL = Counter(

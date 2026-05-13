@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -12,9 +13,20 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+import app.api.ws_ai as _ws_ai
 from app.api.ws_ai import router as ws_ai_router
+from app.core import metrics
 
 pytestmark = [pytest.mark.integration, pytest.mark.no_db]
+
+
+@pytest.fixture(autouse=True)
+def _reset_ws_counters() -> Iterator[None]:
+    _ws_ai._active_chat_connections = 0
+    _ws_ai._active_jobs_connections = 0
+    yield
+    _ws_ai._active_chat_connections = 0
+    _ws_ai._active_jobs_connections = 0
 
 
 async def _jwt_subject(_: Any) -> str:
@@ -41,6 +53,12 @@ class _ForeverRouter:
     async def stream(self, req: Any, *, jwt_subject: str) -> Any:
         await asyncio.Event().wait()
         yield _FakeChunk(text="never", request_id=uuid4())
+
+
+class _ErrorRouter:
+    async def stream(self, req: Any, *, jwt_subject: str) -> Any:
+        yield _FakeChunk(text="before-error", request_id=uuid4())
+        raise RuntimeError("stream failed")
 
 
 def _make_app(router: Any) -> FastAPI:
@@ -140,3 +158,28 @@ def test_second_chat_during_active_stream_emits_active_stream_in_progress(
         "error_class": "ActiveStreamInProgress",
         "message": "wait for the active stream to finish",
     }
+
+
+async def test_stream_error_increments_metric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify ai_ws_chat_stream_errors_total increments on stream errors."""
+    monkeypatch.setattr("app.api.ws_ai.require_admin_jwt_ws", _jwt_subject)
+    app = _make_app(_ErrorRouter())
+    client = TestClient(app)
+    counter = metrics.ai_ws_chat_stream_errors_total.labels(error_class="RuntimeError")
+    before = counter._value.get()
+
+    with client.websocket_connect(
+        "/ws/ai/chat",
+        headers={"Origin": "http://testserver"},
+    ) as ws:
+        ws.send_json(_chat_frame())
+        assert ws.receive_json()["type"] == "chunk"
+        frame = ws.receive_json()
+
+    assert frame == {
+        "version": 1,
+        "type": "error",
+        "error_class": "InternalError",
+        "message": "internal error",
+    }
+    assert counter._value.get() == before + 1
