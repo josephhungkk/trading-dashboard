@@ -4009,21 +4009,479 @@ Lifespan: app.state.ai_{secrets,cost_ledger,jobs,rate_limiter,router}.
 13 new metric series. 51 new tests passing.
 ```
 
-### Chunk C — REST + WS endpoints (sketch)
+### Chunk C — REST + WS endpoints (detailed)
 
-**Files to create:** `backend/app/api/ai.py`, `backend/app/api/ws_ai.py`, tests.
+**Goal:** Expose chunk-B's `_app.state.ai_router` (LiteLLMClient) and
+`_app.state.ai_jobs` (PgAIJobStore) via REST + WS so the FE can call
+them. All new endpoints adopt the canonical `make_ws_endpoint`
+envelope (MED-4) for WS and reuse the existing JWT/rate-limit
+machinery for REST.
 
-**Task outline:**
-1. `POST /api/ai/complete` with LOCAL_ONLY API-boundary check (defence layer 1) + rate-limit + 501 on tools.
-2. `POST /api/ai/jobs` returns 202 + `{job_id}`.
-3. `GET /api/ai/jobs/{id}` polls status.
-4. `DELETE /api/ai/jobs/{id}` sets cancel flag.
-5. `WS /ws/ai/chat` via `make_ws_endpoint` with per-conn turn limiter (5/min) and 10s send timeout.
-6. `WS /ws/ai/jobs/{id}` pushes state changes via pubsub.
-7. Integration tests covering each failure mode in Flow A + B from the spec.
-8. Regenerate `api-generated.ts` via `scripts/gen-types.sh`.
-9. Reviewer chain (haiku + sonnet code + sonnet security).
-10. Tag `v0.11.0.c`.
+**Files to create:**
+- `backend/app/api/ai.py` — REST endpoints (`/api/ai/complete`,
+  `/api/ai/jobs` × 3 verbs).
+- `backend/app/api/ws_ai.py` — WS endpoints (`/ws/ai/chat`,
+  `/ws/ai/jobs/{id}`).
+- `backend/tests/integration/test_ai_complete_endpoint.py`
+- `backend/tests/integration/test_ai_jobs_endpoint.py`
+- `backend/tests/integration/test_ws_ai_chat.py`
+- `backend/tests/integration/test_ws_ai_jobs.py`
+
+**Files to modify:**
+- `backend/app/main.py` — import + `include_router` for both new
+  routers; register a 30s background sweeper for the orphan-recovery
+  cutoffs (HIGH-8, spec §2 11a-C).
+- `frontend/src/api-generated.ts` — regenerate via `scripts/gen-types.sh`.
+
+### Task 23: `POST /api/ai/complete` (warm-route synchronous)
+
+**Files:**
+- Create: `backend/app/api/ai.py`
+- Test: `backend/tests/integration/test_ai_complete_endpoint.py`
+
+Spec section §2 11a-C bullet 1; failure modes from Flow A table at
+§3 "Flow A — Synchronous AI completion (warm-route)".
+
+Endpoint contract:
+- JWT required (`require_jwt`).
+- Body = `CompletionRequest` (already defined in
+  `app/services/ai/types.py`).
+- Response = `CompletionResult` on 200.
+- **LOCAL_ONLY API-boundary check** (defence layer 1 per spec §2
+  11a-C): if `req.capability == LOCAL_ONLY` AND
+  `resolve_models(LOCAL_ONLY)` is empty → 503 with
+  `{detail: "local_models_unavailable"}`.
+- **501 tool-calling guard** (HIGH-4): if `req.tools is not None` →
+  501 `{detail: "tool_calling_not_yet_supported"}` (already raised by
+  router via `AIToolCallingNotSupportedError` — handler maps to 501).
+- **Rate-limit**: route via `_app.state.ai_rate_limiter.check_and_acquire(
+  jwt_subject, capability)` BEFORE calling `router.complete()`. On
+  `AIRateLimitExceededError` → 429 with `Retry-After` header from the
+  exception's `retry_after_s` attribute.
+- **Generic exception mapping**:
+  - `LocalModelsUnavailableError` → 503 `local_models_unavailable`
+  - `AIProxyUnavailableError` → 503 `ai_proxy_unavailable`
+  - `AIToolCallingNotSupportedError` → 501 `tool_calling_not_yet_supported`
+  - Any other Exception → 500 `ai_internal_error` (NEVER leak the
+    underlying message; log via structlog).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# backend/tests/integration/test_ai_complete_endpoint.py
+"""Phase 11a-C Task 23: POST /api/ai/complete failure modes."""
+from __future__ import annotations
+
+import pytest
+from httpx import AsyncClient
+
+from app.services.ai.exceptions import (
+    AIProxyUnavailableError,
+    AIToolCallingNotSupportedError,
+    LocalModelsUnavailableError,
+)
+
+pytestmark = pytest.mark.asyncio
+
+
+async def test_complete_rejects_tools_with_501(
+    authed_client: AsyncClient,
+) -> None:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "capability": "CODING",
+        "caller": "test",
+        "tools": [{"name": "x", "description": "y", "parameters": {}}],
+    }
+    resp = await authed_client.post("/api/ai/complete", json=body)
+    assert resp.status_code == 501
+    assert resp.json()["detail"] == "tool_calling_not_yet_supported"
+
+
+async def test_complete_local_only_with_no_local_returns_503(
+    authed_client_with_empty_local_capability_map: AsyncClient,
+) -> None:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "capability": "LOCAL_ONLY",
+        "caller": "test",
+    }
+    resp = await authed_client_with_empty_local_capability_map.post(
+        "/api/ai/complete", json=body
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "local_models_unavailable"
+
+
+async def test_complete_rate_limited_returns_429_with_retry_after(
+    authed_client_rate_limited: AsyncClient,
+) -> None:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "capability": "CODING",
+        "caller": "test",
+    }
+    resp = await authed_client_rate_limited.post("/api/ai/complete", json=body)
+    assert resp.status_code == 429
+    assert "Retry-After" in resp.headers
+
+
+async def test_complete_happy_path_returns_completion_result(
+    authed_client_with_fake_router: AsyncClient,
+) -> None:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "capability": "CODING",
+        "caller": "test",
+    }
+    resp = await authed_client_with_fake_router.post("/api/ai/complete", json=body)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "request_id" in payload
+    assert payload["text"]
+    assert payload["provider"]
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/integration/test_ai_complete_endpoint.py -v`
+Expected: FAIL — `/api/ai/complete` route does not exist (404).
+
+- [ ] **Step 3: Implement `app/api/ai.py`**
+
+```python
+# backend/app/api/ai.py
+"""Phase 11a-C: REST endpoints for the AI router."""
+from __future__ import annotations
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from uuid import UUID
+
+from app.api.ws_auth import require_jwt
+from app.services.ai.capabilities import AICapability, resolve_models
+from app.services.ai.exceptions import (
+    AIProxyUnavailableError,
+    AIRateLimitExceededError,
+    AIToolCallingNotSupportedError,
+    LocalModelsUnavailableError,
+)
+from app.services.ai.types import CompletionRequest, CompletionResult
+
+log = structlog.get_logger(__name__)
+
+router = APIRouter(prefix="/api/ai", tags=["ai"])
+
+
+@router.post("/complete", response_model=CompletionResult)
+async def post_complete(
+    body: CompletionRequest,
+    request: Request,
+    jwt_subject: str = Depends(require_jwt),
+) -> CompletionResult:
+    # Defence layer 1 — LOCAL_ONLY API-boundary check.
+    if body.capability == AICapability.LOCAL_ONLY:
+        capmap = await request.app.state.capability_svc.get_map()
+        if not resolve_models(AICapability.LOCAL_ONLY, capmap):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="local_models_unavailable",
+            )
+    # Rate-limit BEFORE invoking router.
+    try:
+        request.app.state.ai_rate_limiter.check_and_acquire(
+            jwt_subject, body.capability.value
+        )
+    except AIRateLimitExceededError as exc:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "rate_limited"},
+            headers={"Retry-After": str(exc.retry_after_s)},
+        )
+    try:
+        return await request.app.state.ai_router.complete(body, jwt_subject=jwt_subject)
+    except AIToolCallingNotSupportedError:
+        raise HTTPException(status_code=501, detail="tool_calling_not_yet_supported")
+    except LocalModelsUnavailableError:
+        raise HTTPException(status_code=503, detail="local_models_unavailable")
+    except AIProxyUnavailableError:
+        raise HTTPException(status_code=503, detail="ai_proxy_unavailable")
+    except Exception:  # noqa: BLE001 — last-ditch leak guard
+        log.exception("ai_complete_unhandled")
+        raise HTTPException(status_code=500, detail="ai_internal_error")
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/integration/test_ai_complete_endpoint.py -v`
+Expected: PASS.
+
+- [ ] **Step 5: Wire router in `app/main.py`**
+
+```python
+from app.api.ai import router as ai_router
+...
+app.include_router(ai_router)
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/app/api/ai.py backend/app/main.py \
+        backend/tests/integration/test_ai_complete_endpoint.py
+git commit -m "feat(phase11a-C1): POST /api/ai/complete with LOCAL_ONLY boundary + 501 tool guard"
+```
+
+### Task 24: `POST /api/ai/jobs` — async job submission
+
+**Files:**
+- Modify: `backend/app/api/ai.py`
+- Test: `backend/tests/integration/test_ai_jobs_endpoint.py`
+
+Spec §2 11a-C bullet 2; Flow B at §3.
+
+Endpoint contract:
+- JWT required.
+- Same `CompletionRequest` body.
+- Returns **202** + `{"job_id": "<uuid>"}` immediately.
+- Internally calls `request.app.state.ai_router.submit_job(...)`.
+- Same LOCAL_ONLY + rate-limit + tool-guard mapping as `/complete`.
+
+```python
+@router.post("/jobs", status_code=202)
+async def post_jobs(
+    body: CompletionRequest,
+    request: Request,
+    jwt_subject: str = Depends(require_jwt),
+) -> dict[str, str]:
+    # LOCAL_ONLY + rate-limit + tool-guard identical to /complete.
+    ...
+    job_id = await request.app.state.ai_router.submit_job(body, jwt_subject=jwt_subject)
+    return {"job_id": str(job_id)}
+```
+
+Test cases:
+- 202 + UUID-shaped `job_id` on happy path.
+- 429 on rate-limit (same fixture as /complete).
+- 501 on tools-present.
+- 503 LOCAL_ONLY when empty capability map.
+
+Commit: `feat(phase11a-C2): POST /api/ai/jobs returns 202 + job_id`
+
+### Task 25: `GET /api/ai/jobs/{id}` — poll status
+
+**Files:** modify `backend/app/api/ai.py`; same test file as Task 24.
+
+```python
+@router.get("/jobs/{job_id}")
+async def get_job(
+    job_id: UUID,
+    request: Request,
+    jwt_subject: str = Depends(require_jwt),
+) -> dict[str, Any]:
+    job = await request.app.state.ai_jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    # Ownership: only the JWT subject who submitted may read it.
+    if job.jwt_subject != jwt_subject:
+        raise HTTPException(status_code=404, detail="job_not_found")  # 404, not 403, to avoid existence-oracle
+    return job.to_public_dict()  # includes status, result, error, started_at, completed_at
+```
+
+Test cases:
+- 200 + status payload on happy path.
+- 404 when job_id unknown.
+- 404 when owned by a different jwt_subject (existence-oracle defence).
+
+Commit: `feat(phase11a-C3): GET /api/ai/jobs/{id} poll with ownership check`
+
+### Task 26: `DELETE /api/ai/jobs/{id}` — cooperative cancel
+
+**Files:** modify `backend/app/api/ai.py`; same test file.
+
+Spec §2 11a-C bullet 4: sets cancel flag; inference aborts at next
+check. `PgAIJobStore.cancel_job` from chunk B-B5 already implements
+the flag write.
+
+```python
+@router.delete("/jobs/{job_id}", status_code=204)
+async def delete_job(
+    job_id: UUID,
+    request: Request,
+    jwt_subject: str = Depends(require_jwt),
+) -> None:
+    job = await request.app.state.ai_jobs.get_job(job_id)
+    if job is None or job.jwt_subject != jwt_subject:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    await request.app.state.ai_jobs.cancel_job(job_id)
+```
+
+Test cases:
+- 204 on happy path; verify the row's `cancel_requested_at` is now set.
+- 404 unknown id.
+- 404 other-jwt-subject.
+
+Commit: `feat(phase11a-C4): DELETE /api/ai/jobs/{id} sets cancel flag`
+
+### Task 27: Orphan-recovery sweeper (HIGH-8)
+
+**Files:**
+- Modify: `backend/app/main.py` (lifespan task + cancel on shutdown)
+- New helper: `backend/app/services/ai/orphan_sweeper.py`
+- Test: `backend/tests/services/ai/test_orphan_sweeper.py`
+
+Spec §2 11a-C "Async-job orphan recovery (HIGH-8 — split threshold)":
+- `warming` state cutoff = 90s
+- `inferring` state cutoff = 10min
+- Per-state-transition timestamps already exist on the row.
+- Counter `ai_jobs_orphan_recovered_total{phase}` (already wired in
+  `app/core/metrics.py` if missing; add it).
+
+Sweeper contract: every 30s, run
+```sql
+UPDATE ai_jobs
+SET status = 'failed', error = 'be_restart',
+    completed_at = NOW()
+WHERE (status = 'warming' AND warming_started_at < NOW() - INTERVAL '90 seconds')
+   OR (status = 'inferring' AND inferring_started_at < NOW() - INTERVAL '10 minutes')
+RETURNING id, status;
+```
+For each returned row, increment counter with the phase label. Log
+at INFO level with the row's id.
+
+Test cases:
+- Insert `warming` row aged 100s → sweeper transitions to `failed`,
+  counter `{phase="warming"}` increments.
+- Insert `inferring` row aged 11min → same with `{phase="inferring"}`.
+- Insert `warming` row aged 30s → sweeper leaves it alone.
+- Sweeper handles empty result without error.
+
+Wire into `app/main.py` lifespan:
+```python
+from app.services.ai.orphan_sweeper import run_orphan_sweeper
+
+# inside lifespan():
+orphan_task = asyncio.create_task(run_orphan_sweeper(app.state.ai_jobs))
+try:
+    yield
+finally:
+    orphan_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await orphan_task
+```
+
+Commit: `feat(phase11a-C5): ai-jobs orphan-recovery sweeper (HIGH-8)`
+
+### Task 28: `WS /ws/ai/chat` — streaming chat
+
+**Files:**
+- Create: `backend/app/api/ws_ai.py`
+- Test: `backend/tests/integration/test_ws_ai_chat.py`
+
+Spec §2 11a-C bullet 5; envelope MED-4.
+
+Endpoint contract:
+- JWT required via `require_jwt_ws`.
+- CSWSH origin check pre-accept (handled by `make_ws_endpoint`).
+- Per-conn 1 active stream at a time (state machine flag).
+- Per-conn 5 turns/min (sliding window inside the handler — NOT the
+  shared `ai_rate_limiter` which is subject-scoped; this is connection-scoped).
+- Send timeout 10s (chat-streaming override per spec — pass
+  `send_timeout_s=10.0` to `WSEnvelopeConfig`).
+- Frame schema: `{"version": 1, "type": "chunk" | "done" | "error", ...}`.
+- Body of incoming frames: same `CompletionRequest` shape; server streams
+  via `router.stream(req)` which yields `Chunk` objects.
+
+```python
+# backend/app/api/ws_ai.py — skeleton
+@router.websocket("/ws/ai/chat")
+async def ws_ai_chat(ws: WebSocket) -> None:
+    cfg = WSEnvelopeConfig(
+        allowed_origins=...,
+        max_connections=10,
+        active_counter=lambda: _active_chat_connections,
+        send_timeout_s=10.0,  # spec override for streaming
+        heartbeat_s=30.0,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    accepted = await env.handshake(auth=require_jwt_ws)
+    if not accepted:
+        return
+    ...
+    # Per-conn turn limiter: deque[float] of timestamps; reject when
+    # len(turns) >= 5 within 60s sliding window.
+```
+
+Test cases (via `pytest-asyncio` + `httpx_ws` or FastAPI testclient
+`websocket_connect`):
+- Connect with valid JWT → accepted. Send a chat frame → receive ≥1
+  chunk → receive `{type: "done"}`.
+- Per-conn 5/min limit — 6th turn within 60s closes with 1008 +
+  `reason="turn_rate_exceeded"`.
+- 2nd concurrent stream on the same conn rejected.
+- LOCAL_ONLY + empty capability map closes with 1008 +
+  `reason="local_models_unavailable"`.
+- Origin-disallowed request closes with 1008 pre-accept.
+
+Commit: `feat(phase11a-C6): WS /ws/ai/chat with per-conn 5/min + 10s send`
+
+### Task 29: `WS /ws/ai/jobs/{id}` — push state transitions
+
+**Files:** modify `backend/app/api/ws_ai.py`; test
+`backend/tests/integration/test_ws_ai_jobs.py`.
+
+Spec §2 11a-C bullet 6; pubsub channel `ai:job:{id}` from chunk B-B5.
+
+```python
+@router.websocket("/ws/ai/jobs/{job_id}")
+async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
+    # Standard envelope handshake + auth.
+    # Verify ownership: job.jwt_subject == env.jwt_subject (or 1008).
+    # Subscribe to `ai:job:{job_id}` channel.
+    # On each message, parse + send_or_close `{version: 1, type: "state", state, ...}`.
+    # Close on terminal state (`completed`, `failed`, `cancelled`).
+```
+
+Test cases:
+- Connect to existing `warming` job → receive `state="warming"` frame.
+- Pubsub publishes `{state: "inferring"}` → client receives it.
+- Pubsub publishes `{state: "completed"}` → server sends frame then closes.
+- Other-jwt-subject ownership → 1008 close pre-accept.
+- Unknown job_id → 1008 close.
+
+Commit: `feat(phase11a-C7): WS /ws/ai/jobs/{id} push state changes`
+
+### Task 30: Regenerate `api-generated.ts`
+
+**Files:** modify `frontend/src/api-generated.ts`
+
+Run: `scripts/gen-types.sh`
+
+Commit changes (no FE source edits in chunk C — chunk D consumes the
+generated types).
+
+Commit: `chore(phase11a-C8): regen api-generated.ts after /api/ai endpoints`
+
+### Task 31: Chunk-C reviewer chain + tag
+
+Dispatch:
+- `spec-compliance` (haiku) with `/docs/superpowers/specs/...` §2 11a-C
+  + §3 Flow A/B failure tables inlined.
+- `code-reviewer` (sonnet) on the 5 chunk-C commits.
+- `security-reviewer` (sonnet) — specifically the LOCAL_ONLY API
+  boundary + ownership-existence-oracle (Task 25/26 use 404 not 403)
+  + per-conn turn limiter (Task 28).
+- `python-reviewer` (haiku) — type hints + async correctness.
+- `silent-failure-hunter` (sonnet) — orphan sweeper + ws send failures
+  must always log + metric, never swallow.
+
+Apply CRIT + HIGH + MED findings inline.
+
+Tag: `git tag v0.11.0.5` (chunk-C close; phase 11a still in flight —
+chunk D + close-out remain).
+
+Commit: `chore(phase11a-C9): chunk C reviewer fixes + tag v0.11.0.5`
 
 ### Chunk D — Frontend (sketch)
 
