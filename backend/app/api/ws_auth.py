@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import structlog
-from fastapi import WebSocket, WebSocketException, status
+from fastapi import Request, WebSocket, WebSocketException, status
 from jwt.exceptions import PyJWTError
 
 from app.core import deps, metrics
@@ -12,6 +12,12 @@ from app.core.cf_access import NoIdentityClaimError
 _log = structlog.get_logger(__name__)
 
 _WG_DEV_BYPASS_HOST = "10.10.0.1"
+
+
+async def require_jwt(request: Request) -> str:
+    """Verify CF Access JWT for HTTP endpoints and return the subject."""
+    identity = await deps.require_admin_jwt(request)
+    return identity.email
 
 
 def _ws_client_ip(ws: WebSocket) -> str:
