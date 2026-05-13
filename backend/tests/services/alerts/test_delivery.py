@@ -53,3 +53,53 @@ async def test_dispatcher_fans_out_per_channel_isolated() -> None:
     outcomes = await dispatcher.fan_out(fire, channel_keys=["in_app", "webhook"])
     assert outcomes["in_app"] is DeliveryOutcome.sent
     assert outcomes["webhook"] is DeliveryOutcome.failed
+
+
+from unittest.mock import patch  # noqa: E402
+
+from app.services.alerts.channels.webhook import WebhookChannel  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_webhook_5xx_exhausts_retries() -> None:
+    http = AsyncMock()
+    http.post.return_value = type("R", (), {"status_code": 503})()
+    channel = WebhookChannel(http_client=http, per_fire_budget_s=60.0)
+    fire = AlertFire(
+        fire_id=1,
+        alert_id=1,
+        jwt_subject="u",
+        verdict="true",
+        evaluated_values={},
+        user_label="x",
+    )
+    with patch("app.services.alerts.channels.webhook._validate_url"):
+        with patch("asyncio.sleep", new=AsyncMock()):
+            outcome = await channel.deliver(
+                fire,
+                config={"url": "https://x.com", "secret": "s", "id": "w1"},
+            )
+    assert outcome is DeliveryOutcome.failed
+    assert http.post.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_webhook_4xx_no_retry() -> None:
+    http = AsyncMock()
+    http.post.return_value = type("R", (), {"status_code": 401})()
+    channel = WebhookChannel(http_client=http, per_fire_budget_s=60.0)
+    fire = AlertFire(
+        fire_id=1,
+        alert_id=1,
+        jwt_subject="u",
+        verdict="true",
+        evaluated_values={},
+        user_label="x",
+    )
+    with patch("app.services.alerts.channels.webhook._validate_url"):
+        outcome = await channel.deliver(
+            fire,
+            config={"url": "https://x.com", "secret": "s", "id": "w1"},
+        )
+    assert outcome is DeliveryOutcome.failed
+    assert http.post.call_count == 1
