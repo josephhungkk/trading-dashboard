@@ -76,9 +76,14 @@ describe('usePositionSizing', () => {
 
     const { result } = renderHook(() => usePositionSizing(makeRequest()));
 
-    // Real timer waits 500ms (twice the debounce) so the call has fired.
-    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1), { timeout: 1000 });
-    expect(result.current.result?.suggested_qty).toBe('40');
+    // Wait on the rendered state — spy being called doesn't mean
+    // setResult has flushed. Asserting on result.current.result avoids
+    // the previously-flaky "spy called but state not yet committed" race.
+    await waitFor(
+      () => expect(result.current.result?.suggested_qty).toBe('40'),
+      { timeout: 2000 },
+    );
+    expect(spy).toHaveBeenCalledTimes(1);
     expect(result.current.error).toBeNull();
   });
 
