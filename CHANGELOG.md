@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 11b — Alerts engine (close-out at v0.11.1.3)
+
+Phase 11b shipped across 4 chunks (A/B/C/D) at tags `v0.11.1.0`, `v0.11.1.1`, `v0.11.1.2`, `v0.11.1.3` on 2026-05-13. 153 alerts tests green (131 BE + 22 FE).
+
+**Chunk D — Frontend (`v0.11.1.3`, 7 commits)**
+
+- `services/alerts/types.ts` — `AlertRule`, `CreateAlertResponse` (union of `AlertRule | ParseFailedResponse` via `isParseFailed()` narrowing), `RecentFire`, `AlertWsFrame` (matches chunk-C `v: 1` WS frame).
+- `services/alerts/api.ts` — `postAlert`/`getAlert`/`listAlerts`/`putPredicate`/`deleteAlert`/`confirmAlert`/`getRecentFires` with CSRF nonce via `mintCsrfNonce` for mutations. Same-origin guard inherited from `services/admin/api.ts`.
+- `stores/global/alerts.ts` — zustand-persist, FIFO cap 50, `lastSeenAt` tracking, migrate guard against corrupted localStorage (matches `stores/global/ai.ts` shape).
+- `hooks/useAlertsFeed.ts` — WS feed with reconnect backfill: before opening WS (and before every retry), issues `GET /api/alerts/recent-fires?since=<last_seen_at>&limit=50` and merges into the store de-duped by `fire_id`. Bounded backoff `[500, 1500, 5000, 15000]`. Same-origin guard. `v: 1` frame validation with malformed-frame close. Lives under `hooks/` (not `services/alerts/`) because `boundaries/element-types` disallows services → stores.
+- `services/alerts/useDryRun.ts` — TanStack-Query mutation hook (endpoint deferred to chunk-B-close).
+- 9 components in `features/alerts/`: `AlertsPage` (tab filter + delete via TanStack Query), `AlertDetailPage` (predicate visualiser + JSON edit + delete), `CreateAlertModal` (NL → parse → confirmation card, with Escape dismissal), `ParseFailedEditor` (suggestions + JSON predicate), `PredicateJsonEditor` (textarea + parse-error + schema-errors display), `PredicateVisualiser` (collapsible composite_and / composite_or tree), `DryRunPanel` (resolution banner + samples + insufficient checkbox), `WebhookConfigPanel` (HTTPS-only + HMAC secret), `BellDropdown` (badge + recent fires + WS reconnect backfill).
+- 4 RTL tests + 2 hook tests + 1 store test (7 test files; 22 alerts FE tests).
+- `routes/alerts.tsx` swapped from `AlertsStubPage` to `AlertsPage`; new `routes/alerts.$alertId.tsx`; `BellDropdown` mounted in Topbar.
+- `e2e/alerts.spec.ts` — Playwright smokes `test.fixme`'d until docker-compose harness lands.
+- **Codex chunk-D review (APPROVED-WITH-FIXES):** 0 CRIT + 0 HIGH + 3 MED + 1 LOW. Applied: shared `mountedRef`-across-effect-generations → per-effect-generation `cancelled` closure flag in `useAlertsFeed.ts`; malformed `v: 1` frame now closes socket instead of silently dropping; Escape on `CreateAlertModal`. Deferred MED: `AlertDetailPage` fire-history + dry-run re-run + disable wiring depend on chunk-B-close endpoints.
+- **Deferred to chunk-B-close (fold into 11c or a cleanup commit):**
+  - `POST /api/alerts/dry-run` REST endpoint not wired (service `dry_run.replay` ready).
+  - `GET /api/alerts/{id}/fires` (AlertDetailPage fire-history blocker).
+  - `PUT /api/alerts/{id}/status` (AlertDetailPage disable blocker).
+  - `PUT /api/admin/alerts/webhooks/{id}` (WebhookConfigPanel blocker).
+  - Monaco-editor — currently plain `<textarea>` to avoid ~1.5MB dep.
+  - Lifespan integration of `AlertsEvaluator` + `TicksSubscriber` + LISTEN/NOTIFY driver + `sweep_alert_fire_context` scheduler + CSRF nonce consumption wiring still pending from chunk B-close.
+
 ### Phase 11a — AI router foundation (close-out at v0.11.0.8)
 
 Phase 11a shipped across 7 chunks (A0/A1/A.5/A2/B/C/D) starting at `v0.11.0.0` (2026-05-12) and closing at `v0.11.0.8` (2026-05-13). 75+ feature commits + reviewer-fix commits + CI-debt commits. Stack-wide: backend `_app.state.ai_router` (LiteLLMClient), `_app.state.ai_jobs` (PgAIJobStore), `_app.state.ai_rate_limiter`, `_app.state.heavy_wol` (HeavyBoxWoL with circuit-breaker), `_app.state.capability_svc`; LiteLLM proxy with Redis-backed master-key auth callback; orphan-recovery sweeper; 4 REST + 2 WS endpoints; frontend `/ai/chat` route + `/admin/ai` page + `TradeTicketAiSection` inserted into the trade ticket. Suite at close: 1327 BE / 654 FE tests passing.
