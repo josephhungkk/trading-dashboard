@@ -41,6 +41,15 @@ _ACCOUNT_KEYS = frozenset(
         # Phase 11a-B silent-failure MED: per-provider api_key sent in
         # request body to LiteLLM must never appear as a structlog kwarg.
         "api_key",
+        # Phase 11b-B6 PII: a rule's natural-language input, parsed
+        # predicate tree, and per-fire evaluated state can each carry
+        # portfolio context (NLV, account numbers, position sizes) the
+        # user mentioned in their alert text. These must never reach
+        # structured logs even if we add a debug ``log.info("rule_eval_failed",
+        # original_nl=...)`` line in chunk B-close.
+        "original_nl",
+        "predicate_json",
+        "evaluated_values",
     }
 )
 _REDACTED = "<redacted>"
