@@ -924,12 +924,24 @@ unskipped.
   1293 / 16 / 0 → 1308 / 1 / 0 (only `test_real_schwab_capability_drift`
   remains until Schwab flips supported-set post-A5).
 
-- [ ] **2 chain-test bugs stay Phase 11b candidates** (separate from
-  this recovery): `test_full_modify_chain` (OrderEventConsumer applies
-  cancel-on-old-broker_order_id before orders_service updates it) +
-  `test_full_bracket_chain` (preview hash covers 8 fields, bracket
-  `_consume_nonce` covers 3 — never match). Both are real prod bugs
-  the chain tests would surface.
+- [x] **2 chain-test bugs (Phase 11b candidates)** — fixed 2026-05-13 in
+  commit `e59d8bc`. `test_full_bracket_chain`: extracted shared
+  `_preview_payload_hash` (8 fields) used by both `_nonce_and_payload_hash`
+  (preview write) and the new `_consume_preview_nonce` (bracket place
+  consume). `test_full_modify_chain`: `OrderEventConsumer` short-circuits
+  on `event.kind == "replaced"` (audit row written, UPDATE + WS publish
+  skipped); `orders_service.modify_order` now also UPDATEs the orders
+  row to `status='modified'` + new broker_order_id (synthesized_status
+  was previously only in the response, never persisted). Test suite:
+  1293/16/0 → 1298/14/0.
+
+- [ ] **Followup: retry cancel on LockNotAvailable** — Phase 11b
+  surfaced a real race where `cancel_order`'s `FOR UPDATE NOWAIT`
+  conflicts with the OrderEventConsumer's brief row lock during the
+  modify cancel-replace event burst, returning 423 to the caller. The
+  chain tests work around it with a 200ms sleep before DELETE. A
+  small retry loop in `cancel_order` (3 attempts × 100ms) would fix
+  this for real users too. Not blocking any test.
 
 ## Phase 2.x — follow-ups discovered during v0.2.0 verify
 
