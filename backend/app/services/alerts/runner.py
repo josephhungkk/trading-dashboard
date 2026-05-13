@@ -29,6 +29,27 @@ _BARS_1M_CHANNEL = "bars_1m_insert"
 _DORMANCY_THRESHOLD = 10  # spec §6 fail-isolation cutoff
 
 
+class SymbolCache:
+    """In-memory ``instrument_id -> raw_symbol`` cache.
+
+    Populated by ``rebuild_index`` so the bars-NOTIFY callback can
+    resolve symbols synchronously without a per-event SQL hit and
+    without the previous (broken) ``run_coroutine_threadsafe`` deadlock
+    where the resolver tried to schedule onto the same loop it was
+    blocking. The cache is repopulated on every index rebuild
+    (startup + rule mutation + capability-flip).
+    """
+
+    def __init__(self) -> None:
+        self._inst_to_symbol: dict[int, str] = {}
+
+    def resolve(self, inst_id: int) -> str | None:
+        return self._inst_to_symbol.get(inst_id)
+
+    def replace(self, mapping: dict[int, str]) -> None:
+        self._inst_to_symbol = mapping
+
+
 class AlertsBarsRedisSubscriber:
     """Subscribes to the Redis ``bars_1m_insert`` channel and feeds the
     evaluator. The bridge republishes Postgres NOTIFY payloads here, so
@@ -231,12 +252,19 @@ def build_process_callback(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     dispatcher: DeliveryDispatcher,
+    evaluator: AlertsEvaluator | None = None,
 ) -> Callable[[dict[str, object]], Awaitable[None]]:
     """Return a ``process(item)`` closure suitable for
     ``AlertsEvaluator.start_worker``.
 
     Each invocation opens its own DB session via ``session_factory`` so the
     worker loop does not hold a long-lived transaction.
+
+    ``evaluator`` is optional so unit tests can omit it; in production it
+    threads ``eval_errors_total`` through to the spec §6 fail-isolation
+    counter (the worker only sees a bump if ``process`` itself re-raises,
+    but we catch the predicate exception here so the metric must be
+    incremented explicitly).
     """
 
     async def process(item: dict[str, object]) -> None:
@@ -267,6 +295,8 @@ def build_process_callback(
                 try:
                     fired = evaluate(row.predicate_json, state)
                 except Exception:
+                    if evaluator is not None:
+                        evaluator.metrics.eval_errors_total += 1
                     await mark_eval_error(db, rule_id=rule_id)
                     return
                 if not fired:
@@ -305,22 +335,43 @@ def build_index_rebuild_callback(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     evaluator: AlertsEvaluator,
+    symbol_cache: SymbolCache,
 ) -> Callable[[], Awaitable[None]]:
     """Return the ``_rebuild_fn`` for ``AlertsEvaluator`` — repopulates the
-    inverted index from the database."""
+    inverted index AND the ``inst_id -> symbol`` cache.
+
+    The cache lookup is what the bars-NOTIFY producer-side callback uses
+    to map ``inst_id`` to a raw symbol synchronously. Refreshing it
+    alongside the index keeps the two in sync.
+    """
 
     async def rebuild() -> None:
+        all_symbols: set[str] = set()
         async with session_factory() as db:
             rules = await load_active_rules(db)
-        evaluator.index._symbol_to_rules.clear()
-        evaluator.index._rule_to_symbols.clear()
-        for rule_id, predicate_json, _channels, _subject in rules:
-            try:
-                symbols = referenced_symbols(predicate_json)
-            except Exception:
-                continue
-            if symbols:
-                evaluator.index.add(rule_id=rule_id, symbols=symbols)
+            evaluator.index._symbol_to_rules.clear()
+            evaluator.index._rule_to_symbols.clear()
+            for rule_id, predicate_json, _channels, _subject in rules:
+                try:
+                    symbols = referenced_symbols(predicate_json)
+                except Exception:
+                    continue
+                if symbols:
+                    evaluator.index.add(rule_id=rule_id, symbols=symbols)
+                    all_symbols.update(symbols)
+            if all_symbols:
+                rows = (
+                    await db.execute(
+                        text(
+                            "SELECT instrument_id, raw_symbol FROM symbol_aliases "
+                            "WHERE raw_symbol = ANY(:s)"
+                        ),
+                        {"s": list(all_symbols)},
+                    )
+                ).all()
+                symbol_cache.replace({int(r.instrument_id): str(r.raw_symbol) for r in rows})
+            else:
+                symbol_cache.replace({})
 
     return rebuild
 

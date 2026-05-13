@@ -57,9 +57,9 @@ from app.services.alerts.evaluator import AlertsEvaluator
 from app.services.alerts.retention import sweep_alert_fire_context
 from app.services.alerts.runner import (
     AlertsBarsRedisSubscriber,
+    SymbolCache,
     build_index_rebuild_callback,
     build_process_callback,
-    resolve_symbol_for_instrument,
     run_capability_invalidation_listener,
 )
 from app.services.balance_snapshot_writer import BalanceSnapshotWriter
@@ -406,14 +406,21 @@ async def lifespan(_app: FastAPI) -> Any:
     alerts_capability_listener: asyncio.Task[None] | None = None
     try:
         alerts_evaluator = AlertsEvaluator()
-        # Rebuild the inverted index from the database on startup so live
-        # NOTIFY events from bars_1m can be routed before any rule mutation
-        # triggers a rebuild.
+        # Codex chunk-B-close HIGH-1 fix: in-memory ``inst_id -> symbol``
+        # cache, repopulated by every index rebuild. Replaces the previous
+        # run_coroutine_threadsafe deadlock where the sync resolver tried to
+        # schedule onto the same loop it was blocking with future.result.
+        symbol_cache = SymbolCache()
         rebuild_index = build_index_rebuild_callback(
-            session_factory=session_factory, evaluator=alerts_evaluator
+            session_factory=session_factory,
+            evaluator=alerts_evaluator,
+            symbol_cache=symbol_cache,
         )
         alerts_evaluator._rebuild_fn = rebuild_index
-        alerts_evaluator.request_snapshot_rebuild()
+        # Codex chunk-B-close MED-2 fix: await the initial rebuild BEFORE
+        # the worker + subscriber come online so the first bars_1m NOTIFY
+        # hits a populated inverted index.
+        await rebuild_index()
         await alerts_evaluator.start()
 
         # InApp channel is the only universally-available channel; webhook +
@@ -423,39 +430,21 @@ async def lifespan(_app: FastAPI) -> Any:
         alerts_dispatcher = DeliveryDispatcher(channels={"in_app": in_app_channel})
         _app.state.alerts_evaluator = alerts_evaluator
         _app.state.alerts_dispatcher = alerts_dispatcher
+        _app.state.alerts_symbol_cache = symbol_cache
 
         alerts_evaluator.start_worker(
             process=build_process_callback(
-                session_factory=session_factory, dispatcher=alerts_dispatcher
+                session_factory=session_factory,
+                dispatcher=alerts_dispatcher,
+                evaluator=alerts_evaluator,
             )
         )
-
-        # Symbol resolver: bars_1m_insert NOTIFY → raw_symbol via a fresh
-        # DB session per dispatch. The synchronous Callable signature in
-        # ``_on_bars_1m_notify`` means we run an inline asyncio.run_coroutine
-        # in the resolver — but the producer-debounce path already runs on
-        # the event loop, so use a session-cached resolver returning None
-        # when no alias exists.
-        def _resolve_symbol_sync(inst_id: int) -> str | None:
-            # Spawn an awaitable execution inside the running loop. We use
-            # ``asyncio.get_running_loop`` to schedule the resolver work on
-            # the same loop without blocking.
-            loop = asyncio.get_running_loop()
-
-            async def _lookup() -> str | None:
-                async with session_factory() as db:
-                    return await resolve_symbol_for_instrument(db, instrument_id=inst_id)
-
-            future = asyncio.run_coroutine_threadsafe(_lookup(), loop)
-            try:
-                return future.result(timeout=2.0)
-            except Exception:
-                return None
 
         alerts_bars_subscriber = AlertsBarsRedisSubscriber(
             redis=redis,
             evaluator=alerts_evaluator,
-            resolve_symbol=_resolve_symbol_sync,
+            # Pure-dict lookup — no loop hop, no blocking wait.
+            resolve_symbol=symbol_cache.resolve,
         )
         alerts_bars_subscriber.start()
 

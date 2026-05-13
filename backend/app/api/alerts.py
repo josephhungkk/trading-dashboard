@@ -277,10 +277,15 @@ async def dry_run(
         ) from exc
 
     symbols = referenced_symbols(req.predicate_json) or {str(req.predicate_json.get("symbol", "X"))}
-    # Pull bars for the first referenced symbol. Composite predicates that
-    # reference multiple symbols replay each child against the same series —
-    # the dry-run helper populates state for every symbol from the same data.
-    primary_symbol = next(iter(symbols))
+    # Codex chunk-B-close LOW-1: deterministic primary-symbol selection.
+    # The top-level ``symbol`` key (single-leaf predicates) wins; composite
+    # predicates fall back to ``sorted()`` so the anchor is stable across
+    # processes (a plain ``next(iter(set))`` was nondeterministic).
+    declared_symbol = req.predicate_json.get("symbol")
+    if isinstance(declared_symbol, str) and declared_symbol in symbols:
+        primary_symbol = declared_symbol
+    else:
+        primary_symbol = sorted(symbols)[0]
     bars_1m_rows = (
         await db.execute(
             text(
@@ -422,6 +427,7 @@ async def get_alert_fires(
 async def put_alert_status(
     alert_id: int,
     req: StatusUpdateRequest,
+    request: Request,
     jwt_subject: JwtSubject,
     db: DbSession,
     _csrf: CsrfNonce,
@@ -464,6 +470,13 @@ async def put_alert_status(
     await db.commit()
     rule.status = req.status
     rule.dormancy_reason = None
+    # Codex chunk-B-close HIGH-2: rebuild the inverted index so bars
+    # NOTIFY events route to the newly-active rule (or stop routing to
+    # the newly-disabled one). Best-effort — if the evaluator hasn't
+    # started yet (test runs, lifespan-init failure path) just skip.
+    evaluator = getattr(request.app.state, "alerts_evaluator", None)
+    if evaluator is not None:
+        evaluator.request_snapshot_rebuild()
     return _rule_to_dict(rule)
 
 
