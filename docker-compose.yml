@@ -45,7 +45,12 @@ services:
     restart: "no"
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      # dev stage includes the [dependency-groups.dev] block (alpaca-py,
+      # schwabdev, pytest, fakeredis, ruff). Prod compose falls through to
+      # the default `prod` stage which excludes them to keep the image slim.
+      target: dev
     env_file: .env
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:

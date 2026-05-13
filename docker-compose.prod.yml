@@ -68,7 +68,11 @@ services:
     networks: [td-net]
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      # Slim image, no dev deps. Without this explicit override the merge
+      # with docker-compose.yml's `target: dev` would build the dev stage.
+      target: prod
     env_file: .env
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
