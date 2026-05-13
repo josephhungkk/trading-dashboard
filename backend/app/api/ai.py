@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+from uuid import UUID
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -136,3 +139,31 @@ async def post_jobs(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="ai_internal_error",
         ) from exc
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(
+    job_id: UUID,
+    request: Request,
+    jwt_subject: str = Depends(require_jwt),
+) -> dict[str, Any]:
+    job = await request.app.state.ai_router.get_job(job_id)
+    if job is None or job.jwt_subject != jwt_subject:
+        # 404 (not 403) on both miss + ownership - existence-oracle defence.
+        raise HTTPException(status_code=404, detail="job_not_found")
+    return {
+        "id": str(job.id),
+        "status": job.status,
+        "capability": job.capability,
+        "response": job.response_jsonb,
+        "error": job.error,
+        "started_at": job.started_at.isoformat(),
+        "warming_started_at": (
+            job.warming_started_at.isoformat() if job.warming_started_at else None
+        ),
+        "inferring_started_at": (
+            job.inferring_started_at.isoformat() if job.inferring_started_at else None
+        ),
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "cancel_requested": job.cancel_requested,
+    }
