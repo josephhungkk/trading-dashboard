@@ -23,6 +23,7 @@ from app.api.admin import router as admin_router
 from app.api.admin_metrics import router as admin_metrics_router
 from app.api.admin_risk import router as admin_risk_router
 from app.api.ai import router as ai_router
+from app.api.alerts import router as alerts_router
 from app.api.bars import router as bars_router  # Task 28: GET /api/bars
 from app.api.bars import ws_router as bars_ws_router  # Task 31: WS /ws/bars
 from app.api.brokers import router as brokers_router
@@ -503,6 +504,7 @@ app.include_router(portfolio_router)
 app.include_router(brokers_admin_router)
 app.include_router(accounts_router)
 app.include_router(ai_router)
+app.include_router(alerts_router)
 app.include_router(brokers_router)
 app.include_router(capabilities_router)
 app.include_router(metrics_router)
