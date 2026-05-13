@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 import structlog
@@ -38,9 +39,16 @@ _INFERRING_UPDATE_SQL = text(
 )
 
 
-async def sweep_orphans_once(session_factory: Callable[[], Any]) -> int:
+async def sweep_orphans_once(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+) -> int:
     """Single sweep iteration. Returns number of rows transitioned."""
     async with session_factory() as session:
+        # Two separate UPDATEs (warming + inferring) in one transaction. If the
+        # second UPDATE fails, the first rolls back too - orphans are re-discovered
+        # on the next sweep tick, so correctness is preserved at the cost of one
+        # extra 30s delay for half the rows. This is intentional: keeping it
+        # atomic simplifies reasoning about the metric labels.
         warming_result = await session.execute(
             _WARMING_UPDATE_SQL,
             {"cutoff": _WARMING_CUTOFF_S},
@@ -54,23 +62,29 @@ async def sweep_orphans_once(session_factory: Callable[[], Any]) -> int:
         inferring_ids = list(inferring_result.scalars().all())
         await session.commit()
 
-    for job_id in warming_ids:
-        metrics.ai_jobs_orphan_recovered_total.labels(phase="warming").inc()
-        log.info("ai_jobs_orphan_recovered", job_id=str(job_id), phase="warming")
-    for job_id in inferring_ids:
-        metrics.ai_jobs_orphan_recovered_total.labels(phase="inferring").inc()
-        log.info("ai_jobs_orphan_recovered", job_id=str(job_id), phase="inferring")
+    try:
+        for job_id in warming_ids:
+            metrics.ai_jobs_orphan_recovered_total.labels(phase="warming").inc()
+            log.info("ai_jobs_orphan_recovered", job_id=str(job_id), phase="warming")
+        for job_id in inferring_ids:
+            metrics.ai_jobs_orphan_recovered_total.labels(phase="inferring").inc()
+            log.info("ai_jobs_orphan_recovered", job_id=str(job_id), phase="inferring")
+    except Exception:
+        log.exception("ai_jobs_orphan_recovered_metric_failed")
 
     return len(warming_ids) + len(inferring_ids)
 
 
-async def run_orphan_sweeper(session_factory: Callable[[], Any]) -> None:
+async def run_orphan_sweeper(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+) -> None:
     """Background task - sweep every 30s until cancelled."""
     while True:
         try:
             await sweep_orphans_once(session_factory)
         except asyncio.CancelledError:
             raise
-        except Exception:  # Sweeper must never die on transient errors.
+        except Exception:
+            metrics.ai_jobs_orphan_sweep_failures_total.inc()
             log.exception("ai_jobs_orphan_sweep_failed")
         await asyncio.sleep(_SWEEP_INTERVAL_S)

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -12,7 +15,7 @@ from sqlalchemy import text
 
 from app.core import metrics
 from app.core.db import SessionLocal
-from app.services.ai.orphan_sweeper import sweep_orphans_once
+from app.services.ai.orphan_sweeper import run_orphan_sweeper, sweep_orphans_once
 
 pytestmark = pytest.mark.asyncio
 
@@ -141,3 +144,27 @@ async def test_empty_table_no_error() -> None:
     assert recovered == 0
     assert _orphan_counter_value("warming") - warming_before == 0
     assert _orphan_counter_value("inferring") - inferring_before == 0
+
+
+async def test_sweep_failure_increments_metric() -> None:
+    """A raising session_factory bumps ai_jobs_orphan_sweep_failures_total."""
+    before = metrics.ai_jobs_orphan_sweep_failures_total._value.get()
+
+    class BrokenSessionContext:
+        async def __aenter__(self) -> Any:
+            raise RuntimeError("simulated db error")
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+    def _broken_factory() -> BrokenSessionContext:
+        return BrokenSessionContext()
+
+    sweeper_task = asyncio.create_task(run_orphan_sweeper(_broken_factory))
+    await asyncio.sleep(0.05)
+    sweeper_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await sweeper_task
+
+    after = metrics.ai_jobs_orphan_sweep_failures_total._value.get()
+    assert after - before >= 1

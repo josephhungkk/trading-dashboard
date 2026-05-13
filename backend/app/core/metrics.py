@@ -851,6 +851,11 @@ ai_jobs_orphan_recovered_total = Counter(
     ["phase"],
     registry=registry,
 )
+ai_jobs_orphan_sweep_failures_total = Counter(
+    "ai_jobs_orphan_sweep_failures_total",
+    "Failures in the orphan-recovery sweep loop (transient DB errors etc).",
+    registry=registry,
+)
 ai_ws_chat_stream_errors_total = Counter(
     "ai_ws_chat_stream_errors_total",
     "Unhandled exceptions during /ws/ai/chat stream forwarding.",
