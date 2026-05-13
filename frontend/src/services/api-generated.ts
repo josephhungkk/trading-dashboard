@@ -420,6 +420,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/secrets/ai/litellm_master_key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Litellm Master Key
+         * @description Phase 11a-A.5 HIGH-5: zero-restart rotation.
+         *
+         *     Write order is Redis-first then app_secrets (security-reviewer H2):
+         *     Redis is the live source LiteLLM reads, app_secrets is the recovery
+         *     source the lifespan reads at startup. Writing Redis first means a
+         *     failure during Redis.set leaves both stores at the OLD value
+         *     (safe — operator can retry). Writing app_secrets first would have
+         *     left app_secrets ahead of Redis on a Redis.set failure (silent
+         *     divergence; lifespan would later reconcile but only after restart).
+         */
+        put: operations["put_litellm_master_key_api_admin_secrets_ai_litellm_master_key_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/secrets/{namespace}/{key}": {
         parameters: {
             query?: never;
@@ -468,6 +496,58 @@ export interface paths {
         put: operations["put_sizing_defaults_api_admin_sizing_defaults__account_id__put"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post Complete */
+        post: operations["post_complete_api_ai_complete_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post Jobs */
+        post: operations["post_jobs_api_ai_jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job */
+        get: operations["get_job_api_ai_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Job */
+        delete: operations["delete_job_api_ai_jobs__job_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1076,6 +1156,12 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AICapability
+         * @description Capability tags consumers attach to a CompletionRequest.
+         * @enum {string}
+         */
+        AICapability: "LOCAL_ONLY" | "LONG_CONTEXT" | "REALTIME_SENTIMENT" | "STRUCTURED_OUTPUT" | "BULK_CHEAP" | "REASONING" | "NUMERICAL" | "CODING";
         /** AccountAliasUpdate */
         AccountAliasUpdate: {
             /** Alias */
@@ -1312,6 +1398,62 @@ export interface components {
              */
             updated_at: string;
         };
+        /** CompletionRequest */
+        CompletionRequest: {
+            /**
+             * Caller
+             * @description consumer name for cost ledger
+             */
+            caller: string;
+            capability: components["schemas"]["AICapability"];
+            /**
+             * Force Local Only
+             * @default false
+             */
+            force_local_only: boolean;
+            /**
+             * Max Tokens
+             * @default 1024
+             */
+            max_tokens: number;
+            /** Messages */
+            messages: {
+                [key: string]: string;
+            }[];
+            /** Response Format */
+            response_format?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Temperature
+             * @default 0.2
+             */
+            temperature: number;
+            /** Tools */
+            tools?: components["schemas"]["ToolDef"][] | null;
+        };
+        /** CompletionResult */
+        CompletionResult: {
+            /** Completion Tokens */
+            completion_tokens: number;
+            /** Fallback Chain */
+            fallback_chain?: components["schemas"]["FallbackHop"][];
+            /** Model */
+            model: string;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Provider */
+            provider: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /** Text */
+            text: string;
+            /** Wall Time Ms */
+            wall_time_ms: number;
+        };
         /** ConfigIn */
         ConfigIn: {
             /** Key */
@@ -1411,6 +1553,18 @@ export interface components {
             nlv_high_base: string | null;
             /** Nlv Low Base */
             nlv_low_base: string | null;
+        };
+        /**
+         * FallbackHop
+         * @description MED-8 — record each attempted provider/model + reason for skipping.
+         */
+        FallbackHop: {
+            /** From Model */
+            from_model: string;
+            /** From Provider */
+            from_provider: string;
+            /** Reason */
+            reason: string;
         };
         /** FillListResponse */
         FillListResponse: {
@@ -1540,6 +1694,11 @@ export interface components {
         InstrumentIdResponse: {
             /** Instrument Id */
             instrument_id: number;
+        };
+        /** LiteLLMMasterKeyRotate */
+        LiteLLMMasterKeyRotate: {
+            /** Value */
+            value: string;
         };
         /** MethodBreakdown */
         MethodBreakdown: {
@@ -2434,6 +2593,20 @@ export interface components {
             requires_expiry: boolean;
             /** Sort Order */
             sort_order: number;
+        };
+        /**
+         * ToolDef
+         * @description HIGH-4 forward-compat placeholder. v0.11.0 rejects non-None.
+         */
+        ToolDef: {
+            /** Description */
+            description: string;
+            /** Name */
+            name: string;
+            /** Parameters */
+            parameters: {
+                [key: string]: unknown;
+            };
         };
         /** ValidationError */
         ValidationError: {
@@ -3436,6 +3609,43 @@ export interface operations {
             };
         };
     };
+    put_litellm_master_key_api_admin_secrets_ai_litellm_master_key_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Confirm-Nonce"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LiteLLMMasterKeyRotate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: boolean;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_secret_metadata_api_admin_secrets__namespace___key__get: {
         parameters: {
             query?: never;
@@ -3582,6 +3792,134 @@ export interface operations {
                 "application/json": components["schemas"]["SizingDefaultsUpdate"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_complete_api_ai_complete_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CompletionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompletionResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_jobs_api_ai_jobs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CompletionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_api_ai_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_job_api_ai_jobs__job_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             204: {
