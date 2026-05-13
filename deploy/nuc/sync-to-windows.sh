@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 # deploy/nuc/sync-to-windows.sh
-# One-way mirror from the WSL-side repo to the Windows-side ops surface.
+# One-way mirror from the WSL-side repo to the Windows-side ops surface (NUC).
 #
 # Reason: deploy/nuc/ contains PowerShell + VBS scripts that Windows Task Scheduler
 # invokes by absolute Windows path (e.g., C:\dashboard\deploy\nuc\Launch-IBKRSidecar.vbs).
 # The dev edits happen on the Linux side at /home/joseph/dashboard/deploy/nuc/; this
 # helper keeps the Windows-mounted copy in step.
+#
+# Coverage:
+#   - deploy/nuc/      — all .ps1/.vbs (wholesale rsync; new files auto-picked-up,
+#                        e.g. wol_helper.ps1, install-wol-helper.ps1, configure-
+#                        power-plan.ps1, install-ollama.ps1 added in Phase 11a-A2)
+#   - sidecar_ibkr/    — Phase 4 IBKR sidecar source (build via build-windows.ps1)
+#   - sidecar_futu/    — Phase 6 Futu sidecar source (build via build-windows-futu.ps1)
+#   - proto/           — gRPC contracts (consumed by both build scripts above)
+#
+# Out of scope:
+#   - sidecar_alpaca/ + sidecar_schwab/ + sidecar_schwab_refresher/ — run in Docker
+#     on the VPS, NOT on Windows; no Windows-side copy needed.
+#   - deploy/heavybox/ — targets the heavy AI box (192.168.50.30), not the NUC;
+#     copy those scripts to that host separately (SMB/SCP).
 #
 # Run from anywhere; uses absolute paths.
 # Idempotent: --delete prunes Windows-side files that were deleted in WSL.
@@ -28,14 +42,11 @@ rsync -a --delete "$DEPLOY_SRC" "$DEPLOY_DST"
 echo "[sync] deploy/nuc -> $(find "$DEPLOY_DST" -type f | wc -l) files"
 
 # 2. sidecar_ibkr/ — Phase 4 IBKR sidecar (PyInstaller build, golden-trace recorder).
-#    NOTE (2026-05-12): the WSL source dir was renamed sidecar/ -> sidecar_ibkr/ on
-#    2026-05-04, but the Windows-side launchers (Launch-IBKRSidecar.vbs:38,
-#    Probe-Sidecar.ps1) still reference C:\dashboard\sidecar\dist\... — meaning
-#    production sidecars currently run from the OLD path. The launcher-path
-#    cutover is a separate operator runbook (see memory windows_sidecar_path_drift).
-#    Until then, this sync pushes WSL source to C:\dashboard\sidecar_ibkr\ but
-#    the prod .exe is still served from C:\dashboard\sidecar\dist\. After cutover,
-#    delete the orphan C:\dashboard\sidecar\ directory.
+#    Cutover completed 2026-05-13: WSL source = sidecar_ibkr/, Windows mirror =
+#    C:\dashboard\sidecar_ibkr\, and Launch-IBKRSidecar.vbs + Probe-Sidecar.ps1
+#    reference C:\dashboard\sidecar_ibkr\dist\... The legacy C:\dashboard\sidecar\
+#    directory can be deleted manually on the Windows side once the new path is
+#    confirmed green over a maintenance cycle.
 #    Exclude Linux-built artifacts so we don't push WSL binaries/caches to a Windows path.
 SIDECAR_SRC="/home/joseph/dashboard/sidecar_ibkr/"
 SIDECAR_DST="/mnt/c/dashboard/sidecar_ibkr/"
@@ -51,7 +62,7 @@ rsync -a --delete \
     --exclude 'dist/' \
     --exclude '*.egg-info/' \
     "$SIDECAR_SRC" "$SIDECAR_DST"
-echo "[sync] sidecar -> $(find "$SIDECAR_DST" -type f | wc -l) files"
+echo "[sync] sidecar_ibkr -> $(find "$SIDECAR_DST" -type f | wc -l) files"
 
 # 3. proto/ - gRPC contract source consumed by sidecar_ibkr/scripts/build-windows.ps1
 #    (uv run python -m grpc_tools.protoc --proto_path=../proto ...). The build

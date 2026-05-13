@@ -43,7 +43,7 @@
 param(
     [Parameter(Mandatory)][ValidateSet('isa-live', 'isa-paper', 'normal-live', 'normal-paper')]
     [string]$Label,
-    [string]$ProbeExe = 'C:\dashboard\sidecar\dist\probe-sidecar\probe-sidecar.exe',
+    [string]$ProbeExe = 'C:\dashboard\sidecar_ibkr\dist\probe-sidecar\probe-sidecar.exe',
     [string]$SecretsDir = 'C:\dashboard\secrets',
     [string]$StateDir = 'C:\dashboard\state',
     [int]$TimeoutSec = 5

@@ -35,7 +35,7 @@ Select Case label
 End Select
 
 secretsDir = "C:\dashboard\secrets"
-sidecarExe = "C:\dashboard\sidecar\dist\ibkr-sidecar\ibkr-sidecar.exe"
+sidecarExe = "C:\dashboard\sidecar_ibkr\dist\ibkr-sidecar\ibkr-sidecar.exe"
 logDir = "C:\ProgramData\dashboard\sidecar-" & label
 stateDir = logDir & "\state"
 

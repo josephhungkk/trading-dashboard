@@ -72,11 +72,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # grpc_tools emits `from broker.v1 import broker_pb2` which doesn't resolve
-# under the sidecar._generated.broker.v1 package layout. Rewrite to fully
+# under the sidecar_ibkr._generated.broker.v1 package layout. Rewrite to fully
 # qualified so the bindings work wherever they're imported.
+# NOTE (2026-05-13): line stale-pointed at `sidecar._generated...` from
+# before the 2026-05-04 sidecar/ -> sidecar_ibkr/ package rename. Leaving
+# it stale caused PyInstaller to follow the broken import down into the
+# legacy `C:\dashboard\sidecar\` source tree as well, pulling BOTH module
+# trees into the bundle. That registered `broker/v1/broker.proto` twice
+# in protobuf's global descriptor pool, raising TypeError at startup.
+# See memory windows_sidecar_path_drift.md for the full cutover story.
 $grpcPath = '_generated/broker/v1/broker_pb2_grpc.py'
 $content = Get-Content -Raw $grpcPath
-$content = $content -replace '(?m)^from broker\.v1 import broker_pb2', 'from sidecar._generated.broker.v1 import broker_pb2'
+$content = $content -replace '(?m)^from broker\.v1 import broker_pb2', 'from sidecar_ibkr._generated.broker.v1 import broker_pb2'
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText((Resolve-Path $grpcPath).Path, $content, $utf8NoBom)
 Write-Host "[build] proto codegen complete (grpc_tools.protoc, native PS)" -ForegroundColor Green
