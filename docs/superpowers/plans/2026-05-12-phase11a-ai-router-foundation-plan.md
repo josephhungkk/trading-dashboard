@@ -4497,23 +4497,331 @@ chunk D + close-out remain).
 
 Commit: `chore(phase11a-C9): chunk C reviewer fixes + tag v0.11.0.5`
 
-### Chunk D — Frontend (sketch)
+### Chunk D — Frontend (detailed)
 
-**Files to create:** all `frontend/src/features/ai/`, `services/ai/`, routes, store.
+**Goal:** Surface `services/ai/` REST + WS clients in the FE; ship a `/ai/chat` route, a TradeTicketModal "AI context" section, and a `/admin/ai` page covering capability map + provider-key CRUD + cost-ledger view + heavy-box state. All chunk-C endpoints get a hook.
 
-**Task outline:**
-1. `services/ai/api.ts` + `types.ts` (re-exports).
-2. `useChatStream.ts` with bounded backoff reconnect + mountedRef + per-turn-limit UI feedback.
-3. `useAiJob.ts` with WS push + REST fallback poll.
-4. `useTradeContext.ts` one-shot with graceful-degrade failure mode.
-5. `ChatPage.tsx` + `ChatMessage.tsx` + `ModelPicker.tsx`.
-6. `TradeTicketAiSection.tsx` + insert into TradeTicketModal.
-7. `AdminAiPage.tsx` with capability map editor + provider-key CRUD (CSRF nonce) + cost-ledger view + heavy-box state.
-8. `stores/global/ai.ts` zustand-persist for chat + default model.
-9. Frontend Vitest tests for each component + hook.
-10. 2 Playwright smokes.
-11. Reviewer chain (haiku spec + haiku typescript + sonnet code).
-12. Tag `v0.11.0` — phase 11a close.
+**Files to create:**
+- `frontend/src/services/ai/types.ts`
+- `frontend/src/services/ai/api.ts`
+- `frontend/src/services/ai/useChatStream.ts` + `.test.tsx`
+- `frontend/src/services/ai/useAiJob.ts` + `.test.tsx`
+- `frontend/src/services/ai/useTradeContext.ts` + `.test.tsx`
+- `frontend/src/features/ai/ChatPage.tsx` + `.test.tsx`
+- `frontend/src/features/ai/ChatMessage.tsx` + `.stories.tsx`
+- `frontend/src/features/ai/ModelPicker.tsx` + `.stories.tsx`
+- `frontend/src/features/orders/TradeTicketAiSection.tsx` + `.test.tsx`
+- `frontend/src/features/admin/ai/AdminAiPage.tsx` + `.test.tsx`
+- `frontend/src/features/admin/ai/CapabilityMapEditor.tsx`
+- `frontend/src/features/admin/ai/ProviderKeyCrud.tsx`
+- `frontend/src/features/admin/ai/CostLedgerView.tsx`
+- `frontend/src/features/admin/ai/HeavyBoxStateBadge.tsx`
+- `frontend/src/stores/global/ai.ts` + `.test.ts`
+- `frontend/src/routes/ai.chat.tsx` (TanStack file-route)
+- `frontend/src/routes/admin.ai.tsx`
+- `frontend/e2e/ai-chat.spec.ts` (Playwright)
+- `frontend/e2e/admin-ai.spec.ts`
+
+**Files to modify:**
+- `frontend/src/features/orders/TradeTicketModal.tsx` — insert `<TradeTicketAiSection ...>` between symbol header and sizing section.
+
+### Task 32 (D1): `services/ai/types.ts` + `api.ts`
+
+**Files:**
+- Create: `frontend/src/services/ai/types.ts`
+- Create: `frontend/src/services/ai/api.ts`
+- Test: integrated via the hooks' `.test.tsx` (no standalone test for the wrappers).
+
+Mimic the `frontend/src/services/portfolio/{types,api}.ts` shape. Re-export from `api-generated.ts` where the BE schema exists (CompletionRequest / CompletionResult / FallbackHop / JobSubmitResponse / JobStatusResponse). Hand-curate WS frame types (the spec's `{"version": 1, "type": "chunk"|"done"|"error"|"state", ...}`) at the bottom of `types.ts` — WS isn't in OpenAPI.
+
+Skeleton:
+```typescript
+import type { components } from '@/services/api-generated';
+
+export type CompletionRequest = components['schemas']['CompletionRequest'];
+export type CompletionResult = components['schemas']['CompletionResult'];
+export type FallbackHop = components['schemas']['FallbackHop'];
+export type JobSubmitResponse = components['schemas']['JobSubmitResponse'];
+export type JobStatusResponse = components['schemas']['JobStatusResponse'];
+
+export type AICapability = 'LOCAL_ONLY' | 'LONG_CONTEXT' | 'REALTIME_SENTIMENT'
+  | 'STRUCTURED_OUTPUT' | 'BULK_CHEAP' | 'REASONING' | 'NUMERICAL' | 'CODING';
+
+// Hand-curated — WS isn't in OpenAPI.
+export type ChatWsFrame =
+  | { version: 1; type: 'chunk'; text: string; request_id: string }
+  | { version: 1; type: 'done'; request_id: string | null }
+  | { version: 1; type: 'error'; error_class: string; message: string };
+
+export type JobWsFrame = {
+  version: 1;
+  type: 'state';
+  state: string;
+  job_id: string;
+  // Allowlisted extras (matches backend ws_ai.py:_ALLOWED_EXTRA_KEYS):
+  error_code?: string;
+  model?: string;
+  response?: Record<string, unknown>;
+  fallback_chain?: FallbackHop[];
+};
+
+export type ChatRole = 'user' | 'assistant' | 'system';
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+}
+```
+
+`api.ts` exports two functions only (REST endpoints; WS handled inside the streaming hooks):
+- `postComplete(req: CompletionRequest): Promise<CompletionResult>`
+- `postJob(req: CompletionRequest): Promise<{ job_id: string }>`
+- `getJob(job_id: string): Promise<JobStatusResponse>`
+- `deleteJob(job_id: string): Promise<void>`
+
+Use the same `fetchJson` pattern as `services/portfolio/api.ts`. No CSRF nonce — these are read/write but the spec doesn't require it (chunk C didn't add it).
+
+Commit: `feat(phase11a-D1): services/ai types + api wrappers`
+
+### Task 33 (D2): `useChatStream` hook
+
+**Files:**
+- Create: `frontend/src/services/ai/useChatStream.ts`
+- Test: `frontend/src/services/ai/useChatStream.test.tsx`
+
+Spec § 11a-D bullet 2: WS hybrid with bounded backoff reconnect, mountedRef, per-turn-limit UI feedback.
+
+Hook API:
+```typescript
+export interface UseChatStreamReturn {
+  send: (messages: ChatMessage[], capability: AICapability) => void;
+  partial: string;          // current in-flight assistant chunks concatenated
+  done: boolean;            // true after final 'done' frame
+  error: string | null;     // last error message, null when none
+  rateLimited: boolean;     // briefly true on TurnRateExceeded error frame
+  connected: boolean;       // ws connected
+  fallbackChain: FallbackHop[];
+}
+
+export function useChatStream(opts?: { wsUrl?: string }): UseChatStreamReturn;
+```
+
+Patterns to mimic from `services/portfolio/useRollupLive.ts`:
+- `mountedRef` to gate `setState` calls
+- `RECONNECT_DELAYS_MS = [500, 1500, 5000, 15000]` bounded backoff
+- Close + reconnect on `version !== 1` (server schema-mismatch defence)
+
+Per-turn-limit UI: on receipt of `{type: "error", error_class: "TurnRateExceeded"}`, set `rateLimited = true` for 3 seconds then auto-clear (so the UI can render "wait a moment" without staying in error state). NEVER auto-retry the send.
+
+Test cases (≥4):
+1. Send a chat message → server (fake WS) yields 2 chunks + done → `partial` accumulates, `done` flips true.
+2. Server sends `{type: "error", error_class: "TurnRateExceeded"}` → `rateLimited` is true, then false after 3s (use `vi.useFakeTimers()`).
+3. WS drops → hook reconnects after 500ms backoff (use `vi.useFakeTimers()` + advance).
+4. Unmount during stream → no setState-after-unmount warning.
+
+Commit: `feat(phase11a-D2): useChatStream hook with bounded backoff + turn-limit UI`
+
+### Task 34 (D3): `useAiJob` hook
+
+**Files:**
+- Create: `frontend/src/services/ai/useAiJob.ts`
+- Test: `.test.tsx`
+
+Spec § 11a-D bullet 3: WS push for state changes + REST fallback poll.
+
+Hook API:
+```typescript
+export interface UseAiJobReturn {
+  status: string | undefined;       // 'warming' | 'inferring' | 'completed' | ...
+  response: Record<string, unknown> | null;
+  error: string | null;
+  cancelRequested: boolean;
+  cancel: () => Promise<void>;
+}
+
+export function useAiJob(job_id: string | undefined): UseAiJobReturn;
+```
+
+Mimic `services/portfolio/useRollupLive.ts`: TanStack-Query for the REST poll (10s `refetchInterval`); WS push via `setQueryData`; WS disconnect falls back to poll automatically.
+
+The poll uses `getJob(job_id)`. The WS connects to `/ws/ai/jobs/{job_id}`. Terminal state (`completed` / `failed` / `cancelled`) stops the poll (set `refetchInterval` to false).
+
+`cancel()` calls `deleteJob(job_id)` and optimistically sets `cancelRequested = true`.
+
+Test cases (≥4):
+1. Hook mounts with a job_id → REST returns `{status: "warming"}` → `status === "warming"`.
+2. WS pushes `{state: "inferring"}` → `status === "inferring"` (poll wouldn't have fetched yet).
+3. WS pushes `{state: "completed", response: {...}}` → `status === "completed"`, poll stops.
+4. Calling `cancel()` → optimistic `cancelRequested === true`, DELETE issued.
+
+Commit: `feat(phase11a-D3): useAiJob hook (WS push + REST 10s poll fallback)`
+
+### Task 35 (D4): `useTradeContext` hook
+
+**Files:**
+- Create: `frontend/src/services/ai/useTradeContext.ts`
+- Test: `.test.tsx`
+
+Spec § 11a-D bullet 4 (also referenced in TradeTicketModal section): one-shot call with `capability: "STRUCTURED_OUTPUT"`; **graceful-degrade failure mode**: on any error, return `{ context: null, error: <code> }` — the TradeTicketAiSection then renders "AI context unavailable" instead of blocking the ticket.
+
+Hook API:
+```typescript
+export interface TradeContext {
+  summary: string;
+  recent_signals: string[];
+  risk_flags: string[];
+}
+
+export interface UseTradeContextReturn {
+  context: TradeContext | null;
+  loading: boolean;
+  error: string | null;
+}
+
+export function useTradeContext(input: { symbol: string; side: 'BUY' | 'SELL'; qty: number }): UseTradeContextReturn;
+```
+
+Internally calls `postComplete` with `capability: "STRUCTURED_OUTPUT"` + a hand-crafted prompt that requests JSON-only output. Parse the response.text as JSON; if parse fails, `error = "parse_failed"`, `context = null`. If REST returns 5xx, `error = "unavailable"`. NEVER throw.
+
+Test cases (≥3):
+1. Happy path: postComplete returns `{text: '{"summary":"...","recent_signals":[],"risk_flags":[]}'}` → `context` populated.
+2. 503 LOCAL/proxy unavailable → `error === "unavailable"`, `context === null`.
+3. Malformed JSON text → `error === "parse_failed"`, `context === null`.
+
+Commit: `feat(phase11a-D4): useTradeContext one-shot with graceful degrade`
+
+### Task 36 (D5): `stores/global/ai.ts` zustand-persist
+
+**Files:**
+- Create: `frontend/src/stores/global/ai.ts`
+- Test: `.test.ts`
+
+Persist: `chatHistory: ChatMessage[]` + `defaultModel: string | null`. Mimic `frontend/src/stores/global/portfolio.ts` migrate guard pattern (reject non-string persisted values). Cap history at 200 messages (FIFO drop).
+
+Test cases:
+1. `appendChatMessage({role: 'user', content: 'hi'})` → history length 1.
+2. Setting `defaultModel = 'qwen3-coder'` and re-creating store → still 'qwen3-coder' (persist test).
+3. Corrupted persist value (non-array) → migrate guard returns empty.
+4. 201st message → first one dropped (cap enforced).
+
+Commit: `feat(phase11a-D5): stores/global/ai with zustand-persist + migrate guard`
+
+### Task 37 (D6): `ChatMessage` + `ModelPicker` primitives
+
+**Files:**
+- Create: `frontend/src/features/ai/ChatMessage.tsx`
+- Create: `frontend/src/features/ai/ChatMessage.stories.tsx`
+- Create: `frontend/src/features/ai/ModelPicker.tsx`
+- Create: `frontend/src/features/ai/ModelPicker.stories.tsx`
+
+`ChatMessage` renders a single role-tagged message bubble. Props: `role: ChatRole, content: string, fallbackBadge?: boolean`. Render fallback badge as the spec MED-8 requirement ("Used local fallback (heavy box busy)").
+
+`ModelPicker` is a dropdown bound to a capability list (8 entries from `AICapability` enum). Props: `value: AICapability, onChange: (cap: AICapability) => void`.
+
+Both ship `.stories.tsx` (per CLAUDE.md "Primitives + patterns ship `.stories.tsx`"). No `.test.tsx` — these are pure-render leaf components covered by Storybook + the ChatPage test.
+
+Commit: `feat(phase11a-D6): ChatMessage + ModelPicker components + stories`
+
+### Task 38 (D7): `ChatPage` route
+
+**Files:**
+- Create: `frontend/src/features/ai/ChatPage.tsx`
+- Create: `frontend/src/features/ai/ChatPage.test.tsx`
+- Create: `frontend/src/routes/ai.chat.tsx` (TanStack file-route)
+
+Wires `useChatStream` + `stores/global/ai` + `ChatMessage` + `ModelPicker`. Layout:
+- Top: `ModelPicker` (sets active capability)
+- Middle: scrollable chat history (renders all `ChatMessage`s)
+- Bottom: input box + Send button; disable Send while `useChatStream.partial` is non-empty and `!done`.
+- Rate-limited badge when `rateLimited === true`.
+- Cost-this-conversation display: tally `fallbackChain.length` per turn (no cost API for FE yet — defer to chunk C-cost-ledger view).
+
+Test cases (≥3):
+1. Renders message history from the persisted store.
+2. Typing + Send pushes user msg + waits for `partial` to populate, then `done` flips and msg is committed.
+3. Rate-limited badge appears when hook returns `rateLimited = true`.
+
+Commit: `feat(phase11a-D7): ChatPage + /ai/chat route`
+
+### Task 39 (D8): `TradeTicketAiSection` + insert
+
+**Files:**
+- Create: `frontend/src/features/orders/TradeTicketAiSection.tsx`
+- Create: `.test.tsx`
+- Modify: `frontend/src/features/orders/TradeTicketModal.tsx` — insert section between symbol header and sizing section.
+
+Calls `useTradeContext({symbol, side, qty})` derived from the ticket's current state. Renders:
+- Loading: skeleton
+- Success: `summary` + bullet list of `recent_signals` + amber tags for `risk_flags`
+- Failure: "AI context unavailable" text (DO NOT block the ticket)
+
+Test cases (≥2):
+1. Mounts with happy `useTradeContext` data → renders summary + signals.
+2. Mounts with error → renders the unavailable message; ticket modal remains operable.
+
+Commit: `feat(phase11a-D8): TradeTicketAiSection + insert into TradeTicketModal`
+
+### Task 40 (D9): `AdminAiPage` + sub-panels
+
+**Files:**
+- Create: `frontend/src/features/admin/ai/AdminAiPage.tsx`
+- Create: `.test.tsx`
+- Create: `frontend/src/features/admin/ai/{CapabilityMapEditor,ProviderKeyCrud,CostLedgerView,HeavyBoxStateBadge}.tsx`
+- Create: `frontend/src/routes/admin.ai.tsx`
+
+Four sub-panels. Acceptance criteria:
+- **CapabilityMapEditor**: drag-reorder providers per capability. Reads + writes `app_config[ai_router/capability_map]` via existing admin config endpoints. CSRF nonce required on every save (per spec MED-5).
+- **ProviderKeyCrud**: list + add/delete + rotate provider keys in `app_secrets[ai_provider/...]`. CSRF nonce.
+- **CostLedgerView**: read-only table of last 24h of `ai_completions` rows. New BE endpoint required: **`GET /api/ai/cost-ledger?hours=24`** — defer this to a separate sub-task once we confirm the spec didn't already list it. For now in chunk D, stub the panel with "Coming soon (Phase 11b)" placeholder so we don't block on a BE endpoint.
+- **HeavyBoxStateBadge**: reads `app.state.heavy_wol` status via existing admin endpoint `/api/admin/heavy-box/status` (or polls `/api/admin/config` for the latest snapshot). Renders one of {awake/sleeping/cold-warming/circuit-broken}.
+
+Test cases (≥3):
+1. Page loads and renders all 4 sub-panels.
+2. Saving capability map requires nonce → POST includes `X-CSRF-Nonce` header.
+3. HeavyBoxStateBadge transitions correctly on state change.
+
+Commit: `feat(phase11a-D9): /admin/ai page with capability map + key CRUD + heavy-box badge`
+
+### Task 41 (D10): Playwright smokes
+
+**Files:**
+- Create: `frontend/e2e/ai-chat.spec.ts`
+- Create: `frontend/e2e/admin-ai.spec.ts`
+
+Smoke 1 (`/ai/chat`): navigate, send a message, assert response arrives within timeout.
+Smoke 2 (`/admin/ai`): navigate, assert all 4 sub-panels rendered.
+
+Both run against a docker-compose-up backend with a mocked AI router (use `app.state.ai_router` overridden via test endpoint OR mock the LiteLLM container — preferred is the latter for realistic behaviour). If the docker-compose harness isn't ready, gate these tests with `test.skip(process.env.PLAYWRIGHT_E2E !== '1', ...)`.
+
+Commit: `test(phase11a-D10): playwright smokes for /ai/chat + /admin/ai`
+
+### Task 42 (D11): Reviewer chain
+
+Dispatch 5 reviewers in parallel (mimic chunk-C pattern):
+- spec-compliance (haiku) — inline spec slice (§ 2 11a-D)
+- typescript-reviewer (haiku) — type safety, async correctness in hooks
+- code-reviewer (sonnet) — duplication, file size, coupling
+- security-reviewer (sonnet) — CSRF nonce on admin mutations + WS auth on chat
+- silent-failure-hunter (sonnet) — `useChatStream` reconnect errors logged?, `useTradeContext` graceful-degrade not silently swallowing real bugs?
+
+Apply CRIT + HIGH + MED findings inline.
+
+Commit: `refactor(phase11a-D): apply chunk-D reviewer findings`
+
+### Task 43 (D12): Phase 11a close-out
+
+After Task 42's fix commit lands:
+1. Update `CLAUDE.md` — add Phase 11a load-bearing rule block describing `services/ai/`, LiteLLM proxy, WoL, AI router REST + WS endpoints, FE `/ai/chat` + `/admin/ai`.
+2. Update `CHANGELOG.md` — `[Unreleased]` section gets renamed to `[0.11.0]` with phase summary across chunks A-D.
+3. Update `TASKS.md` — flip Phase 11a row to ✅.
+4. Update `docs/ROADMAP.md` if Phase 11 row needs adjustment.
+5. Write memory `phase11a_shipped.md` with the canonical "what was built / where it lives / what's deferred" structure.
+6. Move/delete `memory/phase11a_in_flight.md`.
+7. Suite full-green check + push tag.
+
+Tag: `v0.11.0` — phase 11a close.
+
+Commit: `chore(phase11a): close-out + tag v0.11.0`
 
 ---
 
