@@ -5,6 +5,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 11b chunk-B-close — lifespan integration + 3 endpoints (v0.11.1.4)
+
+Phase 11b chunk-B-close shipped as `v0.11.1.4` on 2026-05-13 (9 feature commits + 1 reviewer-fix commit, range `fa9585c..34b3fd5`). Closes the deferred wiring items from chunks B and D as a single chunk between D-tag and 11c-open. 171 alerts tests green (149 BE + 22 FE), 676/676 full FE.
+
+**Backend**
+
+- `app/services/postgres_listen_bridge.py`: third LISTEN callback `_on_notify_bars_1m` republishes the `bars_1m_insert` NOTIFY payload to Redis pubsub. JSON-shape-bounded regex validates payloads to defend against rogue NOTIFY injection.
+- `app/services/alerts/evaluator.py`: new `start_worker(process=...)` drains the producer-debounce queue into a lifespan-injected process callback. Per-item exceptions bump `eval_errors_total`; one bad event must NEVER abort the worker (spec §6 fail-isolation).
+- `app/services/alerts/runner.py`: new module with the impure side. `AlertsBarsRedisSubscriber` consumes the Redis `bars_1m_insert` channel and feeds `_on_bars_1m_notify`. `build_process_callback` returns the worker's process closure (rule load + state population + predicate eval + alert_fires + alert_fire_context write + delivery dispatch via `DeliveryDispatcher.fan_out`). `build_index_rebuild_callback` repopulates both the inverted index AND a new `SymbolCache` (`inst_id → raw_symbol`) so the bars-NOTIFY callback can resolve symbols synchronously without per-event SQL. `run_capability_invalidation_listener` listens on `app_config:invalidate:alert_capabilities` and triggers index rebuild.
+- `app/main.py` lifespan: `ensure_alert_capabilities_seeded` on first boot; `AlertsEvaluator` + initial `await rebuild_index()` BEFORE worker/subscriber start; `DeliveryDispatcher(channels={"in_app": ...})` (webhook + telegram channels deferred to 11c); `AlertsBarsRedisSubscriber` with `symbol_cache.resolve` as the pure-dict-lookup resolver; capability-flip pubsub listener task; `apscheduler` job `alerts_retention_sweep` at 03:30 UTC daily. Shutdown drain reverses startup order before broker/redis teardown.
+- `app/api/alerts.py`: mutations (`POST /alerts`, `PUT /alerts/{id}`, `DELETE /alerts/{id}`, `POST /alerts/{id}/confirm`, `PUT /alerts/{id}/status`) now `Depends(consume_confirmation_nonce)` and expect `X-Confirm-Nonce` header. New endpoints: `POST /api/alerts/dry-run` (rate-limited 10/60s; pulls bars_1m last 24h + bars_1d last 30d for the predicate's first referenced symbol); `GET /alerts/{id}/fires` (per-rule history with identity-404 cross-subject defence); `PUT /alerts/{id}/status` (active/disabled toggle with 409 `invalid_status_transition` for forbidden transitions; resets `consecutive_eval_errors` + `dormancy_reason` on transition out of dormant; triggers `evaluator.request_snapshot_rebuild()` so the index picks up the change immediately).
+
+**Frontend**
+
+- `services/alerts/api.ts`: adds `getAlertFires(id, limit)` + `putAlertStatus(id, status)`. All mutations send `X-Confirm-Nonce` (matches the BE `consume_confirmation_nonce` dep).
+- `services/alerts/useDryRun.ts` + `features/alerts/WebhookConfigPanel.tsx`: same header flip.
+- `features/alerts/AlertDetailPage.tsx`: adds fire-history `useQuery(getAlertFires)` list, `DryRunPanel` with `useDryRun` re-run button, `Disable`/`Enable` toggle button calling `putAlertStatus`. Closes chunk-D MED-3.
+- `services/api-generated.ts`: regenerated to expose the new endpoints.
+
+**Codex chunk-B-close review (BLOCKED → APPROVED-WITH-FIXES, applied as `34b3fd5`)**
+
+- HIGH-1: `_resolve_symbol_sync` scheduled `_lookup()` onto the same loop it was blocking with `future.result(timeout=2.0)`. Every bars message would 2s-timeout and drop. Replaced with `SymbolCache` (pure dict lookup populated by `rebuild_index`).
+- HIGH-2: `PUT /api/alerts/{id}/status` updated `alerts.status` but never rebuilt the inverted index. Enabling a rule absent from the in-memory index would never receive bars NOTIFY events. Fixed by calling `request.app.state.alerts_evaluator.request_snapshot_rebuild()` after the status flip.
+- MED-1: `eval_errors_total` was dead code in production paths because the predicate exception was caught inside `process` before reaching the worker's re-raise boundary. Fixed by bumping the counter inside `process` when it catches the eval exception.
+- MED-2: Lifespan called `request_snapshot_rebuild()` (which schedules a 250ms-coalesce-window rebuild) BEFORE starting the worker + subscriber, so bars events arriving during startup could see an empty index. Fixed by awaiting `rebuild_index()` directly before `start_worker`.
+- LOW-1: Dry-run `primary_symbol = next(iter(set))` was nondeterministic. Fixed by preferring the predicate's top-level `symbol` key, falling back to `sorted(symbols)[0]`.
+
+**Test de-flake (separate concern, pre-amble `60e702d`)**
+
+- `usePositionSizing.test.tsx` was flaky ~5% under full-suite load — waited on `spy.toHaveBeenCalledTimes(1)` but the result-state setter runs in the resolved-promise microtask continuation which may not have flushed. Fixed by waiting on `result.current.result` directly (Phase 10b.1 test debt).
+
+**Still deferred to a separate ticket (depends on Phase 7b.1 quote-engine API)**
+
+- `TicksSubscriber` lifespan integration (depends on `register_internal_subscriber(name='alerts', ...)` not yet shipped on the quote engine).
+- 3-retry-then-dormancy fallback on ticks-bus disconnect.
+- Per-webhook secret resolution via `app_secrets[alerts.webhook.<id>.secret]`.
+- `PUT /api/admin/alerts/webhooks/{id}` (WebhookConfigPanel backend).
+- Monaco-editor swap — currently plain `<textarea>` to avoid the ~1.5MB editor dep.
+
 ### Phase 11b — Alerts engine (close-out at v0.11.1.3)
 
 Phase 11b shipped across 4 chunks (A/B/C/D) at tags `v0.11.1.0`, `v0.11.1.1`, `v0.11.1.2`, `v0.11.1.3` on 2026-05-13. 153 alerts tests green (131 BE + 22 FE).
