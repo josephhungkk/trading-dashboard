@@ -1,7 +1,7 @@
 # Phase 11b — Alerts Engine — Design Spec
 
-**Status:** brainstormed 2026-05-13; **pending ARCHITECT-REVIEW**.
-**Tag target:** v0.11.1 (one minor bump after Phase 11a's v0.11.0.8).
+**Status:** brainstormed 2026-05-13; **ARCHITECT-REVIEW applied 2026-05-13** (1 CRIT + 8 HIGH + 8 MED inline; 5 LOW deferred).
+**Tag target:** v0.11.1.0 (chunk A) through v0.11.1.3 (chunk D); patch bump within umbrella `v0.11.x` per sub-phase versioning convention.
 **Predecessor:** Phase 11a shipped 2026-05-13 (memory `phase11a_shipped.md`).
 **Umbrella spec:** `docs/superpowers/specs/2026-05-12-phase11-ai-router-alerts-telegram-design.md` §2.11b (lines 173-227).
 
@@ -17,7 +17,7 @@ Ship a free-form natural-language alert system that users describe in plain Engl
 |---|---|---|---|
 | Parser failure → cloud fallback | Hard-LOCAL_ONLY, no fallback ever | Same — hard-LOCAL_ONLY (CRIT-3 stands) | unchanged |
 | parse_failed UX | "Show validation error, ask user to simplify" | Surface partial-parse JSON to a **manual predicate editor** in the FE | 11a's `useTradeContext` graceful-degrade pattern proved that surfacing partial state beats hard-blocking the user; line 471's "no direct-JSON editor at v0.11.1" is reversed for this narrow case (only opens on parse_failed, not as primary UI) |
-| Predicate primitives | 9: price_threshold, pct_change_window, ma_cross, volume_spike, order_event, ai_signal, unknown, composite_and, composite_or | **10** — adds `news_event` (parser-aware, registry-dormant via `app_config[alert_capabilities/news_feed=false]`) | Forward-compat hook for Phase 18; alembic 0044 already seeds `news_feed=false` so the registry path is open |
+| Predicate primitives | 9: price_threshold, pct_change_window, ma_cross, volume_spike, order_event, ai_signal, unknown, composite_and, composite_or | **10** — adds `news_event` (parser-aware, registry-dormant via `app_config[alert_capabilities/news_feed=false]`) | Forward-compat hook for Phase 18; `ensure_seeded` populates `news_feed=false` so the registry path is open |
 | Price-data source | Implicit (spec didn't specify) | **bars_1m default + opt-in per-rule tick-subscription to Phase 7b.1 quote-engine WS** | Default decouples alerts from streaming-quotes operational state; opt-in addresses sub-minute stop-loss-style use cases without forcing every rule onto the WS |
 | Evaluator runtime | "Bounded asyncio.Queue + inverted index" (single-replica implied) | **In-process FastAPI lifespan loop** matching 11a's `orphan_sweeper` pattern | Proven; single-replica is fine for the same Phase-24 reason as 11a |
 | Delivery channels at 11b | InApp + Email (SMTP) + Telegram-stub | **InApp + Webhook + Telegram-stub** | We have no SMTP primitive in-repo; webhook covers Pushover/Slack/IFTTT/user-SMTP-gateway and is ~5 LoC against `httpx` |
@@ -75,7 +75,7 @@ All other umbrella-spec decisions for 11b (5 mitigations, capability-registry pu
 - `services/alerts/channels/` is the only place that talks to FE-WS / outbound HTTP / Telegram. Telegram channel is a stub at 11b (no-op + log info) and wires at 11c.
 - `services/alerts/` never imports from `services/telegram/` or `services/quotes/` directly except through their public service interfaces.
 
-## 3. Schema (alembic 0043 + 0044)
+## 3. Schema (alembic 0043 only — 0044 dropped per HIGH-7)
 
 ### 0043 — `alerts` + `alert_fires` + `alert_fire_context`
 
@@ -105,6 +105,31 @@ CREATE TABLE alerts (
 CREATE INDEX idx_alerts_active_by_subject ON alerts (jwt_subject) WHERE status = 'active';
 CREATE INDEX idx_alerts_status ON alerts (status);
 
+-- GIN indexes for JSONB queries (added during migration; cheap now, hard to retrofit later)
+CREATE INDEX idx_alerts_predicate_gin ON alerts USING GIN (predicate_json jsonb_path_ops)
+  WHERE status IN ('active', 'dormant');
+-- Enables: SELECT * FROM alerts WHERE predicate_json @? '$.**.symbol ? (@ == "AAPL")'
+-- jsonb_path_ops is smaller than the default operator class.
+
+CREATE INDEX idx_alerts_requires_capabilities_gin ON alerts USING GIN (requires_capabilities)
+  WHERE status IN ('active', 'dormant');
+-- Enables fast "find all rules requiring capability X" on flip-to-true/false.
+
+-- bars_1m AFTER INSERT trigger for evaluator LISTEN/NOTIFY
+CREATE OR REPLACE FUNCTION notify_bars_1m_insert() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify(
+    'bars_1m_insert',
+    json_build_object('inst_id', NEW.instrument_id, 'ts', extract(epoch from NEW.bucket_start))::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_bars_1m_notify AFTER INSERT ON bars_1m
+  FOR EACH ROW EXECUTE FUNCTION notify_bars_1m_insert();
+-- bars_1m is NOT compressed (verified against alembic 0024); trigger fires cleanly on every row.
+-- Re-checked by every alembic migration that touches bars_1m so chunk-management ops don't drop it.
+
 CREATE TABLE alert_fires (
   id            BIGSERIAL,
   alert_id      BIGINT NOT NULL,
@@ -133,20 +158,20 @@ CREATE INDEX idx_alert_fire_context_alert ON alert_fire_context (alert_id, fired
 -- deletes WHERE created_at < now() - interval '90 days'. Table stays small (10 fires/day × 1 user × 90d ≈ 900 rows).
 ```
 
-### 0044 — `alert_capabilities`
+### 0044 — (no separate table)
 
-```sql
-CREATE TABLE alert_capabilities (
-  name          TEXT PRIMARY KEY,
-  available     BOOLEAN NOT NULL DEFAULT FALSE,
-  description   TEXT,
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-INSERT INTO alert_capabilities (name, available, description) VALUES
-  ('news_feed', FALSE, 'Phase 18 news ingest'),
-  ('filings_feed', FALSE, 'Phase 18 SEC filings ingest'),
-  ('earnings_calendar', FALSE, 'Phase 18 earnings calendar');
+**Capability registry is single-source via `app_config[alert_capabilities]`** — same pattern as 11a's `app_config[ai_router/capability_map]`. No parallel SQL table; the original 0044 design was reviewed out (HIGH-7) because two stores create a split-brain risk that the umbrella's two-store rotation pattern would have to solve unnecessarily.
+
+Seed-if-missing on lifespan startup (`app/services/alerts/capabilities.py::ensure_seeded`):
+```json
+{
+  "news_feed":         {"available": false, "description": "Phase 18 news ingest"},
+  "filings_feed":      {"available": false, "description": "Phase 18 SEC filings ingest"},
+  "earnings_calendar": {"available": false, "description": "Phase 18 earnings calendar"}
+}
 ```
+
+So the alembic 0044 slot is effectively unused for 11b; the migration list collapses to **only 0043**.
 
 ## 4. Predicate primitives (10)
 
@@ -208,27 +233,31 @@ Same pattern as `orphan_sweeper`, `ollama_health_watcher`, `BalanceSnapshotWrite
 
 ### Data sources
 
-Default: a single async task subscribes to PostgreSQL `LISTEN bars_1m_insert` (added by alembic 0043 as a NOTIFY trigger on `bars_1m`). Trigger payload is `{symbol, ts}` only; full row read by evaluator on demand from `bars_1m`.
+Default: a single async task subscribes to PostgreSQL `LISTEN bars_1m_insert` (added by alembic 0043 as a NOTIFY trigger on `bars_1m`). Trigger payload is `json_build_object('inst_id', NEW.instrument_id, 'ts', extract(epoch from NEW.bucket_start))::text` — small (well under the 8000-byte NOTIFY limit). Full row read by evaluator on demand from `bars_1m`. `bars_1m` is NOT compressed (verified against alembic 0024) so AFTER INSERT triggers fire cleanly on every row including chunk-creation INSERTs. The trigger is explicitly checked at every alembic migration that touches `bars_1m` so chunk-management ops don't drop it.
 
-Opt-in: rules with `tick_subscribed=true` additionally enqueue from `ticks_subscriber.py`, which subscribes to Phase 7b.1 quote-engine WS for the union of symbols across all opt-in rules. On WS disconnect, falls back to bars_1m alone (bounded retry, then dormant with `dormancy_reason='quote_engine_down'`).
+**Polling fallback:** `app_config[alerts/eval_data_source] = 'listen' | 'poll'` (default `listen`). Operator can flip to `poll` (5s `SELECT ... FROM bars_1m WHERE bucket_start > $last`) if NOTIFY ever becomes a bottleneck under load. Counter `alerts_evaluator_listen_lag_seconds` (Histogram) makes the flip-decision visible.
+
+Opt-in: rules with `tick_subscribed=true` additionally enqueue from `ticks_subscriber.py`, which subscribes to the **internal Redis pubsub bus `quote.<source>.<canonical_id>`** (Phase 7b.1's in-cluster fanout layer — NOT the FE-facing `/ws/quotes` MessagePack gateway). Symbols are resolved via `InstrumentResolver.find_by_alias` (same chokepoint Phase 10b.1 position-sizing uses for conid resolution). Subscriptions register through `services/quotes/subscription_manager.register_internal_subscriber(name='alerts', symbols=[...])` so Phase 7b.1's global subscription cap (5000) accounting holds. On bus disconnect or symbol-resolution failure, falls back to bars_1m alone (bounded retry); after 3 retries, rule transitions `active → dormant` with `dormancy_reason='quote_engine_down'`.
 
 ### Inverted index
 
 In-memory: `dict[str, set[int]]` mapping `symbol → {alert_id, ...}`. Rebuilt on:
 
-- Lifespan startup (SELECT all `active` alerts).
-- Redis pubsub message on channel `app_config:invalidate:alerts` (fires on every CRUD mutation).
-- Capability flip on channel `app_config:invalidate:alert_capabilities`.
+- Lifespan startup (SELECT all `active` alerts — covered by `idx_alerts_active_by_subject` partial index from §3).
+- Redis pubsub message on channel `app_config:invalidate:alerts` — sets `_rebuild_pending = True` and wakes a debounced rebuild task; the task waits 250ms then performs ONE rebuild, **coalescing any further pubsub messages that arrived during the wait** (matches Phase 10b.2 portfolio WS "250ms compute cache + 500ms debounce" pattern). Counter `alerts_evaluator_snapshot_rebuilds_total` + `alerts_evaluator_snapshot_rebuild_coalesced_total`.
+- Capability flip on channel `app_config:invalidate:alert_capabilities` (same coalescing).
 
 Per tick: `O(len(symbol_to_rule_ids[symbol]))`, not `O(all_rules)`.
 
+### Throttling (producer-side debounce — applied BEFORE queue insertion)
+
+Per `(rule_id, symbol)` 500ms debounce applied **at producer side** by `bars_1m_listener` and `ticks_subscriber`. Producers maintain `dict[tuple[int,str], float]` of last-enqueued timestamps; if `now - last < 0.5`, the event is dropped at source with counter `alerts_evaluator_debounced_total{source}` and does NOT consume queue capacity. This prevents a hot symbol with many opt-in tick rules from starving evaluations on other symbols.
+
+**Eviction:** Debounce dict is swept every 60s by an `asyncio.create_task` loop owned by the evaluator. Any `(rule_id, symbol)` whose timestamp is older than `max(window_seconds * 10, 60s)` is dropped. Counter `alerts_evaluator_debounce_evicted_total`. Sweep loop cancelled on `stop()` alongside the main worker. Pattern matches the `evict_stale` calls in `SlidingWindowRateLimiter[K]`, `AIRouterRateLimiter`, and Phase 10b.2's `PortfolioRateLimiter`.
+
 ### Bounded queue
 
-`asyncio.Queue(maxsize=1000)` between producer (bars_1m LISTEN or tick subscription) and consumer (evaluator worker). Drop-oldest on overflow via `try: q.put_nowait(...); except QueueFull: q.get_nowait(); q.put_nowait(...); counter.inc()`. Counter: `alerts_evaluator_queue_dropped_total`.
-
-### Throttling
-
-Per `(rule_id, symbol)` 500ms debounce in addition to the queue. Implemented as `dict[tuple[int,str], float]` mapping last-eval timestamp; evaluator skips if `now - last < 0.5`.
+`asyncio.Queue(maxsize=1000)` between the debounce-passed producer output and the evaluator worker. Drop-oldest on overflow via `try: q.put_nowait(...); except QueueFull: q.get_nowait(); q.put_nowait(...); counter.inc()`. Counter: `alerts_evaluator_queue_dropped_total`. Drop-oldest applies only on genuine downstream-consumer stalls, not on hot-symbol bursts (those are already gated by the producer-side debounce above).
 
 ### Per-rule fail-isolation
 
@@ -271,7 +300,7 @@ class AlertChannel(ABC):
 | Channel | Class | Status at 11b |
 |---|---|---|
 | InApp | `InAppChannel` | Real. Publishes to Redis `alerts:fire:{jwt_subject}`. FE WS `/ws/alerts/feed` re-broadcasts. |
-| Webhook | `WebhookChannel` | Real. POST to user-configured URL. HMAC-SHA256 signed header `X-Alerts-Signature`. 5s timeout. 3 retries with exponential backoff (1s, 3s, 9s). 4xx = no retry; 5xx + timeout = retry. |
+| Webhook | `WebhookChannel` | Real. POST to user-configured URL with SSRF validation (see below). HMAC-SHA256 signed header `X-Alerts-Signature`. 5s timeout per attempt; per-fire timeout budget hard-capped at 30s. 3 retries with exponential backoff (1s, 3s, 9s). 4xx = no retry; 5xx + timeout = retry. Per-webhook in-flight `asyncio.Semaphore(4)`; excess deliveries return `DeliveryOutcome.throttled` + counter `alerts_delivery_throttled_total{channel='webhook'}` (back-pressure for user's downstream system, NOT enqueued). |
 | Telegram | `TelegramChannel` | **Stub.** Logs info, returns `DeliveryOutcome.channel_unavailable`. Wired at 11c. |
 
 ### Webhook config
@@ -284,13 +313,25 @@ class AlertChannel(ABC):
 ```
 Secret value lives in `app_secrets` Fernet-encrypted under `alerts.webhook.<id>.secret`. HMAC computed over the JSON-serialised fire payload.
 
+### Webhook URL validation (SSRF defence — CRIT)
+
+Backend has direct WG/LAN reach to PG (`10.10.0.2:5432`), broker sidecars (`10.10.0.x`), heavy box (`10.10.0.3:11434`), and docker-internal LiteLLM (`litellm:4000`). A user-configured webhook URL pointing at any of those becomes an arbitrary internal HTTP client. CLAUDE.md security: "Postgres reachable only via WG / never public" — the webhook channel must not route around that boundary.
+
+`services/alerts/channels/webhook.py::_validate_url(url)` is called BEFORE every `httpx.post` (including each retry, for DNS-rebinding defence):
+
+- **Scheme:** must be `https://` only — reject `http`, `file`, `gopher`, `ftp`, `data`, anything else.
+- **Hostname:** reject `localhost`, `*.local`, `*.internal`, `*.svc.cluster.local`, and any literal IP that resolves to private/loopback/link-local/reserved/multicast ranges per `ipaddress.ip_address(...).is_private | is_loopback | is_link_local | is_reserved | is_multicast`.
+- **DNS resolve:** call `socket.getaddrinfo(host, None)` and reject if ANY resolved address fails the IP check above. Re-resolve on every retry (defence against DNS-rebinding between attempts).
+- **Port:** reject ports `<1024` except `443`.
+- **Failure:** raise `WebhookUrlRejected(reason)`; channel returns `DeliveryOutcome.failed` with `error_code: 'webhook_url_invalid'`; counter `alerts_webhook_url_rejected_total{reason}` increments with `reason ∈ {scheme, hostname, private_ip, port, dns_rebinding}`.
+
 ### Fail-isolation
 
 Per-channel `try/except → counter → return DeliveryOutcome.failed`. One channel's failure never blocks another's. Outcomes recorded in `alert_fires.delivery_outcomes` JSONB.
 
-## 9. REST endpoints (`app/api/alerts.py` — 6 total)
+## 9. REST endpoints (`app/api/alerts.py` — 7 total)
 
-All gated on `require_jwt`. All use shared `_guarded_alerts_call` helper for LOCAL_ONLY assertion + rate-limit + CSRF + 5-arm exception mapping (matches 11a's `_guarded_ai_call` pattern).
+All gated on `require_jwt`. All use shared `_guarded_alerts_call` helper for rate-limit + CSRF + 5-arm exception mapping (matches 11a's `_guarded_ai_call` pattern).
 
 | Endpoint | Verb | Purpose | CSRF? | Rate-limited? | 404 defence? |
 |---|---|---|---|---|---|
@@ -301,8 +342,18 @@ All gated on `require_jwt`. All use shared `_guarded_alerts_call` helper for LOC
 | `/api/alerts/{id}/confirm` | `POST` | Flip status pending → active | yes | no | yes |
 | `/api/alerts` | `GET` | List rules for jwt_subject | no | no | n/a |
 | `/api/alerts/dry-run` | `POST` | One-shot replay against arbitrary predicate_json | no | 10/min | n/a |
+| `/api/alerts/recent-fires` | `GET` | Last 50 fires across all user's rules (WS-reconnect backfill); accepts `?since=<ISO ts>&limit=<n≤200>` | no | no | n/a (scoped to jwt_subject) |
 
-Net: 7 FastAPI operations across 5 URL paths (`/api/alerts`, `/api/alerts/{id}`, `/api/alerts/{id}/confirm`, `/api/alerts/dry-run`, plus the `/api/alerts` collection-GET).
+Net: 8 FastAPI operations across 6 URL paths.
+
+### `_guarded_alerts_call` helper responsibilities
+
+(a) JWT extraction + subject-scoping for 404 defence.
+(b) CSRF nonce consumption on POST/PUT/DELETE/confirm via `consume_confirmation_nonce`.
+(c) Rate-limit check via `SlidingWindowRateLimiter[K]` on POST `/alerts` (5/min) and POST `/alerts/dry-run` (10/min).
+(d) 5-arm exception → HTTP mapping: `RuleNotFoundError → 404`, `RuleCrossSubjectError → 404 identical body`, `RateLimitExceededError → 429 Retry-After: 60`, `PredicateValidationError → 422 with schema_errors`, `ParserUnavailableError → 503`, fallthrough → 500 with `error_code: 'internal'`.
+
+Helper does NOT inject LOCAL_ONLY assertion — that lives in `parser.py` only since other endpoints don't call AI.
 
 ### POST `/api/alerts` request shape
 
@@ -377,22 +428,23 @@ Endpoint: `WS /ws/alerts/feed` (per-user, scoped by jwt_subject from query-param
 
 - `services/alerts/api.ts` — `postAlert`, `getAlert`, `putAlert`, `deleteAlert`, `confirmAlert`, `listAlerts`, `postDryRun`. Same-origin guard. CSRF via `services/admin/api.ts::mintCsrfNonce` for mutations.
 - `services/alerts/types.ts` — re-exports from `api-generated.ts`; hand-curated `AlertWsFrame`.
-- `services/alerts/useAlertsFeed.ts` — TanStack Query 10s poll for list + WS push via `setQueryData` invalidation. Bounded backoff `[500, 1500, 5000, 15000]` matching 11a's `useChatStream`. Same-origin WS URL guard.
+- `services/alerts/useAlertsFeed.ts` — TanStack Query 10s poll for list + WS push via `setQueryData` invalidation. Bounded backoff `[500, 1500, 5000, 15000]` matching 11a's `useChatStream`. Same-origin WS URL guard. **On every WS (re)connect**, BEFORE opening the WS, issues `GET /api/alerts/recent-fires?since=<last_seen_at>&limit=50` to backfill any fires that landed during disconnect; merges into the bell store de-duped by `fire_id`. `last_seen_at` is persisted in `stores/global/alerts.ts` and updated on every fire received (push or backfill). This closes the silent-miss window when the FE is offline (laptop sleep, network drop) — a CRIT-class concern for an alerts product.
 - `services/alerts/useDryRun.ts` — wraps `postDryRun` with TanStack Query mutation.
 
 ### Stores
 
-- `stores/global/alerts.ts` — zustand-persist. Stores recent fires (capped 50 FIFO) for the bell dropdown when WS isn't connected. Migrate guard against corrupted localStorage matching 11a's `stores/global/ai.ts`.
+- `stores/global/alerts.ts` — zustand-persist. Stores recent fires (capped 50 FIFO) for the bell dropdown when WS isn't connected, plus `last_seen_at: string | null` for reconnect-backfill. Migrate guard against corrupted localStorage matching 11a's `stores/global/ai.ts`.
 
-## 12. Capability registry (alembic 0044 + `app_config[alert_capabilities]`)
+## 12. Capability registry (single-source via `app_config[alert_capabilities]`)
 
-Single source of truth: `alert_capabilities` table. Mirror in `app_config` for fast in-memory read with pubsub invalidation:
+**Single source of truth: `app_config[alert_capabilities]`.** No parallel SQL table (HIGH-7 single-source revision). Matches 11a's `app_config[ai_router/capability_map]` pattern.
 
-- `app_config[alert_capabilities]` = `{news_feed: false, filings_feed: false, earnings_calendar: false}`.
-- Admin endpoint `PUT /api/admin/alert-capabilities/{name}` flips the flag (CSRF + JWT-admin).
+- Lifespan `ensure_seeded` populates the namespace on first startup with `{news_feed, filings_feed, earnings_calendar}` all `available=false`.
+- Admin endpoint `PUT /api/admin/alert-capabilities/{name}` flips the flag (CSRF + JWT-admin); writes via the standard `app_config` admin update path.
 - Publishes `app_config:invalidate:alert_capabilities`.
-- Evaluator subscribes; on flip-to-false, marks matching active rules dormant in same SAVEPOINT'd transaction; on flip-to-true, dormant rules stay dormant (UI notification per umbrella MED-6).
+- Evaluator subscribes; on flip-to-false, marks matching active rules dormant in same SAVEPOINT'd transaction (using the GIN index on `requires_capabilities` from §3); on flip-to-true, dormant rules stay dormant (UI notification per umbrella MED-6).
 - On pubsub delivery failure: capability treated as **unavailable** for 60s cache TTL (fail-CLOSED for the soft-conditions mitigation).
+- Evaluator caches the namespace with 60s TTL + pubsub invalidation — same pattern as `services/ai/secrets.py`.
 
 ## 13. Error handling (full taxonomy)
 
@@ -413,7 +465,11 @@ Single source of truth: `alert_capabilities` table. Mirror in `app_config` for f
 | WS origin mismatch | 1008 close | per envelope |
 | WS frame send timeout | force-close | `alerts_ws_send_timeout_total` |
 
-## 14. Metrics (10 new `alerts_*` series matching umbrella §6)
+### Log redaction (PII)
+
+`original_nl` and `predicate_json` may contain user PII (NLV figures, account names, position sizes in free text). Evaluator/parser error logs MUST emit `alert_id` only, never the rule body — per CLAUDE.md security: "Never log API keys/tokens/passwords — structlog redacts via processor in `app/core/logging.py`." Add `original_nl`, `predicate_json`, and `evaluated_values` to the structlog redaction allowlist. Tests assert no log line contains `original_nl` content when an evaluator exception is raised.
+
+## 14. Metrics (~14 new `alerts_*` series matching umbrella §6 + chunk-B additions)
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -427,6 +483,13 @@ Single source of truth: `alert_capabilities` table. Mirror in `app_config` for f
 | `alerts_delivery_failures_total` | Counter | `channel` |
 | `alerts_capability_unavailable_total` | Counter | `capability` |
 | `alerts_active_rules` | Gauge | — |
+| `alerts_evaluator_debounced_total` | Counter | `source` (∈ `{listen, ticks}`) |
+| `alerts_evaluator_debounce_evicted_total` | Counter | — |
+| `alerts_evaluator_snapshot_rebuilds_total` | Counter | — |
+| `alerts_evaluator_snapshot_rebuild_coalesced_total` | Counter | — |
+| `alerts_evaluator_listen_lag_seconds` | Histogram | — |
+| `alerts_delivery_throttled_total` | Counter | `channel` |
+| `alerts_webhook_url_rejected_total` | Counter | `reason` (∈ `{scheme, hostname, private_ip, port, dns_rebinding}`) |
 
 Plus 2 WS counters: `alerts_ws_send_timeout_total`, `alerts_ws_active_connections` (Gauge).
 
@@ -437,16 +500,17 @@ Plus 2 WS counters: `alerts_ws_send_timeout_total`, `alerts_ws_active_connection
 ### Backend (~45 tests baseline + per-primitive)
 
 - **Per primitive (10 × ≥3 golden vectors = 30 tests):** `test_predicates.py` parametrized over `(input_state, predicate, expected_verdict)`.
-- **Parser (5 tests):** mocked AI client returning canonical predicate / schema-invalid / unknown-leaf / second-try-fail / capability-missing. Use 11a's `services/ai/test_doubles.py` fakes.
-- **Evaluator (8 tests):** inverted-index rebuild on pubsub, bounded queue drop-oldest, 500ms debounce, per-rule fail-isolation 10-error auto-disable, capability flip dormancy, tick-subscription opt-in, bars_1m LISTEN integration, watchdog histogram.
+- **Parser (6 tests):** mocked AI client returning canonical predicate / schema-invalid / unknown-leaf / second-try-fail / capability-missing. **Plus `test_parser_request_payload_strips_portfolio_context`** — asserts request body to `AICompletionClient` contains keys ⊆ `{system_prompt, user_text, symbols_user_currently_watches}` and contains NONE of the substrings `nlv`, `cost_basis`, `account_id`, `position`, `cash`, `currency`, `broker_id` even if the user's input mentions them. Uses 11a's `services/ai/test_doubles.py` fakes; mocked client captures requests via `__call__` MagicMock.
+- **Evaluator (12 tests):** inverted-index rebuild on pubsub, **snapshot rebuild coalescing (10 rapid pubsubs → 1 rebuild within 250-500ms)**, bounded queue drop-oldest, **producer-side debounce gates 1500 single-symbol events down to 2 without consuming queue capacity for other symbols**, **debounce sweep drops stale entries after 60s**, per-rule fail-isolation 10-error auto-disable, capability flip dormancy, tick-subscription opt-in via internal Redis bus (not /ws/quotes), symbol resolution via InstrumentResolver, fallback to bars_1m on disconnect + dormant after 3 retries, **listen vs poll mode flip via app_config**, watchdog histogram.
 - **Dry-run (4 tests):** bars_1d resolution, bars_1m resolution, insufficient resolution, truncated sample.
-- **Delivery (6 tests):** InApp publish to Redis, Webhook HMAC + retry success, Webhook 4xx no-retry, Webhook 5xx exhausted retries, Telegram stub no-op, per-channel fail-isolation.
-- **REST (12 tests):** POST happy path, POST parse_failed, POST rate-limited, GET 404 unknown, GET 404 cross-subject (existence-oracle), PUT schema-invalid, PUT cross-subject 404, DELETE cross-subject 404, confirm CSRF missing, confirm already-active 409, list scoped to subject, dry-run standalone.
+- **Delivery (9 tests):** InApp publish to Redis, Webhook HMAC + retry success, Webhook 4xx no-retry, Webhook 5xx exhausted retries, Telegram stub no-op, per-channel fail-isolation, **Webhook rejects RFC1918 / loopback / link-local / litellm hostname / DNS-rebind via second-resolve**, **Webhook semaphore back-pressure drops 5th concurrent attempt with throttled outcome**, **Webhook 30s per-fire timeout budget enforced**.
+- **REST (14 tests):** POST happy path, POST parse_failed, POST rate-limited, GET 404 unknown, GET 404 cross-subject (existence-oracle), PUT schema-invalid, PUT cross-subject 404, DELETE cross-subject 404, confirm CSRF missing, confirm already-active 409, list scoped to subject, dry-run standalone, **recent-fires backfill returns correct since-window scoped to subject**, **recent-fires cross-subject returns 0 rows (no leak)**.
 - **WS (3 tests):** envelope origin check, pubsub fanout to subscriber, recv-drain detects disconnect.
+- **PII redaction (1 test):** evaluator error log lines do not contain `original_nl` substring even when `rule.evaluation` raises.
 
 ### Frontend (~10 tests)
 
-- `useAlertsFeed` (3): poll fallback when WS down, WS push updates query data, reconnect backoff.
+- `useAlertsFeed` (4): poll fallback when WS down, WS push updates query data, reconnect backoff, **on reconnect calls `/api/alerts/recent-fires?since=<last_seen_at>` and merges results de-duped by `fire_id`**.
 - `CreateAlertModal` (2): NL submit → parsed card render, parse_failed → editor opens.
 - `PredicateJsonEditor` (2): schema validation inline, save calls PUT.
 - `BellDropdown` (1): WS push appends to top.
@@ -459,55 +523,59 @@ Plus 2 WS counters: `alerts_ws_send_timeout_total`, `alerts_ws_active_connection
 
 ## 16. Versioning
 
-- Tag at chunk-D close: **v0.11.1**.
-- Per-chunk patches if reviewer-fix batches needed: v0.11.1.1, v0.11.1.2, ...
-- Phase 11 umbrella close (after 11d) bumps to v0.11.3.
-- Phase 12 starts at v0.12.0.
+- Chunks tag in order: chunk A → **v0.11.1.0**, chunk B → **v0.11.1.1**, chunk C → **v0.11.1.2**, chunk D → **v0.11.1.3** (or earliest patch if chunks collapse).
+- Reviewer-fix batches inside a chunk re-use that chunk's z slot (e.g. v0.11.1.0 may absorb chunk-A reviewer fixes).
+- Phase 11 umbrella close = 11d's last tag (e.g. `v0.11.3.N`); no additional bump on phase close.
+- Phase 12 starts fresh at **v0.12.0** per ROADMAP §12.
 
 Per `feedback_sub_phase_versioning.md`: `0.x.y.z` with `x = §N` for ALL phases.
 
 ## 17. Chunk decomposition (4 chunks, ~6-8 commits each)
 
 ### Chunk A — Schema + parser + predicates (v0.11.1.0)
-- Alembic 0043 (tables + bars_1m LISTEN/NOTIFY trigger) + 0044.
+- Alembic 0043 (tables + GIN indexes + bars_1m LISTEN/NOTIFY trigger). **No alembic 0044** — capability registry is `app_config`-only (HIGH-7).
+- `services/alerts/capabilities.py::ensure_seeded` for app_config seed-if-missing.
 - `services/alerts/predicates.py` + `predicates.schema.json`.
-- `services/alerts/parser.py` (hard-LOCAL_ONLY + parse-once-freeze).
+- `services/alerts/parser.py` (hard-LOCAL_ONLY + parse-once-freeze + portfolio-context-stripping).
 - `services/alerts/rules.py` CRUD layer.
-- 30 primitive tests + 5 parser tests + 6 rule tests.
+- 30 primitive tests + 6 parser tests + 6 rule tests.
 
 ### Chunk B — Evaluator + dry-run + tick-opt-in + retention (v0.11.1.1)
-- `services/alerts/evaluator.py` (inverted index + bounded queue + debounce + per-rule fail-isolation).
-- `services/alerts/ticks_subscriber.py` (Phase 7b.1 WS subscription opt-in).
+- `services/alerts/evaluator.py` (inverted index w/ coalesced rebuild + producer-side debounce w/ eviction + bounded queue + per-rule fail-isolation).
+- `services/alerts/ticks_subscriber.py` (internal Redis bus subscription via `quote.<source>.<canonical_id>`; InstrumentResolver chokepoint; subscription_manager registration).
 - `services/alerts/dry_run.py` (resolution-aware).
 - `services/alerts/retention.py` (apscheduler 90d cleanup of `alert_fire_context`).
-- 8 evaluator tests + 4 dry-run tests + 1 ticks_subscriber test + 1 retention test.
+- 12 evaluator tests + 4 dry-run tests + 1 ticks_subscriber test + 1 retention test + 1 PII-redaction test.
 
 ### Chunk C — Delivery + WS + REST (v0.11.1.2)
-- `services/alerts/delivery.py` + channels (InApp, Webhook, Telegram-stub).
-- `app/api/alerts.py` (6 endpoints + `_guarded_alerts_call` helper).
+- `services/alerts/delivery.py` + channels (InApp, Webhook with SSRF validation + semaphore + budget, Telegram-stub).
+- `app/api/alerts.py` (8 operations / 6 paths + `_guarded_alerts_call` helper + recent-fires backfill endpoint).
 - `app/api/ws_alerts.py` (via shared envelope).
 - `services/alerts/rate_limiter.py`.
-- 6 delivery tests + 12 REST tests + 3 WS tests.
+- 9 delivery tests + 14 REST tests + 3 WS tests.
 
-### Chunk D — Frontend (v0.11.1.3, may roll into v0.11.1)
-- `services/alerts/` (types, api, useAlertsFeed, useDryRun).
-- `stores/global/alerts.ts` (zustand-persist).
+### Chunk D — Frontend (v0.11.1.3)
+- `services/alerts/` (types, api, useAlertsFeed with reconnect-backfill, useDryRun).
+- `stores/global/alerts.ts` (zustand-persist with `last_seen_at`).
 - `features/alerts/` (8 components).
 - Routes `/alerts`, `/alerts/$alertId`.
 - BellDropdown into top bar.
-- 10 FE tests + 2 Playwright (fixme'd).
+- 11 FE tests + 2 Playwright (fixme'd — see §18).
 
 Each chunk closes with the 5-reviewer chain (haiku spec/python/typescript + sonnet code/security/silent-failure) per `feedback_review_per_chunk.md`. Findings applied through MED inline per `feedback_architect_findings_apply_through_medium.md`.
 
 ## 18. Known limitations (carried from umbrella + new)
 
-1. No direct-JSON predicate editor in the primary create flow — only opens on `parse_failed` or edit (per spec line 471, mostly upheld).
+1. Direct-JSON predicate editor IS exposed on (a) `parse_failed` outcome of POST `/api/alerts`, and (b) `/alerts/$alertId` "Edit Predicate" mode. It is NOT exposed as the primary create entry point — NL-first remains the primary path. Trade-off accepted per 11a's `useTradeContext` graceful-degrade precedent; partial deviation from umbrella line 471 documented and bounded.
 2. No fire-history retention shortening below 90d for `alert_fire_context` — manual cleanup if disk pressure.
-3. Tick-subscription is best-effort; quote-engine WS disconnect drops to bars_1m fallback (already documented as `dormancy_reason='quote_engine_down'`).
+3. Tick-subscription is best-effort; internal Redis bus disconnect drops to bars_1m fallback after 3 retries (`dormancy_reason='quote_engine_down'`).
 4. Single-replica evaluator; multi-worker deferred to Phase 24 (same as 11a rate-limiter, position-sizing limiter, portfolio rate-limiter).
 5. No backfill replay for alerts created today over data older than 30d — dry-run window capped at 30d bars_1d / 24h bars_1m.
-6. Webhook delivery has no per-channel rate-limit beyond the dispatcher's 3-retry budget; user-configured URL is trusted.
-7. Bell dropdown shows ≤ 50 recent fires; deeper history requires `/alerts/$alertId` detail page.
+6. Webhook deliveries are validated for SSRF (CRIT-1 defence) but otherwise trusted; HMAC-signed; per-webhook semaphore + 30s budget bound the blast radius.
+7. Bell dropdown shows ≤ 50 recent fires; deeper history requires `/alerts/$alertId` detail page. **WS reconnect backfill via `GET /api/alerts/recent-fires` closes the offline-window gap** (HIGH-5).
+8. Playwright E2E tests for alerts (2 specs in `e2e/alerts.spec.ts`) are `test.fixme(true)`'d pending the docker-compose Playwright harness — same blocker as Phase 11a's 4 fixme'd specs. Until the harness lands, the create-NL → parse → confirm → list golden path is verified only via Vitest component tests + manual smoke. Tracked as Phase 9.5+ Playwright debt; do NOT extend 11b to ship the harness.
+9. `ticks_subscriber` depends on Phase 7b.1's internal Redis bus (`quote.<source>.<canonical_id>` + `services/quotes/subscription_manager`); if Phase 7b.1 is reorganised in future, this boundary needs revisit.
+10. **LOWs deferred** (5, per ARCHITECT-REVIEW): (a) bell-dropdown evaluated_values truncation post-launch if needed; (b) `dormancy_reason` left TEXT (no CHECK) — admin queries surface mistypes; (c) `alerts_capability_state_transitions_total` metric deferred until drift visibility becomes useful; (d) webhook secret rotation pattern inherited from 11a's two-store rotation when admin UI lands; (e) `consecutive_eval_errors` not reset on capability re-availability — consistent with the documented per-rule user-opt-in re-enable path.
 
 ## 19. Out of scope (Phase 11b)
 
@@ -522,4 +590,4 @@ Each chunk closes with the 5-reviewer chain (haiku spec/python/typescript + sonn
 - **Umbrella spec:** `docs/superpowers/specs/2026-05-12-phase11-ai-router-alerts-telegram-design.md` (architect-reviewed commit 077324c).
 - **Predecessor memory:** `phase11a_shipped.md` — load-bearing patterns reused here.
 - **Patterns reused:** `feedback_review_per_chunk.md`, `feedback_reviewer_spec_inline.md`, `feedback_codex_routing_strict.md`, `codex_defaults.md`, `feedback_architect_findings_apply_through_medium.md`.
-- **Architect review:** pending (will commit findings as `docs(phase11b): apply ARCHITECT-REVIEW findings inline` immediately after this spec lands).
+- **Architect review:** applied inline 2026-05-13 — 1 CRIT (webhook SSRF) + 8 HIGH (versioning slot; producer-side debounce; debounce eviction; snapshot rebuild coalescing; WS reconnect fire-replay backfill; predicate_json + requires_capabilities GIN; capability registry single-source; ticks_subscriber internal-bus boundary) + 8 MED (NOTIFY safety + poll fallback; PII log redaction; `_guarded_alerts_call` table; parser portfolio-strip test; parse_failed editor wording; webhook timeout + concurrency cap; Playwright deferral documented). 5 LOW findings deferred with documented rationale (see §18 item 10).
