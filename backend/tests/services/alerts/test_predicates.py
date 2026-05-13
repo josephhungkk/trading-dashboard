@@ -32,6 +32,12 @@ def test_validate_schema_accepts_composite_and() -> None:
     validate_schema(predicate)  # should not raise
 
 
+def test_validate_schema_unknown_requires_suggestions() -> None:
+    """Spec §4 unknown slot = {raw_text, suggestions[]} — both required."""
+    with pytest.raises(PredicateValidationError):
+        validate_schema({"kind": "unknown", "raw_text": "huh"})  # no suggestions
+
+
 def test_validate_schema_rejects_extra_props() -> None:
     with pytest.raises(PredicateValidationError):
         validate_schema(

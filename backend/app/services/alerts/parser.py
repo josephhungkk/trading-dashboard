@@ -7,8 +7,9 @@ Three-layer defence-in-depth (matches 11a):
 3. LiteLLM auth-callback rejects cloud routes for LOCAL_ONLY requests.
 
 Portfolio context stripping (MED-4): the request payload sent to the
-AI client contains ONLY ``original_nl`` + ``symbols_user_watches`` —
-no NLV, no positions, no account_ids, no cost basis, no broker_id.
+AI client contains ONLY ``rule_text`` (the user's NL input) +
+``symbols_user_watches`` — no NLV, no positions, no account_ids, no
+cost basis, no broker_id.
 
 Parse-once-freeze: the AI runs ONCE per rule at create-time and emits
 a structured predicate JSON. Runtime evaluator never re-parses.

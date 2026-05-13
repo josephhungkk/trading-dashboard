@@ -154,3 +154,25 @@ async def test_confirm_already_active_raises(session: AsyncSession) -> None:
     await confirm_rule(session, rule_id=rule.id, jwt_subject="user-1")
     with pytest.raises(AlreadyActiveError):
         await confirm_rule(session, rule_id=rule.id, jwt_subject="user-1")
+
+
+async def test_confirm_non_pending_raises_not_found(session: AsyncSession) -> None:
+    """confirm() must reject non-pending states (dormant/disabled have their own
+    chunk-B flip paths and must not be reachable through user confirm)."""
+    from sqlalchemy import text
+
+    rule = await create_rule(
+        session,
+        jwt_subject="user-1",
+        user_label="x",
+        original_nl="x",
+        predicate_json=_VALID_PREDICATE,
+        parse_status="ok",
+    )
+    await session.execute(
+        text("UPDATE alerts SET status='dormant' WHERE id=:id"),
+        {"id": rule.id},
+    )
+    await session.commit()
+    with pytest.raises(RuleNotFoundError):
+        await confirm_rule(session, rule_id=rule.id, jwt_subject="user-1")

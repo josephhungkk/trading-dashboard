@@ -152,11 +152,19 @@ async def list_rules(db: AsyncSession, *, jwt_subject: str) -> list[AlertRule]:
 
 
 async def delete_rule(db: AsyncSession, *, rule_id: int, jwt_subject: str) -> None:
-    """Soft-delete (sets status='deleted', deleted_at=now). Cross-subject raises."""
+    """Soft-delete (sets status='deleted', deleted_at=now). Cross-subject raises.
+
+    The UPDATE itself scopes by ``jwt_subject`` + ``status != 'deleted'`` so a
+    concurrent ownership change between the existence-check SELECT and the
+    UPDATE can't flip a row out from under us.
+    """
     await get_rule(db, rule_id=rule_id, jwt_subject=jwt_subject)
     await db.execute(
-        text("UPDATE alerts SET status='deleted', deleted_at=:t WHERE id=:id"),
-        {"id": rule_id, "t": datetime.now(UTC)},
+        text(
+            "UPDATE alerts SET status='deleted', deleted_at=:t, updated_at=now() "
+            "WHERE id=:id AND jwt_subject=:s AND status != 'deleted'"
+        ),
+        {"id": rule_id, "s": jwt_subject, "t": datetime.now(UTC)},
     )
     await db.commit()
 
@@ -178,10 +186,13 @@ async def update_predicate(
             text(
                 f"UPDATE alerts SET predicate_json=CAST(:p AS jsonb), "
                 f"requires_capabilities=CAST(:c AS jsonb), parse_status='manual', "
-                f"updated_at=now() WHERE id=:id RETURNING {_COLUMNS}"
+                f"updated_at=now() "
+                f"WHERE id=:id AND jwt_subject=:s AND status != 'deleted' "
+                f"RETURNING {_COLUMNS}"
             ),
             {
                 "id": rule_id,
+                "s": jwt_subject,
                 "p": json.dumps(predicate_json),
                 "c": json.dumps(caps),
             },
@@ -192,18 +203,28 @@ async def update_predicate(
 
 
 async def confirm_rule(db: AsyncSession, *, rule_id: int, jwt_subject: str) -> AlertRule:
-    """Flip status pending → active. Raises AlreadyActiveError if already active.
-    Cross-subject raises RuleCrossSubjectError."""
+    """Flip status pending → active. Raises AlreadyActiveError if already active;
+    raises RuleNotFoundError if the rule is in any other non-pending state
+    (dormant/disabled — those have their own flip paths in chunk B and must not
+    be reachable through user confirm). Cross-subject raises RuleCrossSubjectError.
+
+    The UPDATE itself scopes on ``status='pending'`` so a concurrent flip
+    between the existence-check and the write can't double-activate.
+    """
     rule = await get_rule(db, rule_id=rule_id, jwt_subject=jwt_subject)
     if rule.status == "active":
         raise AlreadyActiveError(rule_id)
+    if rule.status != "pending":
+        raise RuleNotFoundError(rule_id)
     row = (
         await db.execute(
             text(
                 f"UPDATE alerts SET status='active', confirmed_at=now(), "
-                f"updated_at=now() WHERE id=:id RETURNING {_COLUMNS}"
+                f"updated_at=now() "
+                f"WHERE id=:id AND jwt_subject=:s AND status='pending' "
+                f"RETURNING {_COLUMNS}"
             ),
-            {"id": rule_id},
+            {"id": rule_id, "s": jwt_subject},
         )
     ).one()
     await db.commit()

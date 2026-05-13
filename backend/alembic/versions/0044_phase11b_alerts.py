@@ -20,7 +20,7 @@ depends_on = None
 def upgrade() -> None:
     op.execute(
         """
-        CREATE TABLE alerts (
+        CREATE TABLE IF NOT EXISTS alerts (
           id              BIGSERIAL PRIMARY KEY,
           jwt_subject     TEXT NOT NULL,
           user_label      TEXT NOT NULL,
@@ -45,38 +45,56 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE INDEX idx_alerts_active_by_subject ON alerts (jwt_subject)
+        CREATE INDEX IF NOT EXISTS idx_alerts_active_by_subject ON alerts (jwt_subject)
           WHERE status = 'active';
         """
     )
     op.execute(
         """
-        CREATE INDEX idx_alerts_status ON alerts (status);
+        CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts (status);
         """
     )
     op.execute(
         """
-        CREATE INDEX idx_alerts_predicate_gin ON alerts
+        CREATE INDEX IF NOT EXISTS idx_alerts_predicate_gin ON alerts
           USING GIN (predicate_json jsonb_path_ops)
           WHERE status IN ('active', 'dormant');
         """
     )
     op.execute(
         """
-        CREATE INDEX idx_alerts_requires_capabilities_gin ON alerts
+        CREATE INDEX IF NOT EXISTS idx_alerts_requires_capabilities_gin ON alerts
           USING GIN (requires_capabilities)
           WHERE status IN ('active', 'dormant');
         """
     )
+    # Note on FKs: TimescaleDB hypertables (alert_fires) support FKs pointing
+    # OUT to regular tables. ON DELETE CASCADE on alert_id would cascade through
+    # the hypertable chunks; we use RESTRICT instead because rules are soft-
+    # deleted (status='deleted') and the fire-history audit trail must survive
+    # the soft-delete. fire_context_id is nullable + ON DELETE SET NULL so
+    # the chunk-B retention job that prunes alert_fire_context after 90d
+    # doesn't orphan fire rows.
     op.execute(
         """
-        CREATE TABLE alert_fires (
+        CREATE TABLE IF NOT EXISTS alert_fire_context (
+          id              BIGSERIAL PRIMARY KEY,
+          alert_id        BIGINT NOT NULL,
+          fired_at        TIMESTAMPTZ NOT NULL,
+          evaluated_values JSONB NOT NULL,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """
+    )
+    op.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alert_fires (
           id            BIGSERIAL,
-          alert_id      BIGINT NOT NULL,
+          alert_id      BIGINT NOT NULL REFERENCES alerts(id) ON DELETE RESTRICT,
           jwt_subject   TEXT NOT NULL,
           fired_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
           verdict       TEXT NOT NULL,
-          fire_context_id BIGINT,
+          fire_context_id BIGINT REFERENCES alert_fire_context(id) ON DELETE SET NULL,
           delivery_outcomes JSONB NOT NULL DEFAULT '{}'::jsonb,
           PRIMARY KEY (id, fired_at)
         );
@@ -108,24 +126,13 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE INDEX idx_alert_fires_subject_fired
+        CREATE INDEX IF NOT EXISTS idx_alert_fires_subject_fired
           ON alert_fires (jwt_subject, fired_at DESC);
         """
     )
     op.execute(
         """
-        CREATE TABLE alert_fire_context (
-          id              BIGSERIAL PRIMARY KEY,
-          alert_id        BIGINT NOT NULL,
-          fired_at        TIMESTAMPTZ NOT NULL,
-          evaluated_values JSONB NOT NULL,
-          created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        """
-    )
-    op.execute(
-        """
-        CREATE INDEX idx_alert_fire_context_alert
+        CREATE INDEX IF NOT EXISTS idx_alert_fire_context_alert
           ON alert_fire_context (alert_id, fired_at DESC);
         """
     )
@@ -157,6 +164,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS trg_bars_1m_notify ON bars_1m;")
     op.execute("DROP FUNCTION IF EXISTS notify_bars_1m_insert;")
-    op.execute("DROP TABLE IF EXISTS alert_fire_context;")
+    # alert_fires references both alerts and alert_fire_context, so drop it first.
     op.execute("DROP TABLE IF EXISTS alert_fires CASCADE;")
+    op.execute("DROP TABLE IF EXISTS alert_fire_context CASCADE;")
     op.execute("DROP TABLE IF EXISTS alerts CASCADE;")

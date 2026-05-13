@@ -110,7 +110,7 @@
     },
     "unknown": {
       "type": "object",
-      "required": ["kind", "raw_text"],
+      "required": ["kind", "raw_text", "suggestions"],
       "additionalProperties": false,
       "properties": {
         "kind": {"const": "unknown"},
