@@ -156,22 +156,30 @@ async def schwab_oauth_callback_admin(
 
 @router.get("/schwab/status")
 async def schwab_status(config_service: ConfigDep) -> dict[str, str | None]:
+    # ConfigService.get returns the materialized type from the row's
+    # value_type column — bool for tier2_refresh_enabled, int for
+    # tier2_consecutive_failures. The tray and the FE both consume this
+    # endpoint via string comparison (e.g. `tier2_refresh_enabled === 'true'`),
+    # so stringify everything here. None passes through unchanged.
+    def _str(v: object) -> str | None:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return str(v)
+
     return {
-        "access_token_issued_at": cast(
-            str | None,
-            await config_service.get("broker", "schwab.access_token_issued_at"),
+        "access_token_issued_at": _str(
+            await config_service.get("broker", "schwab.access_token_issued_at")
         ),
-        "refresh_token_issued_at": cast(
-            str | None,
-            await config_service.get("broker", "schwab.refresh_token_issued_at"),
+        "refresh_token_issued_at": _str(
+            await config_service.get("broker", "schwab.refresh_token_issued_at")
         ),
-        "tier2_refresh_enabled": cast(
-            str | None,
-            await config_service.get("broker", "schwab.tier2_refresh_enabled"),
+        "tier2_refresh_enabled": _str(
+            await config_service.get("broker", "schwab.tier2_refresh_enabled")
         ),
-        "tier2_consecutive_failures": cast(
-            str | None,
-            await config_service.get("broker", "schwab.tier2_consecutive_failures"),
+        "tier2_consecutive_failures": _str(
+            await config_service.get("broker", "schwab.tier2_consecutive_failures")
         ),
     }
 
