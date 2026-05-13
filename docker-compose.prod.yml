@@ -187,7 +187,11 @@ services:
     networks: [td-net]
 
   schwab-sidecar:
-    build: ./sidecar_schwab
+    build:
+      # Context = repo root so the Dockerfile's `COPY proto/broker/v1/...`
+      # resolves. dockerfile= path stays relative to the new context.
+      context: .
+      dockerfile: sidecar_schwab/Dockerfile
     restart: unless-stopped
     environment:
       SCHWAB_SIDECAR_PORT: "9090"
