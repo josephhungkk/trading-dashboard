@@ -328,6 +328,54 @@ async def test_put_predicate_404_identity_unknown_id_and_cross_subject(
 
 
 @pytest.mark.asyncio
+async def test_dry_run_returns_resolution_and_fire_count(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+) -> None:
+    """Phase 11b chunk-B-close: POST /api/alerts/dry-run replays a predicate."""
+    _api_alerts._DRY_RUN_LIMITER._buckets.clear()
+    response = await client.post(
+        "/api/alerts/dry-run",
+        headers=jwt_headers,
+        json={
+            "predicate_json": {
+                "kind": "price_threshold",
+                "symbol": "AAPL",
+                "op": "gt",
+                "value": 200.0,
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # No bars in the fake DB → no fires.
+    assert body["replay_resolution"] in {"1m", "1d", "insufficient"}
+    assert body["fire_count"] == 0
+    assert body["sample_fires"] == []
+    assert body["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_dry_run_rejects_invalid_predicate(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+) -> None:
+    """A malformed predicate must surface as 422 with schema_errors."""
+    _api_alerts._DRY_RUN_LIMITER._buckets.clear()
+    response = await client.post(
+        "/api/alerts/dry-run",
+        headers=jwt_headers,
+        json={"predicate_json": {"kind": "price_threshold"}},  # missing required keys
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "invalid_predicate"
+    assert detail["schema_errors"]
+
+
+@pytest.mark.asyncio
 async def test_confirm_404_identity_unknown_id_and_cross_subject(
     _patched_verifier: None,
     client: AsyncClient,

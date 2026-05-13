@@ -16,13 +16,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.admin import consume_confirmation_nonce
 from app.api.ws_auth import require_jwt
 from app.core.deps import get_db
+from app.services.alerts.dry_run import replay as dry_run_replay
 from app.services.alerts.exceptions import (
     AlreadyActiveError,
     ParserUnavailableError,
     RuleCrossSubjectError,
     RuleNotFoundError,
 )
-from app.services.alerts.predicates import PredicateValidationError, validate_schema
+from app.services.alerts.predicates import (
+    PredicateValidationError,
+    referenced_symbols,
+    validate_schema,
+)
 from app.services.alerts.rate_limiter import (
     RateLimitExceededError,
     make_create_limiter,
@@ -66,6 +71,10 @@ class CreateAlertRequest(BaseModel):
 
 
 class UpdatePredicateRequest(BaseModel):
+    predicate_json: dict[str, Any]
+
+
+class DryRunRequest(BaseModel):
     predicate_json: dict[str, Any]
 
 
@@ -220,6 +229,84 @@ async def recent_fires(
             }
             for row in rows
         ]
+    }
+
+
+@router.post("/dry-run")
+async def dry_run(
+    req: DryRunRequest,
+    jwt_subject: JwtSubject,
+    db: DbSession,
+    _csrf: CsrfNonce,
+) -> dict[str, Any]:
+    """Replay a predicate against historical bars and return fire-count +
+    sample fires. Resolution is selected by predicate window per spec §7
+    (insufficient / 1m / 1d).
+
+    Rate-limited per jwt_subject by ``_DRY_RUN_LIMITER`` (10/60s burst).
+    """
+    try:
+        _DRY_RUN_LIMITER.check(jwt_subject)
+    except RateLimitExceededError as exc:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error_code": "rate_limited"},
+            headers={"Retry-After": str(_RATE_LIMIT_RETRY_AFTER_S)},
+        ) from exc
+    try:
+        validate_schema(req.predicate_json)
+    except PredicateValidationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "invalid_predicate",
+                "schema_errors": exc.schema_errors,
+            },
+        ) from exc
+
+    symbols = referenced_symbols(req.predicate_json) or {str(req.predicate_json.get("symbol", "X"))}
+    # Pull bars for the first referenced symbol. Composite predicates that
+    # reference multiple symbols replay each child against the same series —
+    # the dry-run helper populates state for every symbol from the same data.
+    primary_symbol = next(iter(symbols))
+    bars_1m_rows = (
+        await db.execute(
+            text(
+                "SELECT bucket_start AS ts, close, volume "
+                "FROM bars_1m JOIN symbol_aliases USING (instrument_id) "
+                "WHERE raw_symbol = :s AND bucket_start > now() - INTERVAL '24 hours' "
+                "ORDER BY bucket_start ASC"
+            ),
+            {"s": primary_symbol},
+        )
+    ).all()
+    bars_1d_rows = (
+        await db.execute(
+            text(
+                "SELECT bucket AS ts, close, volume "
+                "FROM bars_1d JOIN symbol_aliases USING (instrument_id) "
+                "WHERE raw_symbol = :s AND bucket > now() - INTERVAL '30 days' "
+                "ORDER BY bucket ASC"
+            ),
+            {"s": primary_symbol},
+        )
+    ).all()
+    bars_1m_series = [
+        {"ts": r.ts, "close": float(r.close), "volume": float(r.volume)} for r in bars_1m_rows
+    ]
+    bars_1d_series = [
+        {"ts": r.ts, "close": float(r.close), "volume": float(r.volume)} for r in bars_1d_rows
+    ]
+    result = dry_run_replay(
+        predicate=req.predicate_json,
+        bars_1m=bars_1m_series,
+        bars_1d=bars_1d_series,
+    )
+    return {
+        "replay_resolution": result.replay_resolution,
+        "fire_count": result.fire_count,
+        "sample_fires": result.sample_fires,
+        "truncated": result.truncated,
     }
 
 
