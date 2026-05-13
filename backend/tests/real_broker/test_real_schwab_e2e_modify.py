@@ -48,17 +48,20 @@ def test_real_schwab_modify_creates_replacement() -> None:
         ],
     }
 
-    place = client.order_place(acct_hash, base_payload)
+    # schwabdev==3.0.3 method names: place_order / replace_order / cancel_order
+    # (the legacy `order_place` / `order_replace` / `order_cancel` names predate
+    # the renames).
+    place = client.place_order(acct_hash, base_payload)
     assert place.status_code in (200, 201)
     old_id = place.headers["Location"].rsplit("/", 1)[-1]
 
     time.sleep(2)
     new_payload = {**base_payload, "price": "1.50"}
-    replace = client.order_replace(acct_hash, old_id, new_payload)
+    replace = client.replace_order(acct_hash, old_id, new_payload)
     assert replace.status_code in (200, 201), f"replace failed: {replace.status_code}"
     new_id = replace.headers["Location"].rsplit("/", 1)[-1]
     assert new_id != old_id
 
     time.sleep(2)
-    cancel = client.order_cancel(acct_hash, new_id)
+    cancel = client.cancel_order(acct_hash, new_id)
     assert cancel.status_code in (200, 204)

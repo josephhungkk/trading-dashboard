@@ -28,14 +28,16 @@ def _extract_order_id(place_response: object) -> str:
 
 def _place_and_cancel(client: object, acct_hash: str, payload: dict) -> None:  # type: ignore[type-arg]
     """Place an order, wait briefly, cancel it, then verify cancellation."""
-    place = client.order_place(acct_hash, payload)  # type: ignore[union-attr]
+    # schwabdev==3.0.3 method names: place_order / cancel_order / order_details
+    # (the legacy `order_place` / `order_cancel` names predate the renames).
+    place = client.place_order(acct_hash, payload)  # type: ignore[union-attr]
     assert place.status_code in (200, 201), f"place failed: {place.status_code} {place.text}"
     assert "Location" in place.headers, "missing Location header on place response"
 
     broker_order_id = _extract_order_id(place)
 
     time.sleep(2)
-    cancel = client.order_cancel(acct_hash, broker_order_id)  # type: ignore[union-attr]
+    cancel = client.cancel_order(acct_hash, broker_order_id)  # type: ignore[union-attr]
     assert cancel.status_code in (200, 204), f"cancel failed: {cancel.status_code}"
 
     time.sleep(2)
