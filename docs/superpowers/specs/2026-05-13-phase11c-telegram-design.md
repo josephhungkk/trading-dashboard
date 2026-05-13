@@ -133,9 +133,9 @@ POST /api/telegram/webhook
 |---|---|
 | `/status` | Returns evaluator status, active alert count, last fire time |
 | `/accounts` | Lists accounts with broker, alias, mode, NLV |
-| `/kill_switch <broker>` | Calls `PUT /api/admin/accounts/kill-switch` internally; confirms action |
-| `/mute <alert_id> [Xm\|Xh\|Xd]` | Sets `alert_rules.status = muted` with optional expiry |
-| `/unmute <alert_id>` | Restores `alert_rules.status = active` |
+| `/kill_switch <broker>` | Resolves broker alias → all matching account UUIDs → calls `POST /api/admin/accounts/{id}/kill-switch` for each; replies with per-account outcome |
+| `/mute <alert_id> [Xm\|Xh\|Xd]` | Sets `alert_rules.status = 'disabled'` with optional `muted_until` timestamp stored in `app_config[telegram.mute.<alert_id>]`; evaluator skips disabled rules |
+| `/unmute <alert_id>` | Restores `alert_rules.status = 'active'`; removes `app_config[telegram.mute.<alert_id>]` |
 | `/help` | Lists available commands |
 
 Every command: allowlist check → rate limit check → execute → `command_log.py` INSERT → reply.
@@ -176,6 +176,8 @@ SELECT create_hypertable('telegram_command_log', 'ts');
 ```
 
 Retention: 1 year (added to nightly APScheduler sweep alongside `alert_fires`).
+
+**Note:** `/mute` expiry uses `app_config[telegram.mute.<alert_id>]` (ISO timestamp) rather than a DB column — the existing `status = 'disabled'` value covers the evaluator skip, and the mute expiry is a lightweight app_config entry. No additional columns needed on `alerts`.
 
 ---
 
@@ -322,7 +324,7 @@ Bot is **optional** — backend starts cleanly with no token seeded; `TelegramCh
 - RateLimiterMiddleware: 11th command/min → rate_limited outcome
 - `/status` handler: returns evaluator stats
 - `/kill_switch` handler: calls internal endpoint + audit row
-- `/mute` + `/unmute` handlers: DB state transitions
+- `/mute` handler: sets `status='disabled'` + writes `app_config[telegram.mute.<id>]`; `/unmute`: restores `status='active'` + removes key
 - CSRF header tests for CapabilityMapEditor + ProviderKeyCrud (header name flip)
 - Admin allowlist add/remove/list endpoints
 - `PUT /api/admin/alerts/webhooks/{id}` secret resolution
