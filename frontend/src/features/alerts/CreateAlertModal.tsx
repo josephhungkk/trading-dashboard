@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { ParseFailedEditor } from '@/features/alerts/ParseFailedEditor';
 import { PredicateVisualiser } from '@/features/alerts/PredicateVisualiser';
@@ -30,6 +30,17 @@ export function CreateAlertModal({ open, onClose, onCreated }: Props): React.JSX
   const [stage, setStage] = useState<Stage>({ kind: 'idle' });
   const [saving, setSaving] = useState(false);
   const [schemaErrors, setSchemaErrors] = useState<string[]>([]);
+
+  // Codex chunk-D LOW — Escape key dismisses the modal so keyboard users
+  // aren't trapped behind it.
+  useEffect(() => {
+    if (!open) return undefined;
+    const handler = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [open, onClose]);
 
   if (!open) return null;
 

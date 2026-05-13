@@ -39,6 +39,13 @@ describe('CreateAlertModal', () => {
     expect(screen.getByTestId('predicate-leaf-price_threshold')).toBeTruthy();
   });
 
+  it('Escape key calls onClose (Codex chunk-D LOW)', () => {
+    const onClose = vi.fn();
+    render(<CreateAlertModal open onClose={onClose} />);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('parse_failed response opens ParseFailedEditor', async () => {
     vi.spyOn(alertsApi, 'postAlert').mockResolvedValue({
       id: null,

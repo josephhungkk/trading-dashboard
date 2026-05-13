@@ -139,6 +139,24 @@ describe('useAlertsFeed', () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it('closes socket on malformed v=1 frame (Codex chunk-D MED)', async () => {
+    vi.mocked(getRecentFires).mockResolvedValue({ fires: [] });
+    const sockets = installWebSocketMock();
+    renderHook(() => useAlertsFeed({ wsUrl: sameOriginWs('/ws/alerts/feed') }));
+
+    await waitFor(() => expect(sockets.length).toBeGreaterThan(0));
+    const ws = sockets[0];
+    if (ws === undefined) throw new Error('ws not created');
+
+    act(() => ws.onopen?.(new Event('open')));
+    act(() => {
+      ws.onmessage?.({
+        data: JSON.stringify({ v: 1, type: 'fire' }), // missing fire_id etc.
+      } as MessageEvent<string>);
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
   it('rejects non-same-origin wsUrl with invalid_ws_url error', async () => {
     vi.mocked(getRecentFires).mockResolvedValue({ fires: [] });
     installWebSocketMock();

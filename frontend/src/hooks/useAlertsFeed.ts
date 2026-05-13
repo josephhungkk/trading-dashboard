@@ -3,7 +3,7 @@
  * Mirrors services/ai/useChatStream.ts bounded backoff + same-origin guard.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { useAlertsStore } from '@/stores/global/alerts';
 
@@ -37,34 +37,39 @@ export interface UseAlertsFeedState {
 }
 
 export function useAlertsFeed(opts?: { wsUrl?: string }): UseAlertsFeedState {
-  const mountedRef = useRef(true);
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const attemptRef = useRef(0);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    mountedRef.current = true;
     if (typeof window === 'undefined') return undefined;
 
+    // Per-effect-generation cancellation flag — Codex chunk-D MED:
+    // a shared mountedRef across effect re-runs (Strict Mode replay, wsUrl
+    // change mid-backfill) could let an old backfill resume after the next
+    // setup, opening a second WebSocket. A local `cancelled` closure scoped
+    // to this useEffect run is the standard React idiom.
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
     const clearReconnectTimer = (): void => {
-      if (reconnectTimerRef.current !== null) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
       }
     };
 
     const backfillThenConnect = async (): Promise<void> => {
-      if (!mountedRef.current) return;
+      if (cancelled) return;
       const { lastSeenAt, mergeFires } = useAlertsStore.getState();
       try {
         const { fires } = await getRecentFires(lastSeenAt, 50);
-        if (mountedRef.current) mergeFires(fires);
+        if (!cancelled) mergeFires(fires);
       } catch (err) {
         console.warn('[useAlertsFeed] backfill failed', err);
       }
-      if (!mountedRef.current) return;
+      if (cancelled) return;
 
       const url = opts?.wsUrl ?? defaultWsUrl();
       if (!isSameOriginWsUrl(url)) {
@@ -72,77 +77,84 @@ export function useAlertsFeed(opts?: { wsUrl?: string }): UseAlertsFeedState {
         setError('invalid_ws_url');
         return;
       }
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
+      const socket = new WebSocket(url);
+      ws = socket;
       let downHandled = false;
 
-      ws.onopen = () => {
-        if (!mountedRef.current) return;
-        attemptRef.current = 0;
+      socket.onopen = () => {
+        if (cancelled) return;
+        attempt = 0;
         setConnected(true);
         setError(null);
       };
 
-      ws.onmessage = (e: MessageEvent<string>) => {
-        if (!mountedRef.current) return;
+      socket.onmessage = (e: MessageEvent<string>) => {
+        if (cancelled) return;
         try {
           const parsed: unknown = JSON.parse(e.data);
           if (typeof parsed !== 'object' || parsed === null) {
-            ws.close();
+            socket.close();
             return;
           }
           const frame = parsed as Partial<AlertWsFrame>;
           if (frame.v !== 1) {
             console.warn('[useAlertsFeed] protocol version mismatch', frame.v);
-            ws.close();
+            socket.close();
             return;
           }
-          if (frame.type === 'fire'
-            && typeof frame.fire_id === 'number'
-            && typeof frame.alert_id === 'number'
-            && typeof frame.fired_at === 'string'
-            && typeof frame.verdict === 'string'
+          // Codex chunk-D MED — structurally malformed v=1 frames must close
+          // the socket to trigger reconnect/backfill, not silently drop.
+          // Only `type: 'fire'` is defined in §10; missing required fields
+          // means a misbehaving server.
+          if (
+            frame.type !== 'fire'
+            || typeof frame.fire_id !== 'number'
+            || typeof frame.alert_id !== 'number'
+            || typeof frame.fired_at !== 'string'
+            || typeof frame.verdict !== 'string'
           ) {
-            useAlertsStore.getState().appendFire({
-              id: frame.fire_id,
-              alert_id: frame.alert_id,
-              fired_at: frame.fired_at,
-              verdict: frame.verdict,
-            });
+            console.warn('[useAlertsFeed] malformed v=1 frame, closing');
+            socket.close();
+            return;
           }
+          useAlertsStore.getState().appendFire({
+            id: frame.fire_id,
+            alert_id: frame.alert_id,
+            fired_at: frame.fired_at,
+            verdict: frame.verdict,
+          });
         } catch (err) {
           console.warn('[useAlertsFeed] malformed frame, closing', err);
-          ws.close();
+          socket.close();
         }
       };
 
       const onDown = (): void => {
-        if (!mountedRef.current || downHandled) return;
+        if (cancelled || downHandled) return;
         downHandled = true;
         setConnected(false);
-        const delay = RECONNECT_DELAYS_MS[attemptRef.current];
+        const delay = RECONNECT_DELAYS_MS[attempt];
         if (delay === undefined) {
           setError('reconnect_exhausted');
           return;
         }
-        attemptRef.current += 1;
+        attempt += 1;
         clearReconnectTimer();
-        reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimer = setTimeout(() => {
           void backfillThenConnect();
         }, delay);
       };
-      ws.onclose = onDown;
-      ws.onerror = onDown;
+      socket.onclose = onDown;
+      socket.onerror = onDown;
     };
 
     void backfillThenConnect();
 
     return () => {
-      mountedRef.current = false;
+      cancelled = true;
       clearReconnectTimer();
-      const ws = wsRef.current;
       if (ws !== null) ws.close();
-      wsRef.current = null;
+      ws = null;
     };
   }, [opts?.wsUrl]);
 
