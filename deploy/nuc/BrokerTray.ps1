@@ -3,11 +3,13 @@
 # appending the four sidecar entries (Task 28) is straightforward. No
 # fixed-grid layout to rewrite.
 #
-# 4 tray icons showing broker connection status.
-# - FutuOpenD   (circle)   -> port 11111
-# - Schwab      (diamond)  -> https://dashboard.kiusinghung.com/api/schwab/health (via origin direct)
-# - IBKR Live   (filled sq) -> ports 4001 (isa) + 4003 (normal), aggregated
-# - IBKR Paper  (empty sq)  -> ports 4002 (isa) + 4004 (normal), aggregated
+# 6 tray icons showing broker connection status.
+# - FutuOpenD   (circle)     -> port 11111 + backend futu.connected
+# - Schwab      (diamond)    -> /api/admin/brokers/schwab/status
+# - IBKR Live   (filled sq)  -> ports 4001 (isa) + 4003 (normal), aggregated
+# - IBKR Paper  (empty sq)   -> ports 4002 (isa) + 4004 (normal), aggregated
+# - Alpaca Live  (filled hex) -> backend alpaca.live.connected (sidecar on VPS)
+# - Alpaca Paper (empty hex)  -> backend alpaca.paper.connected (sidecar on VPS)
 #
 # Status colours: green=all-up, yellow=partial, red=all-down, gray=not-configured.
 # Tooltip shows per-account detail.
@@ -133,6 +135,41 @@ function Draw-TriangleEmpty {
     (New-Object System.Drawing.Point  1, 14)
   )
   $g.DrawPolygon($pen, $pts)
+  $pen.Dispose(); $g.Dispose()
+  return $bmp
+}
+
+# Pointy-top hexagons for the Alpaca pair. Filled = live, empty = paper.
+# Mirrors the IBKR Live/Paper (square) and Futu (triangle) shape conventions
+# so each broker family gets a distinct silhouette.
+$script:_alpacaHexPts = @(
+  (New-Object System.Drawing.Point  8,  1),
+  (New-Object System.Drawing.Point 14,  5),
+  (New-Object System.Drawing.Point 14, 11),
+  (New-Object System.Drawing.Point  8, 15),
+  (New-Object System.Drawing.Point  2, 11),
+  (New-Object System.Drawing.Point  2,  5)
+)
+
+function Draw-HexagonFilled {
+  param([string]$status)
+  $bmp = New-Bitmap
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $brush = New-Object System.Drawing.SolidBrush(Get-StatusColor $status)
+  $g.FillPolygon($brush, $script:_alpacaHexPts)
+  $g.DrawPolygon([System.Drawing.Pens]::Black, $script:_alpacaHexPts)
+  $brush.Dispose(); $g.Dispose()
+  return $bmp
+}
+
+function Draw-HexagonEmpty {
+  param([string]$status)
+  $bmp = New-Bitmap
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $pen = New-Object System.Drawing.Pen ((Get-StatusColor $status), 2.5)
+  $g.DrawPolygon($pen, $script:_alpacaHexPts)
   $pen.Dispose(); $g.Dispose()
   return $bmp
 }
@@ -478,6 +515,30 @@ function Get-IbkrPairStatus {
   return @{ Status = $status; Tip = $tip }
 }
 
+# Alpaca sidecars live in Docker on the VPS, not on the NUC, so there's
+# no local port to probe. Status is entirely derived from the backend's
+# broker_accounts view (BrokerRegistry.connected flag), which itself
+# reflects whether the alpaca-sidecar-{mode} container's Health RPC
+# succeeded and the Configure-with-creds call returned OK.
+function Get-AlpacaStatus {
+  param([Parameter(Mandatory)][ValidateSet('live', 'paper')][string]$Mode)
+  $modeLabel = if ($Mode -eq 'live') { 'Live' } else { 'Paper' }
+  $r = Get-BrokerAccounts
+  if (-not $r.Reachable) {
+    $err = if ($r.Error) { $r.Error } else { 'unknown' }
+    return @{ Status = 'partial'; Tip = ("Alpaca {0}: backend {1}" -f $modeLabel, $err) }
+  }
+  $rows = @($r.Accounts | Where-Object { $_.broker -eq 'alpaca' -and $_.mode -eq $Mode })
+  if ($rows.Count -eq 0) {
+    return @{ Status = 'gray'; Tip = ("Alpaca {0}: not configured (set alpaca-{1}.api_key / api_secret in Settings)" -f $modeLabel, $Mode) }
+  }
+  $connected = @($rows | Where-Object { $_.connected }).Count -gt 0
+  if ($connected) {
+    return @{ Status = 'up'; Tip = ("Alpaca {0}: connected ({1} acct)" -f $modeLabel, $rows.Count) }
+  }
+  return @{ Status = 'down'; Tip = ("Alpaca {0}: configured but not connected (check sidecar logs)" -f $modeLabel) }
+}
+
 # ---------- targets ----------
 
 $targets = @(
@@ -563,6 +624,14 @@ $targets = @(
   @{
     Name = 'IBKR Paper'; Shape = { param($s) Draw-SquareEmpty $s }
     Probe = { Get-IbkrPairStatus -Mode 'paper' -GatewayPorts @{ 'isa-paper' = 4002; 'normal-paper' = 4004 } }
+  }
+  @{
+    Name = 'Alpaca Live'; Shape = { param($s) Draw-HexagonFilled $s }
+    Probe = { Get-AlpacaStatus -Mode 'live' }
+  }
+  @{
+    Name = 'Alpaca Paper'; Shape = { param($s) Draw-HexagonEmpty $s }
+    Probe = { Get-AlpacaStatus -Mode 'paper' }
   }
 )
 
