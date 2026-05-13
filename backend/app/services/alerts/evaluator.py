@@ -16,6 +16,7 @@ Per-rule fail-isolation lives at the worker boundary (chunk B2). Wired into
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -134,6 +135,34 @@ class AlertsEvaluator:
             self._metrics.snapshot_rebuilds_total += 1
             if coalesced > 0:
                 self._metrics.snapshot_rebuild_coalesced_total += coalesced
+
+    async def _on_bars_1m_notify(
+        self,
+        payload: str,
+        *,
+        resolve_symbol: Callable[[int], str | None],
+    ) -> None:
+        """Decode a `pg_notify('bars_1m_insert', ...)` payload and enqueue
+        one evaluation request per rule indexed for the resolved symbol.
+
+        Producer-side debounce gates each `(rule_id, symbol)` pair so a
+        chunk-fill insert burst can't starve the worker.
+        """
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+        inst_id = obj.get("inst_id")
+        ts = obj.get("ts")
+        if inst_id is None:
+            return
+        symbol = resolve_symbol(int(inst_id))
+        if symbol is None:
+            return
+        now = time.monotonic()
+        for rule_id in self._index.rules_for(symbol):
+            if self._producer_debounce_check(rule_id=rule_id, symbol=symbol, now=now):
+                await self._enqueue({"rule_id": rule_id, "symbol": symbol, "ts": ts})
 
     async def _sweep_loop(self) -> None:
         while True:

@@ -81,3 +81,50 @@ async def test_snapshot_rebuild_coalescing() -> None:
         assert len(rebuild_calls) == 1
     finally:
         await evaluator.stop()
+
+
+# ── B2: bars_1m LISTEN producer ────────────────────────────────────────
+
+
+async def test_on_bars_1m_notify_enqueues_for_indexed_symbol() -> None:
+    import json
+
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.0)
+    evaluator.index.add(rule_id=1, symbols={"AAPL"})
+    payload = json.dumps({"inst_id": 12345, "ts": 1700000000.0})
+
+    def resolve(inst_id: int) -> str | None:
+        return "AAPL" if inst_id == 12345 else None
+
+    await evaluator._on_bars_1m_notify(payload, resolve_symbol=resolve)
+    item = evaluator._queue.get_nowait()
+    assert item["symbol"] == "AAPL"
+    assert item["rule_id"] == 1
+    assert item["ts"] == 1700000000.0
+
+
+async def test_on_bars_1m_notify_drops_unresolvable_inst_id() -> None:
+    import json
+
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.0)
+    evaluator.index.add(rule_id=1, symbols={"AAPL"})
+    payload = json.dumps({"inst_id": 99999, "ts": 1700000000.0})
+    await evaluator._on_bars_1m_notify(payload, resolve_symbol=lambda _id: None)
+    assert evaluator._queue.empty()
+
+
+async def test_on_bars_1m_notify_no_rules_for_symbol() -> None:
+    import json
+
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.0)
+    # Index has no rule for AAPL; payload still resolves.
+    payload = json.dumps({"inst_id": 12345, "ts": 1700000000.0})
+    await evaluator._on_bars_1m_notify(payload, resolve_symbol=lambda _id: "AAPL")
+    assert evaluator._queue.empty()
+
+
+async def test_on_bars_1m_notify_handles_malformed_payload() -> None:
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.0)
+    evaluator.index.add(rule_id=1, symbols={"AAPL"})
+    await evaluator._on_bars_1m_notify("not-json", resolve_symbol=lambda _id: "AAPL")
+    assert evaluator._queue.empty()
