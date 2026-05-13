@@ -62,8 +62,10 @@ _FUTU: _MarkerSpec = {
 }
 _ALPACA_EQUITY: _MarkerSpec = {
     "secrets": [
-        ("broker", "alpaca-paper.api_key", "ALPACA_PAPER_API_KEY"),
-        ("broker", "alpaca-paper.api_secret", "ALPACA_PAPER_API_SECRET"),
+        # Dotted schema (alpaca.{mode}.api_*), NOT hyphenated.
+        # broker_registry_factory._configure_alpaca:256 reads this form.
+        ("broker", "alpaca.paper.api_key", "ALPACA_PAPER_API_KEY"),
+        ("broker", "alpaca.paper.api_secret", "ALPACA_PAPER_API_SECRET"),
     ],
     "config": [],
 }
