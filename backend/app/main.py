@@ -17,11 +17,13 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+import app.api.telegram as _telegram_api_module
 from app.api import admin_instruments
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.admin_metrics import router as admin_metrics_router
 from app.api.admin_risk import router as admin_risk_router
+from app.api.admin_telegram import router as admin_telegram_router
 from app.api.ai import router as ai_router
 from app.api.alerts import router as alerts_router
 from app.api.bars import router as bars_router  # Task 28: GET /api/bars
@@ -39,6 +41,7 @@ from app.api.portfolio import router as portfolio_router
 from app.api.risk import router as risk_router
 from app.api.sizing import router as sizing_router
 from app.api.sse import router as sse_router
+from app.api.telegram import router as telegram_router
 from app.api.ws_ai import router as ws_ai_router
 from app.api.ws_alerts import router as ws_alerts_router
 from app.api.ws_portfolio import router as ws_portfolio_router
@@ -52,6 +55,7 @@ from app.core.metrics import SCHWAB_REFRESH_TOKEN_AGE_HOURS, SCHWAB_REFRESH_TOKE
 from app.services.ai.orphan_sweeper import run_orphan_sweeper
 from app.services.alerts.capabilities import ensure_seeded as ensure_alert_capabilities_seeded
 from app.services.alerts.channels.in_app import InAppChannel
+from app.services.alerts.channels.telegram import TelegramChannel as TelegramDeliveryChannel
 from app.services.alerts.delivery import DeliveryDispatcher
 from app.services.alerts.evaluator import AlertsEvaluator
 from app.services.alerts.retention import sweep_alert_fire_context
@@ -77,6 +81,8 @@ from app.services.pending_submit_watchdog import PendingSubmitWatchdog
 from app.services.postgres_listen_bridge import PostgresListenBridge
 from app.services.quotes.engine_factory import build_quote_engine
 from app.services.quotes.instruments_seed import seed_instruments_from_positions
+from app.services.telegram.allowlist import AllowlistService as TelegramAllowlistService
+from app.services.telegram.bot import build_dispatcher, telegram_shutdown, telegram_startup
 
 configure_logging()
 log = structlog.get_logger(__name__)
@@ -402,6 +408,7 @@ async def lifespan(_app: FastAPI) -> Any:
         log.exception("alerts.capability_seed_failed")
 
     alerts_evaluator: AlertsEvaluator | None = None
+    alerts_dispatcher: DeliveryDispatcher | None = None
     alerts_bars_subscriber: AlertsBarsRedisSubscriber | None = None
     alerts_capability_listener: asyncio.Task[None] | None = None
     try:
@@ -475,6 +482,50 @@ async def lifespan(_app: FastAPI) -> Any:
     except Exception:
         log.exception("alerts.lifespan_init_failed")
 
+    telegram_allowlist = TelegramAllowlistService(config=svc)
+    await telegram_allowlist.refresh()
+    _app.state.telegram_allowlist = telegram_allowlist
+    telegram_bot_instance = None
+    tg_allowlist_listener: asyncio.Task[None] | None = None
+    try:
+        bot_token = await svc.reveal_secret("telegram", "bot_token")
+        webhook_secret = await svc.reveal_secret("telegram", "webhook_secret")
+        public_base_url = await svc.get("telegram", "public_base_url", "")
+        public_base_url = str(public_base_url or "")
+        if bot_token:
+            webhook_url = f"{public_base_url}/api/telegram/webhook"
+            telegram_bot_instance = await telegram_startup(
+                bot_token=str(bot_token),
+                webhook_secret=str(webhook_secret or ""),
+                webhook_url=webhook_url,
+            )
+            _app.state.telegram_bot = telegram_bot_instance
+            _app.state.telegram_webhook_secret = str(webhook_secret or "")
+            _app.state.telegram_webhook_status = "set"
+            _telegram_api_module.dp = build_dispatcher()
+            tg_allowlist_listener = asyncio.create_task(
+                telegram_allowlist.run_pubsub_listener(redis)
+            )
+        else:
+            _app.state.telegram_bot = None
+            _app.state.telegram_webhook_secret = ""
+            _app.state.telegram_webhook_status = "failed"
+            log.info("telegram.bot_token_not_seeded")
+    except Exception:
+        log.exception("telegram.lifespan_init_failed")
+        _app.state.telegram_bot = None
+        _app.state.telegram_webhook_secret = ""
+        _app.state.telegram_webhook_status = "failed"
+        public_base_url = ""
+
+    tg_channel = TelegramDeliveryChannel(
+        bot=_app.state.telegram_bot,
+        allowlist=telegram_allowlist,
+        public_base_url=public_base_url,
+    )
+    if alerts_dispatcher is not None:
+        alerts_dispatcher._channels["telegram"] = tg_channel
+
     scheduler.start()
     _app.state.scheduler = scheduler
 
@@ -501,6 +552,12 @@ async def lifespan(_app: FastAPI) -> Any:
             await alerts_bars_subscriber.stop()
         if alerts_evaluator is not None:
             await alerts_evaluator.stop()
+        if tg_allowlist_listener is not None:
+            tg_allowlist_listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tg_allowlist_listener
+        if telegram_bot_instance is not None:
+            await telegram_shutdown(telegram_bot_instance)
         orphan_sweeper_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await orphan_sweeper_task
@@ -621,6 +678,8 @@ app.include_router(contracts_router)
 app.include_router(oauth_router)
 app.include_router(sse_router)
 app.include_router(admin_metrics_router)
+app.include_router(admin_telegram_router)
+app.include_router(telegram_router)
 app.include_router(ws_quotes_router)
 app.include_router(ws_portfolio_router)
 app.include_router(ws_ai_router)
