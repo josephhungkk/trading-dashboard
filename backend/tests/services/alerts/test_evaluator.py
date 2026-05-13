@@ -1,0 +1,83 @@
+"""Phase 11b chunk B1: evaluator skeleton tests — inverted index, producer
+debounce, bounded queue drop-oldest, debounce-sweep eviction, snapshot
+rebuild coalescing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from app.services.alerts.evaluator import AlertsEvaluator, InvertedIndex
+
+
+def test_inverted_index_groups_by_symbol() -> None:
+    idx = InvertedIndex()
+    idx.add(rule_id=1, symbols={"AAPL", "TSLA"})
+    idx.add(rule_id=2, symbols={"AAPL"})
+    assert idx.rules_for("AAPL") == {1, 2}
+    assert idx.rules_for("TSLA") == {1}
+    assert idx.rules_for("MSFT") == set()
+
+
+def test_inverted_index_remove_drops_empty_symbols() -> None:
+    idx = InvertedIndex()
+    idx.add(rule_id=1, symbols={"AAPL"})
+    idx.remove(rule_id=1)
+    assert idx.rules_for("AAPL") == set()
+
+
+async def test_producer_debounce_drops_within_500ms() -> None:
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.5)
+    accepted_1 = evaluator._producer_debounce_check(rule_id=1, symbol="AAPL", now=1000.0)
+    accepted_2 = evaluator._producer_debounce_check(rule_id=1, symbol="AAPL", now=1000.3)
+    accepted_3 = evaluator._producer_debounce_check(rule_id=1, symbol="AAPL", now=1000.6)
+    assert accepted_1 is True
+    assert accepted_2 is False
+    assert accepted_3 is True
+
+
+async def test_queue_drop_oldest_on_overflow() -> None:
+    evaluator = AlertsEvaluator(queue_maxsize=2, debounce_seconds=0.0)
+    await evaluator._enqueue({"rule_id": 1, "symbol": "A"})
+    await evaluator._enqueue({"rule_id": 2, "symbol": "B"})
+    await evaluator._enqueue({"rule_id": 3, "symbol": "C"})  # forces drop-oldest
+    items: list[dict[str, object]] = []
+    while not evaluator._queue.empty():
+        items.append(evaluator._queue.get_nowait())
+    assert len(items) == 2
+    assert items[-1]["symbol"] == "C"
+    assert evaluator.metrics.queue_dropped_total == 1
+
+
+def test_debounce_sweep_evicts_stale() -> None:
+    evaluator = AlertsEvaluator(queue_maxsize=10, debounce_seconds=0.5)
+    evaluator._producer_debounce_check(rule_id=1, symbol="A", now=0.0)
+    evaluator._producer_debounce_check(rule_id=2, symbol="B", now=1050.0)
+    evaluator._sweep_debounce(now=1100.0, max_age_seconds=60.0)
+    # rule 1 entry was at t=0; now=1100; age=1100 > 60 -> evict.
+    # rule 2 entry was at t=1050; now=1100; age=50 < 60 -> keep.
+    assert (1, "A") not in evaluator._debounce_last_at
+    assert (2, "B") in evaluator._debounce_last_at
+    assert evaluator.metrics.debounce_evicted_total == 1
+
+
+async def test_snapshot_rebuild_coalescing() -> None:
+    rebuild_calls: list[float] = []
+
+    async def fake_rebuild() -> None:
+        rebuild_calls.append(asyncio.get_event_loop().time())
+
+    evaluator = AlertsEvaluator(
+        queue_maxsize=10,
+        debounce_seconds=0.5,
+        snapshot_coalesce_seconds=0.05,
+        _rebuild_fn=fake_rebuild,
+    )
+    await evaluator.start()
+    try:
+        for _ in range(10):
+            evaluator.request_snapshot_rebuild()
+        await asyncio.sleep(0.2)
+        assert len(rebuild_calls) == 1
+    finally:
+        await evaluator.stop()
