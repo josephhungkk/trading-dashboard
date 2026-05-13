@@ -407,13 +407,27 @@ def _payload(account_id: UUID, **overrides: Any) -> dict[str, Any]:
 
 
 async def _store_nonce(redis: fakeredis.aioredis.FakeRedis, payload: dict[str, Any]) -> None:
+    """Mirror what preview_order's _nonce_and_payload_hash writes.
+
+    Phase 11b: bracket-place now validates against the 8-field preview hash
+    via _consume_preview_nonce (previously 3-field modify hash via
+    _consume_nonce, which never matched what preview minted).
+    """
     key = f"nonce:order:{payload['account_id']}:{payload['nonce']}"
     value = json.dumps(
         {
-            "payload_hash": orders_service._modify_nonce_payload_hash(
+            "payload_hash": orders_service._preview_payload_hash(
                 account_id=payload["account_id"],
+                conid=payload["conid"],
+                side=payload["side"],
+                order_type=payload["order_type"],
+                tif=payload["tif"],
                 qty=payload["qty"],
                 limit_price=payload["limit_price"],
+                # Preview for a LIMIT parent has no stop_price; the
+                # bracket's payload['stop_price'] is the child SL leg,
+                # not the parent's.
+                stop_price=None,
             ),
             "rth_at_mint": True,
         },

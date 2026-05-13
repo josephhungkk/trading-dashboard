@@ -19,7 +19,9 @@ from __future__ import annotations
 import socket
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from typing import Any, cast
+from unittest.mock import patch
 
 import grpc
 import pytest_asyncio
@@ -37,6 +39,7 @@ from app.core.deps import (
 )
 from app.main import app
 from app.services.brokers import AccountService, BrokerRegistry
+from app.services.ibkr_maintenance import BrokerMaintenance
 from tests.fixtures.sidecar_servicer import (
     FakeBrokerServicer,
     _build_ephemeral_pki,
@@ -146,6 +149,26 @@ async def chain_client() -> AsyncIterator[tuple[AsyncClient, FakeBrokerServicer]
 
     app.dependency_overrides[require_admin_jwt] = _admin
 
+    # IBKR daily maintenance window (~05:45 UTC) and the weekend window
+    # both return 503 from preview/place_order — irrelevant to the chain
+    # tests' behaviour, so neutralise the gate by patching the
+    # compute_broker_maintenance entry points to always report inactive.
+    # Patched at the import sites used by orders_service + brokers.
+    _inactive = BrokerMaintenance(active=False)
+    maintenance_patches = ExitStack()
+    maintenance_patches.enter_context(
+        patch(
+            "app.services.orders_service.compute_broker_maintenance",
+            return_value=_inactive,
+        )
+    )
+    maintenance_patches.enter_context(
+        patch(
+            "app.services.brokers.compute_broker_maintenance",
+            return_value=_inactive,
+        )
+    )
+
     order_consumer = None
     try:
         async with app.router.lifespan_context(app):
@@ -178,6 +201,7 @@ async def chain_client() -> AsyncIterator[tuple[AsyncClient, FakeBrokerServicer]
         if order_consumer is not None:
             await order_consumer.stop()
         app.dependency_overrides.clear()
+        maintenance_patches.close()
         await sidecar_client_obj.close()
         await grpc_server.stop(grace=1.0)
         async with factory() as s:

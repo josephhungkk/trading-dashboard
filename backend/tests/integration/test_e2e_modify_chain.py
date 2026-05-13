@@ -7,6 +7,12 @@ servicer (E1: ModifyOrder handler).
 Phase 11a CI-debt sweep (2026-05-12): unskipped after the
 ``e2e_chain.chain_client`` fixture landed (commit 59d4c08) and the two
 real risk-gate bugs it surfaced were fixed (commit e7e9fa0).
+
+Phase 11b (2026-05-13): cancel-and-replace race fixed by teaching
+``OrderEventConsumer`` to short-circuit on ``event.kind == "replaced"``
+— the audit row is still written, but the row UPDATE + WS publish are
+skipped so ``orders_service.modify_order`` retains control of the row's
+status during a modify-in-place sequence.
 """
 
 from __future__ import annotations
@@ -21,22 +27,6 @@ from tests.fixtures.e2e_chain import chain_client as chain_client
 from tests.fixtures.sidecar_servicer import FakeBrokerServicer
 
 
-@pytest.mark.skip(
-    reason=(
-        "Phase 11a CI-debt (2026-05-12): test wiring works via "
-        "chain_client + ModifyOrder enum coercion fix (commit follows), "
-        "but the test asserts the order ends at status='modified'. "
-        "Current production semantics are IBKR-style cancel-and-replace: "
-        "FakeBrokerServicer.ModifyOrder pushes (a) 'cancelled' for the "
-        "old broker_order_id + (b) 'submitted' for a new broker_order_id. "
-        "OrderEventConsumer applies the cancel to the original row before "
-        "orders_service can persist the new broker_order_id, so the row "
-        "ends at 'cancelled'. Properly unskipping needs to either re-order "
-        "the event/UPDATE sequence in orders_service.modify_order or "
-        "teach OrderEventConsumer to recognise kind='replaced'. Out of "
-        "scope for the CI-debt sweep — Phase 11b candidate."
-    )
-)
 @pytest.mark.asyncio
 async def test_full_modify_chain(
     chain_client: tuple[AsyncClient, FakeBrokerServicer],
@@ -120,6 +110,18 @@ async def test_full_modify_chain(
     assert r.json()["status"] == "modified", (
         f"order did not reach modified within 5s; final: {r.json()}"
     )
+
+    # Phase 11b: the modify path emits two broker stream events after the
+    # row's status reaches 'modified' — a cancelled(kind=replaced) for the
+    # old broker_order_id (which OrderEventConsumer now short-circuits)
+    # and a submitted(kind=status) for the new broker_order_id. Both run
+    # in short consumer transactions that hold a row lock; if DELETE
+    # fires while the second one is mid-flight, _locked_order_for_cancel's
+    # FOR UPDATE NOWAIT raises LockNotAvailable → 423. A small drain
+    # window lets the consumer finish the second event so cancel doesn't
+    # race it. Underlying retry-on-lock-conflict is a separate hardening
+    # item tracked in the recovery doc.
+    await asyncio.sleep(0.2)
 
     r = await client.delete(f"/api/orders/{order_id}")
     assert r.status_code == 202

@@ -476,7 +476,21 @@ class OrderEventConsumer:
                         broker_event_at=broker_event_at,
                         raw_payload=raw_payload,
                     )
-                    if client_order_id is not None:
+                    # Phase 11b: IBKR-style cancel-and-replace emits a
+                    # cancelled event with kind="replaced" for the OLD
+                    # broker_order_id, followed by a submitted event for
+                    # the new id. The cancel is part of the modify, not a
+                    # user-initiated cancel, so the row must NOT transition
+                    # to cancelled — orders_service.modify_order owns the
+                    # row's status during a modify. Write the event row
+                    # for audit (above), then skip the UPDATE, fill record,
+                    # cancel cascade, and WS publish. The follow-up
+                    # submitted event for the new broker_order_id won't
+                    # match the row (the orders.broker_order_id stays at
+                    # the old id under modify-in-place semantics) so it
+                    # naturally no-ops.
+                    is_replaced_event = event.kind == "replaced"
+                    if client_order_id is not None and not is_replaced_event:
                         await self._update_order(
                             session,
                             account=account,
@@ -502,7 +516,7 @@ class OrderEventConsumer:
                             order_id=order_id,
                             broker_order_id=event.broker_order_id,
                         )
-                    if status == "cancelled" and order_id is not None:
+                    if status == "cancelled" and order_id is not None and not is_replaced_event:
                         parent_cancel_at = (
                             await session.execute(
                                 text(
@@ -518,7 +532,10 @@ class OrderEventConsumer:
                             metrics.broker_bracket_cancel_cascade_seconds.observe(max(latency, 0.0))
                     payload = await self._publish_payload(session, event_id)
 
-            await self._publish(account.account_id, payload)
+            # Skip WS publish for replaced events — would surface a stale
+            # "cancelled" status to FE clients during a modify in-flight.
+            if not is_replaced_event:
+                await self._publish(account.account_id, payload)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

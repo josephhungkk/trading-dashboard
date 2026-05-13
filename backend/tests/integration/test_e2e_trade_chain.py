@@ -86,6 +86,12 @@ async def test_full_trade_chain(
     assert place_resp["status"] == "submitted"
     assert place_resp["broker_order_id"].startswith("SIM-")
 
+    # Phase 11b: give the OrderEventConsumer a moment to drain the
+    # FakeBrokerServicer's `submitted` stream event before DELETE locks
+    # the row. Without this, _locked_order_for_cancel's FOR UPDATE NOWAIT
+    # races the consumer's _update_order and raises LockNotAvailable.
+    await asyncio.sleep(0.2)
+
     r = await client.delete(f"/api/orders/{order_id}")
     assert r.status_code == 202
 

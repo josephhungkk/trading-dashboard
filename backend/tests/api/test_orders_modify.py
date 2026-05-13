@@ -152,7 +152,30 @@ class _Session:
             self.order.tif = params["tif"]
             self.order.notional = params["notional"]
             return _Result(row=None)
+        if "UPDATE orders" in sql and "broker_order_id = :new_broker_order_id" in sql:
+            # Phase 11b: orders_service.modify_order now UPDATEs the row's
+            # status to 'modified' and adopts the new broker_order_id from
+            # the sidecar reply. Mirror the production semantics (rank tie
+            # — submitted=1==modified=1 means submitted stays submitted
+            # under '>'; only ranks below 1 get bumped to 'modified').
+            rank = {
+                "pending_submit": 0,
+                "submitted": 1,
+                "modified": 1,
+                "partial": 3,
+                "filled": 4,
+                "cancelled": 5,
+                "rejected": 5,
+                "expired": 5,
+            }
+            current = str(self.order.status)
+            new_status = current if rank.get(current, -1) > 1 else "modified"
+            self.order.status = new_status
+            self.order.broker_order_id = params["new_broker_order_id"]
+            return _Result(scalar=new_status)
         if "order_status_rank" in sql:
+            # Legacy CASE-statement query removed in Phase 11b; kept here
+            # in case other call sites still emit it.
             rank = {
                 "pending_submit": 0,
                 "submitted": 1,

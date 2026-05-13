@@ -7,6 +7,11 @@ sidecar mock servicer (E1: PlaceBracket + cascade-aware CancelOrder).
 Phase 11a CI-debt sweep (2026-05-12): unskipped after the
 ``e2e_chain.chain_client`` fixture landed (commit 59d4c08) and the
 risk-gate bugs it surfaced were fixed (commit e7e9fa0).
+
+Phase 11b (2026-05-13): hash-mismatch bug fixed by extracting
+``_preview_payload_hash`` and routing bracket-place through
+``_consume_preview_nonce`` (8-field) instead of ``_consume_nonce``
+(3-field modify hash).
 """
 
 from __future__ import annotations
@@ -21,21 +26,6 @@ from tests.fixtures.e2e_chain import chain_client as chain_client
 from tests.fixtures.sidecar_servicer import FakeBrokerServicer
 
 
-@pytest.mark.skip(
-    reason=(
-        "Phase 11a CI-debt (2026-05-12): test wiring works via "
-        "chain_client, and preview/risk-gate pass. But the test feeds the "
-        "preview's nonce into POST /api/orders/bracket and the bracket "
-        "place uses _consume_nonce which hashes only (account_id, qty, "
-        "limit_price) — while preview's _nonce_and_payload_hash also "
-        "covers (conid, side, order_type, tif, stop_price). The two hash "
-        "sets never match, so every preview->bracket flow raises "
-        "payload_mismatch. Either bracket needs its own preview endpoint "
-        "with matching hash semantics, or the canonical-payload hash "
-        "should be unified across all order kinds. Out of scope for the "
-        "CI-debt sweep — Phase 11b candidate."
-    )
-)
 @pytest.mark.asyncio
 async def test_full_bracket_chain(
     chain_client: tuple[AsyncClient, FakeBrokerServicer],

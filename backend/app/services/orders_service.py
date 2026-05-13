@@ -1407,27 +1407,39 @@ async def modify_order(
             "raw_payload": json.dumps(raw_payload),
         },
     )
-    await db.commit()
 
-    current_status_row = await db.execute(
-        text("SELECT status::text FROM orders WHERE id = :id"),
-        {"id": order_id},
-    )
-    current_status = current_status_row.scalar_one()
-    new_status_row = await db.execute(
+    # Phase 11b: also UPDATE the orders row's status to 'modified' (and
+    # adopt the new broker_order_id when the sidecar returns one — IBKR-
+    # style cancel-and-replace assigns a fresh broker_order_id, while
+    # other brokers modify in-place and return the same id). Without
+    # this UPDATE the row stayed at 'submitted' from place_order, and a
+    # follow-up broker stream event for the new broker_order_id would
+    # match-and-overwrite via OrderEventConsumer._update_order.
+    #
+    # Uses order_status_rank to avoid regressing past a more-advanced
+    # state (e.g., a partial-fill that landed concurrently between the
+    # event INSERT above and this UPDATE).
+    new_broker_order_id = modify_result.broker_order_id or str(row["broker_order_id"] or "")
+    update_result = await db.execute(
         text(
             """
-            SELECT CASE
-                     WHEN order_status_rank(CAST(:current AS order_status_enum))
-                          > order_status_rank('modified'::order_status_enum)
-                       THEN CAST(:current AS order_status_enum)
-                     ELSE 'modified'::order_status_enum
-                   END::text
+            UPDATE orders
+               SET status = CASE
+                              WHEN order_status_rank(status)
+                                   > order_status_rank('modified'::order_status_enum)
+                                THEN status
+                              ELSE 'modified'::order_status_enum
+                            END,
+                   broker_order_id = :new_broker_order_id,
+                   updated_at = now()
+             WHERE id = :id
+            RETURNING status::text;
             """
         ),
-        {"current": current_status},
+        {"id": order_id, "new_broker_order_id": new_broker_order_id},
     )
-    synthesized_status = str(new_status_row.scalar_one())
+    synthesized_status = str(update_result.scalar_one())
+    await db.commit()
 
     projected = {
         "id": order_id,
@@ -2152,21 +2164,52 @@ def _order_response_from_mapping(
     )
 
 
-def _nonce_and_payload_hash(request: PreviewRequest) -> tuple[str, str]:
-    nonce = str(uuid4())
-    qty_str = canonicalize_qty(request.qty)
+def _preview_payload_hash(
+    *,
+    account_id: object,
+    conid: str,
+    side: str,
+    order_type: str,
+    tif: str,
+    qty: str | None,
+    limit_price: str | None,
+    stop_price: str | None,
+) -> str:
+    """Canonical 8-field preview payload hash.
+
+    Phase 11b fix: extracted from ``_nonce_and_payload_hash`` so the bracket
+    place-path (``place_bracket``) can reuse the exact same canonical form.
+    Previously bracket used ``_consume_nonce`` (modify-shape, 3 fields) which
+    never matched the 8-field preview hash, so every preview->bracket flow
+    raised ``payload_mismatch``.
+    """
     payload = {
-        "account_id": str(request.account_id),
-        "conid": request.conid,
-        "side": request.side,
-        "order_type": request.order_type,
-        "tif": request.tif,
-        "qty": qty_str,
-        "limit_price": _canonical_decimal_or_none(request.limit_price),
-        "stop_price": _canonical_decimal_or_none(request.stop_price),
+        "account_id": str(account_id),
+        "conid": conid,
+        "side": side,
+        "order_type": order_type,
+        "tif": tif,
+        "qty": canonicalize_qty(qty),
+        "limit_price": _canonical_decimal_or_none(limit_price),
+        "stop_price": _canonical_decimal_or_none(stop_price),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return nonce, hashlib.sha256(canonical.encode()).hexdigest()
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _nonce_and_payload_hash(request: PreviewRequest) -> tuple[str, str]:
+    nonce = str(uuid4())
+    payload_hash = _preview_payload_hash(
+        account_id=request.account_id,
+        conid=request.conid,
+        side=request.side,
+        order_type=request.order_type,
+        tif=request.tif,
+        qty=request.qty,
+        limit_price=request.limit_price,
+        stop_price=request.stop_price,
+    )
+    return nonce, payload_hash
 
 
 def _modify_nonce_payload_hash(
@@ -2310,6 +2353,7 @@ async def _consume_nonce(
     qty: str,
     limit_price: str | None,
 ) -> None:
+    """Consume a MODIFY-flow nonce: 3-field hash (account_id, qty, limit_price)."""
     nonce_key = f"nonce:order:{account_id}:{nonce}"
     consumed_nonce_value = await redis.execute_command("GETDEL", nonce_key)
     if consumed_nonce_value is None:
@@ -2320,6 +2364,45 @@ async def _consume_nonce(
         qty=qty,
         limit_price=limit_price,
     ):
+        raise PreviewUnavailable(422, {"error": "payload_mismatch"})
+
+
+async def _consume_preview_nonce(
+    redis: RedisLike,
+    nonce: str,
+    *,
+    account_id: object,
+    conid: str,
+    side: str,
+    order_type: str,
+    tif: str,
+    qty: str | None,
+    limit_price: str | None,
+    stop_price: str | None,
+) -> None:
+    """Consume a PREVIEW-flow nonce: 8-field hash matching ``_preview_payload_hash``.
+
+    Phase 11b fix: bracket-place uses this so the hash check actually matches
+    what ``preview_order`` minted. The old code called ``_consume_nonce`` which
+    used the 3-field modify hash — every preview->bracket flow raised
+    ``payload_mismatch``.
+    """
+    nonce_key = f"nonce:order:{account_id}:{nonce}"
+    consumed_nonce_value = await redis.execute_command("GETDEL", nonce_key)
+    if consumed_nonce_value is None:
+        raise PreviewUnavailable(422, {"error": "unknown_nonce"})
+    consumed_nonce_payload = _decode_nonce_payload(consumed_nonce_value)
+    expected = _preview_payload_hash(
+        account_id=account_id,
+        conid=conid,
+        side=side,
+        order_type=order_type,
+        tif=tif,
+        qty=qty,
+        limit_price=limit_price,
+        stop_price=stop_price,
+    )
+    if consumed_nonce_payload["payload_hash"] != expected:
         raise PreviewUnavailable(422, {"error": "payload_mismatch"})
 
 
@@ -2420,12 +2503,22 @@ async def place_bracket(
         )
         if len(child_rows) == expected_children:
             return _build_bracket_response_from_db(existing_row, child_rows)
-        await _consume_nonce(
+        await _consume_preview_nonce(
             redis,
             request.nonce,
             account_id=request.account_id,
+            conid=request.conid,
+            side=request.side,
+            order_type=request.order_type,
+            tif=request.tif,
             qty=parent_qty,
             limit_price=request.limit_price,
+            # Bracket parent is constrained to order_type=LIMIT
+            # (OrderBracketRequest schema), so the preview's stop_price was
+            # None. The OrderBracketRequest.stop_price is the CHILD stop-
+            # loss leg, not the parent's, and must not enter the parent
+            # nonce hash.
+            stop_price=None,
         )
         nonce_consumed = True
         await db.execute(
@@ -2439,12 +2532,19 @@ async def place_bracket(
         await db.commit()
 
     if not nonce_consumed:
-        await _consume_nonce(
+        await _consume_preview_nonce(
             redis,
             request.nonce,
             account_id=request.account_id,
+            conid=request.conid,
+            side=request.side,
+            order_type=request.order_type,
+            tif=request.tif,
             qty=parent_qty,
             limit_price=request.limit_price,
+            # See note above on the existing-row branch — preview never
+            # carried stop_price for a LIMIT parent.
+            stop_price=None,
         )
 
     parent_id = uuid7()
