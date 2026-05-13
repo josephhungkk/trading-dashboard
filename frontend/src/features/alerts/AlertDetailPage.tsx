@@ -4,10 +4,18 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams } from '@tanstack/react-router';
 
+import { DryRunPanel } from '@/features/alerts/DryRunPanel';
 import { PredicateJsonEditor } from '@/features/alerts/PredicateJsonEditor';
 import { PredicateVisualiser } from '@/features/alerts/PredicateVisualiser';
-import { deleteAlert, getAlert, putPredicate } from '@/services/alerts/api';
-import type { AlertRule } from '@/services/alerts/types';
+import {
+  deleteAlert,
+  getAlert,
+  getAlertFires,
+  putAlertStatus,
+  putPredicate,
+} from '@/services/alerts/api';
+import type { AlertRule, RecentFire } from '@/services/alerts/types';
+import { useDryRun } from '@/services/alerts/useDryRun';
 
 interface AdminBodyShape {
   body?: { detail?: { schema_errors?: string[] } };
@@ -24,12 +32,21 @@ export function AlertDetailPage(): React.JSX.Element {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [schemaErrors, setSchemaErrors] = useState<string[]>([]);
+  const [insufficientAck, setInsufficientAck] = useState(false);
 
   const query = useQuery({
     queryKey: ['alerts', 'detail', id],
     queryFn: (): Promise<AlertRule> => getAlert(id),
     enabled: Number.isFinite(id),
   });
+
+  const fires = useQuery({
+    queryKey: ['alerts', 'detail', id, 'fires'],
+    queryFn: (): Promise<{ fires: RecentFire[] }> => getAlertFires(id, 50),
+    enabled: Number.isFinite(id),
+  });
+
+  const dryRun = useDryRun();
 
   const savePredicate = useMutation({
     mutationFn: (predicate: Record<string, unknown>) => putPredicate(id, predicate),
@@ -41,6 +58,13 @@ export function AlertDetailPage(): React.JSX.Element {
     onError: (err: unknown) => {
       const errs = extractSchemaErrors(err);
       if (errs) setSchemaErrors(errs);
+    },
+  });
+
+  const toggleStatus = useMutation({
+    mutationFn: (next: 'active' | 'disabled') => putAlertStatus(id, next),
+    onSuccess: (updated) => {
+      qc.setQueryData(['alerts', 'detail', id], updated);
     },
   });
 
@@ -74,6 +98,14 @@ export function AlertDetailPage(): React.JSX.Element {
     );
   }
 
+  const nextStatus: 'active' | 'disabled' =
+    rule.status === 'active' ? 'disabled' : 'active';
+  const canToggleStatus =
+    rule.status === 'active'
+    || rule.status === 'disabled'
+    || rule.status === 'pending'
+    || rule.status === 'dormant';
+
   return (
     <div className="flex flex-col gap-4 p-4 md:p-6" data-testid="alert-detail-page">
       <header className="flex items-center justify-between">
@@ -82,9 +114,20 @@ export function AlertDetailPage(): React.JSX.Element {
           <p className="text-xs text-muted-foreground">{rule.original_nl}</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="rounded-md bg-muted px-2 py-1 text-xs">
+          <span className="rounded-md bg-muted px-2 py-1 text-xs" data-testid="alert-detail-status">
             {rule.status}
           </span>
+          {canToggleStatus && (
+            <button
+              type="button"
+              onClick={() => toggleStatus.mutate(nextStatus)}
+              disabled={toggleStatus.isPending}
+              className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted disabled:opacity-50"
+              data-testid="alert-detail-toggle-status"
+            >
+              {nextStatus === 'disabled' ? 'Disable' : 'Enable'}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setEditing((v) => !v)}
@@ -114,6 +157,43 @@ export function AlertDetailPage(): React.JSX.Element {
       ) : (
         <PredicateVisualiser predicate={rule.predicate_json} />
       )}
+
+      <DryRunPanel
+        result={dryRun.data ?? null}
+        isPending={dryRun.isPending}
+        insufficientAcknowledged={insufficientAck}
+        onAcknowledge={setInsufficientAck}
+        onReRun={() => dryRun.mutate(rule.predicate_json)}
+      />
+
+      <section
+        className="rounded-md border border-border bg-panel p-4"
+        data-testid="alert-detail-fires"
+      >
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          Recent fires
+        </h2>
+        {fires.isLoading ? (
+          <p className="text-xs text-muted-foreground">Loading…</p>
+        ) : (fires.data?.fires.length ?? 0) === 0 ? (
+          <p className="text-xs text-muted-foreground" data-testid="alert-detail-fires-empty">
+            No fires yet.
+          </p>
+        ) : (
+          <ul className="space-y-1">
+            {(fires.data?.fires ?? []).map((fire) => (
+              <li
+                key={fire.id}
+                className="flex justify-between rounded-md bg-muted/50 px-2 py-1 text-xs tabular-nums"
+                data-testid={`alert-detail-fire-${fire.id}`}
+              >
+                <span className="font-mono">{fire.fired_at}</span>
+                <span>{fire.verdict}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }
