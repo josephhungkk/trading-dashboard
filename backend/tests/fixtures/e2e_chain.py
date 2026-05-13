@@ -144,8 +144,16 @@ async def chain_client() -> AsyncIterator[tuple[AsyncClient, FakeBrokerServicer]
             )
         await s.commit()
 
+    # Per-fixture-instance actor email so consecutive `pytest` invocations
+    # don't share the orders_service Redis rate-limit bucket
+    # (`rl:orders-preview:{email}`, 10/60s, set in orders_service:1683).
+    # Previously hardcoded `ci@example.com` caused test_full_modify_chain
+    # to flake with 429 after a handful of back-to-back invocations of
+    # the same test_postgres + test-redis pair.
+    actor_email = f"ci-{uuid.uuid4().hex[:8]}@example.com"
+
     async def _admin() -> AdminIdentity:
-        return AdminIdentity(email="ci@example.com", kind="user", claims={})
+        return AdminIdentity(email=actor_email, kind="user", claims={})
 
     app.dependency_overrides[require_admin_jwt] = _admin
 
