@@ -293,3 +293,46 @@ async def test_list_alerts_returns_only_caller_subject(
     alerts = response.json()["alerts"]
     assert {alert["id"] for alert in alerts} == {user_a["id"]}
     assert user_b["id"] not in {alert["id"] for alert in alerts}
+
+
+@pytest.mark.asyncio
+async def test_put_predicate_404_identity_unknown_id_and_cross_subject(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    other_jwt_headers: dict[str, str],
+) -> None:
+    """Codex chunk-C test-gap LOW — PUT must surface identical 404 body for
+    unknown-id and cross-subject access (existence-oracle defence)."""
+    created = await _create_alert(client, jwt_headers)
+    body = {"predicate_json": _predicate(value=300.0)}
+
+    cross_subject = await client.put(
+        f"/api/alerts/{created['id']}", headers=other_jwt_headers, json=body
+    )
+    unknown = await client.put("/api/alerts/99999999", headers=other_jwt_headers, json=body)
+
+    assert cross_subject.status_code == 404
+    assert unknown.status_code == 404
+    assert cross_subject.json() == unknown.json()
+
+
+@pytest.mark.asyncio
+async def test_confirm_404_identity_unknown_id_and_cross_subject(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    other_jwt_headers: dict[str, str],
+) -> None:
+    """Codex chunk-C test-gap LOW — confirm must surface identical 404 body
+    for unknown-id and cross-subject access."""
+    created = await _create_alert(client, jwt_headers)
+
+    cross_subject = await client.post(
+        f"/api/alerts/{created['id']}/confirm", headers=other_jwt_headers
+    )
+    unknown = await client.post("/api/alerts/99999999/confirm", headers=other_jwt_headers)
+
+    assert cross_subject.status_code == 404
+    assert unknown.status_code == 404
+    assert cross_subject.json() == unknown.json()

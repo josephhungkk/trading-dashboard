@@ -171,11 +171,51 @@ async def test_pubsub_fire_emits_v1_fire_frame() -> None:
             if m.get("type") == "websocket.send" and "text" in m and m["text"]
         ]
         assert any(
-            f.get("version") == 1
+            f.get("v") == 1
             and f.get("type") == "fire"
             and f.get("fire_id") == 7
             and f.get("alert_id") == 42
             for f in fire_frames
         ), f"no v=1 fire frame seen; frames={fire_frames}"
+    finally:
+        await fake_redis.aclose()
+
+
+async def test_disconnect_releases_subscription_and_counter() -> None:
+    """Codex chunk-C test-gap MED — client disconnect must terminate the
+    handler task and decrement the connection counter even when no pubsub
+    message arrives, otherwise pubsub.listen() leaks the slot."""
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        app = _make_app(fake_redis)
+        msgs: list[Message] = []
+        queue: asyncio.Queue[Message] = asyncio.Queue()
+        await queue.put({"type": "websocket.connect"})
+
+        scope = _make_scope()
+        scope["client"] = ("10.10.0.1", 50001)
+
+        accepted = asyncio.Event()
+
+        async def receive() -> Message:
+            return await queue.get()
+
+        async def send(message: Message) -> None:
+            msgs.append(message)
+            if message.get("type") == "websocket.accept":
+                accepted.set()
+
+        async def driver() -> None:
+            await accepted.wait()
+            # Disconnect immediately without ever publishing.
+            await asyncio.sleep(0.05)
+            await queue.put({"type": "websocket.disconnect", "code": 1000})
+
+        run = asyncio.create_task(app(scope, receive, send))
+        drive = asyncio.create_task(driver())
+        # Bounded wait: if the handler leaks pubsub.listen() this will time
+        # out and the assertion below catches it explicitly.
+        await asyncio.wait_for(asyncio.gather(run, drive, return_exceptions=True), timeout=3.0)
+        assert _ws_alerts._active_feed_connections == 0
     finally:
         await fake_redis.aclose()

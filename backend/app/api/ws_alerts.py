@@ -20,6 +20,7 @@ router = APIRouter(tags=["alerts-ws"])
 _MAX_WS_CONNECTIONS = 20
 _HEARTBEAT_S = 30.0
 _SEND_TIMEOUT_S = 2.0
+_PUBSUB_POLL_S = 1.0
 
 _active_feed_connections = 0
 
@@ -58,7 +59,7 @@ async def ws_alerts_feed(ws: WebSocket) -> None:
     async def _heartbeat() -> None:
         while not env.disconnected.is_set():
             await asyncio.sleep(_HEARTBEAT_S)
-            if not await env.send_or_close({"version": 1, "type": "heartbeat"}):
+            if not await env.send_or_close({"v": 1, "type": "heartbeat"}):
                 return
 
     try:
@@ -67,9 +68,14 @@ async def ws_alerts_feed(ws: WebSocket) -> None:
         env.start_recv_drain()
         heartbeat_task = asyncio.create_task(_heartbeat())
 
-        async for msg in pubsub.listen():
-            if env.disconnected.is_set():
-                break
+        # Codex chunk-C HIGH — pubsub.listen() blocks on Redis indefinitely
+        # when no messages arrive, leaking the subscription + connection slot
+        # after the client disconnects. Poll with a bounded timeout so the
+        # env.disconnected.is_set() check actually runs.
+        while not env.disconnected.is_set():
+            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=_PUBSUB_POLL_S)
+            if msg is None:
+                continue
             if msg.get("type") != "message":
                 continue
             data = msg.get("data")
@@ -83,7 +89,7 @@ async def ws_alerts_feed(ws: WebSocket) -> None:
                 continue
             if not isinstance(payload, dict):
                 continue
-            if not await env.send_or_close({"version": 1, "type": "fire", **payload}):
+            if not await env.send_or_close({"v": 1, "type": "fire", **payload}):
                 return
     except WebSocketDisconnect:
         log.info("ws_alerts_feed_disconnect")

@@ -103,3 +103,92 @@ async def test_webhook_4xx_no_retry() -> None:
         )
     assert outcome is DeliveryOutcome.failed
     assert http.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_signs_with_hmac_sha256_over_body() -> None:
+    """Codex chunk-C test-gap MED — assert HMAC signature is computed over
+    the exact body bytes with the configured secret using SHA-256."""
+    import hashlib
+    import hmac
+
+    captured: dict[str, object] = {}
+
+    async def _capture_post(
+        url: str,
+        *,
+        content: bytes,
+        headers: dict[str, str],
+        timeout: float,  # noqa: ASYNC109 — mimics httpx.post signature
+    ) -> object:
+        captured["url"] = url
+        captured["content"] = content
+        captured["headers"] = headers
+        return type("R", (), {"status_code": 200})()
+
+    http = AsyncMock()
+    http.post.side_effect = _capture_post
+
+    async def _resolver(host: str) -> list[str]:
+        return ["8.8.8.8"]
+
+    channel = WebhookChannel(http_client=http, per_fire_budget_s=60.0, resolver=_resolver)
+    fire = AlertFire(
+        fire_id=11,
+        alert_id=22,
+        jwt_subject="u",
+        verdict="true",
+        evaluated_values={"close": 201.5},
+        user_label="hmac",
+        fired_at_iso="2026-05-13T20:00:00+00:00",
+    )
+    outcome = await channel.deliver(
+        fire, config={"url": "https://public.example/api", "secret": "shh", "id": "w1"}
+    )
+    assert outcome is DeliveryOutcome.sent
+    sent_headers = captured["headers"]
+    assert isinstance(sent_headers, dict)
+    assert sent_headers["Content-Type"] == "application/json"
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    expected = hmac.new(b"shh", sent_body, hashlib.sha256).hexdigest()
+    assert sent_headers["X-Alerts-Signature"] == expected
+    # Host header pins to the original hostname (SNI + cert verification).
+    assert sent_headers["Host"] == "public.example"
+    # URL netloc was rewritten to the resolved IP — TOCTOU-closure assertion.
+    assert "//8.8.8.8" in str(captured["url"])
+
+
+@pytest.mark.asyncio
+async def test_webhook_validates_on_every_retry() -> None:
+    """Codex chunk-C test-gap MED — the SSRF check must run on every retry so
+    a DNS rebind between attempts can't slip a private IP through."""
+    http = AsyncMock()
+    http.post.return_value = type("R", (), {"status_code": 503})()
+
+    call_count = {"n": 0}
+
+    async def _flipping_resolver(host: str) -> list[str]:
+        call_count["n"] += 1
+        # Attempt 1: public IP; attempt 2: rebind to RFC1918.
+        return ["8.8.8.8"] if call_count["n"] == 1 else ["10.10.0.2"]
+
+    channel = WebhookChannel(http_client=http, per_fire_budget_s=60.0, resolver=_flipping_resolver)
+    fire = AlertFire(
+        fire_id=1,
+        alert_id=1,
+        jwt_subject="u",
+        verdict="true",
+        evaluated_values={},
+        user_label="x",
+    )
+    with patch("asyncio.sleep", new=AsyncMock()):
+        outcome = await channel.deliver(
+            fire,
+            config={"url": "https://rebind.example/h", "secret": "s", "id": "w1"},
+        )
+    assert outcome is DeliveryOutcome.failed
+    # First attempt got through validation + POSTed; second attempt's resolver
+    # returned a private IP so we never POST again.
+    assert http.post.call_count == 1
+    assert call_count["n"] == 2
