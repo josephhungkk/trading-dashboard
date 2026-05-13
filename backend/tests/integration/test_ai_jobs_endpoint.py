@@ -273,3 +273,46 @@ async def test_get_job_returns_404_for_other_jwt_subject(
 
     assert resp.status_code == 404
     assert resp.json() == {"detail": "job_not_found"}
+
+
+async def test_delete_job_returns_204_for_owner_and_calls_cancel(
+    authed_client: AsyncClient,
+    fake_router: _FakeJobRouter,
+) -> None:
+    job_id = uuid4()
+    fake_router.jobs[job_id] = _job_record(
+        job_id=job_id,
+        jwt_subject="ci@example.com",
+    )
+
+    resp = await authed_client.delete(f"/api/ai/jobs/{job_id}")
+
+    assert resp.status_code == 204
+    assert resp.content == b""
+    assert fake_router.cancelled_job_ids == [job_id]
+
+
+async def test_delete_job_returns_404_for_unknown_id(
+    authed_client: AsyncClient,
+) -> None:
+    resp = await authed_client.delete(f"/api/ai/jobs/{uuid4()}")
+
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "job_not_found"}
+
+
+async def test_delete_job_returns_404_for_other_jwt_subject(
+    authed_client: AsyncClient,
+    fake_router: _FakeJobRouter,
+) -> None:
+    job_id = uuid4()
+    fake_router.jobs[job_id] = _job_record(
+        job_id=job_id,
+        jwt_subject="other@example.com",
+    )
+
+    resp = await authed_client.delete(f"/api/ai/jobs/{job_id}")
+
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "job_not_found"}
+    assert fake_router.cancelled_job_ids == []

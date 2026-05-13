@@ -167,3 +167,15 @@ async def get_job(
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "cancel_requested": job.cancel_requested,
     }
+
+
+@router.delete("/jobs/{job_id}", status_code=204)
+async def delete_job(
+    job_id: UUID,
+    request: Request,
+    jwt_subject: str = Depends(require_jwt),
+) -> None:
+    job = await request.app.state.ai_router.get_job(job_id)
+    if job is None or job.jwt_subject != jwt_subject:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    await request.app.state.ai_router.cancel_job(job_id)
