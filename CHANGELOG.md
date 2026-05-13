@@ -5,6 +5,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 11a-C — AI router REST + WS endpoints (12 commits)
+
+Spec: `docs/superpowers/specs/2026-05-12-phase11-ai-router-alerts-telegram-design.md` § 2 11a-C. Plan: `docs/superpowers/plans/2026-05-12-phase11a-ai-router-foundation-plan.md` Tasks 23–31. Exposes the chunk-B `LiteLLMClient` and `AIJobStore` to the FE via 4 REST endpoints and 2 WS endpoints; adds HIGH-8 orphan-recovery sweeper.
+
+**Endpoints**
+
+- `POST /api/ai/complete` (JWT) — synchronous warm-route. Defence layer 1: LOCAL_ONLY API-boundary check → 503 `local_models_unavailable` when capability map has no local entries. HIGH-4 tool-calling rejection → 501 `tool_calling_not_yet_supported`. Returns `CompletionResult` including `fallback_chain` (MED-8).
+- `POST /api/ai/jobs` (JWT) — 202 + `{job_id}` for async cold-start capabilities. Same boundary checks. Pydantic response model `JobSubmitResponse`.
+- `GET /api/ai/jobs/{id}` (JWT) — poll status. **Ownership-existence-oracle defence**: 404 (not 403) on both unknown-id AND cross-jwt-subject, identical response body. Pydantic response model `JobStatusResponse`.
+- `DELETE /api/ai/jobs/{id}` (JWT) — cooperative cancel via `cancel_requested` flag; same 404 oracle defence.
+- `WS /ws/ai/chat` (JWT) — streaming chat via `make_ws_endpoint` envelope. Per-connection 1 active stream + 5 turns/min sliding window (NOT shared across connections). Send timeout 10s (chat-streaming override). Frame schema `{"version": 1, "type": "chunk"|"done"|"error", ...}`. Module-level connection counter capped at 10.
+- `WS /ws/ai/jobs/{id}` (JWT) — push state changes via `ai:job:{id}` pubsub. Closes on terminal state. Allowlisted pubsub extras (`{"error_code", "model", "response", "fallback_chain"}`) — unknown keys dropped to prevent silent leakage if publishers ever include sensitive fields.
+
+**Orphan-recovery sweeper (HIGH-8)**
+
+`backend/app/services/ai/orphan_sweeper.py` — 30s background loop in lifespan; two atomic UPDATEs per tick:
+- `warming` state cutoff = 90s (WoL + readiness should complete within)
+- `inferring` state cutoff = 10min (70B prompts need room)
+
+Counter `ai_jobs_orphan_recovered_total{phase}` increments per recovered row. Counter `ai_jobs_orphan_sweep_failures_total` increments on transient DB errors (sweeper logs+continues; never dies).
+
+**Reviewer findings applied (3 fix commits — 6 HIGH + 7 MED)**
+
+- HIGH (code-quality): `_guarded_ai_call` helper extracted — dedupes the tool-guard + LOCAL_ONLY + rate-limit + 5-arm exception mapping across `post_complete` and `post_jobs` (~80 LOC saved).
+- HIGH (code-quality): WS connection-counter test pollution — `autouse` fixture resets `_active_chat_connections` + `_active_jobs_connections` before/after every test in `test_ws_ai_chat.py` and `test_ws_ai_jobs.py`.
+- HIGH (code-quality): `_active_jobs_connections` decrement ordering — now first statement in `finally` (matches chat handler), no longer reads stale during pubsub teardown.
+- HIGH (python-reviewer): Pydantic `JobSubmitResponse` + `JobStatusResponse` for typed response_model on POST/GET jobs.
+- HIGH (silent-failure): new counter `ai_ws_chat_stream_errors_total{error_class}` on `/ws/ai/chat` unhandled stream errors.
+- HIGH (silent-failure): new counter `ai_ws_jobs_send_timeout_total` on `/ws/ai/jobs/{id}` send timeouts (matches portfolio WS pattern).
+- MED (python-reviewer): `session_factory: Callable[[], AbstractAsyncContextManager[Any]]` — tightens orphan sweeper signature.
+- MED (security): pubsub extras allowlist on `/ws/ai/jobs/{id}` — prevents silent leakage if publishers ever include sensitive fields.
+- MED (silent-failure): orphan sweeper metric increments ordered to survive `commit-then-raise` — row IDs captured before commit; metric loop wrapped in its own try/except.
+- MED (silent-failure): pubsub unsubscribe guarded by `_subscribed` flag; narrowed `contextlib.suppress` to `(ConnectionError, redis.RedisError)`.
+- MED (code-quality): `_RATE_LIMIT_RETRY_AFTER_S = 60` module constant — no more magic `"60"` in two places.
+- MED (code-quality): shared test fixtures (`_FakeRouter`, `_FakeJobRouter`, `_FakeRateLimiter`, etc.) moved to `tests/integration/conftest.py` — deduped across `test_ai_complete_endpoint.py` and `test_ai_jobs_endpoint.py`.
+- MED (code-quality): orphan sweeper two-UPDATE atomicity comment — documents the deliberate single-transaction choice.
+
+**Non-actionable findings (downgraded with rationale)**
+
+- Spec HIGH on `require_admin_jwt_ws` (admin-only WS) — single-user system; admin=user; consistent with all other WS endpoints (`ws_portfolio`, `ws_quotes`, `ws_bars`). Adding a non-admin variant is Phase 24 (multi-user) territory.
+- Spec MED on `make_ws_endpoint(handler, cap=N)` factory shape — `WSEnvelopeConfig(max_connections=N)` IS parametric; loose spec wording.
+- Security HIGH on `ws.close(1008)` before `ws.accept()` — verified `WSEnvelope.handshake` accepts before returning True (`ws_envelope.py:48`), so the subsequent close IS post-accept; security reviewer misread the flow.
+
+**Tests added**
+
+- 4 in `test_ai_complete_endpoint.py` (LOCAL_ONLY 503, tool-guard 501, rate-limit 429 + Retry-After, happy path)
+- 10 in `test_ai_jobs_endpoint.py` (POST + GET + DELETE × happy/unknown/cross-subject)
+- 5 in `test_orphan_sweeper.py` (warming/inferring transitions, under-cutoff, empty table, new failures counter)
+- 5 in `test_ws_ai_chat.py` (origin reject, stream chunks→done, turn-rate exceeded, active-stream-in-progress, stream-error counter increment)
+- 5 in `test_ws_ai_jobs.py` (unknown 1008, cross-subject 1008, initial state, terminal-state close, extras allowlist filters)
+
+**Suite state at chunk-C tag: 1327 passed, 6 skipped, 0 failed.**
+
 ## [0.10.3] — 2026-05-12
 
 ### Phase 10b.2 — Multi-account portfolio rollup (32 commits since v0.13.0)
