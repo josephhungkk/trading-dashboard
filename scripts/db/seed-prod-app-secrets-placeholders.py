@@ -61,13 +61,19 @@ SLOTS: list[tuple[str, str]] = [
     ("broker", "schwab.app_key"),
     ("broker", "schwab.app_secret"),
     ("broker", "schwab.refresh_token"),
-    # Alpaca paper + live.
-    ("broker", "alpaca-paper.api_key"),
-    ("broker", "alpaca-paper.api_secret"),
-    ("broker", "alpaca-live.api_key"),
-    ("broker", "alpaca-live.api_secret"),
-    # Futu 1024-bit RSA priv key.
+    # Alpaca paper + live. Schema is dotted (alpaca.<mode>.api_*) NOT
+    # hyphenated (alpaca-<mode>.api_*); broker_registry_factory.py:256
+    # reads `alpaca.{expected_mode}.api_key` as the legacy fallback.
+    # The hyphenated form silently fails the Configure call.
+    ("broker", "alpaca.paper.api_key"),
+    ("broker", "alpaca.paper.api_secret"),
+    ("broker", "alpaca.live.api_key"),
+    ("broker", "alpaca.live.api_secret"),
+    # Futu 1024-bit RSA priv key + OpenD unlock-password MD5 hash.
+    # Both are required by broker_registry_factory.py:146 (the configure
+    # call returns "creds missing" if either is absent).
     ("broker", "futu.rsa_priv_pem"),
+    ("broker", "futu.unlock_pwd_md5"),
 ]
 
 

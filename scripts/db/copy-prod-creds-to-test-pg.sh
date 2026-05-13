@@ -29,7 +29,7 @@ set -euo pipefail
 # Resolve repo root portably — required for VPS clones, CI runners, and
 # any dev box that isn't /home/joseph/dashboard. Falls back to script
 # directory if git isn't on PATH (extreme edge case).
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd))"
 ENV_FILE="${REPO_ROOT}/.env"
 
 # Tables to copy.

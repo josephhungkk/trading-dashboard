@@ -34,21 +34,41 @@
 -- go through the admin API or ConfigService.set_secret). One exception: the
 -- Alpaca key rename is a metadata-only fix that's safe in raw SQL.
 
--- ─── app_secrets typo fix ───────────────────────────────────────────────────
--- `broker/alpaca-papaer.api_secret` → `broker/alpaca-paper.api_secret`
--- (matches the correctly-spelled `broker/alpaca-paper.api_key` already there).
--- Wrapped in DO so it's idempotent: if the correct key already exists, the
--- update silently no-ops via NOT EXISTS.
+-- ─── app_secrets schema migration ───────────────────────────────────────────
+-- Alpaca credentials use a dotted hierarchy (`alpaca.<mode>.api_*`) NOT
+-- hyphenated (`alpaca-<mode>.api_*`). The hyphenated form matches the
+-- gateway_label spelling but `broker_registry_factory._configure_alpaca`
+-- reads the dotted form, so the hyphenated rows silently fail Configure.
+-- This DO block performs both renames idempotently in one pass:
+--   1. `alpaca-papaer.api_secret` (historical typo) -> dotted form
+--   2. `alpaca-{mode}.api_{key,secret}` -> `alpaca.{mode}.api_{key,secret}`
 DO $$
 BEGIN
+    -- Step 1: collapse the legacy 'papaer' typo into the canonical form
+    -- (still hyphenated at this point; step 2 then re-canonicalizes).
     IF EXISTS (SELECT 1 FROM app_secrets WHERE namespace='broker' AND key='alpaca-papaer.api_secret')
     AND NOT EXISTS (SELECT 1 FROM app_secrets WHERE namespace='broker' AND key='alpaca-paper.api_secret') THEN
-        UPDATE app_secrets
-           SET key = 'alpaca-paper.api_secret',
-               updated_at = now()
+        UPDATE app_secrets SET key='alpaca-paper.api_secret', updated_at=now()
          WHERE namespace='broker' AND key='alpaca-papaer.api_secret';
         RAISE NOTICE 'renamed alpaca-papaer.api_secret -> alpaca-paper.api_secret';
     END IF;
+    -- Step 2: rename each hyphenated key to its dotted counterpart, but
+    -- only if the dotted form doesn't already exist.
+    FOR r IN
+        SELECT old_key, new_key FROM (VALUES
+            ('alpaca-paper.api_key',    'alpaca.paper.api_key'),
+            ('alpaca-paper.api_secret', 'alpaca.paper.api_secret'),
+            ('alpaca-live.api_key',     'alpaca.live.api_key'),
+            ('alpaca-live.api_secret',  'alpaca.live.api_secret')
+        ) AS t(old_key, new_key)
+    LOOP
+        IF EXISTS (SELECT 1 FROM app_secrets WHERE namespace='broker' AND key=r.old_key)
+        AND NOT EXISTS (SELECT 1 FROM app_secrets WHERE namespace='broker' AND key=r.new_key) THEN
+            UPDATE app_secrets SET key=r.new_key, updated_at=now()
+             WHERE namespace='broker' AND key=r.old_key;
+            RAISE NOTICE 'renamed % -> %', r.old_key, r.new_key;
+        END IF;
+    END LOOP;
 END$$;
 
 -- ─── broker namespace: per-label trade_enabled flags ────────────────────────
