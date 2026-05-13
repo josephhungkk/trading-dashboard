@@ -36,7 +36,7 @@ log = structlog.get_logger(__name__)
 _T = TypeVar("_T")
 
 _INSTRUMENTS_SQL = """
-SELECT id, symbol || '.' || COALESCE(exchange, 'XX') AS canonical_id
+SELECT id, canonical_id
 FROM instruments
 """
 _ALLOWED_SOURCES: frozenset[str] = frozenset({"schwab", "alpaca", "ibkr", "futu"})

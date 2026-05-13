@@ -34,6 +34,12 @@ class Settings:
         assert redis_url is not None
         assert database_url is not None
 
+        # asyncpg.create_pool rejects the SQLAlchemy-style `postgresql+asyncpg://`
+        # scheme used by the backend's DATABASE_URL. Strip the driver suffix so
+        # the same env var works for both. Matches backend/app/main.py lifespan.
+        if database_url.startswith("postgresql+asyncpg://"):
+            database_url = database_url.replace("+asyncpg", "", 1)
+
         return cls(
             redis_url=redis_url,
             database_url=database_url,

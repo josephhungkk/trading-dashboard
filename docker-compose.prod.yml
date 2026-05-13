@@ -104,6 +104,10 @@ services:
     # default final target. Phase 0 compose overrode to target: build for dev.
     build:
       context: ./frontend
+    # Clear the dev compose's `command: [pnpm, dev]` so the nginx image runs
+    # its built-in CMD. Without this override, Compose merges the dev command
+    # into the prod image and nginx exits 127 (pnpm not found).
+    command: ["nginx", "-g", "daemon off;"]
     # Start as nginx user (uid 101) to skip entrypoint's chown (blocked by cap_drop: ALL).
     user: "nginx"
     restart: unless-stopped
