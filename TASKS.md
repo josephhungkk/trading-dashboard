@@ -778,6 +778,11 @@ The two ROADMAP.md Phase 10 deliverables NOT covered by Phase 10a. Brainstorm no
 
 Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` module any subsystem can call. Price/condition alerts engine. Telegram bot. Prompt-cost tracking.
 
+- [x] **11a** AI router foundation (v0.11.0.8, 2026-05-13) — LiteLLM proxy + 8 capabilities + Redis-backed master-key auth callback + 4 REST `/api/ai/*` + 2 WS `/ws/ai/*` + heavy-box WoL + orphan-recovery sweeper + FE `/ai/chat` + `/admin/ai` + TradeTicketAiSection. Memory `phase11a_shipped.md`.
+- [ ] **11b** Alerts engine — alembic 0043/0044 (alerts + alert_fires + alert_fire_context + alert_capabilities), 9 predicate primitives, parse-once-freeze + JSON-schema constrained AI parser, resolution-aware dry-run replay, inverted-index evaluator with bounded queue + push-invalidation, in-app/email/telegram delivery channels, /alerts FE.
+- [ ] **11c** Telegram outbound + inbound non-trade — bot.py with long-poll, allowlist authorization, `/status` `/accounts` `/kill_switch` `/mute` `/unmute` commands, chat_id HMAC hashing for metrics + logs.
+- [ ] **11d** Telegram trade execution — `/place_order` parser, **extended nonce binding tuple** (chat_id, from_user_id, account_id, symbol, side, qty_bucket, nonce_source), single-shot telegram nonces, transport-mismatch reject, per-chat 5/min trade rate-limit.
+
 ## Phase 12 — Options (single-leg)
 
 Option chain viewer, strike/expiry pickers, on-demand strike-window subscribe, Greeks display, exercise/assign events. Polymorphic contract via JSONB `contract_details`.

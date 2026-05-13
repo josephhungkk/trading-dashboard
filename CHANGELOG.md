@@ -5,6 +5,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 11a — AI router foundation (close-out at v0.11.0.8)
+
+Phase 11a shipped across 7 chunks (A0/A1/A.5/A2/B/C/D) starting at `v0.11.0.0` (2026-05-12) and closing at `v0.11.0.8` (2026-05-13). 75+ feature commits + reviewer-fix commits + CI-debt commits. Stack-wide: backend `_app.state.ai_router` (LiteLLMClient), `_app.state.ai_jobs` (PgAIJobStore), `_app.state.ai_rate_limiter`, `_app.state.heavy_wol` (HeavyBoxWoL with circuit-breaker), `_app.state.capability_svc`; LiteLLM proxy with Redis-backed master-key auth callback; orphan-recovery sweeper; 4 REST + 2 WS endpoints; frontend `/ai/chat` route + `/admin/ai` page + `TradeTicketAiSection` inserted into the trade ticket. Suite at close: 1327 BE / 654 FE tests passing.
+
+### Phase 11a-D — Frontend AI surface (12 commits)
+
+Spec: `docs/superpowers/specs/2026-05-12-phase11-ai-router-alerts-telegram-design.md` § 2 11a-D. Plan: Tasks 32–43.
+
+**FE service layer (`frontend/src/services/ai/`)**
+
+- `types.ts` — re-exports `CompletionRequest`, `CompletionResult`, `FallbackHop`, `JobSubmitResponse`, `JobStatusResponse` from `api-generated.ts`; hand-curates `ChatWsFrame` (discriminated `chunk|done|error`) + `JobWsFrame` (allowlisted extras matching BE `_ALLOWED_EXTRA_KEYS`). Exports `TURN_RATE_LIMIT_PER_MINUTE = 5` constant.
+- `api.ts` — `postComplete`, `postJob`, `getJob`, `deleteJob` fetch wrappers + typed `AiApiError`. Same-origin guard for `BASE` (mimics `services/portfolio/api.ts`).
+- `useChatStream.ts` — WS hybrid; bounded reconnect backoff `[500, 1500, 5000, 15000]`; `mountedRef` gate; per-conn turn-rate limit feedback; `wsUrl` opt with same-origin validation (security MED).
+- `useAiJob.ts` — TanStack-Query for the 10s REST poll + WS push via `setQueryData`; terminal-state polling stop; `cancel()` calls `deleteJob` optimistically.
+- `useTradeContext.ts` — one-shot `STRUCTURED_OUTPUT` call with **graceful-degrade failure mode**: never throws, returns `{context, loading, error}` so `TradeTicketAiSection` renders "AI context unavailable" instead of blocking the ticket. Error taxonomy: 429→`rate_limited`, ≥500→`unavailable`, 4xx→`request_error`, parse→`parse_failed`.
+
+**Zustand store (`frontend/src/stores/global/ai.ts`)**
+
+`useAiStore` persists `chatHistory: ChatMessage[]` (capped at 200, FIFO drop) + `defaultModel: string | null`. Migrate guard filters non-conforming items; logs dropped counts via `console.warn` for dev observability.
+
+**Components + routes**
+
+- `features/ai/ChatMessage.tsx` + `ModelPicker.tsx` (with `.stories.tsx`) — mobile-first bubbles + 8-capability select.
+- `features/ai/ChatPage.tsx` — combines `useChatStream` + `useAiStore` + `ModelPicker`. Persisted history rendered with stable index-key; in-flight streaming bubble rendered separately with fixed `key="streaming-assistant"` (no re-mount per chunk during streaming). Cost-this-conversation badge from `fallbackChain.length`. "Used local fallback (heavy box busy)" badge per MED-8.
+- `routes/ai.chat.tsx` — TanStack file-route at `/ai/chat`.
+- `features/orders/TradeTicketAiSection.tsx` — inserted into `TradeTicketModal.tsx` ABOVE the sizing section. Renders only when symbol is non-empty (avoids empty-ticket noise). Calls `useTradeContext({symbol, side, qty})` — request payload contains ONLY symbol/side/qty per security defence (no account_id, no NLV, no positions).
+
+**Admin AI page**
+
+- `features/admin/ai/AdminAiPage.tsx` — 4 collapsible sub-panels at `/admin/ai`:
+  - `CapabilityMapEditor.tsx` — JSON textarea bound to `app_config[ai_router/capability_map]`. Inline validation (250ms debounce). CSRF nonce minted on every save (spec MED-5).
+  - `ProviderKeyCrud.tsx` — list + add + delete entries in `app_secrets[ai_provider/...]`. `<input type="password">` for secret value; cleared after success; CSRF nonce on every mutation. 404 on DELETE reloads the list (no stale rows).
+  - `CostLedgerView.tsx` — **placeholder** for "Coming in 11b" (needs `GET /api/ai/cost-ledger` BE endpoint).
+  - `HeavyBoxStateBadge.tsx` — **placeholder** for 11b (needs admin endpoint exposing `HeavyBoxWoL` circuit state).
+- `services/admin/api.ts` — shared `adminFetch<T>`, `mintCsrfNonce()`, `AdminApiError`. Same-origin guard; extracted out of duplicated panel-local helpers during reviewer-fix batch 2.
+
+**Playwright smokes** (`frontend/e2e/{ai-chat,admin-ai}.spec.ts`) — 4 specs, all `test.fixme(true, 'requires compose+fixtures')` matching the phase9-charting aspirational-spec pattern. Will be wired up once the docker-compose harness lands (deferred).
+
+**Reviewer findings applied (2 fix commits — 8 HIGH + 8 MED across 5 reviewers)**
+
+5-reviewer chain dispatched in parallel (haiku spec + haiku typescript + sonnet code + sonnet security + sonnet silent-failure). Findings split into:
+
+- **Batch 1 (commit `9dbc938`, hooks + stores):**
+  - HIGH (TS): `ChatPage` stable streaming-bubble key — no more component re-mount per chunk during streaming.
+  - HIGH (TS): `useAiJob` runtime type guard before `as JobWsFrame` cast — drops non-state, non-v1 frames.
+  - HIGH (silent): `useChatStream` version-mismatch close logs + sets `error: 'protocol_version_mismatch'` + exhausts reconnect loop.
+  - HIGH (silent): `useChatStream` + `useAiJob` malformed-frame `catch{}` now logs + closes socket (triggers backoff).
+  - HIGH (silent): `useTradeContext` logs underlying `err` via `console.warn` before graceful degrade.
+  - HIGH (code): `useTradeContext.errorCode` taxonomy fixed — 429/5xx/4xx/parse_failed branches.
+  - MED (security): `useChatStream.wsUrl` opt now origin-validated (rejected non-same-origin URLs with `setError('invalid_ws_url')`).
+  - MED (code): `TURN_RATE_LIMIT_PER_MINUTE` constant in `types.ts` — referenced from ChatPage rate-limit text + E2E regex.
+  - MED (silent): Reconnect exhaustion in both hooks sets `error: 'connection_failed'` (no more silent infinite-disconnected).
+  - MED (silent): Zustand `migrate` logs dropped item count + coerced defaultModel via `console.warn`.
+
+- **Batch 2 (commit `ecd0fb5`, admin panels):**
+  - HIGH (code+TS): Extract `services/admin/api.ts` — shared `adminFetch`, `mintCsrfNonce`, `AdminApiError`. Both admin panels drop their duplicated local helpers.
+  - HIGH (TS): `ProviderKeyCrud.onSubmit` properly chains `addSecret` promise (no more `void` discard); same fix on the delete handler.
+  - MED (silent): `ProviderKeyCrud.removeSecret` 404 re-syncs the row list via `load()` (no more stale rows).
+  - MED (a11y): `<summary>` elements in `AdminAiPage` + `TradeTicketAiSection` carry `aria-label` for screen-reader clarity.
+
+**Non-actionable findings (downgraded with rationale)**
+
+- Spec MED on "drag-reorder providers per capability" — implementation ships a JSON textarea. Semantically correct; UX polish deferred. Phase 11b can revisit.
+- Spec MED on `CostLedgerView` + `HeavyBoxStateBadge` — both BE endpoints don't exist yet. Documented placeholders linked to phase 11b roadmap.
+- LOW: `'system'` role in zustand `SUPPORTED_ROLES` — no path appends; cosmetic future-regression catch.
+- LOW: `installWebSocketMock` double-call in `useChatStream.test.tsx`.
+
+**FE tests added (~12 new):** useChatStream (4) + useAiJob (4) + useTradeContext (4 incl. 429 path) + zustand store (4) + ChatPage (3) + TradeTicketAiSection (2) + AdminAiPage (3). Plus 4 Playwright `test.fixme`'d smokes.
+
+**Suite at chunk-D close: 1327 BE / 654 FE passing. 0 failed.**
+
 ### Phase 11a-C — AI router REST + WS endpoints (12 commits)
 
 Spec: `docs/superpowers/specs/2026-05-12-phase11-ai-router-alerts-telegram-design.md` § 2 11a-C. Plan: `docs/superpowers/plans/2026-05-12-phase11a-ai-router-foundation-plan.md` Tasks 23–31. Exposes the chunk-B `LiteLLMClient` and `AIJobStore` to the FE via 4 REST endpoints and 2 WS endpoints; adds HIGH-8 orphan-recovery sweeper.
