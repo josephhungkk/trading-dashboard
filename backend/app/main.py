@@ -46,6 +46,7 @@ from app.core.db import SessionLocal, engine
 from app.core.deps import set_account_service, set_broker_registry, set_config_service
 from app.core.logging import configure_logging
 from app.core.metrics import SCHWAB_REFRESH_TOKEN_AGE_HOURS, SCHWAB_REFRESH_TOKEN_USES_PER_24H
+from app.services.ai.orphan_sweeper import run_orphan_sweeper
 from app.services.balance_snapshot_writer import BalanceSnapshotWriter
 from app.services.bar_service import BarService
 from app.services.broker_callback_server import start_backend_callback_server
@@ -198,6 +199,7 @@ async def lifespan(_app: FastAPI) -> Any:
     except Exception:
         log.exception("ai_jobs_orphan_recovery_failed")
     _app.state.ai_jobs = ai_jobs
+    orphan_sweeper_task = asyncio.create_task(run_orphan_sweeper(SessionLocal))
 
     ai_rate_limiter = AIRouterRateLimiter(
         semaphores={"LOCAL_ONLY": 1, "REASONING": 2, "__default__": 5},
@@ -390,6 +392,9 @@ async def lifespan(_app: FastAPI) -> Any:
     try:
         yield
     finally:
+        orphan_sweeper_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await orphan_sweeper_task
         # Cancel the initial pre-warm task if still running (codex-default B).
         pre_warm_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
