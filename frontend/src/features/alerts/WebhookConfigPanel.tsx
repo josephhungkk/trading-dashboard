@@ -33,7 +33,7 @@ export function WebhookConfigPanel({
       await adminFetch(`/api/admin/alerts/webhooks/${webhookId}`, {
         method: 'PUT',
         body: JSON.stringify({ url, secret }),
-        headers: { 'X-CSRF-Nonce': nonce },
+        headers: { 'X-Confirm-Nonce': nonce },
       });
       onSaved?.();
     } catch (err) {

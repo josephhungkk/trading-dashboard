@@ -24,7 +24,7 @@ export function useDryRun(): ReturnType<
       return adminFetch<DryRunResult>('/api/alerts/dry-run', {
         method: 'POST',
         body: JSON.stringify({ predicate_json }),
-        headers: { 'X-CSRF-Nonce': nonce },
+        headers: { 'X-Confirm-Nonce': nonce },
       });
     },
   });

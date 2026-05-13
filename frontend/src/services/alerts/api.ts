@@ -12,7 +12,7 @@ export async function postAlert(req: CreateAlertRequest): Promise<CreateAlertRes
   return adminFetch<CreateAlertResponse>('/api/alerts', {
     method: 'POST',
     body: JSON.stringify(req),
-    headers: { 'X-CSRF-Nonce': nonce },
+    headers: { 'X-Confirm-Nonce': nonce },
   });
 }
 
@@ -32,7 +32,7 @@ export async function putPredicate(
   return adminFetch<AlertRule>(`/api/alerts/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ predicate_json }),
-    headers: { 'X-CSRF-Nonce': nonce },
+    headers: { 'X-Confirm-Nonce': nonce },
   });
 }
 
@@ -40,7 +40,7 @@ export async function deleteAlert(id: number): Promise<void> {
   const nonce = await mintCsrfNonce();
   await adminFetch<undefined>(`/api/alerts/${id}`, {
     method: 'DELETE',
-    headers: { 'X-CSRF-Nonce': nonce },
+    headers: { 'X-Confirm-Nonce': nonce },
   });
 }
 
@@ -48,7 +48,7 @@ export async function confirmAlert(id: number): Promise<AlertRule> {
   const nonce = await mintCsrfNonce();
   return adminFetch<AlertRule>(`/api/alerts/${id}/confirm`, {
     method: 'POST',
-    headers: { 'X-CSRF-Nonce': nonce },
+    headers: { 'X-Confirm-Nonce': nonce },
   });
 }
 

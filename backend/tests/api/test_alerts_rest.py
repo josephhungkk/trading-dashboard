@@ -8,6 +8,7 @@ import pytest_asyncio
 from httpx import AsyncClient
 
 from app.api import alerts as _api_alerts
+from app.api.admin import consume_confirmation_nonce
 from app.core import deps as _deps
 from app.core.deps import get_db
 from app.main import app
@@ -126,6 +127,14 @@ async def _fake_alert_store(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _api_alerts._CREATE_LIMITER._buckets.clear()
     app.dependency_overrides[get_db] = override_db
+
+    # Phase 11b chunk-B-close: bypass the X-Confirm-Nonce dep so the no_db
+    # alerts tests don't need a real Redis. Per-route CSRF behaviour is
+    # covered by the dedicated admin test surface.
+    async def _no_csrf() -> None:
+        return None
+
+    app.dependency_overrides[consume_confirmation_nonce] = _no_csrf
     monkeypatch.setattr(_api_alerts, "create_rule", create_rule)
     monkeypatch.setattr(_api_alerts, "get_rule", get_rule)
     monkeypatch.setattr(_api_alerts, "list_rules", list_rules)
@@ -136,6 +145,7 @@ async def _fake_alert_store(monkeypatch: pytest.MonkeyPatch) -> None:
         yield
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(consume_confirmation_nonce, None)
 
 
 def _predicate(symbol: str = "AAPL", value: float = 200.0) -> dict[str, Any]:

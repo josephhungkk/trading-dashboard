@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.admin import consume_confirmation_nonce
 from app.api.ws_auth import require_jwt
 from app.core.deps import get_db
 from app.services.alerts.exceptions import (
@@ -46,7 +47,10 @@ _RATE_LIMIT_RETRY_AFTER_S = 60
 
 JwtSubject = Annotated[str, Depends(require_jwt)]
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-CsrfNonce = Annotated[str | None, Header()]
+# Phase 11b chunk-B-close: mutating routes consume a single-use Redis nonce.
+# Header name matches the existing admin convention (X-Confirm-Nonce). The FE
+# `services/alerts/api.ts` issues this header via `services/admin/api.ts`.
+CsrfNonce = Annotated[None, Depends(consume_confirmation_nonce)]
 
 
 def _identity_404() -> HTTPException:
@@ -88,9 +92,8 @@ async def create_alert(
     request: Request,
     jwt_subject: JwtSubject,
     db: DbSession,
-    x_csrf_nonce: CsrfNonce = None,
+    _csrf: CsrfNonce,
 ) -> dict[str, Any]:
-    del x_csrf_nonce
     try:
         _CREATE_LIMITER.check(jwt_subject)
     except RateLimitExceededError as exc:
@@ -239,9 +242,8 @@ async def put_predicate(
     req: UpdatePredicateRequest,
     jwt_subject: JwtSubject,
     db: DbSession,
-    x_csrf_nonce: CsrfNonce = None,
+    _csrf: CsrfNonce,
 ) -> dict[str, Any]:
-    del x_csrf_nonce
     try:
         rule = await update_predicate(
             db,
@@ -267,9 +269,8 @@ async def delete_alert(
     alert_id: int,
     jwt_subject: JwtSubject,
     db: DbSession,
-    x_csrf_nonce: CsrfNonce = None,
+    _csrf: CsrfNonce,
 ) -> None:
-    del x_csrf_nonce
     try:
         await delete_rule(db, rule_id=alert_id, jwt_subject=jwt_subject)
     except (RuleNotFoundError, RuleCrossSubjectError) as exc:
@@ -281,9 +282,8 @@ async def confirm_alert(
     alert_id: int,
     jwt_subject: JwtSubject,
     db: DbSession,
-    x_csrf_nonce: CsrfNonce = None,
+    _csrf: CsrfNonce,
 ) -> dict[str, Any]:
-    del x_csrf_nonce
     try:
         rule = await confirm_rule(db, rule_id=alert_id, jwt_subject=jwt_subject)
     except AlreadyActiveError as exc:
