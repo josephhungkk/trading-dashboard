@@ -46,14 +46,21 @@ def _place_and_cancel(client: object, acct_hash: str, payload: dict) -> None:  #
 
 
 def _build_market_spy_payload(symbol: str, client_order_id: str) -> dict:  # type: ignore[type-arg]
-    """DAY LIMIT $1.00 — deeply unfillable, original Phase 8a scenario."""
+    """DAY LIMIT $1.00 — deeply unfillable, original Phase 8a scenario.
+
+    Note: the `client_order_id` parameter is kept on the function signature
+    for log-correlation purposes (the test stamps NIGHTLY-<case>-<ts>) but
+    is NOT sent to Schwab — their Trader API rejects unknown payload fields
+    with HTTP 400, and `clientOrderId` is not a supported field. Verified
+    via preview_order probe 2026-05-13.
+    """
+    _ = client_order_id  # reserved for test-side correlation only
     return {
         "orderType": "LIMIT",
         "session": "NORMAL",
         "duration": "DAY",
         "orderStrategyType": "SINGLE",
         "price": "1.00",
-        "clientOrderId": client_order_id,
         "orderLegCollection": [
             {
                 "instruction": "BUY",
@@ -66,6 +73,7 @@ def _build_market_spy_payload(symbol: str, client_order_id: str) -> dict:  # typ
 
 def _build_trail_amount_spy_payload(symbol: str, client_order_id: str) -> dict:  # type: ignore[type-arg]
     """TRAIL order with $0.10 amount offset — never fills far from market."""
+    _ = client_order_id
     return {
         "orderType": "TRAILING_STOP",
         "session": "NORMAL",
@@ -74,7 +82,6 @@ def _build_trail_amount_spy_payload(symbol: str, client_order_id: str) -> dict: 
         "stopPriceLinkBasis": "LAST",
         "stopPriceLinkType": "VALUE",
         "stopPriceOffset": "0.10",
-        "clientOrderId": client_order_id,
         "orderLegCollection": [
             {
                 "instruction": "BUY",
@@ -87,6 +94,7 @@ def _build_trail_amount_spy_payload(symbol: str, client_order_id: str) -> dict: 
 
 def _build_gtd_limit_spy_payload(symbol: str, client_order_id: str) -> dict:  # type: ignore[type-arg]
     """GTD LIMIT $1.00 expiring tomorrow — deeply unfillable."""
+    _ = client_order_id
     expiry_date: str = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     return {
         "orderType": "LIMIT",
@@ -95,7 +103,6 @@ def _build_gtd_limit_spy_payload(symbol: str, client_order_id: str) -> dict:  # 
         "orderStrategyType": "SINGLE",
         "price": "1.00",
         "cancelTime": expiry_date,
-        "clientOrderId": client_order_id,
         "orderLegCollection": [
             {
                 "instruction": "BUY",
