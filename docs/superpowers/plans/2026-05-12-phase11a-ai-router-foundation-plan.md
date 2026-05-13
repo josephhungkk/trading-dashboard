@@ -4054,10 +4054,13 @@ Endpoint contract:
 - **501 tool-calling guard** (HIGH-4): if `req.tools is not None` →
   501 `{detail: "tool_calling_not_yet_supported"}` (already raised by
   router via `AIToolCallingNotSupportedError` — handler maps to 501).
-- **Rate-limit**: route via `_app.state.ai_rate_limiter.check_and_acquire(
-  jwt_subject, capability)` BEFORE calling `router.complete()`. On
-  `AIRateLimitExceededError` → 429 with `Retry-After` header from the
-  exception's `retry_after_s` attribute.
+- **Rate-limit**: `ai_rate_limiter.check_and_acquire(jwt_subject,
+  capability.value)` is an **async context manager** (acquires the
+  per-capability semaphore + holds it for the call). Wrap the entire
+  `router.complete()` call in it. On `RateLimitExceededError` (from
+  `app.services.common.rate_limiter`) → 429 with `Retry-After: 60`
+  (the limiter's window is 60s; the exception itself carries no
+  retry hint, so use the window constant from the limiter config).
 - **Generic exception mapping**:
   - `LocalModelsUnavailableError` → 503 `local_models_unavailable`
   - `AIProxyUnavailableError` → 503 `ai_proxy_unavailable`
@@ -4163,10 +4166,10 @@ from app.api.ws_auth import require_jwt
 from app.services.ai.capabilities import AICapability, resolve_models
 from app.services.ai.exceptions import (
     AIProxyUnavailableError,
-    AIRateLimitExceededError,
     AIToolCallingNotSupportedError,
     LocalModelsUnavailableError,
 )
+from app.services.common.rate_limiter import RateLimitExceededError
 from app.services.ai.types import CompletionRequest, CompletionResult
 
 log = structlog.get_logger(__name__)
@@ -4188,19 +4191,21 @@ async def post_complete(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="local_models_unavailable",
             )
-    # Rate-limit BEFORE invoking router.
+    # Rate-limit is an async-CM holding the per-capability semaphore for
+    # the duration of router.complete(); see services/ai/rate_limiter.py.
     try:
-        request.app.state.ai_rate_limiter.check_and_acquire(
+        async with request.app.state.ai_rate_limiter.check_and_acquire(
             jwt_subject, body.capability.value
-        )
-    except AIRateLimitExceededError as exc:
+        ):
+            return await request.app.state.ai_router.complete(
+                body, jwt_subject=jwt_subject
+            )
+    except RateLimitExceededError:
         return JSONResponse(
             status_code=429,
             content={"detail": "rate_limited"},
-            headers={"Retry-After": str(exc.retry_after_s)},
+            headers={"Retry-After": "60"},  # matches ai_router window
         )
-    try:
-        return await request.app.state.ai_router.complete(body, jwt_subject=jwt_subject)
     except AIToolCallingNotSupportedError:
         raise HTTPException(status_code=501, detail="tool_calling_not_yet_supported")
     except LocalModelsUnavailableError:
