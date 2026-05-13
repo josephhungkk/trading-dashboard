@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { AlertsStubPage } from '@/features/alerts/AlertsStubPage';
 
-export const Route = createFileRoute('/alerts')({ component: AlertsStubPage });
+import { AlertsPage } from '@/features/alerts/AlertsPage';
+
+export const Route = createFileRoute('/alerts')({ component: AlertsPage });

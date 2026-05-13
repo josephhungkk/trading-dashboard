@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { Search } from 'lucide-react';
 import { ModeToggle } from '@/components/patterns/ModeToggle';
 import { AccountPicker } from '@/features/accounts/AccountPicker';
+import { BellDropdown } from '@/features/alerts/BellDropdown';
 import { ConnectedDropdown } from '@/components/patterns/ConnectedDropdown';
 import { Button } from '@/components/primitives/Button';
 import { Icon } from '@/components/primitives/Icon';
@@ -60,6 +61,7 @@ export function Topbar(): React.JSX.Element {
           <Icon as={Search} size="sm" />
           <span>⌘K</span>
         </Button>
+        <BellDropdown />
       </div>
     </header>
   );
