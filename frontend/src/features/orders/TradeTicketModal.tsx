@@ -15,6 +15,7 @@ import type { SizingMethod, SizingRequest } from '@/services/sizing/types';
 import { usePositionSizing } from '@/services/sizing/usePositionSizing';
 import { useSizingDefaults } from '@/services/sizing/useSizingDefaults';
 import { ContractSearchInput, type ContractSearchInputValue } from './ContractSearchInput';
+import { TradeTicketAiSection } from '@/features/orders/TradeTicketAiSection';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 
 type Side = PreviewRequest['side'];
@@ -566,6 +567,15 @@ function TradeTicketForm({
           }) : null}
         </select>
       </label>
+
+      {/* ── Phase 11a-D — AI context section ────────────────────────── */}
+      {form.contract.symbol.trim() && (
+        <TradeTicketAiSection
+          symbol={form.contract.symbol.trim()}
+          side={form.side}
+          qty={Number.parseFloat(form.qty) || 0}
+        />
+      )}
 
       {/* ── Phase 10b.1 — position-sizing section ─────────────────────── */}
       <details
