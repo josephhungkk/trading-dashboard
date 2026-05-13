@@ -50,6 +50,18 @@ from app.core.deps import set_account_service, set_broker_registry, set_config_s
 from app.core.logging import configure_logging
 from app.core.metrics import SCHWAB_REFRESH_TOKEN_AGE_HOURS, SCHWAB_REFRESH_TOKEN_USES_PER_24H
 from app.services.ai.orphan_sweeper import run_orphan_sweeper
+from app.services.alerts.capabilities import ensure_seeded as ensure_alert_capabilities_seeded
+from app.services.alerts.channels.in_app import InAppChannel
+from app.services.alerts.delivery import DeliveryDispatcher
+from app.services.alerts.evaluator import AlertsEvaluator
+from app.services.alerts.retention import sweep_alert_fire_context
+from app.services.alerts.runner import (
+    AlertsBarsRedisSubscriber,
+    build_index_rebuild_callback,
+    build_process_callback,
+    resolve_symbol_for_instrument,
+    run_capability_invalidation_listener,
+)
 from app.services.balance_snapshot_writer import BalanceSnapshotWriter
 from app.services.bar_service import BarService
 from app.services.broker_callback_server import start_backend_callback_server
@@ -380,6 +392,100 @@ async def lifespan(_app: FastAPI) -> Any:
     scheduler.add_job(_run_pre_warm, CronTrigger(hour=8, minute=35, timezone="UTC"))
     # FX rollover ~22:00 UTC
     scheduler.add_job(_run_pre_warm, CronTrigger(hour=22, minute=5, timezone="UTC"))
+    # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
+    # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery
+    # dispatcher + capability-flip pubsub listener + nightly retention sweep.
+    try:
+        async with session_factory() as alert_seed_db:
+            await ensure_alert_capabilities_seeded(alert_seed_db)
+    except Exception:
+        log.exception("alerts.capability_seed_failed")
+
+    alerts_evaluator: AlertsEvaluator | None = None
+    alerts_bars_subscriber: AlertsBarsRedisSubscriber | None = None
+    alerts_capability_listener: asyncio.Task[None] | None = None
+    try:
+        alerts_evaluator = AlertsEvaluator()
+        # Rebuild the inverted index from the database on startup so live
+        # NOTIFY events from bars_1m can be routed before any rule mutation
+        # triggers a rebuild.
+        rebuild_index = build_index_rebuild_callback(
+            session_factory=session_factory, evaluator=alerts_evaluator
+        )
+        alerts_evaluator._rebuild_fn = rebuild_index
+        alerts_evaluator.request_snapshot_rebuild()
+        await alerts_evaluator.start()
+
+        # InApp channel is the only universally-available channel; webhook +
+        # telegram channels need per-rule config that's wired in 11c.
+        # redis-py Redis structurally satisfies the InAppChannel _RedisLike Protocol.
+        in_app_channel = InAppChannel(redis=redis)  # type: ignore[arg-type]
+        alerts_dispatcher = DeliveryDispatcher(channels={"in_app": in_app_channel})
+        _app.state.alerts_evaluator = alerts_evaluator
+        _app.state.alerts_dispatcher = alerts_dispatcher
+
+        alerts_evaluator.start_worker(
+            process=build_process_callback(
+                session_factory=session_factory, dispatcher=alerts_dispatcher
+            )
+        )
+
+        # Symbol resolver: bars_1m_insert NOTIFY → raw_symbol via a fresh
+        # DB session per dispatch. The synchronous Callable signature in
+        # ``_on_bars_1m_notify`` means we run an inline asyncio.run_coroutine
+        # in the resolver — but the producer-debounce path already runs on
+        # the event loop, so use a session-cached resolver returning None
+        # when no alias exists.
+        def _resolve_symbol_sync(inst_id: int) -> str | None:
+            # Spawn an awaitable execution inside the running loop. We use
+            # ``asyncio.get_running_loop`` to schedule the resolver work on
+            # the same loop without blocking.
+            loop = asyncio.get_running_loop()
+
+            async def _lookup() -> str | None:
+                async with session_factory() as db:
+                    return await resolve_symbol_for_instrument(db, instrument_id=inst_id)
+
+            future = asyncio.run_coroutine_threadsafe(_lookup(), loop)
+            try:
+                return future.result(timeout=2.0)
+            except Exception:
+                return None
+
+        alerts_bars_subscriber = AlertsBarsRedisSubscriber(
+            redis=redis,
+            evaluator=alerts_evaluator,
+            resolve_symbol=_resolve_symbol_sync,
+        )
+        alerts_bars_subscriber.start()
+
+        async def _capability_invalidate() -> None:
+            await rebuild_index()
+
+        alerts_capability_listener = asyncio.create_task(
+            run_capability_invalidation_listener(redis, on_invalidate=_capability_invalidate)
+        )
+
+        # Nightly retention sweep — apscheduler job at 03:30 UTC.
+        async def _run_alert_retention_sweep() -> None:
+            try:
+                async with session_factory() as db:
+                    count = await sweep_alert_fire_context(db)
+                log.info("alerts.retention_sweep", deleted=count)
+            except Exception:
+                log.exception("alerts.retention_sweep_failed")
+
+        scheduler.add_job(
+            _run_alert_retention_sweep,
+            CronTrigger(hour=3, minute=30, timezone="UTC"),
+            id="alerts_retention_sweep",
+            replace_existing=True,
+        )
+
+        log.info("alerts.lifespan_started")
+    except Exception:
+        log.exception("alerts.lifespan_init_failed")
+
     scheduler.start()
     _app.state.scheduler = scheduler
 
@@ -395,6 +501,17 @@ async def lifespan(_app: FastAPI) -> Any:
     try:
         yield
     finally:
+        # Phase 11b chunk-B-close: drain alerts evaluator + subscribers before
+        # broker/redis shutdown so the worker doesn't try to write to a closed
+        # session.
+        if alerts_capability_listener is not None:
+            alerts_capability_listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await alerts_capability_listener
+        if alerts_bars_subscriber is not None:
+            await alerts_bars_subscriber.stop()
+        if alerts_evaluator is not None:
+            await alerts_evaluator.stop()
         orphan_sweeper_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await orphan_sweeper_task

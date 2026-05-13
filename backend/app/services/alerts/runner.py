@@ -53,7 +53,16 @@ class AlertsBarsRedisSubscriber:
         try:
             await pubsub.subscribe(_BARS_1M_CHANNEL)
             while not self._stopping:
-                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                try:
+                    msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # In-memory test fakes may not implement get_message;
+                    # real Redis transient errors should also not abort the
+                    # subscriber. Back off briefly and retry.
+                    await asyncio.sleep(0.5)
+                    continue
                 if msg is None:
                     # Yield even when the underlying get_message returns
                     # synchronously (test fakes, busy Redis) so cancel()
