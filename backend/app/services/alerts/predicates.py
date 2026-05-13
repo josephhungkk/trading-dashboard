@@ -15,6 +15,7 @@ Used by:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ class PredicateValidationError(Exception):
         self.schema_errors = schema_errors
 
 
-_OPS = {
+_OPS: dict[str, Callable[[Any, Any], bool]] = {
     "gt": lambda a, b: a > b,
     "lt": lambda a, b: a < b,
     "gte": lambda a, b: a >= b,
@@ -49,7 +50,7 @@ def _eval_price_threshold(p: dict[str, Any], state: dict[str, Any]) -> bool:
         return False
     price = prices[symbol]
     op_func = _OPS[p["op"]]
-    return op_func(price, p["value"])
+    return bool(op_func(price, p["value"]))
 
 
 def _eval_pct_change_window(p: dict[str, Any], state: dict[str, Any]) -> bool:
@@ -68,8 +69,8 @@ def _eval_pct_change_window(p: dict[str, Any], state: dict[str, Any]) -> bool:
     pct = (last - first) / first * 100
     target_pct = p["pct"]
     if target_pct >= 0:
-        return pct >= target_pct
-    return pct <= target_pct
+        return bool(pct >= target_pct)
+    return bool(pct <= target_pct)
 
 
 def _eval_ma_cross(p: dict[str, Any], state: dict[str, Any]) -> bool:
@@ -88,9 +89,9 @@ def _eval_ma_cross(p: dict[str, Any], state: dict[str, Any]) -> bool:
     fast_prev = sum(closes[-fast_period - 1 : -1]) / fast_period
     slow_prev = sum(closes[-slow_period - 1 : -1]) / slow_period
     if p["direction"] == "golden":
-        return fast_prev <= slow_prev and fast_now > slow_now
+        return bool(fast_prev <= slow_prev and fast_now > slow_now)
     if p["direction"] == "death":
-        return fast_prev >= slow_prev and fast_now < slow_now
+        return bool(fast_prev >= slow_prev and fast_now < slow_now)
     return False
 
 
@@ -107,7 +108,7 @@ def _eval_volume_spike(p: dict[str, Any], state: dict[str, Any]) -> bool:
     avg = sum(b["volume"] for b in window) / len(window)
     if avg == 0:
         return False
-    return series[-1]["volume"] >= avg * p["multiple"]
+    return bool(series[-1]["volume"] >= avg * p["multiple"])
 
 
 def _eval_order_event(p: dict[str, Any], state: dict[str, Any]) -> bool:
@@ -128,7 +129,7 @@ def _eval_ai_signal(p: dict[str, Any], state: dict[str, Any]) -> bool:
     if key not in signals:
         return False
     score = signals[key]
-    return score >= p["threshold"]
+    return bool(score >= p["threshold"])
 
 
 def _eval_news_event(p: dict[str, Any], state: dict[str, Any]) -> bool:

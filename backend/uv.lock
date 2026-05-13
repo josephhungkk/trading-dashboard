@@ -243,6 +243,7 @@ dev = [
     { name = "ruff" },
     { name = "schwabdev" },
     { name = "syrupy" },
+    { name = "types-jsonschema" },
 ]
 
 [package.metadata]
@@ -287,6 +288,7 @@ dev = [
     { name = "ruff", specifier = ">=0.15.11" },
     { name = "schwabdev", specifier = "==3.0.3" },
     { name = "syrupy", specifier = ">=5.1.0" },
+    { name = "types-jsonschema", specifier = ">=4.26.0.20260508" },
 ]
 
 [[package]]
@@ -1950,6 +1952,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/11/d6/114b492226588d6ff54579d95847662fc69196bdeec318eb45393b24c192/toolz-1.1.0.tar.gz", hash = "sha256:27a5c770d068c110d9ed9323f24f1543e83b2f300a687b7891c1a6d56b697b5b", size = 52613, upload-time = "2025-10-17T04:03:21.661Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/12/5911ae3eeec47800503a238d971e51722ccea5feb8569b735184d5fcdbc0/toolz-1.1.0-py3-none-any.whl", hash = "sha256:15ccc861ac51c53696de0a5d6d4607f99c210739caf987b5d2054f3efed429d8", size = 58093, upload-time = "2025-10-17T04:03:20.435Z" },
+]
+
+[[package]]
+name = "types-jsonschema"
+version = "4.26.0.20260508"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "referencing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/11/d8/7ba8007c48e0de93d82268e0447312c9c28d90ac7a8f73e034356bb40921/types_jsonschema-4.26.0.20260508.tar.gz", hash = "sha256:ae0be85ac6ec0cb94a98f75f876b0620cf2afa3e37fdf8460203f4d05f745acb", size = 16602, upload-time = "2026-05-08T04:51:45.26Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/55/4f25833c410426b1f359dd579f3b3d1ee0f43f5674b23a815f396d3ea63c/types_jsonschema-4.26.0.20260508-py3-none-any.whl", hash = "sha256:4ec1dea0a757c8c2e2aa7bc085612fb54e1ae9562428d5da6f26dd7a0f24dbc2", size = 16062, upload-time = "2026-05-08T04:51:44.437Z" },
 ]
 
 [[package]]
