@@ -58,6 +58,16 @@ _FUTU: _MarkerSpec = {
     "config": [
         ("broker", "futu.opend_host", "FUTU_HOST"),
         ("broker", "futu.opend_port", "FUTU_PORT"),
+        # Explicit opt-in: futu-api's OpenSecTradeContext spawns a daemon
+        # reconnect thread at instantiation time. When OpenD rejects the
+        # RSA handshake (e.g. the public key on OpenD doesn't match the
+        # private key in app_secrets, or the docker bridge IP is filtered),
+        # that thread loops forever and pytest hangs after the test exits.
+        # Until the test fixture properly tears down the context, gate the
+        # real_futu marker on an explicit testing/futu_test_enabled=true
+        # config row so the default state is "skip" even when creds are
+        # populated for prod use.
+        ("testing", "futu_test_enabled", "FUTU_TEST_ENABLED"),
     ],
 }
 _ALPACA_EQUITY: _MarkerSpec = {
@@ -74,9 +84,23 @@ _IBKR: _MarkerSpec = {
         ("broker", "mtls.client_cert_pem", "IBKR_MTLS_CLIENT_CERT_PEM"),
         ("broker", "mtls.client_key_pem", "IBKR_MTLS_CLIENT_KEY_PEM"),
         ("broker", "mtls.ca_bundle_pem", "IBKR_MTLS_CA_BUNDLE_PEM"),
+        # IBKR E2E test hits prod ingress over Cloudflare Access; needs a
+        # service-token pair to pass the CF Access gate. Stored as secrets
+        # since they grant backend-read scope. (The tray's
+        # C:\dashboard\secrets\cf-access-tray.env holds the same values
+        # for the Windows tray probes; DB rows are the canonical source.)
+        ("testing", "cf_access_client_id", "CF_ACCESS_CLIENT_ID"),
+        ("testing", "cf_access_client_secret", "CF_ACCESS_CLIENT_SECRET"),
     ],
     "config": [
         ("testing", "ibkr_paper_account", "IBKR_PAPER_ACCOUNT"),
+        # The test places a real paper order through the prod backend.
+        # When `broker/kill_switch_enabled=true` (the default safe state)
+        # the risk gate returns 503 on preview, so the test would always
+        # fail. Gate on an explicit testing/ibkr_test_enabled=true opt-in
+        # — operator sets this only during a maintenance window when
+        # they've also dropped the global kill switch.
+        ("testing", "ibkr_test_enabled", "IBKR_TEST_ENABLED"),
     ],
 }
 
