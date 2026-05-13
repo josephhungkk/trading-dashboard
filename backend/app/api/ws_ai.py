@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import time
 from collections import deque
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import structlog
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from fastapi.websockets import WebSocketState
 
 from app.api.ws_auth import require_admin_jwt_ws
@@ -26,10 +28,13 @@ router = APIRouter(tags=["ai-ws"])
 _MAX_WS_CONNECTIONS = 10
 _HEARTBEAT_S = 30.0
 _SEND_TIMEOUT_S = 10.0
+_JOBS_SEND_TIMEOUT_S = 2.0
 _TURNS_PER_MIN = 5
 _TURN_WINDOW_S = 60
+_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 
 _active_chat_connections = 0
+_active_jobs_connections = 0
 
 
 def _allowed_origins(ws: WebSocket) -> frozenset[str]:
@@ -179,3 +184,116 @@ async def ws_ai_chat(ws: WebSocket) -> None:
         )
         _active_chat_connections -= 1
         await env.cleanup()
+
+
+@router.websocket("/ws/ai/jobs/{job_id}")
+async def ws_ai_job(ws: WebSocket, job_id: UUID) -> None:
+    global _active_jobs_connections
+
+    cfg = WSEnvelopeConfig(
+        allowed_origins=_allowed_origins(ws),
+        max_connections=_MAX_WS_CONNECTIONS,
+        active_counter=lambda: _active_jobs_connections,
+        send_timeout_s=_JOBS_SEND_TIMEOUT_S,
+        heartbeat_s=_HEARTBEAT_S,
+    )
+    env = make_ws_endpoint(ws, cfg)
+    accepted = await env.handshake(auth=require_admin_jwt_ws)
+    if not accepted:
+        return
+    assert env.jwt_subject is not None
+
+    _active_jobs_connections += 1
+    redis = ws.app.state.redis
+    pubsub = redis.pubsub()
+    channel = f"ai:job:{job_id}"
+    heartbeat_task: asyncio.Task[None] | None = None
+
+    async def _heartbeat() -> None:
+        while not env.disconnected.is_set():
+            await asyncio.sleep(_HEARTBEAT_S)
+            if not await env.send_or_close({"version": 1, "type": "heartbeat"}):
+                return
+
+    try:
+        job = await ws.app.state.ai_router.get_job(job_id)
+        if job is None or job.jwt_subject != env.jwt_subject:
+            await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="job_not_found")
+            return
+
+        await pubsub.subscribe(channel)
+        env.start_recv_drain()
+        heartbeat_task = asyncio.create_task(_heartbeat())
+
+        if not await env.send_or_close(
+            {
+                "version": 1,
+                "type": "state",
+                "state": job.status,
+                "job_id": str(job_id),
+            }
+        ):
+            return
+        if job.status in _TERMINAL_STATES:
+            await ws.close(code=status.WS_1000_NORMAL_CLOSURE, reason=job.status)
+            return
+
+        async for msg in pubsub.listen():
+            if env.disconnected.is_set():
+                break
+            if msg.get("type") != "message":
+                continue
+
+            data = msg.get("data")
+            if isinstance(data, bytes):
+                data = data.decode()
+            try:
+                payload = json.loads(data)
+            except (TypeError, json.JSONDecodeError) as exc:
+                log.warning(
+                    "ws_ai_job_bad_pubsub_payload",
+                    job_id=str(job_id),
+                    error_class=type(exc).__name__,
+                )
+                continue
+            if not isinstance(payload, dict):
+                continue
+            state = payload.get("state")
+            if not isinstance(state, str):
+                continue
+
+            extras = {
+                str(key): value
+                for key, value in payload.items()
+                if key not in {"version", "type", "state", "job_id"}
+            }
+            if not await env.send_or_close(
+                {
+                    "version": 1,
+                    "type": "state",
+                    "state": state,
+                    "job_id": str(job_id),
+                    **extras,
+                }
+            ):
+                return
+            if state in _TERMINAL_STATES:
+                await ws.close(code=status.WS_1000_NORMAL_CLOSURE, reason=state)
+                return
+    except WebSocketDisconnect:
+        log.info("ws_ai_job_disconnect", job_id=str(job_id))
+    except Exception:
+        log.exception("ws_ai_job_unhandled", job_id=str(job_id))
+        if ws.client_state == WebSocketState.CONNECTED:
+            await ws.close(code=status.WS_1011_INTERNAL_ERROR, reason="unhandled")
+    finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+        await env.cleanup()
+        with contextlib.suppress(Exception):
+            await pubsub.unsubscribe(channel)
+        with contextlib.suppress(Exception):
+            await pubsub.aclose()
+        _active_jobs_connections -= 1
