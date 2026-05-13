@@ -21,6 +21,10 @@ _CHANNEL = "app_config:invalidate"
 # CRIT-1c: migrations call pg_notify on this channel; bridge must re-publish
 # to Redis so the capability listener inside OrderCapabilityService is woken.
 _CHANNEL_CAPABILITIES = "app_config:invalidate:order_capabilities"
+# Phase 11b chunk-B-close: bars_1m INSERT trigger pg_notify's a small JSON
+# payload `{"inst_id": int, "ts": float}` which the alerts evaluator reads
+# off the matching Redis channel.
+_CHANNEL_BARS_1M = "bars_1m_insert"
 _BACKOFF_MAX = 30.0
 
 # MED-sec-2: accept only "word|word" shaped payloads so a rogue NOTIFY cannot
@@ -29,6 +33,9 @@ _BACKOFF_MAX = 30.0
 _VALID_PAYLOAD = re.compile(r"^[A-Za-z0-9_.-]+\|[A-Za-z0-9_.-]+$")
 # Capability-channel payloads are a plain broker_id (e.g. "schwab") — no pipe.
 _VALID_CAPABILITY_PAYLOAD = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# bars_1m payload — JSON object with integer inst_id + float ts. Bounded to
+# 200 chars to defend against a rogue NOTIFY emitting a giant payload.
+_VALID_BARS_1M_PAYLOAD = re.compile(r"^\{.{1,200}\}$")
 
 
 def _sanitize_dsn(dsn: str) -> str:
@@ -132,6 +139,35 @@ class PostgresListenBridge:
                 exc=str(exc),
             )
 
+    async def _on_notify_bars_1m(
+        self,
+        connection: Any,
+        pid: int,
+        channel: str,
+        payload: str,
+    ) -> None:
+        """Republish bars_1m_insert NOTIFY payloads to Redis pubsub.
+
+        Phase 11b chunk-B-close: payload is a JSON object emitted by the
+        ``notify_bars_1m_insert`` trigger (alembic 0044). The alerts
+        evaluator subscribes to this Redis channel.
+        """
+        if not _VALID_BARS_1M_PAYLOAD.match(payload):
+            log.warning(
+                "postgres_listen_bridge.invalid_bars_1m_payload",
+                channel=channel,
+                payload=payload[:200],
+            )
+            return
+        try:
+            await self.redis.publish(_CHANNEL_BARS_1M, payload)
+        except Exception as exc:
+            log.warning(
+                "pg_listen_bridge.bars_1m_publish_failed",
+                channel=_CHANNEL_BARS_1M,
+                exc=str(exc),
+            )
+
     async def run(self) -> None:
         """Reconnect loop with exponential backoff capped at _BACKOFF_MAX seconds."""
         backoff = 1.0
@@ -143,18 +179,20 @@ class PostgresListenBridge:
                 backoff = 1.0
                 log.info(
                     "pg_listen_bridge.connected",
-                    channels=[_CHANNEL, _CHANNEL_CAPABILITIES],
+                    channels=[_CHANNEL, _CHANNEL_CAPABILITIES, _CHANNEL_BARS_1M],
                 )
 
                 await conn.add_listener(_CHANNEL, self._on_notify)
                 # CRIT-1c: also subscribe to the capability invalidation channel.
                 await conn.add_listener(_CHANNEL_CAPABILITIES, self._on_notify_capabilities)
+                await conn.add_listener(_CHANNEL_BARS_1M, self._on_notify_bars_1m)
                 # Block until stop() is called; asyncpg drives callbacks in the
                 # background. CancelledError is caught at the outer try.
                 await self._stop_event.wait()
 
                 await conn.remove_listener(_CHANNEL, self._on_notify)
                 await conn.remove_listener(_CHANNEL_CAPABILITIES, self._on_notify_capabilities)
+                await conn.remove_listener(_CHANNEL_BARS_1M, self._on_notify_bars_1m)
             except (TimeoutError, asyncpg.PostgresError, OSError) as exc:
                 self._connected = False
                 log.warning(
