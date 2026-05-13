@@ -32,10 +32,10 @@ async def telegram_webhook(request: Request) -> Response:
             return Response(status_code=200)
         await redis.set(dedup_key, "1", ex=300)
 
-    update = Update.model_validate(body)
     if dp is None:
         return Response(status_code=503)
 
+    update = Update.model_validate(body, context={"bot": bot})
     try:
         await dp.feed_update(bot, update)
     except Exception as exc:
