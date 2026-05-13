@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AlertPredicate",
+  "oneOf": [
+    {"$ref": "#/definitions/price_threshold"},
+    {"$ref": "#/definitions/pct_change_window"},
+    {"$ref": "#/definitions/ma_cross"},
+    {"$ref": "#/definitions/volume_spike"},
+    {"$ref": "#/definitions/order_event"},
+    {"$ref": "#/definitions/ai_signal"},
+    {"$ref": "#/definitions/news_event"},
+    {"$ref": "#/definitions/unknown"},
+    {"$ref": "#/definitions/composite_and"},
+    {"$ref": "#/definitions/composite_or"}
+  ],
+  "definitions": {
+    "predicate": {
+      "oneOf": [
+        {"$ref": "#/definitions/price_threshold"},
+        {"$ref": "#/definitions/pct_change_window"},
+        {"$ref": "#/definitions/ma_cross"},
+        {"$ref": "#/definitions/volume_spike"},
+        {"$ref": "#/definitions/order_event"},
+        {"$ref": "#/definitions/ai_signal"},
+        {"$ref": "#/definitions/news_event"},
+        {"$ref": "#/definitions/unknown"},
+        {"$ref": "#/definitions/composite_and"},
+        {"$ref": "#/definitions/composite_or"}
+      ]
+    },
+    "price_threshold": {
+      "type": "object",
+      "required": ["kind", "symbol", "op", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "price_threshold"},
+        "symbol": {"type": "string", "minLength": 1, "maxLength": 32},
+        "op": {"enum": ["gt", "lt", "gte", "lte", "eq"]},
+        "value": {"type": "number"},
+        "lookback_seconds": {"type": "integer", "minimum": 0}
+      }
+    },
+    "pct_change_window": {
+      "type": "object",
+      "required": ["kind", "symbol", "pct", "window_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "pct_change_window"},
+        "symbol": {"type": "string", "minLength": 1, "maxLength": 32},
+        "pct": {"type": "number"},
+        "window_seconds": {"type": "integer", "minimum": 60}
+      }
+    },
+    "ma_cross": {
+      "type": "object",
+      "required": ["kind", "symbol", "fast_period", "slow_period", "direction"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "ma_cross"},
+        "symbol": {"type": "string", "minLength": 1, "maxLength": 32},
+        "fast_period": {"type": "integer", "minimum": 1, "maximum": 500},
+        "slow_period": {"type": "integer", "minimum": 1, "maximum": 500},
+        "direction": {"enum": ["golden", "death"]}
+      }
+    },
+    "volume_spike": {
+      "type": "object",
+      "required": ["kind", "symbol", "multiple", "vs_window_minutes"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "volume_spike"},
+        "symbol": {"type": "string", "minLength": 1, "maxLength": 32},
+        "multiple": {"type": "number", "exclusiveMinimum": 1.0},
+        "vs_window_minutes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "order_event": {
+      "type": "object",
+      "required": ["kind", "event_type"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "order_event"},
+        "event_type": {"enum": ["filled", "cancelled", "rejected", "modified"]},
+        "account_id": {"type": ["string", "null"]},
+        "broker_id": {"type": ["string", "null"]},
+        "symbol": {"type": ["string", "null"]}
+      }
+    },
+    "ai_signal": {
+      "type": "object",
+      "required": ["kind", "prompt_template", "capability", "threshold"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "ai_signal"},
+        "prompt_template": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "capability": {"enum": ["STRUCTURED_OUTPUT", "REASONING", "NUMERICAL"]},
+        "threshold": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "news_event": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "news_event"},
+        "symbol": {"type": ["string", "null"]},
+        "source": {"type": ["string", "null"]},
+        "sentiment": {"enum": ["positive", "negative", "neutral", null]}
+      }
+    },
+    "unknown": {
+      "type": "object",
+      "required": ["kind", "raw_text"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "unknown"},
+        "raw_text": {"type": "string"},
+        "suggestions": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "composite_and": {
+      "type": "object",
+      "required": ["kind", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "composite_and"},
+        "children": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {"$ref": "#/definitions/predicate"}
+        }
+      }
+    },
+    "composite_or": {
+      "type": "object",
+      "required": ["kind", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "composite_or"},
+        "children": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {"$ref": "#/definitions/predicate"}
+        }
+      }
+    }
+  }
+}
