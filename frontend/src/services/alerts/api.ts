@@ -52,6 +52,29 @@ export async function confirmAlert(id: number): Promise<AlertRule> {
   });
 }
 
+export async function getAlertFires(
+  id: number,
+  limit = 50,
+): Promise<{ fires: RecentFire[] }> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  return adminFetch<{ fires: RecentFire[] }>(
+    `/api/alerts/${id}/fires?${q.toString()}`,
+    { method: 'GET' },
+  );
+}
+
+export async function putAlertStatus(
+  id: number,
+  status: 'active' | 'disabled',
+): Promise<AlertRule> {
+  const nonce = await mintCsrfNonce();
+  return adminFetch<AlertRule>(`/api/alerts/${id}/status`, {
+    method: 'PUT',
+    body: JSON.stringify({ status }),
+    headers: { 'X-Confirm-Nonce': nonce },
+  });
+}
+
 export async function getRecentFires(
   since: string | null,
   limit = 50,

@@ -78,6 +78,18 @@ class DryRunRequest(BaseModel):
     predicate_json: dict[str, Any]
 
 
+class StatusUpdateRequest(BaseModel):
+    status: str  # 'active' | 'disabled'
+
+
+_ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
+    "active": {"disabled"},
+    "disabled": {"active"},
+    "pending": {"active", "disabled"},
+    "dormant": {"active", "disabled"},
+}
+
+
 def _rule_to_dict(rule: Any) -> dict[str, Any]:
     return {
         "id": rule.id,
@@ -362,6 +374,97 @@ async def delete_alert(
         await delete_rule(db, rule_id=alert_id, jwt_subject=jwt_subject)
     except (RuleNotFoundError, RuleCrossSubjectError) as exc:
         raise _identity_404() from exc
+
+
+@router.get("/{alert_id}/fires")
+async def get_alert_fires(
+    alert_id: int,
+    jwt_subject: JwtSubject,
+    db: DbSession,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Phase 11b chunk-B-close: per-rule fire history for AlertDetailPage.
+
+    Cross-subject reads return the same 404 body as unknown-id reads —
+    existence-oracle defence matching the rest of the surface.
+    """
+    bounded_limit = min(max(limit, 1), 200)
+    # Authorisation check via get_rule() raises the identity-404 if the
+    # caller does not own the rule or it does not exist.
+    try:
+        await get_rule(db, rule_id=alert_id, jwt_subject=jwt_subject)
+    except (RuleNotFoundError, RuleCrossSubjectError) as exc:
+        raise _identity_404() from exc
+    rows = (
+        await db.execute(
+            text(
+                "SELECT id, alert_id, fired_at, verdict "
+                "FROM alert_fires WHERE alert_id = :r AND jwt_subject = :s "
+                "ORDER BY fired_at DESC LIMIT :n"
+            ),
+            {"r": alert_id, "s": jwt_subject, "n": bounded_limit},
+        )
+    ).all()
+    return {
+        "fires": [
+            {
+                "id": row.id,
+                "alert_id": row.alert_id,
+                "fired_at": row.fired_at.isoformat(),
+                "verdict": row.verdict,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.put("/{alert_id}/status")
+async def put_alert_status(
+    alert_id: int,
+    req: StatusUpdateRequest,
+    jwt_subject: JwtSubject,
+    db: DbSession,
+    _csrf: CsrfNonce,
+) -> dict[str, Any]:
+    """Phase 11b chunk-B-close: toggle a rule between active/disabled.
+
+    Allowed transitions: pending|dormant|active → disabled, and
+    pending|dormant|disabled → active. Unknown targets surface 400.
+    Cross-subject + unknown-id share the identity-404 body.
+    """
+    if req.status not in {"active", "disabled"}:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"error_code": "invalid_status"},
+        )
+    try:
+        rule = await get_rule(db, rule_id=alert_id, jwt_subject=jwt_subject)
+    except (RuleNotFoundError, RuleCrossSubjectError) as exc:
+        raise _identity_404() from exc
+    if rule.status == req.status:
+        return _rule_to_dict(rule)
+    allowed = _ALLOWED_STATUS_TRANSITIONS.get(rule.status, set())
+    if req.status not in allowed:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "invalid_status_transition",
+                "from": rule.status,
+                "to": req.status,
+            },
+        )
+    await db.execute(
+        text(
+            "UPDATE alerts SET status = :t, dormancy_reason = NULL, "
+            "consecutive_eval_errors = 0, updated_at = now() "
+            "WHERE id = :r AND jwt_subject = :s"
+        ),
+        {"r": alert_id, "s": jwt_subject, "t": req.status},
+    )
+    await db.commit()
+    rule.status = req.status
+    rule.dormancy_reason = None
+    return _rule_to_dict(rule)
 
 
 @router.post("/{alert_id}/confirm")

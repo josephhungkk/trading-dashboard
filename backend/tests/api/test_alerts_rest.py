@@ -45,6 +45,9 @@ class _FakeDb:
     async def execute(self, *_args: Any, **_kwargs: Any) -> _Rows:
         return _Rows()
 
+    async def commit(self) -> None:
+        return None
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def _fake_alert_store(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,6 +376,96 @@ async def test_dry_run_rejects_invalid_predicate(
     detail = response.json()["detail"]
     assert detail["error_code"] == "invalid_predicate"
     assert detail["schema_errors"]
+
+
+@pytest.mark.asyncio
+async def test_get_fires_404_identity_unknown_id_and_cross_subject(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    other_jwt_headers: dict[str, str],
+) -> None:
+    """Phase 11b chunk-B-close: GET /{id}/fires must mirror the surface-wide
+    identity-404 pattern (cross-subject and unknown-id share the body)."""
+    created = await _create_alert(client, jwt_headers)
+
+    cross_subject = await client.get(
+        f"/api/alerts/{created['id']}/fires", headers=other_jwt_headers
+    )
+    unknown = await client.get("/api/alerts/99999999/fires", headers=other_jwt_headers)
+
+    assert cross_subject.status_code == 404
+    assert unknown.status_code == 404
+    assert cross_subject.json() == unknown.json()
+
+
+@pytest.mark.asyncio
+async def test_put_status_disables_active_rule(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+) -> None:
+    """Phase 11b chunk-B-close: PUT /{id}/status flips the rule status."""
+    created = await _create_alert(client, jwt_headers)
+    # Activate first (the fake store creates pending rules; confirm to active).
+    await client.post(f"/api/alerts/{created['id']}/confirm", headers=jwt_headers)
+
+    response = await client.put(
+        f"/api/alerts/{created['id']}/status",
+        headers=jwt_headers,
+        json={"status": "disabled"},
+    )
+
+    assert response.status_code == 200, response.text
+    # The fake update_predicate path doesn't touch status; the route writes
+    # via raw SQL against the (fake) db. We only assert the response shape.
+    body = response.json()
+    assert body["id"] == created["id"]
+
+
+@pytest.mark.asyncio
+async def test_put_status_rejects_unknown_status(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+) -> None:
+    """Status values other than 'active' / 'disabled' surface 400."""
+    created = await _create_alert(client, jwt_headers)
+    response = await client.put(
+        f"/api/alerts/{created['id']}/status",
+        headers=jwt_headers,
+        json={"status": "deleted"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "invalid_status"
+
+
+@pytest.mark.asyncio
+async def test_put_status_404_identity_cross_subject(
+    _patched_verifier: None,
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    other_jwt_headers: dict[str, str],
+) -> None:
+    """PUT /{id}/status must return the same 404 body for unknown-id and
+    cross-subject targets."""
+    created = await _create_alert(client, jwt_headers)
+    body = {"status": "disabled"}
+
+    cross_subject = await client.put(
+        f"/api/alerts/{created['id']}/status",
+        headers=other_jwt_headers,
+        json=body,
+    )
+    unknown = await client.put(
+        "/api/alerts/99999999/status",
+        headers=other_jwt_headers,
+        json=body,
+    )
+
+    assert cross_subject.status_code == 404
+    assert unknown.status_code == 404
+    assert cross_subject.json() == unknown.json()
 
 
 @pytest.mark.asyncio
