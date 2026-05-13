@@ -154,4 +154,43 @@ describe('useAiJob', () => {
     expect(result.current.cancelRequested).toBe(true);
     expect(deleteJob).toHaveBeenCalledWith('job-1');
   });
+
+  it('sets protocol_version_mismatch and does not reconnect on websocket version mismatch', async () => {
+    vi.useFakeTimers();
+    const sockets = installWebSocketMock();
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(api, 'getJob').mockResolvedValue({
+      job_id: 'job-1',
+      status: 'warming',
+    });
+
+    const { result } = renderHook(() => useAiJob('job-1'), {
+      wrapper: makeWrapper(),
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const ws = sockets[0];
+    if (ws === undefined) throw new Error('websocket was not created');
+
+    act(() => {
+      ws.onmessage?.({
+        data: JSON.stringify({
+          version: 2,
+          type: 'state',
+          job_id: 'job-1',
+          state: 'inferring',
+        }),
+      } as MessageEvent<string>);
+      ws.onclose?.({} as CloseEvent);
+      vi.advanceTimersByTime(15_000);
+    });
+
+    expect(result.current.error).toBe('protocol_version_mismatch');
+    expect(sockets).toHaveLength(1);
+    expect(consoleWarn).toHaveBeenCalledWith(
+      '[useAiJob] protocol version mismatch — closing',
+      2,
+    );
+  });
 });

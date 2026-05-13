@@ -3,7 +3,11 @@ import * as React from 'react';
 import { Button } from '@/components/primitives/Button';
 import { Input } from '@/components/primitives/Input';
 import { useChatStream } from '@/services/ai/useChatStream';
-import type { AICapability, ChatMessage as ChatMessageType } from '@/services/ai/types';
+import {
+  TURN_RATE_LIMIT_PER_MINUTE,
+  type AICapability,
+  type ChatMessage as ChatMessageType,
+} from '@/services/ai/types';
 import { useAiStore } from '@/stores/global/ai';
 
 import { ChatMessage } from './ChatMessage';
@@ -34,13 +38,10 @@ export function ChatPage(): React.JSX.Element {
 
   const activeStream = chatStream.partial !== '' && !chatStream.done;
   const sendDisabled = activeStream || chatStream.rateLimited || draft.trim() === '';
-  const displayedMessages =
-    chatStream.partial !== '' && !chatStream.done
-      ? [
-          ...chatHistory,
-          { role: 'assistant', content: chatStream.partial } satisfies ChatMessageType,
-        ]
-      : chatHistory;
+  const streamingMessage = {
+    role: 'assistant',
+    content: chatStream.partial,
+  } satisfies ChatMessageType;
 
   React.useEffect(() => {
     if (chatStream.partial === '') {
@@ -88,22 +89,31 @@ export function ChatPage(): React.JSX.Element {
         className="flex flex-1 flex-col gap-3 overflow-y-auto rounded-md border border-border bg-bg p-3"
         aria-label="Chat history"
       >
-        {displayedMessages.length === 0 ? (
+        {chatHistory.length === 0 && !activeStream ? (
           <p className="text-sm text-fg-muted">No messages yet.</p>
         ) : (
-          displayedMessages.map((message, index) => (
+          chatHistory.map((message, index) => (
             <ChatMessage
-              key={`${index}-${message.role}-${message.content}`}
+              key={index}
               role={message.role}
               content={message.content}
               fallbackBadge={
-                index === displayedMessages.length - 1
+                !activeStream
+                && index === chatHistory.length - 1
                 && message.role === 'assistant'
                 && chatStream.fallbackChain.length > 0
               }
             />
           ))
         )}
+        {activeStream ? (
+          <ChatMessage
+            key="streaming-assistant"
+            role={streamingMessage.role}
+            content={streamingMessage.content}
+            fallbackBadge={chatStream.fallbackChain.length > 0}
+          />
+        ) : null}
       </div>
 
       {chatStream.error ? (
@@ -112,7 +122,7 @@ export function ChatPage(): React.JSX.Element {
         </p>
       ) : null}
       {chatStream.rateLimited ? (
-        <p className="text-sm text-warn">wait, max 5/min</p>
+        <p className="text-sm text-warn">wait, max {TURN_RATE_LIMIT_PER_MINUTE}/min</p>
       ) : null}
 
       <form className="flex flex-col gap-2 md:flex-row" onSubmit={handleSubmit}>

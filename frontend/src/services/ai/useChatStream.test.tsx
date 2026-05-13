@@ -44,6 +44,10 @@ function installWebSocketMock(): FakeWS[] {
   return sockets;
 }
 
+function sameOriginWsUrl(path: string): string {
+  return `ws://${window.location.host}${path}`;
+}
+
 describe('useChatStream', () => {
   beforeEach(() => {
     installWebSocketMock();
@@ -57,7 +61,9 @@ describe('useChatStream', () => {
 
   it('sends chat and accumulates chunks until done', async () => {
     const sockets = installWebSocketMock();
-    const { result } = renderHook(() => useChatStream({ wsUrl: 'ws://test/chat' }));
+    const { result } = renderHook(() =>
+      useChatStream({ wsUrl: sameOriginWsUrl('/chat') }),
+    );
     const ws = sockets[0];
     if (ws === undefined) throw new Error('websocket was not created');
 
@@ -98,7 +104,9 @@ describe('useChatStream', () => {
   it('briefly marks TurnRateExceeded as rate limited', async () => {
     vi.useFakeTimers();
     const sockets = installWebSocketMock();
-    const { result } = renderHook(() => useChatStream({ wsUrl: 'ws://test/chat' }));
+    const { result } = renderHook(() =>
+      useChatStream({ wsUrl: sameOriginWsUrl('/chat') }),
+    );
     const ws = sockets[0];
     if (ws === undefined) throw new Error('websocket was not created');
 
@@ -121,7 +129,7 @@ describe('useChatStream', () => {
   it('reconnects after a 500ms backoff when the websocket drops', () => {
     vi.useFakeTimers();
     const sockets = installWebSocketMock();
-    renderHook(() => useChatStream({ wsUrl: 'ws://test/chat' }));
+    renderHook(() => useChatStream({ wsUrl: sameOriginWsUrl('/chat') }));
     const ws = sockets[0];
     if (ws === undefined) throw new Error('websocket was not created');
 
@@ -135,7 +143,9 @@ describe('useChatStream', () => {
   it('does not set state after unmount during a stream', () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const sockets = installWebSocketMock();
-    const { unmount } = renderHook(() => useChatStream({ wsUrl: 'ws://test/chat' }));
+    const { unmount } = renderHook(() =>
+      useChatStream({ wsUrl: sameOriginWsUrl('/chat') }),
+    );
     const ws = sockets[0];
     if (ws === undefined) throw new Error('websocket was not created');
 
@@ -152,5 +162,47 @@ describe('useChatStream', () => {
       } as MessageEvent<string>);
     }).not.toThrow();
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('rejects cross-origin websocket urls', () => {
+    const sockets = installWebSocketMock();
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const { result } = renderHook(() =>
+      useChatStream({ wsUrl: 'ws://example.test/chat' }),
+    );
+
+    expect(sockets).toHaveLength(0);
+    expect(result.current.error).toBe('invalid_ws_url');
+    expect(consoleWarn).toHaveBeenCalledWith(
+      '[useChatStream] rejecting non-same-origin wsUrl',
+      'ws://example.test/chat',
+    );
+  });
+
+  it('sets protocol_version_mismatch and does not reconnect on version mismatch', () => {
+    vi.useFakeTimers();
+    const sockets = installWebSocketMock();
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { result } = renderHook(() =>
+      useChatStream({ wsUrl: sameOriginWsUrl('/chat') }),
+    );
+    const ws = sockets[0];
+    if (ws === undefined) throw new Error('websocket was not created');
+
+    act(() => {
+      ws.onmessage?.({
+        data: JSON.stringify({ version: 2, type: 'done', request_id: 'req-1' }),
+      } as MessageEvent<string>);
+      ws.onclose?.({} as CloseEvent);
+      vi.advanceTimersByTime(15_000);
+    });
+
+    expect(result.current.error).toBe('protocol_version_mismatch');
+    expect(sockets).toHaveLength(1);
+    expect(consoleWarn).toHaveBeenCalledWith(
+      '[useChatStream] protocol version mismatch — closing',
+      2,
+    );
   });
 });

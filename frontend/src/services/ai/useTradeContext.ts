@@ -67,7 +67,8 @@ function parseTradeContext(text: string): TradeContext | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
-  } catch {
+  } catch (err) {
+    console.warn('[useTradeContext] failed to parse AI context', err);
     return null;
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -93,8 +94,12 @@ function parseTradeContext(text: string): TradeContext | null {
 }
 
 function errorCode(err: unknown): string {
-  if (isAiApiError(err) && err.status >= 500) return 'unavailable';
-  return 'unavailable';
+  if (isAiApiError(err)) {
+    if (err.status === 429) return 'rate_limited';
+    if (err.status >= 500) return 'unavailable';
+    return 'request_error';
+  }
+  return 'parse_failed';
 }
 
 export function useTradeContext(input: TradeContextInput): UseTradeContextReturn {
@@ -125,6 +130,7 @@ export function useTradeContext(input: TradeContextInput): UseTradeContextReturn
         setState({ context, loading: false, error: null });
       } catch (err) {
         if (cancelled) return;
+        console.warn('[useTradeContext] AI context failed', err);
         setState({ context: null, loading: false, error: errorCode(err) });
       }
     })();

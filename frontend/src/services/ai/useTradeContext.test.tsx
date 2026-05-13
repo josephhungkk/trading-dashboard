@@ -59,6 +59,36 @@ describe('useTradeContext', () => {
     expect(result.current.error).toBe('unavailable');
   });
 
+  it('gracefully degrades when the AI proxy rate limits', async () => {
+    const err = new Error('ai api 429') as api.AiApiError;
+    err.status = 429;
+    err.payload = { detail: 'rate limited' };
+    vi.spyOn(api, 'postComplete').mockRejectedValue(err);
+
+    const { result } = renderHook(() =>
+      useTradeContext({ symbol: 'NVDA', side: 'BUY', qty: 2 }),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.context).toBeNull();
+    expect(result.current.error).toBe('rate_limited');
+  });
+
+  it('gracefully degrades on request errors', async () => {
+    const err = new Error('ai api 400') as api.AiApiError;
+    err.status = 400;
+    err.payload = { detail: 'bad request' };
+    vi.spyOn(api, 'postComplete').mockRejectedValue(err);
+
+    const { result } = renderHook(() =>
+      useTradeContext({ symbol: 'MSFT', side: 'SELL', qty: 5 }),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.context).toBeNull();
+    expect(result.current.error).toBe('request_error');
+  });
+
   it('gracefully degrades on malformed JSON', async () => {
     vi.spyOn(api, 'postComplete').mockResolvedValue(completion('not json'));
 

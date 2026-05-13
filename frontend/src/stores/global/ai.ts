@@ -70,12 +70,25 @@ export const useAiStore = create<AiStore>()(
         const chatHistory = Array.isArray(persistedHistory)
           ? capHistory(persistedHistory.filter(isChatMessage))
           : [];
+        if (Array.isArray(persistedHistory)) {
+          const droppedCount = persistedHistory.length - chatHistory.length;
+          if (droppedCount > 0) {
+            console.warn(`[ai-store] migrate dropped ${droppedCount} invalid chat messages`);
+          }
+        }
         // Security: explicit string-or-null typed check before hydrating.
         // This mirrors the portfolio migrate guard's defensive shape.
         const defaultModel =
           typeof persistedDefaultModel === 'string' || persistedDefaultModel === null
             ? persistedDefaultModel
             : null;
+        if (
+          persistedDefaultModel !== undefined
+          && persistedDefaultModel !== null
+          && typeof persistedDefaultModel !== 'string'
+        ) {
+          console.warn('[ai-store] migrate coerced invalid defaultModel to null');
+        }
         return { chatHistory, defaultModel };
       },
     },

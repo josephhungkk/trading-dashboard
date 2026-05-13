@@ -32,6 +32,19 @@ function defaultWsUrl(): string {
   return `${scheme}://${window.location.host}/ws/ai/chat`;
 }
 
+function isSameOriginWsUrl(url: string): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    const parsed = new URL(url, window.location.href);
+    return (
+      (parsed.protocol === 'ws:' || parsed.protocol === 'wss:')
+      && parsed.host === window.location.host
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function useChatStream(opts?: { wsUrl?: string }): UseChatStreamReturn {
   const mountedRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
@@ -67,7 +80,13 @@ export function useChatStream(opts?: { wsUrl?: string }): UseChatStreamReturn {
 
     const connect = (): void => {
       if (!mountedRef.current) return;
-      const ws = new WebSocket(opts?.wsUrl ?? defaultWsUrl());
+      const url = opts?.wsUrl ?? defaultWsUrl();
+      if (!isSameOriginWsUrl(url)) {
+        console.warn('[useChatStream] rejecting non-same-origin wsUrl', url);
+        setError('invalid_ws_url');
+        return;
+      }
+      const ws = new WebSocket(url);
       currentWs = ws;
       wsRef.current = ws;
       let downHandled = false;
@@ -81,11 +100,25 @@ export function useChatStream(opts?: { wsUrl?: string }): UseChatStreamReturn {
       ws.onmessage = (e: MessageEvent<string>) => {
         if (!mountedRef.current) return;
         try {
-          const frame = JSON.parse(e.data) as ChatWsFrame;
-          if (frame.version !== 1) {
+          const parsedFrame: unknown = JSON.parse(e.data);
+          if (typeof parsedFrame !== 'object' || parsedFrame === null) {
+            console.warn('[useChatStream] non-object frame, dropping');
             ws.close();
             return;
           }
+          if ((parsedFrame as { version?: unknown }).version !== 1) {
+            console.warn(
+              '[useChatStream] protocol version mismatch — closing',
+              (parsedFrame as { version?: unknown }).version,
+            );
+            setError('protocol_version_mismatch');
+            attemptRef.current = RECONNECT_DELAYS_MS.length;
+            downHandled = true;
+            setConnected(false);
+            ws.close();
+            return;
+          }
+          const frame = parsedFrame as ChatWsFrame;
           setFallbackFromFrame(frame);
           if (frame.type === 'chunk') {
             setPartial((current) => current + frame.text);
@@ -105,8 +138,9 @@ export function useChatStream(opts?: { wsUrl?: string }): UseChatStreamReturn {
               if (mountedRef.current) setRateLimited(false);
             }, RATE_LIMIT_CLEAR_MS);
           }
-        } catch {
-          // Malformed frames are ignored; callers can send again manually.
+        } catch (err) {
+          console.warn('[useChatStream] malformed frame, closing socket', err);
+          ws.close();
         }
       };
 
@@ -119,6 +153,9 @@ export function useChatStream(opts?: { wsUrl?: string }): UseChatStreamReturn {
           attemptRef.current += 1;
           clearReconnectTimer();
           reconnectTimerRef.current = setTimeout(connect, delay);
+        } else {
+          console.warn('[useChatStream] reconnect exhausted');
+          setError('connection_failed');
         }
       };
 

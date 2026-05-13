@@ -53,6 +53,7 @@ export function useAiJob(job_id: string | undefined): UseAiJobReturn {
   const qc = useQueryClient();
   const wsConnectedRef = useRef(false);
   const mountedRef = useRef(true);
+  const [wsError, setWsError] = useState<string | null>(null);
   const [cancelState, setCancelState] = useState<{
     jobId: string | undefined;
     requested: boolean;
@@ -89,25 +90,44 @@ export function useAiJob(job_id: string | undefined): UseAiJobReturn {
       ws.onopen = () => {
         if (!mountedRef.current) return;
         attempt = 0;
+        setWsError(null);
         wsConnectedRef.current = true;
       };
 
       ws.onmessage = (e: MessageEvent<string>) => {
         if (!mountedRef.current) return;
         try {
-          const frame = JSON.parse(e.data) as JobWsFrame;
-          if (frame.version !== 1) {
+          const parsedFrame: unknown = JSON.parse(e.data);
+          if (typeof parsedFrame !== 'object' || parsedFrame === null) {
+            console.warn('[useAiJob] dropping non-state or non-v1 frame', parsedFrame);
             ws.close();
             return;
           }
-          if (frame.type === 'state') {
-            qc.setQueryData<JobStatusResponse>(
-              ['ai', 'job', job_id],
-              fromWsFrame(frame),
+          if ((parsedFrame as { version?: unknown }).version !== 1) {
+            console.warn(
+              '[useAiJob] protocol version mismatch — closing',
+              (parsedFrame as { version?: unknown }).version,
             );
+            setWsError('protocol_version_mismatch');
+            attempt = RECONNECT_DELAYS_MS.length;
+            downHandled = true;
+            wsConnectedRef.current = false;
+            ws.close();
+            return;
           }
-        } catch {
-          // Malformed frames are ignored; REST polling covers missed state.
+          if ((parsedFrame as { type?: unknown }).type !== 'state') {
+            console.warn('[useAiJob] dropping non-state or non-v1 frame', parsedFrame);
+            ws.close();
+            return;
+          }
+          const frame = parsedFrame as JobWsFrame;
+          qc.setQueryData<JobStatusResponse>(
+            ['ai', 'job', job_id],
+            fromWsFrame(frame),
+          );
+        } catch (err) {
+          console.warn('[useAiJob] malformed frame, closing socket', err);
+          ws.close();
         }
       };
 
@@ -119,6 +139,9 @@ export function useAiJob(job_id: string | undefined): UseAiJobReturn {
         if (delay !== undefined) {
           attempt += 1;
           reconnectTimer = setTimeout(connect, delay);
+        } else {
+          console.warn('[useAiJob] reconnect exhausted');
+          setWsError('connection_failed');
         }
       };
 
@@ -149,7 +172,7 @@ export function useAiJob(job_id: string | undefined): UseAiJobReturn {
   return {
     status: statusOf(query.data),
     response: query.data?.response ?? null,
-    error: query.data?.error_code ?? ((query.error as Error | null)?.message ?? null),
+    error: wsError ?? query.data?.error_code ?? ((query.error as Error | null)?.message ?? null),
     cancelRequested,
     cancel,
   };

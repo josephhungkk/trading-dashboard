@@ -11,6 +11,9 @@ export type CompletionResult = components['schemas']['CompletionResult'];
 export type FallbackHop = components['schemas']['FallbackHop'];
 export type AICapability = components['schemas']['AICapability'];
 
+/** Server-side per-connection turn-rate limit on /ws/ai/chat (backend ws_ai.py:_TURN_RATE_PER_WINDOW). */
+export const TURN_RATE_LIMIT_PER_MINUTE = 5;
+
 // api-generated.ts currently exposes the job endpoints as unknown records, so
 // keep the FE contract narrow and explicit here.
 export interface JobSubmitResponse {
