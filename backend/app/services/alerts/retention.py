@@ -14,22 +14,21 @@ few thousand rows) so we issue one DELETE ... RETURNING id and report the count.
 from __future__ import annotations
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def sweep_alert_fire_context(db: AsyncSession, *, retention_days: int = 90) -> int:
     """Delete ``alert_fire_context`` rows older than ``retention_days``.
 
-    Returns the count deleted. Caller (apscheduler job) logs the count.
+    Returns the count deleted via ``cursor.rowcount`` — does NOT materialize
+    deleted rows in Python, so a widened retention call can't blow up memory
+    on a backlog sweep. Caller (apscheduler job) logs the count.
     """
-    result = await db.execute(
-        text(
-            "DELETE FROM alert_fire_context "
-            "WHERE created_at < now() - make_interval(days => :d) "
-            "RETURNING id"
-        ),
+    result: CursorResult[object] = await db.execute(  # type: ignore[assignment]
+        text("DELETE FROM alert_fire_context WHERE created_at < now() - make_interval(days => :d)"),
         {"d": retention_days},
     )
-    count = len(result.all())
+    count = result.rowcount or 0
     await db.commit()
     return count

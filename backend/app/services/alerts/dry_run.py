@@ -22,7 +22,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.services.alerts.predicates import evaluate
+from app.services.alerts.predicates import evaluate, referenced_symbols
+
+# Spec §7 resolution thresholds (seconds). Centralized so a future spec
+# revision changes one constant rather than scattered literals.
+_INSUFFICIENT_BELOW_SECONDS = 60
+_DAILY_AT_OR_ABOVE_SECONDS = 86_400
 
 
 @dataclass(slots=True)
@@ -37,8 +42,11 @@ def _pick_resolution(predicate: dict[str, Any]) -> str:
     kind = predicate.get("kind")
     if kind in {"composite_and", "composite_or"}:
         children = predicate.get("children", [])
+        # Spec §4 schema requires minItems: 1, but this helper is also called
+        # by the "test predicate" button on raw user JSON before validation.
+        # Bail to 'insufficient' so an empty composite can't pretend to fire.
         if not children:
-            return "1m"
+            return "insufficient"
         children_resolutions = [_pick_resolution(c) for c in children]
         if "insufficient" in children_resolutions:
             return "insufficient"
@@ -50,9 +58,9 @@ def _pick_resolution(predicate: dict[str, Any]) -> str:
     if window is None:
         vs_window_minutes = predicate.get("vs_window_minutes")
         window = vs_window_minutes * 60 if vs_window_minutes is not None else 0
-    if 0 < window < 60:
+    if 0 < window < _INSUFFICIENT_BELOW_SECONDS:
         return "insufficient"
-    if window >= 86400:
+    if window >= _DAILY_AT_OR_ABOVE_SECONDS:
         return "1d"
     return "1m"
 
@@ -68,31 +76,47 @@ def replay(
 
     Series must each be sorted ascending by ``ts``. Each bar is a dict with
     at least ``ts``, ``close``, ``volume`` keys.
+
+    Composite predicates that reference multiple symbols all read from the
+    SAME series — production callers pass interleaved/aligned series; the
+    state dict populates ``prices`` + ``bars`` for every referenced symbol
+    so each child's evaluator sees its own symbol.
     """
     resolution = _pick_resolution(predicate)
     if resolution == "insufficient":
         return DryRunResult(replay_resolution="insufficient", fire_count=0)
 
     series = bars_1m if resolution == "1m" else bars_1d
-    symbol = predicate.get("symbol") or "X"
+    symbols = referenced_symbols(predicate) or {predicate.get("symbol") or "X"}
     fires: list[dict[str, Any]] = []
-    for i in range(2, len(series)):
+    fire_count = 0
+    # Replay starts at index 0 so non-windowed predicates (price_threshold,
+    # order_event, ai_signal, news_event, unknown) get every bar evaluated.
+    # Multi-bar predicates (pct_change_window, ma_cross, volume_spike) gate
+    # themselves internally on insufficient series length.
+    for i in range(len(series)):
         window_bars = series[: i + 1]
+        last_close = window_bars[-1]["close"]
         state = {
-            "prices": {symbol: window_bars[-1]["close"]},
-            "bars": {symbol: window_bars},
+            "prices": dict.fromkeys(symbols, last_close),
+            "bars": dict.fromkeys(symbols, window_bars),
         }
         try:
-            if evaluate(predicate, state):
-                fires.append({"ts": window_bars[-1]["ts"], "close": window_bars[-1]["close"]})
+            fired = evaluate(predicate, state)
         except Exception:
             # per-bar isolation (spec §7): one bad bar must not abort the replay
             continue
+        if not fired:
+            continue
+        fire_count += 1
+        # Spec §7: sample_fires bounded to ``max_samples``. Append only while
+        # under the cap; ``truncated`` reports whether more were observed.
+        if len(fires) < max_samples:
+            fires.append({"ts": window_bars[-1]["ts"], "close": last_close})
 
-    truncated = len(fires) > max_samples
     return DryRunResult(
         replay_resolution=resolution,
-        fire_count=len(fires),
-        sample_fires=fires[:max_samples],
-        truncated=truncated,
+        fire_count=fire_count,
+        sample_fires=fires,
+        truncated=fire_count > max_samples,
     )

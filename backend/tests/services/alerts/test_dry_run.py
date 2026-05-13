@@ -56,10 +56,16 @@ def test_replay_truncates_samples() -> None:
     bars_1m = [{"ts": i, "close": 100, "volume": 1} for i in range(20)]
     result = replay(predicate=predicate, bars_1m=bars_1m, bars_1d=[])
     assert result.replay_resolution == "1m"
-    # i ranges 2..19 → 18 windows, all fire (close=100 > 50)
-    assert result.fire_count == 18
+    # All 20 bars fire (close=100 > 50). Replay starts at bar 0 (non-windowed
+    # predicates can evaluate immediately — chunk-B reviewer HIGH-1 fix).
+    assert result.fire_count == 20
+    # sample_fires is the bounded list; max_samples default = 10.
     assert len(result.sample_fires) == 10
     assert result.truncated is True
+    # Memory bound: sample_fires must NOT contain the full 20 — only the
+    # first 10 collected (reviewer MED-4 fix).
+    assert result.sample_fires[0]["ts"] == 0
+    assert result.sample_fires[-1]["ts"] == 9
 
 
 def test_replay_no_fires_not_truncated() -> None:
@@ -162,3 +168,33 @@ def test_replay_uses_bars_1d_when_resolution_is_daily() -> None:
     result = replay(predicate=predicate, bars_1m=bars_1m, bars_1d=bars_1d)
     assert result.replay_resolution == "1d"
     # Doesn't crash even though bars_1m is empty.
+
+
+# ── B-close reviewer fixes ─────────────────────────────────────────────
+
+
+def test_pick_resolution_empty_composite_is_insufficient() -> None:
+    """Reviewer MED-3: empty composite must NOT default to '1m' (which would
+    let an evaluator.evaluate() short-circuit fire spuriously). Should bail
+    to 'insufficient' so the FE checkbox gates user attention."""
+    assert _pick_resolution({"kind": "composite_and", "children": []}) == "insufficient"
+    assert _pick_resolution({"kind": "composite_or", "children": []}) == "insufficient"
+
+
+def test_replay_composite_uses_each_childs_own_symbol() -> None:
+    """Reviewer HIGH-2: composite with mismatched child symbols must populate
+    state for EVERY referenced symbol, not just the outer composite (which has
+    no symbol at all). Otherwise each child evaluator looks up its own symbol
+    in `state['prices']` and finds nothing → never fires."""
+    composite = {
+        "kind": "composite_or",
+        "children": [
+            {"kind": "price_threshold", "symbol": "AAPL", "op": "gt", "value": 50.0},
+            {"kind": "price_threshold", "symbol": "MSFT", "op": "gt", "value": 50.0},
+        ],
+    }
+    bars_1m = [{"ts": i, "close": 100, "volume": 1} for i in range(5)]
+    result = replay(predicate=composite, bars_1m=bars_1m, bars_1d=[])
+    # Each bar fires for both AAPL and MSFT children → composite_or fires
+    # every bar. Reviewer HIGH-1 fix means we no longer skip the first 2.
+    assert result.fire_count == 5

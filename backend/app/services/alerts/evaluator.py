@@ -19,17 +19,36 @@ import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+# Spec §6 producer-side defaults. Centralized so a spec revision touches
+# one place rather than scattered literals.
+_DEFAULT_QUEUE_MAXSIZE = 1000
+_DEFAULT_DEBOUNCE_SECONDS = 0.5
+_DEFAULT_SNAPSHOT_COALESCE_SECONDS = 0.25
+_DEFAULT_DEBOUNCE_SWEEP_SECONDS = 60.0
+_DEFAULT_DEBOUNCE_MAX_AGE_SECONDS = 60.0
+
+# spec §6 source labels for `alerts_evaluator_debounced_total{source}`
+_SOURCE_LISTEN = "listen"
+_SOURCE_TICKS = "ticks"
 
 
 @dataclass(slots=True)
 class EvaluatorMetrics:
     queue_dropped_total: int = 0
-    debounced_total: int = 0
+    # `alerts_evaluator_debounced_total{source}` — spec §6 keys by producer.
+    debounced_total_by_source: dict[str, int] = field(default_factory=dict)
     debounce_evicted_total: int = 0
     snapshot_rebuilds_total: int = 0
     snapshot_rebuild_coalesced_total: int = 0
     eval_errors_total: int = 0
+
+    @property
+    def debounced_total(self) -> int:
+        """Sum across all source labels — kept for backward-compat with
+        callers that don't care about the breakdown."""
+        return sum(self.debounced_total_by_source.values())
 
 
 class InvertedIndex:
@@ -62,16 +81,23 @@ class AlertsEvaluator:
     def __init__(
         self,
         *,
-        queue_maxsize: int = 1000,
-        debounce_seconds: float = 0.5,
-        snapshot_coalesce_seconds: float = 0.25,
-        debounce_sweep_seconds: float = 60.0,
+        queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
+        debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS,
+        snapshot_coalesce_seconds: float = _DEFAULT_SNAPSHOT_COALESCE_SECONDS,
+        debounce_sweep_seconds: float = _DEFAULT_DEBOUNCE_SWEEP_SECONDS,
+        debounce_max_age_seconds: float = _DEFAULT_DEBOUNCE_MAX_AGE_SECONDS,
+        max_age_fn: Callable[[int, str], float] | None = None,
         _rebuild_fn: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=queue_maxsize)
         self._debounce_seconds = debounce_seconds
         self._snapshot_coalesce_seconds = snapshot_coalesce_seconds
         self._debounce_sweep_seconds = debounce_sweep_seconds
+        # Spec §6: evict `(rule_id, symbol)` older than
+        # ``max(window_seconds * 10, 60s)``. Producers wire ``max_age_fn``
+        # to look up the rule's window; default uses the configured floor.
+        self._debounce_max_age_seconds = debounce_max_age_seconds
+        self._max_age_fn = max_age_fn
         self._debounce_last_at: dict[tuple[int, str], float] = {}
         self._index = InvertedIndex()
         self._metrics = EvaluatorMetrics()
@@ -93,17 +119,47 @@ class AlertsEvaluator:
     async def _noop_rebuild(self) -> None:
         pass
 
-    def _producer_debounce_check(self, *, rule_id: int, symbol: str, now: float) -> bool:
+    def _producer_debounce_check(
+        self,
+        *,
+        rule_id: int,
+        symbol: str,
+        now: float,
+        source: str = _SOURCE_LISTEN,
+    ) -> bool:
+        """Return True if the event should be enqueued; False to drop.
+
+        ``source`` labels the producer ('listen' | 'ticks') so the
+        ``alerts_evaluator_debounced_total{source}`` Prometheus counter can
+        distinguish bars_1m NOTIFY drops from internal-bus tick drops.
+        """
         key = (rule_id, symbol)
         last = self._debounce_last_at.get(key)
         if last is not None and (now - last) < self._debounce_seconds:
-            self._metrics.debounced_total += 1
+            self._metrics.debounced_total_by_source[source] = (
+                self._metrics.debounced_total_by_source.get(source, 0) + 1
+            )
             return False
         self._debounce_last_at[key] = now
         return True
 
-    def _sweep_debounce(self, *, now: float, max_age_seconds: float = 60.0) -> None:
-        stale = [k for k, ts in self._debounce_last_at.items() if (now - ts) > max_age_seconds]
+    def _sweep_debounce(self, *, now: float, max_age_seconds: float | None = None) -> None:
+        """Evict stale (rule_id, symbol) debounce entries.
+
+        Per spec §6, eviction age = ``max(window_seconds * 10, 60s)`` per rule.
+        If ``self._max_age_fn`` is configured, it's consulted per-key; otherwise
+        every key uses ``max_age_seconds`` (default ``_debounce_max_age_seconds``).
+        Test callers pass ``max_age_seconds`` for deterministic eviction.
+        """
+        floor = max_age_seconds if max_age_seconds is not None else self._debounce_max_age_seconds
+        stale: list[tuple[int, str]] = []
+        for key, ts in self._debounce_last_at.items():
+            rule_id, symbol = key
+            per_key_max = floor
+            if self._max_age_fn is not None and max_age_seconds is None:
+                per_key_max = max(self._max_age_fn(rule_id, symbol), floor)
+            if (now - ts) > per_key_max:
+                stale.append(key)
         for k in stale:
             del self._debounce_last_at[k]
         self._metrics.debounce_evicted_total += len(stale)
@@ -146,22 +202,30 @@ class AlertsEvaluator:
         one evaluation request per rule indexed for the resolved symbol.
 
         Producer-side debounce gates each `(rule_id, symbol)` pair so a
-        chunk-fill insert burst can't starve the worker.
+        chunk-fill insert burst can't starve the worker. Malformed payloads
+        (non-JSON, missing inst_id, non-numeric inst_id) are dropped silently
+        — the LISTEN bus must survive a bad row.
         """
         try:
             obj = json.loads(payload)
         except json.JSONDecodeError:
             return
-        inst_id = obj.get("inst_id")
-        ts = obj.get("ts")
-        if inst_id is None:
+        raw_inst_id = obj.get("inst_id") if isinstance(obj, dict) else None
+        ts = obj.get("ts") if isinstance(obj, dict) else None
+        if raw_inst_id is None:
             return
-        symbol = resolve_symbol(int(inst_id))
+        try:
+            inst_id = int(raw_inst_id)
+        except TypeError, ValueError:
+            return
+        symbol = resolve_symbol(inst_id)
         if symbol is None:
             return
         now = time.monotonic()
         for rule_id in self._index.rules_for(symbol):
-            if self._producer_debounce_check(rule_id=rule_id, symbol=symbol, now=now):
+            if self._producer_debounce_check(
+                rule_id=rule_id, symbol=symbol, now=now, source=_SOURCE_LISTEN
+            ):
                 await self._enqueue({"rule_id": rule_id, "symbol": symbol, "ts": ts})
 
     async def _sweep_loop(self) -> None:

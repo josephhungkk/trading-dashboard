@@ -34,6 +34,23 @@ async def test_producer_debounce_drops_within_500ms() -> None:
     assert accepted_1 is True
     assert accepted_2 is False
     assert accepted_3 is True
+    # debounced_total aggregates across sources (default 'listen').
+    assert evaluator.metrics.debounced_total == 1
+
+
+async def test_producer_debounce_records_source_dimension() -> None:
+    """Spec §6: alerts_evaluator_debounced_total{source} keys by producer."""
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.5)
+    # Two LISTEN drops, one TICKS drop.
+    evaluator._producer_debounce_check(rule_id=1, symbol="AAPL", now=1000.0, source="listen")
+    evaluator._producer_debounce_check(rule_id=1, symbol="AAPL", now=1000.1, source="listen")
+    evaluator._producer_debounce_check(rule_id=1, symbol="AAPL", now=1000.2, source="listen")
+    evaluator._producer_debounce_check(rule_id=2, symbol="TSLA", now=2000.0, source="ticks")
+    evaluator._producer_debounce_check(rule_id=2, symbol="TSLA", now=2000.1, source="ticks")
+    by_source = evaluator.metrics.debounced_total_by_source
+    assert by_source["listen"] == 2  # first call seeds, 2nd+3rd are drops
+    assert by_source["ticks"] == 1
+    assert evaluator.metrics.debounced_total == 3  # aggregate property
 
 
 async def test_queue_drop_oldest_on_overflow() -> None:
@@ -128,3 +145,49 @@ async def test_on_bars_1m_notify_handles_malformed_payload() -> None:
     evaluator.index.add(rule_id=1, symbols={"AAPL"})
     await evaluator._on_bars_1m_notify("not-json", resolve_symbol=lambda _id: "AAPL")
     assert evaluator._queue.empty()
+
+
+# ── B-close reviewer fixes ─────────────────────────────────────────────
+
+
+async def test_on_bars_1m_notify_drops_non_numeric_inst_id() -> None:
+    """If a malformed row produces a non-numeric inst_id, drop silently
+    instead of raising ValueError into the LISTEN callback."""
+    import json
+
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.0)
+    evaluator.index.add(rule_id=1, symbols={"AAPL"})
+    payload = json.dumps({"inst_id": "not-a-number", "ts": 1700000000.0})
+    await evaluator._on_bars_1m_notify(payload, resolve_symbol=lambda _id: "AAPL")
+    assert evaluator._queue.empty()
+
+
+async def test_on_bars_1m_notify_drops_non_dict_payload() -> None:
+    """`json.loads` on a bare number/string succeeds but yields a non-dict —
+    must not crash on `.get(...)`."""
+    evaluator = AlertsEvaluator(queue_maxsize=100, debounce_seconds=0.0)
+    evaluator.index.add(rule_id=1, symbols={"AAPL"})
+    await evaluator._on_bars_1m_notify("42", resolve_symbol=lambda _id: "AAPL")
+    assert evaluator._queue.empty()
+
+
+def test_debounce_sweep_uses_max_age_fn_per_key() -> None:
+    """Spec §6: eviction age per-key is max(window_seconds*10, 60s). When
+    a max_age_fn is configured, long-window rules survive longer."""
+
+    def max_age(rule_id: int, symbol: str) -> float:
+        # Rule 1 has a 1-hour window → max_age = 36000s (long).
+        # Rule 2 has a 1-minute window → max_age = 600s.
+        return 36_000.0 if rule_id == 1 else 600.0
+
+    evaluator = AlertsEvaluator(
+        queue_maxsize=10,
+        debounce_seconds=0.5,
+        max_age_fn=max_age,
+    )
+    evaluator._producer_debounce_check(rule_id=1, symbol="A", now=0.0)
+    evaluator._producer_debounce_check(rule_id=2, symbol="B", now=0.0)
+    # At now=700, rule 2's 600s window has elapsed (gone), rule 1's hasn't.
+    evaluator._sweep_debounce(now=700.0)
+    assert (1, "A") in evaluator._debounce_last_at
+    assert (2, "B") not in evaluator._debounce_last_at
