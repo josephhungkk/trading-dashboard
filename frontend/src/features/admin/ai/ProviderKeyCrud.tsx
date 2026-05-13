@@ -1,8 +1,8 @@
 import * as React from 'react';
 import { Button } from '@/components/primitives/Button';
 import { Input } from '@/components/primitives/Input';
+import { adminFetch, mintCsrfNonce } from '@/services/admin/api';
 
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 const NAMESPACE = 'ai_provider';
 
 interface SecretMetadata {
@@ -11,49 +11,6 @@ interface SecretMetadata {
   value_type?: string;
   created_at?: string;
   updated_at?: string;
-}
-
-function pathPart(value: string): string {
-  return encodeURIComponent(value);
-}
-
-async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body) headers.set('Content-Type', 'application/json');
-  const response = await fetch(`${BASE}${path}`, {
-    ...init,
-    credentials: 'include',
-    headers,
-  });
-  if (!response.ok) throw new Error(await responseMessage(response));
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
-}
-
-async function responseMessage(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as unknown;
-    if (isDetailBody(body)) return `admin ${response.status}: ${body.detail}`;
-  } catch {
-    return `admin ${response.status}`;
-  }
-  return `admin ${response.status}`;
-}
-
-function isDetailBody(body: unknown): body is { detail: string } {
-  return (
-    typeof body === 'object'
-    && body !== null
-    && 'detail' in body
-    && typeof body.detail === 'string'
-  );
-}
-
-async function mintCsrfNonce(): Promise<string> {
-  const result = await adminFetch<{ nonce: string }>('/api/admin/csrf/issue', {
-    method: 'POST',
-  });
-  return result.nonce;
 }
 
 function listProviderSecrets(): Promise<SecretMetadata[]> {
@@ -68,15 +25,11 @@ function createProviderSecret(key: string, value: string, nonce: string): Promis
   });
 }
 
-function deleteProviderSecret(key: string, nonce: string): Promise<void> {
-  return adminFetch<undefined>(`/api/admin/secrets/${pathPart(NAMESPACE)}/${pathPart(key)}`, {
+function deleteProviderSecret(key: string, nonce: string): Promise<undefined> {
+  return adminFetch<undefined>(`/api/admin/secrets/${encodeURIComponent(NAMESPACE)}/${encodeURIComponent(key)}`, {
     method: 'DELETE',
     headers: { 'X-CSRF-Nonce': nonce },
   });
-}
-
-function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : 'Admin request failed';
 }
 
 export function ProviderKeyCrud(): React.JSX.Element {
@@ -94,7 +47,7 @@ export function ProviderKeyCrud(): React.JSX.Element {
     try {
       setRows(await listProviderSecrets());
     } catch (err) {
-      setError(messageFrom(err));
+      setError(err instanceof Error ? err.message : 'Admin request failed');
     } finally {
       setLoading(false);
     }
@@ -116,7 +69,7 @@ export function ProviderKeyCrud(): React.JSX.Element {
       setValue('');
       await load();
     } catch (err) {
-      setError(messageFrom(err));
+      setError(err instanceof Error ? err.message : 'Admin request failed');
     } finally {
       setSaving(false);
     }
@@ -130,7 +83,9 @@ export function ProviderKeyCrud(): React.JSX.Element {
       await deleteProviderSecret(key, nonce);
       await load();
     } catch (err) {
-      setError(messageFrom(err));
+      console.warn('[ProviderKeyCrud] removeSecret error', err);
+      setError(err instanceof Error ? err.message : 'Admin request failed');
+      await load();
     } finally {
       setDeletingKey(null);
     }
@@ -144,7 +99,16 @@ export function ProviderKeyCrud(): React.JSX.Element {
 
       {error && <div className="rounded-md border border-negative bg-negative/10 p-3 text-sm text-negative">{error}</div>}
 
-      <form className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]" onSubmit={(event) => void addSecret(event)}>
+      <form
+        className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          addSecret(event).catch((err: unknown) => {
+            console.warn('[ProviderKeyCrud] addSecret rejected', err);
+            setSaving(false);
+          });
+        }}
+      >
         <label htmlFor="provider-key-name" className="grid gap-1 text-sm text-fg">
           Key name
           <Input
@@ -193,7 +157,12 @@ export function ProviderKeyCrud(): React.JSX.Element {
                     type="button"
                     variant="destructive"
                     size="sm"
-                    onClick={() => void removeSecret(row.key)}
+                    onClick={() => {
+                      removeSecret(row.key).catch((err: unknown) => {
+                        console.warn('[ProviderKeyCrud] removeSecret rejected', err);
+                        setDeletingKey(null);
+                      });
+                    }}
                     disabled={deletingKey === row.key}
                   >
                     Delete

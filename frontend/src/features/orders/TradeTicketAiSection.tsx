@@ -24,7 +24,7 @@ export function TradeTicketAiSection({
       className="rounded-md border border-border p-3"
       data-testid="ai-context-section"
     >
-      <summary className="cursor-pointer text-sm font-medium">
+      <summary className="cursor-pointer text-sm font-medium" aria-label="Section: AI context">
         AI context
       </summary>
       <div className="mt-3 space-y-3">

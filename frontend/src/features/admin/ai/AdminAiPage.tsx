@@ -36,7 +36,10 @@ function AiSection({
 }): React.JSX.Element {
   return (
     <details open className="rounded-md border border-border bg-bg">
-      <summary className="cursor-pointer px-3 py-2 text-base font-medium text-fg">
+      <summary
+        className="cursor-pointer px-3 py-2 text-base font-medium text-fg"
+        aria-label={`Section: ${title}`}
+      >
         {title}
       </summary>
       <div className="border-t border-border p-3">

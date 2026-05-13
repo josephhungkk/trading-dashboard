@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Button } from '@/components/primitives/Button';
+import { AdminApiError, adminFetch, mintCsrfNonce } from '@/services/admin/api';
 
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 const NAMESPACE = 'ai_router';
 const KEY = 'capability_map';
 
@@ -14,70 +14,9 @@ interface ConfigRecord {
   value_type: 'json';
 }
 
-interface AdminApiError extends Error {
-  status: number;
-}
-
-function pathPart(value: string): string {
-  return encodeURIComponent(value);
-}
-
-async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body) headers.set('Content-Type', 'application/json');
-  const response = await fetch(`${BASE}${path}`, {
-    ...init,
-    credentials: 'include',
-    headers,
-  });
-  if (!response.ok) throw await buildError(response);
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
-}
-
-async function buildError(response: Response): Promise<AdminApiError> {
-  const error = new Error(await responseMessage(response)) as AdminApiError;
-  error.status = response.status;
-  return error;
-}
-
-async function responseMessage(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as unknown;
-    if (isDetailBody(body)) return `admin ${response.status}: ${body.detail}`;
-  } catch {
-    return `admin ${response.status}`;
-  }
-  return `admin ${response.status}`;
-}
-
-function isDetailBody(body: unknown): body is { detail: string } {
-  return (
-    typeof body === 'object'
-    && body !== null
-    && 'detail' in body
-    && typeof body.detail === 'string'
-  );
-}
-
-function isAdminApiError(error: unknown): error is AdminApiError {
-  return (
-    error instanceof Error
-    && 'status' in error
-    && typeof (error as { status: unknown }).status === 'number'
-  );
-}
-
-async function mintCsrfNonce(): Promise<string> {
-  const result = await adminFetch<{ nonce: string }>('/api/admin/csrf/issue', {
-    method: 'POST',
-  });
-  return result.nonce;
-}
-
 function readCapabilityMap(): Promise<ConfigRecord> {
   return adminFetch<ConfigRecord>(
-    `/api/admin/config/${pathPart(NAMESPACE)}/${pathPart(KEY)}`,
+    `/api/admin/config/${encodeURIComponent(NAMESPACE)}/${encodeURIComponent(KEY)}`,
   );
 }
 
@@ -96,7 +35,7 @@ function createCapabilityMap(value: JsonValue, nonce: string): Promise<ConfigRec
 
 function updateCapabilityMap(value: JsonValue, nonce: string): Promise<ConfigRecord> {
   return adminFetch<ConfigRecord>(
-    `/api/admin/config/${pathPart(NAMESPACE)}/${pathPart(KEY)}`,
+    `/api/admin/config/${encodeURIComponent(NAMESPACE)}/${encodeURIComponent(KEY)}`,
     {
       method: 'PUT',
       headers: { 'X-CSRF-Nonce': nonce },
@@ -108,10 +47,6 @@ function updateCapabilityMap(value: JsonValue, nonce: string): Promise<ConfigRec
       }),
     },
   );
-}
-
-function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : 'Admin request failed';
 }
 
 export function CapabilityMapEditor(): React.JSX.Element {
@@ -131,11 +66,11 @@ export function CapabilityMapEditor(): React.JSX.Element {
       setText(JSON.stringify(row.value, null, 2));
       setExists(true);
     } catch (err) {
-      if (isAdminApiError(err) && err.status === 404) {
+      if (err instanceof AdminApiError && err.status === 404) {
         setText('{}');
         setExists(false);
       } else {
-        setError(messageFrom(err));
+        setError(err instanceof Error ? err.message : 'Admin request failed');
       }
     } finally {
       setLoading(false);
@@ -175,7 +110,7 @@ export function CapabilityMapEditor(): React.JSX.Element {
       if (err instanceof SyntaxError) {
         setJsonError(err.message);
       } else {
-        setError(messageFrom(err));
+        setError(err instanceof Error ? err.message : 'Admin request failed');
       }
     } finally {
       setSaving(false);
