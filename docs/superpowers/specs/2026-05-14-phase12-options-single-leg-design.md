@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-14
 **Version target:** v0.12.x
-**Status:** approved for planning (architect reviews 1 + 2 applied 2026-05-14)
+**Status:** approved for planning (architect reviews 1 + 2 + 3 applied 2026-05-14)
 
 ---
 
@@ -50,8 +50,23 @@ Chain source routing is config-driven — see §Configuration below.
   {"USD": ["schwab", "ibkr", "alpaca"], "HKD": ["futu"]}
   ```
 - **Validation:** on load, assert every source ID exists in `broker_registry`; reject unknown sources with startup warning (fail-open — use remaining valid sources).
-- **Invalidation:** pubsub channel `app_config:invalidate:option_chain_sources` (same pattern as `risk_limits`). `OptionChainService` subscribes at lifespan start and reloads in-memory priority list on message.
+- **Invalidation:** pubsub channel `app_config:invalidate:option_chain_sources` (same pattern as `risk_limits`). `OptionChainService` subscribes at lifespan start and reloads in-memory priority list on message. Hot-reload uses the same fail-open policy as boot, plus increments `option_chain_sources_invalid_total{source}` Counter so bad config is visible in Prometheus (LOW-3).
 - **Admin endpoint:** `PUT /api/admin/quote-engine/option-chain-sources` (JWT admin + CSRF nonce). Writes to `app_config`, publishes invalidation.
+
+---
+
+## Market-calendar extensions (HIGH-1)
+
+The spec uses four helpers that do not exist in the current `market_calendar` module. These are new functions to be added to `app/services/market_calendar.py` as part of Phase 12 scope:
+
+| Function | Signature | Behaviour |
+|----------|-----------|-----------|
+| `is_open(exchange)` | `(exchange: str) -> bool` | Returns `True` if the exchange is currently in its regular trading session. Wraps the existing `is_session_window_open` with a standard session-type tag. Exchange codes: `"NYSE"`, `"NASDAQ"` (→ US equity), `"CBOE"` (→ US equity hours), `"HKEX"` (→ HK hours). |
+| `is_past_expiry(expiry, exchange)` | `(expiry: date, exchange: str) -> bool` | Returns `True` if the current time in the exchange's local timezone is past the standard option expiry moment for that exchange (15:00 ET for US equity options; 16:00 HKT for HKEX). Uses `eod_for_exchange` as the anchor and adds the exchange-specific option cutoff offset. |
+| `option_cutoff_time(expiry, exchange)` | `(expiry: date, exchange: str) -> datetime` | Returns the UTC `datetime` at which options on `expiry` stop accepting new OPEN orders for the given exchange. US equity: 15:00 ET on expiry date. HKEX: 16:00 HKT on expiry date. Callers compare `datetime.now(UTC)` against this value. |
+| `next_trading_days(n, exchange)` | `(n: int, exchange: str) -> list[date]` | Returns the next `n` trading days (excluding today) for the exchange. Wraps the existing `next_session_open` logic. Used by `ExerciseService.list_pending` to find contracts expiring within 5 sessions. |
+
+All four must be covered by unit tests using `freezegun` to pin "now".
 
 ---
 
@@ -83,9 +98,9 @@ Inside the transaction:
    ```sql
    ALTER TABLE orders
    ADD COLUMN position_effect TEXT
-       CHECK (position_effect IN ('OPEN', 'CLOSE', 'UNWIND', NULL));
+       CHECK (position_effect IS NULL OR position_effect IN ('OPEN', 'CLOSE'));
    ```
-   `NULL` = equity/non-option (existing rows unchanged). Options orders: `'OPEN'` (BTO/STO) or `'CLOSE'` (BTC/STC). `side` remains `BUY`/`SELL`; `position_effect` is the second dimension. Combined label `BTO`/`STO`/`BTC`/`STC` is derived in the UI and in risk checks — never stored as a composite string.
+   `NULL` = equity/non-option (existing rows unchanged). Options orders: `'OPEN'` (BTO/STO) or `'CLOSE'` (BTC/STC). `side` remains `BUY`/`SELL`; `position_effect` is the second dimension. Combined label `BTO`/`STO`/`BTC`/`STC` is derived in the UI and in risk checks — never stored as a composite string. `'UNWIND'` is excluded — closing both legs of a spread atomically is a Phase 13 concern.
 
 4. **New `option_greeks` table** — persisted Greeks for held/traded contracts only.
 
@@ -148,7 +163,21 @@ position_effect: str | None = None   # "OPEN" | "CLOSE" | None
 
 ### `tax_treatment` on fills and orders (HIGH-F)
 
-Add nullable `tax_treatment TEXT` column to both `orders` and `fills` tables (migration 0046). Values: `'EQUITY'`, `'OPTION_PREMIUM'`, `'OPTION_EXERCISE'`, `'OPTION_ASSIGNMENT'`, `'OPTION_EXPIRY'`. `NULL` = not yet classified (existing rows). Phase 23 (UK CGT) reads this column — cheap now, expensive to backfill later.
+Add nullable `tax_treatment TEXT` column to both `orders` and `fills` tables (migration 0046):
+
+```sql
+ALTER TABLE orders
+  ADD COLUMN tax_treatment TEXT
+    CHECK (tax_treatment IS NULL OR tax_treatment IN
+      ('EQUITY','OPTION_PREMIUM','OPTION_EXERCISE','OPTION_ASSIGNMENT','OPTION_EXPIRY'));
+
+ALTER TABLE fills
+  ADD COLUMN tax_treatment TEXT
+    CHECK (tax_treatment IS NULL OR tax_treatment IN
+      ('EQUITY','OPTION_PREMIUM','OPTION_EXERCISE','OPTION_ASSIGNMENT','OPTION_EXPIRY'));
+```
+
+`NULL` = not yet classified (existing rows). Phase 23 (UK CGT) reads this column — cheap now, expensive to backfill later.
 
 ### Canonical ID format for option contracts (MED-1)
 
@@ -238,6 +267,8 @@ rpc ExerciseOption(ExerciseOptionRequest) returns (ExerciseOptionResponse);
 
 **HIGH-J — streaming Greeks RPC:** `StreamOptionGreeks` is a server-side streaming RPC (not unary `GetOptionGreeks`). The sidecar streams Greeks updates as the market ticks (IBKR: `reqMktData` tick types 10–13; Schwab: not available; Futu: `get_option_condiction` poll). The backend subscribes once per conid and fans out to Redis `greeks.options.<conid>`. The WS options feed reads from this channel, not from `option_greeks` Postgres table (which is the durable store for held contracts only).
 
+**Backpressure (MED-4):** The sidecar drops the oldest Greeks-update message per conid if the unsent queue depth exceeds 4 (i.e., only the freshest 4 ticks per conid are buffered). On drop, increment `option_greeks_stream_drops_total{source}` Counter. This prevents slow backend consumers or gRPC channel backpressure from OOMing the sidecar under high fan-out (e.g. IBKR at 4 updates/sec × 400 conids = 1600 msg/sec).
+
 ### Key messages
 
 ```protobuf
@@ -316,7 +347,9 @@ message ExerciseOptionResponse {
 
 ### `SymbolRef` — `OptionContractHint` oneof (HIGH-3)
 
-Tag 6 in `SymbolRef` was `source_meta bytes`. Replace with a typed oneof to avoid msgpack-in-proto:
+Tag 6 in `SymbolRef` was `source_meta bytes`. Replace with a typed oneof to avoid msgpack-in-proto.
+
+**INFO-1 — tag reuse note:** Tag 6 reuse is intentional. `source_meta bytes` was never written in production (grepped 2026-05-14). Sidecar + backend deploys must be coordinated in lock-step — a deployed sidecar still serialising `source_meta` would produce a parse error. The `OptionContractHint` oneof occupies the same tag number for additive forward-compatibility with future `FutureContractHint = 7` / `ForexContractHint = 8`.
 
 ```protobuf
 message OptionContractHint {
@@ -368,7 +401,7 @@ class OptionChainService:
 
 `SubscriptionHandle` is a dataclass `(conid: str, canonical_id: str | None, channel: str)` — unambiguous whether a given strike is on the conid path or canonical_id path.
 
-Cache: exchange-aware TTL (MED-P). Singleflight per `(underlying_canonical_id, expiry_iso)` (HIGH-4, MED-M note): in-process `asyncio.Lock` dict. For multi-worker deployments (Phase 24), this becomes a Redis lock — noted as a known single-replica limitation consistent with the project's Phase 24 policy.
+Cache: exchange-aware TTL (MED-P). Singleflight per `(underlying_canonical_id, expiry_iso, source)` (HIGH-4): in-process `asyncio.Lock` dict keyed by the three-tuple, matching the cache key shape. This ensures concurrent fetches for the same underlying+expiry from different sources (Schwab, IBKR, Alpaca) run in parallel rather than serialising behind a single lock. For multi-worker deployments (Phase 24), this becomes a Redis lock — noted as a known single-replica limitation consistent with the project's Phase 24 policy.
 
 **`app/services/options/greeks_service.py`**
 
@@ -400,28 +433,47 @@ class ExerciseService:
     ) -> ExerciseResult
 ```
 
-`list_pending` uses `market_calendar.next_trading_days(5)` (MED-4/MED-K note: style derived from `OptionDetails.style` on the instrument, not hardcoded by currency). `account_id` is resolved via `AccountService._resolve_account` chokepoint (HIGH-I — same pattern as all other account-touching endpoints). Rate-limited 5/min per `jwt_subject` (HIGH-I — exercise is money-moving).
+`list_pending` uses `market_calendar.next_trading_days(5, exchange)` (MED-K note: style derived from `OptionDetails.style` on the instrument, not hardcoded by currency). `account_id` is resolved via `AccountService._resolve_account` chokepoint (HIGH-I — same pattern as all other account-touching endpoints). Rate-limited 5/min per `jwt_subject` (HIGH-I — exercise is money-moving).
+
+**Spot price source for intrinsic filter (MED-5):** `list_pending` calls `QuoteService.get_last(underlying_canonical_id)` with a 30s TTL Redis cache. Returns `None` on miss. When spot is `None`, the intrinsic-positive filter is dropped and all expiring-within-5-sessions contracts are returned with a `spot_unavailable: true` flag — FE degrades to "expiring within 5 sessions" label without intrinsic value.
 
 ### New risk checks (`app/services/risk_service.py`) — HIGH-D
 
-New `_check_options_exposure` method, called from `evaluate()` when `ctx.asset_class == OPTION`:
+New `_check_options_exposure` method, called from `evaluate()` when `ctx.asset_class == OPTION`.
 
-1. **Options trading level gate:** `app_config[options/trading_level]` (integer L1–L4). Default L1 (covered calls + long options only). Checked at order-intent:
+**Insertion order in the existing 7-check pipeline (MED-6):** New checks slot in between existing kill-switch (step 1) and PDT (step 2) as follows:
+
+```
+Step 1:   kill-switch check (existing)
+Step 1a:  options trading-level gate       ← new, BLOCK; cheap config read — fail-fast
+Step 1b:  expiry-day cutoff               ← new, BLOCK; config read + datetime compare
+Step 1c:  naked-short check               ← new, BLOCK; requires positions query
+Step 1d:  cash-secured put reserve        ← new, BLOCK; requires BP/cash query
+Step 2:   PDT check (existing)
+Step 3:   cross-broker concentration (existing; uses positions.multiplier — see MED-Q)
+Step 4:   BP buffer check (existing; reads ctx.multiplier — correct for options)
+Step 5:   sidecar margin preview (existing)
+Step 6+:  0DTE WARN + assignment risk WARN ← new WARNs; run last after all BLOCKs pass
+```
+
+**Check definitions:**
+
+1. **Options trading level gate (1a):** `app_config[options/trading_level]` (integer L1–L4). Default L1 (covered calls + long options only). Checked at order-intent:
    - L1: BTO (long calls/puts) and covered calls (STO with existing long stock ≥ qty×100)
    - L2: L1 + cash-secured puts (STO put with cash reserve ≥ strike×qty×multiplier in account)
    - L3: L2 + naked calls/puts (STO without cover)
    - L4: L3 + uncapped risk strategies (not enforced in Phase 12 — deferred to Phase 13 multi-leg)
-2. **Naked short check (CRIT-B):** STO without cover → require L3+; if L < 3, `BLOCK` with `naked_short_not_permitted`.
-3. **Cash-secured put reserve:** STO put at L2 → verify available cash ≥ `strike × qty × multiplier × 1.05` (5% buffer). Uses BP check site (same as CRIT-1 fix).
-4. **Expiry-day cutoff:** On expiry date, block new OPEN orders after `market_calendar.option_cutoff_time(expiry, exchange)` (e.g. 15:00 ET for US equity options).
-5. **0DTE warning:** If `expiry == today`, append `WARN` with `zero_dte_order` code. Not a blocker. FE surfaces as a yellow banner.
-6. **Assignment risk warning:** For STO (short options) within 5 trading days of expiry with delta > 0.7 (ITM), append `WARN` with `high_assignment_risk`.
+2. **Naked short check (1c):** STO without cover → require L3+; if L < 3, `BLOCK` with `naked_short_not_permitted`.
+3. **Cash-secured put reserve (1d):** STO put at L2 → verify available cash ≥ `strike × qty × multiplier × 1.05` (5% buffer). Uses BP check site (same as CRIT-1 fix).
+4. **Expiry-day cutoff (1b):** On expiry date, block new OPEN orders after `market_calendar.option_cutoff_time(expiry, exchange)` (e.g. 15:00 ET for US equity options).
+5. **0DTE warning (post-BLOCK):** If `expiry == today`, append `WARN` with `zero_dte_order` code. Not a blocker. FE surfaces as a yellow banner.
+6. **Assignment risk warning (post-BLOCK):** For STO (short options) within 5 trading days of expiry with delta > 0.7 (ITM), append `WARN` with `high_assignment_risk`.
 
 All new checks respect the existing fail-OPEN policy for audit row insertion failures.
 
 ### Modified services
 
-**`app/services/instruments.py` — `InstrumentResolver.find_or_create_option` (HIGH-2, CRIT-C)**
+**`app/services/instruments.py` — `InstrumentResolver.find_or_create_option` (HIGH-5, CRIT-C)**
 
 Delegates to the existing `resolve_or_create(meta=...)` primitive — no duplication of lock/ON CONFLICT logic:
 
@@ -433,12 +485,12 @@ async def find_or_create_option(
     strike: Decimal,
     expiry: date,
     put_call: Literal["C", "P"],
-    multiplier: int,         # required — not defaulted
+    multiplier: int,           # required — not defaulted
     style: Literal["A", "E"],  # required — not defaulted
     exchange: str,
     currency: str,
     source: str,
-    conid: str,
+    source_symbol: str,        # HIGH-5: broker-native ID — conid (IBKR), OCC symbol (Alpaca), Futu code (Futu HK), Schwab symbol
 ) -> Instrument:
     canonical_id = _build_option_canonical_id(
         underlying_canonical_id, expiry, put_call, strike, exchange
@@ -454,9 +506,9 @@ async def find_or_create_option(
         asset_class=AssetClass.OPTION,
         primary_exchange=exchange,
         currency=currency,
-        meta=details.model_dump(),   # CRIT-C: meta kwarg — column name unchanged
+        meta=details.model_dump(),    # CRIT-C: meta kwarg — column name unchanged
         source=source,
-        raw_symbol=conid,
+        raw_symbol=source_symbol,     # HIGH-5: source-native ID, not IBKR-specific "conid"
     )
 ```
 
@@ -484,7 +536,7 @@ position_effect: str | None = None   # "OPEN" | "CLOSE" | None
 #   ctx = RiskContext(..., multiplier=multiplier, position_effect=position_effect)
 ```
 
-**Concentration check (MED-Q):** `risk_service._check_concentration` uses `position.market_value_base`; for option positions this must include the multiplier: `option_exposure = qty * premium * multiplier`. The position sync path must populate `market_value_base` as `qty × last_price × multiplier` for OPTION asset class.
+**Concentration check (MED-Q):** `risk_service._check_concentration` already multiplies by `positions.multiplier` (column exists; the `market_value_base` column is still deferred to a later phase per Phase 10b.2 notes). For option positions, the position-sync code path must set `positions.multiplier = OptionDetails.multiplier` (e.g. 100) on upsert so that the existing concentration arithmetic `qty * avg_cost * multiplier` is correct. No service code change is needed beyond ensuring the upsert populates `multiplier`.
 
 **`app/services/orders_service.py` — contract expiry check (MED-8)**
 
@@ -499,7 +551,7 @@ if isinstance(details, OptionDetails):
 `parse_place_order` in `order_flow.py` must explicitly reject OCC-format symbols:
 
 ```python
-_OCC_PATTERN = re.compile(r'^[A-Z]{1,5}\d{6}[CP]\d{8}$')
+_OCC_PATTERN = re.compile(r'^[A-Z]{1,6}\d{6}[CP]\d{8}$')  # LOW-2: 1-6 char root covers preferred shares (e.g. BRK.B)
 
 def parse_place_order(text: str) -> ParsedOrder:
     parts = text.split()
@@ -512,6 +564,8 @@ def parse_place_order(text: str) -> ParsedOrder:
     ...
 ```
 
+**LOW-1 — style literals:** `OptionDetails.style` uses `Literal["A", "E"]` in the Pydantic model (proto stays `"A"/"E"`). Implementers should add a module-level comment `# "A" = American, "E" = European` next to the literal definition for grep-ability. If the team prefers `Literal["AMERICAN", "EUROPEAN"]` in the Python model layer with a proto converter at the sidecar boundary, that is acceptable — the choice is deferred to the implementer; either form is spec-compliant.
+
 ### Quote-engine integration (HIGH-6, HIGH-H)
 
 **Subscription budget sizing (HIGH-H):**
@@ -523,7 +577,7 @@ def parse_place_order(text: str) -> ParsedOrder:
 | Alpaca | Options data: rate-limited per plan | 60 per WS connection; 10 connections = 600 max |
 | Futu HK | ~100 subscriptions per quote context | 40 per connection; 10 connections = 400 max |
 
-**Budget enforcement:** `SubscriptionRegistry` tracks `options_subs_active_{source}` Gauge. When adding a new option subscription would exceed `OPTION_SUB_BUDGET[source]` (loaded from `app_config[quote_engine/option_sub_budgets]` with safe defaults), the subscription is refused and the `subscription_capped` frame is sent.
+**Budget enforcement:** `SubscriptionRegistry` tracks `options_subs_active_{source}` Gauge. When adding a new option subscription would exceed the per-source budget (loaded from `app_config[quote_engine/option_sub_budgets]` as `dict[str, int]`, e.g. `{"ibkr": 400, "alpaca": 600, "futu": 400}`, with safe hardcoded defaults), the subscription is refused and the `subscription_capped` frame is sent. All code references this config via `quote_engine/option_sub_budgets` (lowercase, plural) — the uppercase `OPTION_SUB_BUDGET` name is not used in production code.
 
 **In-process conid map (per WS connection):**
 - `dict[conid, OptionContractHint]` — populated on subscribe, torn down entirely on WS close
@@ -575,11 +629,13 @@ option_chain_fetch_seconds{source}               Histogram
 option_chain_fetch_total{source, outcome}         Counter   — ok|stale|timeout|error
 option_expirations_fetch_total{source, outcome}   Counter
 option_greeks_stream_updates_total{source}        Counter   — HIGH-J: streaming, not unary
+option_greeks_stream_drops_total{source}          Counter   — MED-4: backpressure drop per conid
 option_exercise_total{broker, action, outcome}    Counter
 option_greeks_rows_total                          Gauge
 option_greeks_clamped_total{field}                Counter
 quote_options_chain_subs_active{source}           Gauge
 option_risk_check_total{check, verdict}           Counter   — HIGH-D: per new check type
+option_chain_sources_invalid_total{source}        Counter   — LOW-3: bad config on load/reload
 ```
 
 ---
@@ -658,7 +714,8 @@ TanStack Query + WS hybrid (same pattern as `usePortfolioRollup`). Handles `cano
 | Naked short without L3 | BLOCK `naked_short_not_permitted` | Blocking risk banner |
 | Expiry-day cutoff | BLOCK `option_cutoff_passed` | Blocking risk banner |
 | High assignment risk | WARN `high_assignment_risk` | Yellow banner |
-| Exercise duplicate | Idempotency key → return original; partial index → 409 | No duplicate broker call |
+| Exercise — same `idempotency_key` resent | Return 200 with original record (idempotent replay — no second broker call) | Silently succeeds; user sees original status |
+| Exercise — new `idempotency_key` for same `(account_id, instrument_id, date)` | 409 `duplicate_election` (partial unique index) | Error banner: "Election already submitted today" |
 | Greeks out of range | Clamp + `option_greeks_clamped_total` | Clamped value displayed |
 | Subscription over budget | `subscription_capped` frame + REST fallback | "Showing X of Y strikes — polling remainder" |
 | OCC symbol in Telegram | Parser `ParseError` | Bot replies with rejection message |
@@ -686,7 +743,11 @@ TanStack Query + WS hybrid (same pattern as `usePortfolioRollup`). Handles `cano
 - `OptionEventsPage.test.tsx` — elections, idempotency key, CSRF, spot-unavailable degradation
 - `useOptionChain.test.ts` — REST fallback, stale banner, canonicalized frame handling, cap hybrid
 
-Coverage target: 80%+.
+Coverage target: 80%+. Pre-Phase-12 baseline: 970 BE tests. Delta-coverage measured against `pytest --cov=app.services.options --cov-fail-under=80` (INFO-2).
+
+### Market-calendar extension tests
+
+- `test_market_calendar_extensions.py` — all four new helpers (`is_open`, `is_past_expiry`, `option_cutoff_time`, `next_trading_days`) with `freezegun` for time-pinning; US equity + HKEX exchange branches; edge cases at session boundary.
 
 ---
 
