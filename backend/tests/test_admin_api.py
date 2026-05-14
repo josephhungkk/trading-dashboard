@@ -45,11 +45,11 @@ async def clean_tables(session_factory):
     # pytest run (memory feedback_pytest_prod_db_wipe.md). If DATABASE_URL
     # points at the prod WG IP, raise loudly instead of destroying state.
     db_url = settings.database_url
-    if "10.10.0.2" in db_url and "localhost" not in db_url and not _IN_DOCKER:
+    if "test_postgres" not in db_url and ":5433" not in db_url:
         pytest.skip(
-            "Refusing to truncate app_config/app_secrets against the prod DB "
-            f"({db_url}). Override DATABASE_URL to a local test PG before "
-            "running pytest in backend/. See memory feedback_pytest_prod_db_wipe.md."
+            "Refusing to truncate app_config/app_secrets: DATABASE_URL does not "
+            f"point at the test_postgres container ({db_url}). Run tests via "
+            "backend/scripts/run-tests.sh which sets DATABASE_URL correctly."
         )
     async with session_factory() as s:
         # Phase 5b: orders + order_events FK-ordered (events first).

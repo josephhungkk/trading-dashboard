@@ -30,11 +30,11 @@ async def session_factory(engine):
 @pytest.fixture(autouse=True)
 async def clean_tables(session_factory):
     db_url = settings.database_url
-    if "10.10.0.2" in db_url and not _IN_DOCKER:
+    if "test_postgres" not in db_url and ":5433" not in db_url:
         pytest.skip(
-            "Refusing to truncate app_config/app_secrets against the prod DB "
-            f"({db_url}). Set DATABASE_URL to test_postgres before running. "
-            "See memory feedback_pytest_prod_db_wipe.md."
+            "Refusing to truncate app_config/app_secrets: DATABASE_URL does not "
+            f"point at the test_postgres container ({db_url}). Run tests via "
+            "backend/scripts/run-tests.sh which sets DATABASE_URL correctly."
         )
     async with session_factory() as s:
         # 0046 trigger blocks multi-namespace unfiltered DELETEs; scan and delete per-namespace.
