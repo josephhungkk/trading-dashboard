@@ -17,6 +17,7 @@ import { useSizingDefaults } from '@/services/sizing/useSizingDefaults';
 import { ContractSearchInput, type ContractSearchInputValue } from './ContractSearchInput';
 import { TradeTicketAiSection } from '@/features/orders/TradeTicketAiSection';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
+import { OptionDetailsSection } from '@/features/options/OptionDetailsSection';
 
 type Side = PreviewRequest['side'];
 type SubmittableOrderType = PreviewRequest['order_type'];
@@ -24,6 +25,9 @@ type OrderType = SubmittableOrderType | 'TRAIL' | 'TRAIL_LIMIT' | 'MOC' | 'MOO' 
 type Tif = PreviewRequest['tif'];
 type TradeTicketContract = ContractSearchInputValue & {
   asset_class?: string;
+  optionRow?: import('@/features/options/types').OptionChainRow;
+  expiryIso?: string;
+  positionEffect?: 'OPEN' | 'CLOSE';
 };
 
 interface MaintenanceBanner {
@@ -567,6 +571,23 @@ function TradeTicketForm({
           }) : null}
         </select>
       </label>
+
+      {/* ── Phase 12 — Option details section ───────────────────────── */}
+      {(form.contract as TradeTicketContract).asset_class === 'OPTION' &&
+        (form.contract as TradeTicketContract).optionRow != null && (
+          <OptionDetailsSection
+            row={(form.contract as TradeTicketContract).optionRow as NonNullable<TradeTicketContract['optionRow']>}
+            underlyingSymbol={form.contract.symbol.trim()}
+            expiryIso={(form.contract as TradeTicketContract).expiryIso ?? ''}
+            onSideChange={(side: 'BUY' | 'SELL', positionEffect: 'OPEN' | 'CLOSE') => {
+              setForm((s) => ({
+                ...s,
+                side,
+                contract: { ...s.contract, positionEffect } as ContractSearchInputValue,
+              }));
+            }}
+          />
+        )}
 
       {/* ── Phase 11a-D — AI context section ────────────────────────── */}
       {form.contract.symbol.trim() && (

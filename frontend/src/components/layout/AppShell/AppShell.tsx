@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Outlet } from '@tanstack/react-router';
+import { Link, Outlet } from '@tanstack/react-router';
 import { Topbar } from '@/components/layout/Topbar';
 import { LeftPanel } from '@/components/layout/LeftPanel';
 import { RightPanel } from '@/components/layout/RightPanel';
@@ -104,6 +104,27 @@ export function AppShell(): React.JSX.Element {
           </div>
         </div>
         <BottomTabBar />
+        {/* Options secondary nav — desktop only; hidden on mobile (covered by BottomTabBar → More) */}
+        <nav
+          aria-label="Options navigation"
+          className="hidden border-t border-border bg-panel px-4 py-2 md:flex md:gap-4"
+        >
+          <Link
+            to="/options/chain"
+            search={{ symbol: undefined, expiry: undefined }}
+            className="text-sm text-fg-muted transition-colors hover:text-fg"
+            activeProps={{ className: 'text-sm text-primary font-medium' }}
+          >
+            Option Chain
+          </Link>
+          <Link
+            to="/options/events"
+            className="text-sm text-fg-muted transition-colors hover:text-fg"
+            activeProps={{ className: 'text-sm text-primary font-medium' }}
+          >
+            Exercise Events
+          </Link>
+        </nav>
       </div>
       <CommandPalette />
     </ErrorBoundary>

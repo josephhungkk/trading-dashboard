@@ -25,13 +25,19 @@ def _make_app(chain_svc: MagicMock | None = None) -> FastAPI:
 
 
 def test_ws_options_connect_and_disconnect() -> None:
-    """Client should be able to connect and receive an initial frame."""
+    """Client connecting from the WG dev-bypass IP should receive an initial frame."""
     svc = MagicMock()
     svc.get_chain = AsyncMock(
         return_value={"calls": [], "puts": [], "source": "ibkr", "fetched_at_ms": 0, "stale": False}
     )
 
-    with patch("app.api.ws_options.get_chain_service", return_value=svc):
+    with (
+        patch("app.api.ws_options.get_chain_service", return_value=svc),
+        patch(
+            "app.api.ws_options.require_admin_jwt_ws",
+            new=AsyncMock(return_value="test@example.com"),
+        ),
+    ):
         app = _make_app()
         client = TestClient(app)
         with client.websocket_connect("/ws/options/chain?symbol=SPY&expiry=2025-01-17") as ws:

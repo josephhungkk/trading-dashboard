@@ -9,6 +9,7 @@ from typing import Annotated, Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.admin import consume_confirmation_nonce
 from app.core.cf_access import AdminIdentity
 from app.core.deps import get_config, get_db, get_redis, require_admin_jwt
 from app.schemas.options import (
@@ -41,6 +42,8 @@ DbDep = Annotated[Any, Depends(get_db)]
 RedisDep = Annotated[Any, Depends(get_redis)]
 ConfigDep = Annotated[ConfigService, Depends(get_config)]
 IdentityDep = Annotated[AdminIdentity, Depends(require_admin_jwt)]
+# Single-use Redis nonce consumed from X-Confirm-Nonce header (403 if absent/expired).
+CsrfNonce = Annotated[None, Depends(consume_confirmation_nonce)]
 
 
 def get_chain_service(redis: RedisDep, cfg: ConfigDep) -> OptionChainService:
@@ -59,8 +62,8 @@ ExerciseSvcDep = Annotated[ExerciseService, Depends(get_exercise_service)]
 async def get_expirations(
     svc: ChainSvcDep,
     identity: IdentityDep,
-    symbol: Annotated[str, Query()],
-    currency: Annotated[str, Query()] = "USD",
+    symbol: Annotated[str, Query(max_length=20)],
+    currency: Annotated[str, Query(max_length=12)] = "USD",
 ) -> OptionExpirationsResponse:
     expiries = await svc.get_expirations(symbol, currency)
     return OptionExpirationsResponse(expiry_dates=expiries)
@@ -70,10 +73,10 @@ async def get_expirations(
 async def get_chain(
     svc: ChainSvcDep,
     identity: IdentityDep,
-    symbol: Annotated[str, Query()],
+    symbol: Annotated[str, Query(max_length=20)],
     expiry: Annotated[date, Query()],
     strikes: Annotated[int, Query(ge=1, le=60)] = 20,
-    currency: Annotated[str, Query()] = "USD",
+    currency: Annotated[str, Query(max_length=12)] = "USD",
 ) -> OptionChainResponse:
     result = await svc.get_chain(symbol, expiry, strike_count=strikes, currency=currency)
     return OptionChainResponse(**result)
@@ -93,6 +96,7 @@ async def post_exercise_election(
     body: ExerciseElectionRequest,
     identity: IdentityDep,
     svc: ExerciseSvcDep,
+    _csrf: CsrfNonce,
 ) -> ExerciseElectionResponse:
     try:
         result = await svc.elect(
@@ -101,7 +105,6 @@ async def post_exercise_election(
             instrument_id=body.instrument_id,
             action=body.action,
             qty=body.qty,
-            csrf_nonce=body.csrf_nonce,
             idempotency_key=body.idempotency_key,
         )
         return ExerciseElectionResponse(**result)
@@ -124,7 +127,8 @@ async def list_exercise_events(
         text(
             "SELECT id, action, status, created_at, broker_ref FROM exercise_elections "
             "WHERE jwt_subject = :subject AND created_at >= now() - interval '30 days' "
-            "ORDER BY created_at DESC"
+            "ORDER BY created_at DESC "
+            "LIMIT 200"
         ),
         {"subject": identity.email},
     )
@@ -146,6 +150,7 @@ async def update_chain_sources(
     cfg: ConfigDep,
     redis: RedisDep,
     identity: IdentityDep,
+    _csrf: CsrfNonce,
 ) -> dict[str, Any]:
     await cfg.set("quote_engine", "option_chain_sources", body.sources, "json")
     await redis.publish("app_config:invalidate:option_chain_sources", "1")
@@ -157,6 +162,7 @@ async def update_sub_budgets(
     body: OptionSubBudgetsRequest,
     cfg: ConfigDep,
     identity: IdentityDep,
+    _csrf: CsrfNonce,
 ) -> dict[str, Any]:
     await cfg.set("quote_engine", "option_sub_budgets", body.budgets, "json")
     return {"ok": True}
@@ -167,6 +173,7 @@ async def update_trading_level(
     body: TradingLevelRequest,
     cfg: ConfigDep,
     identity: IdentityDep,
+    _csrf: CsrfNonce,
 ) -> dict[str, Any]:
     await cfg.set("options", "trading_level", body.level, "int")
     return {"ok": True, "level": body.level}

@@ -129,10 +129,13 @@ class ExerciseService:
         instrument_id: int,
         action: Literal["EXERCISE", "DO_NOT_EXERCISE", "LAPSE"],
         qty: Decimal,
-        csrf_nonce: str,
         idempotency_key: uuid.UUID,
     ) -> dict[str, Any]:
-        """Submit an exercise election. Idempotent on same idempotency_key."""
+        """Submit an exercise election. Idempotent on same idempotency_key.
+
+        CSRF validation is handled at the API layer via the consume_confirmation_nonce
+        Redis dep — this method does not accept or validate a nonce.
+        """
         existing = await self._find_by_idempotency_key(idempotency_key, jwt_subject)
         if existing is not None:
             return existing

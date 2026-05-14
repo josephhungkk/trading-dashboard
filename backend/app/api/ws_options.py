@@ -8,8 +8,9 @@ import time
 from datetime import date
 
 import structlog
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException
 
+from app.api.ws_auth import require_admin_jwt_ws
 from app.services.options.chain_service import OptionChainService
 
 log = structlog.get_logger(__name__)
@@ -40,6 +41,11 @@ async def ws_options_chain(
         return
 
     await websocket.accept()
+    try:
+        await require_admin_jwt_ws(websocket)  # raises WebSocketException on failure
+    except WebSocketException:
+        return
+
     _active_connections += 1
     log.info("ws_options_chain_connected", symbol=symbol, expiry=expiry)
 
