@@ -434,6 +434,29 @@ async def _evaluate_risk_for_place_order(
         config=cast(Any, cfg),
         sidecar=cast(Any, client),
     )
+    # Phase 12: resolve multiplier and position_effect for options
+
+    import sqlalchemy as _sa
+
+    from app.services.options.types import OptionDetails, parse_instrument_meta
+
+    multiplier = 1
+    position_effect_value: Literal["OPEN", "CLOSE"] | None = None
+    if instrument_id is not None and asset_class == "OPTION":
+        try:
+            instr_result = await db.execute(
+                _sa.text("SELECT meta FROM instruments WHERE id = :id"),
+                {"id": instrument_id},
+            )
+            instr_row = instr_result.fetchone()
+            if instr_row:
+                details = parse_instrument_meta(instr_row[0] or {})
+                if isinstance(details, OptionDetails):
+                    multiplier = details.multiplier
+        except Exception:
+            pass
+    if hasattr(request, "position_effect"):
+        position_effect_value = request.position_effect
     ctx = EvaluationContext(
         account_id=request.account_id,
         broker_id=capability_broker_id(account.gateway_label),
@@ -447,6 +470,8 @@ async def _evaluate_risk_for_place_order(
         currency_base=account.currency_base,
         symbol=symbol,
         asset_class=asset_class,
+        multiplier=multiplier,
+        position_effect=position_effect_value,
     )
     verdict = await svc.evaluate(ctx, mode="place_order")
     log.info(
@@ -1858,14 +1883,15 @@ async def _native_notional(
     contract: base.Contract,
     qty: Decimal,
     *,
+    multiplier: int = 1,
     quote_engine: object | None = None,
 ) -> Decimal:
     if request.order_type == "LIMIT" and request.limit_price is not None:
-        return qty * Decimal(request.limit_price)
+        return qty * Decimal(request.limit_price) * multiplier
     if request.order_type == "STOP" and request.stop_price is not None:
-        return qty * Decimal(request.stop_price)
+        return qty * Decimal(request.stop_price) * multiplier
     mid = await _get_market_mid(redis, request.conid, contract=contract, quote_engine=quote_engine)
-    return qty * mid * Decimal("1.05")
+    return qty * mid * Decimal("1.05") * multiplier
 
 
 async def _get_market_mid(

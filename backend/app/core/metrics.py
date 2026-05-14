@@ -951,3 +951,80 @@ TELEGRAM_ORDER_E2E_SECONDS = Histogram(
     labelnames=["stage"],
     registry=registry,
 )
+
+# Phase 12: Options metrics
+OPTION_CHAIN_FETCH_SECONDS = Histogram(
+    "option_chain_fetch_seconds",
+    "Option chain fetch latency.",
+    labelnames=["source"],
+    registry=registry,
+)
+
+OPTION_CHAIN_FETCH_TOTAL = Counter(
+    "option_chain_fetch_total",
+    "Option chain fetch outcomes.",
+    labelnames=["source", "outcome"],
+    registry=registry,
+)
+
+OPTION_EXPIRATIONS_FETCH_TOTAL = Counter(
+    "option_expirations_fetch_total",
+    "Option expirations fetch outcomes.",
+    labelnames=["source", "outcome"],
+    registry=registry,
+)
+
+OPTION_GREEKS_STREAM_UPDATES_TOTAL = Counter(
+    "option_greeks_stream_updates_total",
+    "Greeks stream updates received.",
+    labelnames=["source"],
+    registry=registry,
+)
+
+OPTION_GREEKS_STREAM_DROPS_TOTAL = Counter(
+    "option_greeks_stream_drops_total",
+    "Greeks stream messages dropped (backpressure).",
+    labelnames=["source"],
+    registry=registry,
+)
+
+OPTION_EXERCISE_TOTAL = Counter(
+    "option_exercise_total",
+    "Exercise elections submitted.",
+    labelnames=["broker", "action", "outcome"],
+    registry=registry,
+)
+
+OPTION_GREEKS_ROWS_TOTAL = Gauge(
+    "option_greeks_rows_total",
+    "Current rows in option_greeks table.",
+    registry=registry,
+)
+
+OPTION_GREEKS_CLAMPED_TOTAL = Counter(
+    "option_greeks_clamped_total",
+    "Greeks values clamped to valid range.",
+    labelnames=["field"],
+    registry=registry,
+)
+
+QUOTE_OPTIONS_CHAIN_SUBS_ACTIVE = Gauge(
+    "quote_options_chain_subs_active",
+    "Active options chain subscriptions.",
+    labelnames=["source"],
+    registry=registry,
+)
+
+OPTION_RISK_CHECK_TOTAL = Counter(
+    "option_risk_check_total",
+    "Options risk check outcomes.",
+    labelnames=["check", "verdict"],
+    registry=registry,
+)
+
+OPTION_CHAIN_SOURCES_INVALID_TOTAL = Counter(
+    "option_chain_sources_invalid_total",
+    "Invalid sources on chain config load/reload.",
+    labelnames=["source"],
+    registry=registry,
+)
