@@ -75,8 +75,8 @@ export function PredicateJsonEditor({
           role="alert"
           data-testid="predicate-json-schema-errors"
         >
-          {schemaErrors.map((err, idx) => (
-            <li key={idx}>{err}</li>
+          {schemaErrors.map((err) => (
+            <li key={err}>{err}</li>
           ))}
         </ul>
       )}
