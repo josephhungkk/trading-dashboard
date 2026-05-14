@@ -5,6 +5,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 11c — Telegram bot (v0.11.2.0)
+
+Phase 11c shipped across 3 chunks (A/B/C) at tag `v0.11.2.0` on 2026-05-14. 22 telegram tests green (BE); 676/676 FE tests green. Introduces aiogram 3.28.2 webhook bot, Telegram delivery channel, and AI chat integration.
+
+**Chunk A — Infrastructure (feat, then fix)**
+
+- `alembic/versions/0045_telegram.py`: 3 tables — `telegram_allowlist` (chat_id PK, from_user_id, jwt_subject, label, unique idx), `telegram_command_log` (TimescaleDB hypertable, 90d retention), `telegram_config_history` (immutable audit log).
+- `app/services/telegram/allowlist.py`: `AllowlistEntry` dataclass + `AllowlistService` (in-memory dict keyed `(chat_id, from_user_id)`, Redis pubsub reload on `telegram:allowlist:invalidate`).
+- `app/services/telegram/bot.py`: `build_dispatcher()` (aiogram `Dispatcher`), `telegram_startup()` (set_webhook + retry), `telegram_shutdown()` (delete_webhook).
+- `app/services/telegram/log_command.py`: `log_command(db, …)` writes to `telegram_command_log`.
+- `app/api/telegram.py`: `POST /api/telegram/webhook` (HMAC-SHA256 signature verify, constant-time), `GET /api/admin/telegram/config`, `PUT /api/admin/telegram/config` (bot_token + public_base_url, rotates webhook secret), `POST /api/admin/telegram/test-message`, `GET/POST/DELETE /api/admin/telegram/allowlist`, `GET /api/admin/telegram/command-log`.
+- `app/services/alerts/channels/telegram.py`: `TelegramChannel` stub wired into `DeliveryDispatcher`.
+- `app/main.py` lifespan: loads `bot_token` + `webhook_secret` from secrets; builds `AllowlistService`, `TelegramRateLimiter`, `Dispatcher`; calls `telegram_startup()`; starts pubsub listeners.
+
+**Chunk B — Command handlers + admin webhook endpoint**
+
+- `app/services/telegram/rate_limiter.py`: `TelegramRateLimiter` — 2-bucket sliding-window via Redis sorted-set; 10 read/60s + 3 write/60s per `(chat_id, from_user_id)`; fail-open on Redis error.
+- `app/services/telegram/commands.py`: `handle_status`, `handle_accounts`, `handle_kill_switch`, `handle_mute`, `handle_unmute`, `handle_help` + `register_handlers` wiring. All DB strings `html.escape()`'d; `RETURNING id` + `fetchone()` detects zero-row UPDATEs; `_MAX_MUTE_SECS = 365d` guard. `F.text` catch-all wired when `tg_chat` provided.
+- `app/api/admin_alerts.py`: `PUT /api/admin/alerts/webhooks/{webhook_id}` (SSRF validation via `_validate_url`, Path(ge=1), CSRF nonce).
+- `app/main.py`: mute-expiry APScheduler job (60s interval, restores `status='active'` for expired mutes); `admin_alerts_router` included; `register_tg_handlers` called with wired dependencies.
+- FE `services/admin/api.ts`: CSRF header flipped to `X-Confirm-Nonce` (matches BE `consume_confirmation_nonce`).
+
+**Chunk C — Free-form AI chat**
+
+- `app/services/telegram/chat.py`: `TelegramChat` — non-blocking lock acquire (`asyncio.shield + wait_for(0.001s)`), REASONING capability, 20-turn Redis history (full SHA-256 HMAC key, 24h TTL), input capped at 2000 chars, reply capped at 4096 chars (Telegram limit), lock evicted from dict after release.
+- `app/main.py`: reads `chat_id_hash_salt` secret (fallback `"default-salt"`); constructs `TelegramChat(ai_client=app.state.ai_router, …)`.
+
+**Frontend (Chunk B FE)**
+
+- `features/admin/telegram/BotConfigPanel.tsx`: useQuery-based config load (load error surfaced); PUT with `X-Confirm-Nonce`; test-message send; labeled inputs.
+- `features/admin/telegram/AllowlistPanel.tsx`: useQuery + invalidate CRUD; `parsePositiveInt` guard before POST; in-flight remove tracker (`Set<number>`); labeled inputs.
+- `features/admin/telegram/CommandLogPanel.tsx`: 30s refetch, outcome colored, `satisfies never` on default branch.
+- `features/admin/telegram/AdminTelegramPage.tsx`: composes all three panels.
+- `routes/admin.telegram.tsx`: `/admin/telegram` route.
+
+**Reviewer findings applied**
+
+- Chunk A: 6-reviewer chain — 3C/9H/9M applied.
+- Chunk B: 6-reviewer chain — 4H/8M applied (SSRF, RETURNING id, rate-limit wiring, html.escape).
+- Chunk B FE: typescript-reviewer — 4H/1M applied (NaN input guard, concurrent-remove Set, load error UX, labels).
+- Chunk C: code-quality-reviewer — 4H/2M applied (TOCTOU lock fix, unbounded lock leak, done-callback safety, prompt-injection cap).
+
+**Still deferred**
+
+- `TicksSubscriber` lifespan integration (quote-engine dependency).
+- 3-retry-then-dormancy fallback.
+- Monaco editor swap.
+
 ### Phase 11b chunk-B-close — lifespan integration + 3 endpoints (v0.11.1.4)
 
 Phase 11b chunk-B-close shipped as `v0.11.1.4` on 2026-05-13 (9 feature commits + 1 reviewer-fix commit, range `fa9585c..34b3fd5`). Closes the deferred wiring items from chunks B and D as a single chunk between D-tag and 11c-open. 171 alerts tests green (149 BE + 22 FE), 676/676 full FE.
