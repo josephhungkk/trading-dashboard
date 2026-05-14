@@ -23,12 +23,20 @@ pytestmark = [pytest.mark.integration]
 
 async def _seed_test_account_and_instruments(db: AsyncSession) -> tuple[str, list[int]]:
     """Return (account_id, list of instrument_ids inserted)."""
-    # Read existing seeded account
+    # Ensure the test account exists (idempotent — safe on both test and prod DB).
     account_id = (
         await db.execute(
             text(
-                "SELECT id FROM broker_accounts WHERE account_number = 'TEST001' "
-                "AND broker_id = 'ibkr' LIMIT 1"
+                """
+                INSERT INTO broker_accounts (
+                    broker_id, account_number, alias, mode, gateway_label,
+                    currency_base, last_seen_via
+                ) VALUES (
+                    'ibkr'::broker_id_enum, 'TEST001', 'test-acct-1',
+                    'paper'::trading_mode_enum, 'isa-paper', 'GBP', 'isa-paper'
+                ) ON CONFLICT (broker_id, account_number) DO UPDATE SET alias = EXCLUDED.alias
+                RETURNING id
+                """
             )
         )
     ).scalar_one()

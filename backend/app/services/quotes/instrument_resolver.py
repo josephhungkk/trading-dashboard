@@ -233,7 +233,8 @@ class InstrumentResolver:
         new_id = result.scalar_one_or_none()
 
         if new_id is not None:
-            QUOTE_INSTRUMENTS_CREATED_TOTAL.labels(asset_class=asset_class.value).inc()
+            ac_label = asset_class.value if hasattr(asset_class, "value") else str(asset_class)
+            QUOTE_INSTRUMENTS_CREATED_TOTAL.labels(asset_class=ac_label).inc()
             inst = await self._session.get(Instrument, new_id)
             if inst is None:  # pragma: no cover — invariant violation, not assert
                 raise LookupError(
