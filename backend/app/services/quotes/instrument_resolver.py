@@ -24,6 +24,8 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -121,6 +123,68 @@ class InstrumentResolver:
             entry = self._locks[key]
             if entry.refcount == 0:
                 self._locks.pop(key, None)
+
+    @staticmethod
+    def _build_option_canonical_id(
+        underlying: str,
+        option_type: str,
+        strike: Decimal,
+        expiry: date,
+    ) -> str:
+        return f"option:{underlying}:{option_type}:{strike}:{expiry.isoformat()}"
+
+    async def find_or_create_option(
+        self,
+        session: AsyncSession,
+        underlying_canonical_id: str,
+        option_type: str,
+        strike: Decimal,
+        expiry: date,
+        exchange: str,
+        multiplier: int = 100,
+        broker_id: str | None = None,
+    ) -> Instrument:
+        """Find or create an OPTION instrument for a single option contract."""
+        if session is not self._session:
+            resolver = InstrumentResolver(session)
+            return await resolver.find_or_create_option(
+                session,
+                underlying_canonical_id,
+                option_type,
+                strike,
+                expiry,
+                exchange,
+                multiplier,
+                broker_id,
+            )
+
+        normalized_type = option_type.upper()
+        canonical_id = self._build_option_canonical_id(
+            underlying_canonical_id,
+            normalized_type,
+            strike,
+            expiry,
+        )
+        meta: MetaDict = {
+            "asset_class": AssetClass.OPTION.value,
+            "underlying_canonical_id": underlying_canonical_id,
+            "option_type": normalized_type,
+            "strike": str(strike),
+            "expiry": expiry.isoformat(),
+            "multiplier": multiplier,
+            "style": "AMERICAN",
+            "exchange": exchange,
+        }
+        return await self.resolve_or_create(
+            canonical_id=canonical_id,
+            source=broker_id or "options",
+            raw_symbol=canonical_id,
+            asset_class=AssetClass.OPTION,
+            primary_exchange=exchange,
+            currency="HKD" if exchange.upper() in {"HKEX", "SEHK", "XHKG"} else "USD",
+            meta=meta,
+            alias_meta={"exchange": exchange, "sec_type": "OPT"},
+        )
 
     async def resolve_or_create(
         self,
