@@ -21,7 +21,9 @@ async def test_telegram_startup_calls_set_webhook() -> None:
             webhook_url="https://example.test/api/telegram/webhook",
         )
 
-    assert returned is bot
+    returned_bot, ok = returned
+    assert returned_bot is bot
+    assert ok is True
     bot.set_webhook.assert_awaited_once_with(
         url="https://example.test/api/telegram/webhook",
         secret_token="secret",
@@ -55,5 +57,7 @@ async def test_telegram_startup_retries_set_webhook_on_failure() -> None:
             webhook_url="https://example.test/api/telegram/webhook",
         )
 
-    assert returned is bot
+    returned_bot, ok = returned
+    assert returned_bot is bot
+    assert ok is True
     assert bot.set_webhook.await_count == 3

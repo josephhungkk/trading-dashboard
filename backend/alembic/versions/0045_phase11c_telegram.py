@@ -26,7 +26,8 @@ def upgrade() -> None:
             command      TEXT NOT NULL,
             args         TEXT,
             outcome      TEXT NOT NULL CHECK (outcome IN ('ok','unauthorized','rate_limited','error','noop')),
-            latency_ms   INT
+            latency_ms   INT,
+            PRIMARY KEY (ts, id)
         );
         """
     )
@@ -47,6 +48,12 @@ def upgrade() -> None:
           ON telegram_command_log (outcome, ts DESC) WHERE outcome != 'ok';
         """
     )
+    op.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tg_cmd_id
+          ON telegram_command_log (id DESC);
+        """
+    )
     op.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS muted_until TIMESTAMPTZ;")
     op.execute(
         """
@@ -59,6 +66,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS idx_alerts_muted_until;")
     op.execute("ALTER TABLE alerts DROP COLUMN IF EXISTS muted_until;")
+    op.execute("DROP INDEX IF EXISTS idx_tg_cmd_id;")
     op.execute("DROP INDEX IF EXISTS idx_tg_cmd_outcome_ts;")
     op.execute("DROP INDEX IF EXISTS idx_tg_cmd_chat_ts;")
     op.execute("DROP TABLE IF EXISTS telegram_command_log CASCADE;")

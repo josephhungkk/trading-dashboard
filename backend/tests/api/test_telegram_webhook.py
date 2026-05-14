@@ -67,7 +67,7 @@ async def test_webhook_bot_none_returns_503(telegram_client: AsyncClient) -> Non
 
 @pytest.mark.asyncio
 async def test_webhook_duplicate_update_id_is_noop(telegram_client: AsyncClient) -> None:
-    telegram_client._transport.app.state.redis.get = AsyncMock(return_value=b"1")  # type: ignore[attr-defined]
+    telegram_client._transport.app.state.redis.set = AsyncMock(return_value=None)  # type: ignore[attr-defined]  # NX miss → already exists
 
     response = await telegram_client.post(
         "/api/telegram/webhook",

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import inspect
 import secrets
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
-from pydantic import BaseModel
+from pydantic import AnyHttpUrl, BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,11 +26,12 @@ router = APIRouter(
 )
 
 _ALLOWLIST_CHANNEL = "app_config:invalidate:telegram_allowlist"
+_CONFIG_CHANNEL = "app_config:invalidate:telegram_config"
 
 
 class TelegramConfigPut(BaseModel):
     bot_token: str
-    public_base_url: str = ""
+    public_base_url: AnyHttpUrl | Literal[""] = ""
 
 
 class TestMessageIn(BaseModel):
@@ -41,8 +42,8 @@ class TestMessageIn(BaseModel):
 class AllowlistEntryIn(BaseModel):
     chat_id: int
     from_user_id: int
-    jwt_subject: str
-    label: str
+    jwt_subject: str = Field(min_length=1, max_length=256)
+    label: str = Field(min_length=1, max_length=200)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -75,13 +76,15 @@ async def get_telegram_config(request: Request, config: ConfigDep) -> dict[str, 
 async def put_telegram_config(
     body: TelegramConfigPut,
     config: ConfigDep,
+    redis: RedisDep,
     _csrf: CsrfDep,
 ) -> dict[str, bool]:
     webhook_secret = secrets.token_urlsafe(32)
     await config.set_secret("telegram", "bot_token", body.bot_token)
     await config.set_secret("telegram", "webhook_secret", webhook_secret)
     if body.public_base_url:
-        await config.set("telegram", "public_base_url", body.public_base_url, "str")
+        await config.set("telegram", "public_base_url", str(body.public_base_url), "str")
+    await redis.publish(_CONFIG_CHANNEL, "1")
     return {"ok": True}
 
 
@@ -134,16 +137,13 @@ async def get_command_log(
     before_id: int | None = Query(default=None),
 ) -> list[dict[str, Any]]:
     params: dict[str, Any] = {}
-    where = ""
+    cursor_clause = ""
     if before_id is not None:
-        where = "WHERE id < :before_id"
+        cursor_clause = "WHERE id < :before_id "
         params["before_id"] = before_id
-    result = await db.execute(
-        text(
-            "SELECT id, ts, chat_id, from_user_id, command, args, outcome, latency_ms "
-            f"FROM telegram_command_log {where} "
-            "ORDER BY ts DESC LIMIT :limit"
-        ),
-        {**params, "limit": limit},
+    query = text(
+        "SELECT id, ts, chat_id, from_user_id, command, args, outcome, latency_ms "
+        "FROM telegram_command_log " + cursor_clause + "ORDER BY id DESC LIMIT :limit"
     )
+    result = await db.execute(query, {**params, "limit": limit})
     return [dict(row) for row in result.mappings().all()]

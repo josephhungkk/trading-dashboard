@@ -59,15 +59,28 @@ class TelegramChannel(AlertChannel):
                     timeout=_SEND_TIMEOUT,
                 )
                 return True
-            except Exception:
-                log.warning("telegram.send_failed", alert_id=fire.alert_id)
+            except Exception as exc:
+                log.warning(
+                    "telegram.send_failed",
+                    alert_id=fire.alert_id,
+                    chat_id=chat_id,
+                    error_class=type(exc).__name__,
+                )
                 return False
 
-        results = await asyncio.gather(
+        raw_results = await asyncio.gather(
             *[send_one(cid) for cid in chat_ids],
-            return_exceptions=False,
+            return_exceptions=True,
         )
-        successes = sum(1 for result in results if result)
+        successes = sum(1 for r in raw_results if r is True)
+        failures = len(raw_results) - successes
+        if failures:
+            log.warning(
+                "telegram.partial_send_failures",
+                alert_id=fire.alert_id,
+                failures=failures,
+                total=len(raw_results),
+            )
         if successes == 0:
             return DeliveryOutcome.failed
         return DeliveryOutcome.sent

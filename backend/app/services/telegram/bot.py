@@ -33,17 +33,18 @@ async def _set_webhook_with_retry(bot: Bot, *, url: str, secret_token: str) -> b
                 "telegram.set_webhook_failed",
                 attempt=attempt,
                 error_class=type(exc).__name__,
-                error=str(exc),
             )
     return False
 
 
-async def telegram_startup(*, bot_token: str, webhook_secret: str, webhook_url: str) -> Bot:
+async def telegram_startup(
+    *, bot_token: str, webhook_secret: str, webhook_url: str
+) -> tuple[Bot, bool]:
     bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     ok = await _set_webhook_with_retry(bot, url=webhook_url, secret_token=webhook_secret)
     if not ok:
         log.error("telegram.set_webhook_all_retries_failed")
-    return bot
+    return bot, ok
 
 
 async def telegram_shutdown(bot: Bot) -> None:

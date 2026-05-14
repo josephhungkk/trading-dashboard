@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from typing import Any
 
 import structlog
@@ -16,7 +17,7 @@ dp: Dispatcher | None = None
 async def telegram_webhook(request: Request) -> Response:
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     expected = getattr(request.app.state, "telegram_webhook_secret", None)
-    if not expected or secret != expected:
+    if not expected or not hmac.compare_digest(secret, expected):
         return Response(status_code=403)
 
     bot: Bot | None = getattr(request.app.state, "telegram_bot", None)
@@ -26,11 +27,11 @@ async def telegram_webhook(request: Request) -> Response:
     redis = request.app.state.redis
     body: dict[str, Any] = await request.json()
     update_id = body.get("update_id")
-    if update_id:
+    if isinstance(update_id, int) and update_id > 0:
         dedup_key = f"telegram:seen:{update_id}"
-        if await redis.get(dedup_key):
+        was_set = await redis.set(dedup_key, "1", ex=300, nx=True)
+        if not was_set:
             return Response(status_code=200)
-        await redis.set(dedup_key, "1", ex=300)
 
     if dp is None:
         return Response(status_code=503)

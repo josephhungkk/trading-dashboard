@@ -487,6 +487,31 @@ async def lifespan(_app: FastAPI) -> Any:
     _app.state.telegram_allowlist = telegram_allowlist
     telegram_bot_instance = None
     tg_allowlist_listener: asyncio.Task[None] | None = None
+    tg_config_listener: asyncio.Task[None] | None = None
+
+    async def _watch_telegram_config_secret() -> None:
+        pubsub = redis.pubsub()
+        channel = "app_config:invalidate:telegram_config"
+        while True:
+            try:
+                await pubsub.subscribe(channel)
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        await asyncio.sleep(0)
+                        continue
+                    new_secret = await svc.reveal_secret("telegram", "webhook_secret")
+                    if new_secret:
+                        _app.state.telegram_webhook_secret = str(new_secret)
+                        log.info("telegram.webhook_secret_rotated")
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                await pubsub.unsubscribe(channel)
+                raise
+            except Exception:
+                log.exception("telegram.config_listener_crashed", retry_in=5.0)
+                await pubsub.unsubscribe(channel)
+                await asyncio.sleep(5.0)
+
     try:
         bot_token = await svc.reveal_secret("telegram", "bot_token")
         webhook_secret = await svc.reveal_secret("telegram", "webhook_secret")
@@ -494,17 +519,28 @@ async def lifespan(_app: FastAPI) -> Any:
         public_base_url = str(public_base_url or "")
         if bot_token:
             webhook_url = f"{public_base_url}/api/telegram/webhook"
-            telegram_bot_instance = await telegram_startup(
+            telegram_bot_instance, webhook_ok = await telegram_startup(
                 bot_token=str(bot_token),
                 webhook_secret=str(webhook_secret or ""),
                 webhook_url=webhook_url,
             )
             _app.state.telegram_bot = telegram_bot_instance
             _app.state.telegram_webhook_secret = str(webhook_secret or "")
-            _app.state.telegram_webhook_status = "set"
+            _app.state.telegram_webhook_status = "set" if webhook_ok else "webhook_failed"
             _telegram_api_module.dp = build_dispatcher()
             tg_allowlist_listener = asyncio.create_task(
                 telegram_allowlist.run_pubsub_listener(redis)
+            )
+            tg_config_listener = asyncio.create_task(_watch_telegram_config_secret())
+            tg_allowlist_listener.add_done_callback(
+                lambda t: (
+                    not t.cancelled()
+                    and t.exception() is not None
+                    and log.error(
+                        "telegram.allowlist_listener_died",
+                        error_class=type(t.exception()).__name__,
+                    )
+                )
             )
         else:
             _app.state.telegram_bot = None
@@ -556,6 +592,10 @@ async def lifespan(_app: FastAPI) -> Any:
             tg_allowlist_listener.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await tg_allowlist_listener
+        if tg_config_listener is not None:
+            tg_config_listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tg_config_listener
         if telegram_bot_instance is not None:
             await telegram_shutdown(telegram_bot_instance)
         orphan_sweeper_task.cancel()
