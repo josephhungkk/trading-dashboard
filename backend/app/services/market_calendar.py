@@ -64,16 +64,17 @@ def is_trading_day(exchange: str, d: date) -> bool:
     return bool(cal.is_session(d.isoformat()))
 
 
-def is_open(exchange: str, dt: datetime) -> bool:
-    """True if exchange is open at dt.
-
-    TODO: integrate exchange_calendars fallback for optional installs.
-    """
+def is_open(exchange: str, dt: datetime | None = None) -> bool:
+    """True if exchange is currently open (or at dt if provided)."""
     try:
         cal = _calendar(exchange)
-    except (ValueError, ImportError) as _exc:
+    except ValueError:
         return True
-    when = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    except ImportError:
+        return True
+    when = dt if dt is not None else datetime.now(UTC)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
     return bool(cal.is_open_on_minute(when.astimezone(UTC)))
 
 
