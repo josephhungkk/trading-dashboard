@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
-from aiogram import Dispatcher
+from aiogram import Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy import text
@@ -207,10 +207,13 @@ def register_handlers(
     db_factory: Any,
     redis: Any,
     request_app: Any = None,
+    tg_chat: Any = None,
 ) -> None:
     async def _authed(msg: Message) -> AllowlistEntry | None:
         from_user_id = msg.from_user.id if msg.from_user else 0
-        entry = allowlist.lookup(chat_id=msg.chat.id, from_user_id=from_user_id)
+        entry: AllowlistEntry | None = allowlist.lookup(
+            chat_id=msg.chat.id, from_user_id=from_user_id
+        )
         if entry is None:
             await msg.answer("Unauthorized.")
         return entry
@@ -276,3 +279,27 @@ def register_handlers(
             return
         async with db_factory() as db:
             await handle_unmute(msg, entry=entry, db=db)
+
+    if tg_chat is not None:
+        import asyncio as _asyncio
+
+        @dp.message(F.text & ~F.text.startswith("/"))
+        async def _chat_msg(msg: Message) -> None:
+            entry = await _authed(msg)
+            if entry is None:
+                return
+            from_user_id = entry.from_user_id
+            if not await rate_limiter.check_read(chat_id=msg.chat.id, from_user_id=from_user_id):
+                await msg.answer("Rate limit exceeded. Try again later.")
+                return
+            task = _asyncio.create_task(tg_chat.handle(msg))
+            task.add_done_callback(
+                lambda t: (
+                    not t.cancelled()
+                    and t.exception() is not None
+                    and log.error(
+                        "telegram.chat_task_failed",
+                        error_class=type(t.exception()).__name__,
+                    )
+                )
+            )

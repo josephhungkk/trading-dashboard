@@ -84,6 +84,7 @@ from app.services.quotes.engine_factory import build_quote_engine
 from app.services.quotes.instruments_seed import seed_instruments_from_positions
 from app.services.telegram.allowlist import AllowlistService as TelegramAllowlistService
 from app.services.telegram.bot import build_dispatcher, telegram_shutdown, telegram_startup
+from app.services.telegram.chat import TelegramChat
 from app.services.telegram.commands import register_handlers as register_tg_handlers
 from app.services.telegram.rate_limiter import TelegramRateLimiter
 
@@ -558,6 +559,14 @@ async def lifespan(_app: FastAPI) -> Any:
             _app.state.telegram_webhook_status = "set" if webhook_ok else "webhook_failed"
             tg_rate_limiter = TelegramRateLimiter(redis=redis)
             tg_dispatcher = build_dispatcher()
+            chat_id_hash_salt = (
+                await svc.reveal_secret("telegram", "chat_id_hash_salt") or "default-salt"
+            )
+            tg_chat = TelegramChat(
+                ai_client=getattr(_app.state, "ai_router", None),
+                redis=redis,
+                chat_id_hash_salt=str(chat_id_hash_salt),
+            )
             register_tg_handlers(
                 tg_dispatcher,
                 allowlist=telegram_allowlist,
@@ -565,6 +574,7 @@ async def lifespan(_app: FastAPI) -> Any:
                 db_factory=session_factory,
                 redis=redis,
                 request_app=_app,
+                tg_chat=tg_chat,
             )
             _telegram_api_module.dp = tg_dispatcher
             tg_allowlist_listener = asyncio.create_task(
