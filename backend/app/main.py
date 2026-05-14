@@ -36,6 +36,8 @@ from app.api.chart_layouts import router as chart_layouts_router
 from app.api.contracts import router as contracts_router
 from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
+from app.api.options import admin_router as options_admin_router
+from app.api.options import router as options_router
 from app.api.orders import fills_router
 from app.api.orders import router as orders_router
 from app.api.portfolio import router as portfolio_router
@@ -45,6 +47,7 @@ from app.api.sse import router as sse_router
 from app.api.telegram import router as telegram_router
 from app.api.ws_ai import router as ws_ai_router
 from app.api.ws_alerts import router as ws_alerts_router
+from app.api.ws_options import router as ws_options_router
 from app.api.ws_portfolio import router as ws_portfolio_router
 from app.api.ws_quotes import router as ws_quotes_router
 from app.core.config import settings
@@ -780,6 +783,9 @@ app.include_router(ws_alerts_router)
 app.include_router(chart_layouts_router)
 app.include_router(bars_router)  # Task 28: GET /api/bars cursor pagination
 app.include_router(bars_ws_router)  # Task 31: WS /ws/bars live-tail
+app.include_router(options_router)
+app.include_router(options_admin_router)
+app.include_router(ws_options_router)
 
 
 @app.get("/health")
