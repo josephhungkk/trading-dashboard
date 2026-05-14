@@ -910,3 +910,44 @@ AI_JOBS_PUBLISH_FAILURES_TOTAL = Counter(
     "AI job state-transition pubsub publish failures (PG committed, WS missed).",
     registry=registry,
 )
+
+TELEGRAM_ORDER_ATTEMPTS_TOTAL = Counter(
+    "telegram_order_attempts_total",
+    "Telegram /place_order attempts by result.",
+    labelnames=["result"],
+    registry=registry,
+)
+
+TELEGRAM_ORDER_PREVIEWS_TOTAL = Counter(
+    "telegram_order_previews_total",
+    "Telegram order preview outcomes.",
+    labelnames=["result"],
+    registry=registry,
+)
+
+TELEGRAM_ORDER_CONFIRMS_TOTAL = Counter(
+    "telegram_order_confirms_total",
+    "Telegram /confirm outcomes.",
+    labelnames=["result"],
+    registry=registry,
+)
+
+TELEGRAM_ORDER_CANCELS_TOTAL = Counter(
+    "telegram_order_cancels_total",
+    "Telegram /cancel_order executions by stage.",
+    labelnames=["stage"],
+    registry=registry,
+)
+
+TELEGRAM_RATE_LIMITER_TRADE_BLOCK_TOTAL = Counter(
+    "telegram_rate_limiter_trade_block_total",
+    "Times the Telegram trade rate-limit bucket blocked a request.",
+    registry=registry,
+)
+
+TELEGRAM_ORDER_E2E_SECONDS = Histogram(
+    "telegram_order_e2e_seconds",
+    "Telegram order flow end-to-end latency.",
+    labelnames=["stage"],
+    registry=registry,
+)
