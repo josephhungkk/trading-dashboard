@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Numeric, Text, func
+from sqlalchemy import BigInteger, ForeignKey, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -16,15 +16,6 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.instruments import Instrument
-
-
-class BrokerAccount(Base):
-    """Minimal broker_accounts mapping for ExerciseElection relationships."""
-
-    __tablename__ = "broker_accounts"
-    __table_args__ = {"extend_existing": True}  # noqa: RUF012
-
-    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
 
 
 class OptionGreeks(Base):
@@ -55,16 +46,6 @@ class ExerciseElection(Base):
     """Exercise / lapse election submitted for an option instrument."""
 
     __tablename__ = "exercise_elections"
-    __table_args__ = (
-        CheckConstraint(
-            "action IN ('EXERCISE', 'DO_NOT_EXERCISE', 'LAPSE')",
-            name="exercise_elections_action_check",
-        ),
-        CheckConstraint(
-            "status IN ('submitted', 'confirmed', 'failed')",
-            name="exercise_elections_status_check",
-        ),
-    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     idempotency_key: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), unique=True, nullable=False)
@@ -84,5 +65,4 @@ class ExerciseElection(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
 
-    account: Mapped[BrokerAccount] = relationship("BrokerAccount")
     instrument: Mapped[Instrument] = relationship("Instrument")

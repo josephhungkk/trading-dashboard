@@ -651,10 +651,10 @@ class RiskService:
         """Phase 12: Options-specific risk checks. Called from evaluate() when asset_class==OPTION.
 
         Check ordering:
-          1a: trading-level gate  (BLOCK — cheap config read)
-          1b: expiry-day cutoff   (BLOCK — config + datetime)
-          1c: naked-short check   (BLOCK — requires positions query)
-          post-BLOCK: 0DTE WARN
+          1a: naked-short gate          (BLOCK — cfg read + positions query)
+          1a.5: cash-secured put L2     (BLOCK — strike * qty * multiplier * 1.05 vs cash)
+          1b: expiry-day cutoff         (BLOCK — exchange-tz date compare)
+          post-BLOCK: 0DTE WARN, assignment-risk WARN (mutually exclusive)
         """
         from app.services import market_calendar
 
@@ -682,31 +682,99 @@ class RiskService:
                     None,
                 )
 
-        # Step 1b: expiry-day cutoff + 0DTE WARN
-        option_expiry = await self._get_option_expiry(ctx)
-        if option_expiry is not None:
-            exchange = await self._get_instrument_exchange(ctx) or "NYSE"
+        # Step 1a.5: cash-secured put reserve check (L2 only, STO PUTs)
+        option_expiry, exchange, option_type, strike_str = await self._get_option_meta(ctx)
+        if is_sto and option_type == "PUT" and trading_level == 2 and strike_str is not None:
             try:
-                today_ex = market_calendar.today_in_exchange_tz(exchange)
-                if today_ex > option_expiry:
+                strike = Decimal(strike_str)
+                required_cash = strike * ctx.qty * Decimal(ctx.multiplier) * Decimal("1.05")
+                cash_row = await self._db.execute(
+                    text(
+                        "SELECT COALESCE(SUM(market_value_base), 0) FROM positions "
+                        "WHERE account_id = :aid AND instrument_id IS NULL"
+                    ),
+                    {"aid": ctx.account_id},
+                )
+                available_cash = Decimal(str(cash_row.scalar() or 0))
+                if required_cash > available_cash:
                     return (
                         GateBlockerEntry(
                             check="options_exposure",
-                            message=f"Past option cutoff for expiry {option_expiry} on {exchange}",
-                            code="option_cutoff_passed",
+                            message=(
+                                f"Cash-secured put requires {required_cash:.2f} "
+                                f"{ctx.currency_base} reserve, "
+                                f"available={available_cash:.2f}"
+                            ),
+                            code="cash_secured_put_insufficient_reserve",
                         ),
                         None,
                     )
-                if today_ex == option_expiry:
-                    return (
-                        None,
-                        GateWarningEntry(
-                            check="options_exposure",
-                            message="0DTE order — option expires today",
-                        ),
-                    )
-            except ValueError:
-                pass  # unknown exchange — skip cutoff check
+            except Exception:
+                pass
+
+        # Step 1b: expiry-day cutoff + 0DTE WARN + assignment-risk WARN
+        if option_expiry is not None:
+            if exchange is not None:
+                try:
+                    today_ex = market_calendar.today_in_exchange_tz(exchange)
+                    if today_ex > option_expiry:
+                        return (
+                            GateBlockerEntry(
+                                check="options_exposure",
+                                message=(
+                                    f"Past option cutoff for expiry {option_expiry} on {exchange}"
+                                ),
+                                code="option_cutoff_passed",
+                            ),
+                            None,
+                        )
+                    if today_ex == option_expiry:
+                        return (
+                            None,
+                            GateWarningEntry(
+                                check="options_exposure",
+                                message="0DTE order — option expires today",
+                            ),
+                        )
+                    # Assignment-risk WARN: STO within 5 trading days of expiry
+                    # (only fires when today_ex < option_expiry, i.e. not 0DTE)
+                    if is_sto:
+                        try:
+                            next_5 = market_calendar.next_trading_days(exchange, 5)
+                            within_5_days = option_expiry in next_5
+                        except Exception:
+                            within_5_days = False
+                        if within_5_days:
+                            delta: Decimal | None = None
+                            try:
+                                if ctx.instrument_id is not None:
+                                    delta_row = await self._db.execute(
+                                        text(
+                                            "SELECT delta FROM option_greeks "
+                                            "WHERE instrument_id = :iid"
+                                        ),
+                                        {"iid": ctx.instrument_id},
+                                    )
+                                    delta_val = delta_row.scalar()
+                                    if delta_val is not None:
+                                        delta = Decimal(str(delta_val))
+                            except Exception:
+                                delta = None
+                            if delta is None or abs(delta) >= Decimal("0.7"):
+                                return (
+                                    None,
+                                    GateWarningEntry(
+                                        check="options_exposure",
+                                        message=(
+                                            "High assignment risk: ITM short option "
+                                            "within 5 trading days of expiry"
+                                        ),
+                                        value=float(abs(delta)) if delta is not None else 0.0,
+                                        threshold=0.7,
+                                    ),
+                                )
+                except ValueError:
+                    pass  # unknown exchange — skip cutoff check
 
         return None
 
@@ -723,29 +791,35 @@ class RiskService:
         row = result.fetchone()
         return Decimal(str(row[0])) if row else Decimal("0")
 
-    async def _get_option_expiry(self, ctx: EvaluationContext) -> date | None:
-        """Return expiry date for an option instrument, or None if not an option."""
-        if ctx.instrument_id is None or ctx.asset_class != "OPTION":
-            return None
-        result = await self._db.execute(
-            text("SELECT meta->>'expiry' FROM instruments WHERE id = :iid"),
-            {"iid": ctx.instrument_id},
-        )
-        row = result.fetchone()
-        if row and row[0]:
-            return date.fromisoformat(row[0])
-        return None
+    async def _get_option_meta(
+        self, ctx: EvaluationContext
+    ) -> tuple[date | None, str | None, str | None, str | None]:
+        """Return (expiry, exchange, option_type, strike_str) for an option instrument.
 
-    async def _get_instrument_exchange(self, ctx: EvaluationContext) -> str | None:
-        """Return primary_exchange for an instrument."""
-        if ctx.instrument_id is None:
-            return None
+        Runs a single DB query to avoid N+1 round-trips. Returns all-None tuple
+        when instrument_id is absent or asset_class is not OPTION.
+        """
+        if ctx.instrument_id is None or ctx.asset_class != "OPTION":
+            return (None, None, None, None)
         result = await self._db.execute(
-            text("SELECT primary_exchange FROM instruments WHERE id = :iid"),
+            text(
+                "SELECT meta->>'expiry', primary_exchange, "
+                "meta->>'option_type', meta->>'strike' "
+                "FROM instruments WHERE id = :iid"
+            ),
             {"iid": ctx.instrument_id},
         )
         row = result.fetchone()
-        return row[0] if row else None
+        if not row:
+            return (None, None, None, None)
+        expiry_str, exchange, option_type, strike_str = row
+        expiry: date | None = None
+        if expiry_str:
+            try:
+                expiry = date.fromisoformat(expiry_str)
+            except ValueError:
+                pass
+        return (expiry, exchange or None, option_type or None, strike_str or None)
 
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).

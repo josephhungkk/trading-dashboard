@@ -101,7 +101,7 @@ async def test_options_level_gate_blocks_when_level_too_low():
     ctx = _make_ctx(side="sell", position_effect="OPEN")
 
     svc._get_existing_long_position = AsyncMock(return_value=Decimal("0"))
-    svc._get_option_expiry = AsyncMock(return_value=None)
+    svc._get_option_meta = AsyncMock(return_value=(None, None, None, None))
 
     result = await svc._check_options_exposure(ctx)
     assert result is not None
@@ -117,7 +117,7 @@ async def test_bto_always_allowed_at_l1():
     svc = _make_risk_service(config_values={"options/trading_level": 1})
     ctx = _make_ctx(side="buy", position_effect="OPEN")
 
-    svc._get_option_expiry = AsyncMock(return_value=None)
+    svc._get_option_meta = AsyncMock(return_value=(None, None, None, None))
 
     result = await svc._check_options_exposure(ctx)
     assert result is None
@@ -132,8 +132,7 @@ async def test_expiry_cutoff_blocks_open_order():
     ctx = _make_ctx(side="buy", position_effect="OPEN")
 
     expiry = datetime.date(2025, 1, 17)
-    svc._get_option_expiry = AsyncMock(return_value=expiry)
-    svc._get_instrument_exchange = AsyncMock(return_value="NYSE")
+    svc._get_option_meta = AsyncMock(return_value=(expiry, "NYSE", "CALL", "450.00"))
 
     with patch("app.services.market_calendar") as mc:
         mc.today_in_exchange_tz.return_value = datetime.date(2025, 1, 18)  # strictly past
@@ -155,8 +154,7 @@ async def test_zero_dte_warn():
     ctx = _make_ctx(side="buy", position_effect="OPEN")
 
     expiry = datetime.date(2025, 1, 17)
-    svc._get_option_expiry = AsyncMock(return_value=expiry)
-    svc._get_instrument_exchange = AsyncMock(return_value="NYSE")
+    svc._get_option_meta = AsyncMock(return_value=(expiry, "NYSE", "CALL", "450.00"))
 
     with patch("app.services.market_calendar") as mc:
         mc.today_in_exchange_tz.return_value = expiry  # today == expiry → 0DTE
@@ -176,8 +174,7 @@ async def test_stc_allowed_at_l1():
     svc = _make_risk_service(config_values={"options/trading_level": 1})
     ctx = _make_ctx(side="sell", position_effect="CLOSE")
 
-    svc._get_option_expiry = AsyncMock(return_value=None)
-    svc._get_instrument_exchange = AsyncMock(return_value=None)
+    svc._get_option_meta = AsyncMock(return_value=(None, None, None, None))
 
     result = await svc._check_options_exposure(ctx)
     assert result is None
@@ -190,8 +187,7 @@ async def test_sto_with_cover_allowed_at_l1():
     ctx = _make_ctx(side="sell", position_effect="OPEN")
 
     svc._get_existing_long_position = AsyncMock(return_value=Decimal("5"))
-    svc._get_option_expiry = AsyncMock(return_value=None)
-    svc._get_instrument_exchange = AsyncMock(return_value=None)
+    svc._get_option_meta = AsyncMock(return_value=(None, None, None, None))
 
     result = await svc._check_options_exposure(ctx)
     assert result is None

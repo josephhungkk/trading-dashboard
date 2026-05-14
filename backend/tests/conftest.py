@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient  # noqa: E402
 from alembic import command  # noqa: E402
 
 # Env vars set before importing app (pydantic-settings reads at import time).
+os.environ.setdefault("TEST_DISABLE_STMT_CACHE", "1")
 os.environ.setdefault("APP_ENV", "dev")
 os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-at-least-32-chars-ok")
 os.environ.setdefault("APP_CORS_ORIGINS", '["http://localhost:5173"]')

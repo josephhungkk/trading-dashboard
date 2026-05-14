@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, Numeric, String, func
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, Numeric, String, Text, func
 
 # NOTE: orders.account_id and order_events.account_id reference
 # broker_accounts(id) at the DB layer (enforced by alembic 0004), but no
@@ -64,6 +64,8 @@ class Order(Base):
     notional_filled: Mapped[Decimal] = mapped_column(
         Numeric(20, 8), nullable=False, server_default="0"
     )
+    position_effect: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tax_treatment: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )

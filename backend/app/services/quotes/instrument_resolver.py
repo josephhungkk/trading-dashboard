@@ -135,29 +135,15 @@ class InstrumentResolver:
 
     async def find_or_create_option(
         self,
-        session: AsyncSession,
         underlying_canonical_id: str,
         option_type: str,
         strike: Decimal,
         expiry: date,
         exchange: str,
-        multiplier: int = 100,
+        multiplier: int,
         broker_id: str | None = None,
     ) -> Instrument:
         """Find or create an OPTION instrument for a single option contract."""
-        if session is not self._session:
-            resolver = InstrumentResolver(session)
-            return await resolver.find_or_create_option(
-                session,
-                underlying_canonical_id,
-                option_type,
-                strike,
-                expiry,
-                exchange,
-                multiplier,
-                broker_id,
-            )
-
         normalized_type = option_type.upper()
         canonical_id = self._build_option_canonical_id(
             underlying_canonical_id,

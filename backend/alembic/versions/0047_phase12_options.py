@@ -22,27 +22,68 @@ def upgrade() -> None:
         """
     )
 
+    # orders.position_effect — named constraint for idempotent re-runs
     op.execute(
         """
         ALTER TABLE orders
         ADD COLUMN IF NOT EXISTS position_effect TEXT
-            CHECK (position_effect IS NULL OR position_effect IN ('OPEN', 'CLOSE'))
         """
     )
     op.execute(
         """
         ALTER TABLE orders
+        DROP CONSTRAINT IF EXISTS orders_position_effect_check
+        """
+    )
+    op.execute(
+        """
+        ALTER TABLE orders
+        ADD CONSTRAINT orders_position_effect_check
+        CHECK (position_effect IS NULL OR position_effect IN ('OPEN', 'CLOSE'))
+        """
+    )
+
+    # orders.tax_treatment — named constraint
+    op.execute(
+        """
+        ALTER TABLE orders
         ADD COLUMN IF NOT EXISTS tax_treatment TEXT
-            CHECK (tax_treatment IS NULL OR tax_treatment IN
-              ('EQUITY','OPTION_PREMIUM','OPTION_EXERCISE','OPTION_ASSIGNMENT','OPTION_EXPIRY'))
+        """
+    )
+    op.execute(
+        """
+        ALTER TABLE orders
+        DROP CONSTRAINT IF EXISTS orders_tax_treatment_check
+        """
+    )
+    op.execute(
+        """
+        ALTER TABLE orders
+        ADD CONSTRAINT orders_tax_treatment_check
+        CHECK (tax_treatment IS NULL OR tax_treatment IN
+          ('EQUITY','OPTION_PREMIUM','OPTION_EXERCISE','OPTION_ASSIGNMENT','OPTION_EXPIRY'))
+        """
+    )
+
+    # fills.tax_treatment — named constraint
+    op.execute(
+        """
+        ALTER TABLE fills
+        ADD COLUMN IF NOT EXISTS tax_treatment TEXT
         """
     )
     op.execute(
         """
         ALTER TABLE fills
-        ADD COLUMN IF NOT EXISTS tax_treatment TEXT
-            CHECK (tax_treatment IS NULL OR tax_treatment IN
-              ('EQUITY','OPTION_PREMIUM','OPTION_EXERCISE','OPTION_ASSIGNMENT','OPTION_EXPIRY'))
+        DROP CONSTRAINT IF EXISTS fills_tax_treatment_check
+        """
+    )
+    op.execute(
+        """
+        ALTER TABLE fills
+        ADD CONSTRAINT fills_tax_treatment_check
+        CHECK (tax_treatment IS NULL OR tax_treatment IN
+          ('EQUITY','OPTION_PREMIUM','OPTION_EXERCISE','OPTION_ASSIGNMENT','OPTION_EXPIRY'))
         """
     )
 
@@ -74,7 +115,7 @@ def upgrade() -> None:
             id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             idempotency_key  UUID NOT NULL UNIQUE,
             jwt_subject      TEXT NOT NULL,
-            account_id       UUID NOT NULL REFERENCES broker_accounts(id),
+            account_id       UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
             instrument_id    BIGINT NOT NULL REFERENCES instruments(id),
             action           TEXT NOT NULL CHECK (
                 action IN ('EXERCISE', 'DO_NOT_EXERCISE', 'LAPSE')
@@ -104,7 +145,14 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS exercise_elections_one_per_day")
     op.execute("DROP TABLE IF EXISTS exercise_elections")
+    op.execute("DROP INDEX IF EXISTS option_greeks_updated_at_idx")
     op.execute("DROP TABLE IF EXISTS option_greeks")
+
+    op.execute("ALTER TABLE fills DROP CONSTRAINT IF EXISTS fills_tax_treatment_check")
     op.execute("ALTER TABLE fills DROP COLUMN IF EXISTS tax_treatment")
+
+    op.execute("ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_tax_treatment_check")
     op.execute("ALTER TABLE orders DROP COLUMN IF EXISTS tax_treatment")
+
+    op.execute("ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_position_effect_check")
     op.execute("ALTER TABLE orders DROP COLUMN IF EXISTS position_effect")

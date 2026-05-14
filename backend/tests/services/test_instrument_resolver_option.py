@@ -19,12 +19,12 @@ async def test_find_or_create_option_creates_row_with_canonical_id(
     resolver = InstrumentResolver(db_session)
 
     inst = await resolver.find_or_create_option(
-        db_session,
         "stock:SPY:US",
         "CALL",
         Decimal("450.00"),
         date(2026, 6, 20),
         "ARCA",
+        multiplier=100,
         broker_id="ibkr",
     )
 
@@ -45,20 +45,20 @@ async def test_find_or_create_option_is_idempotent(db_session: AsyncSession) -> 
     resolver = InstrumentResolver(db_session)
 
     inst1 = await resolver.find_or_create_option(
-        db_session,
         "stock:SPY:US",
         "CALL",
         Decimal("450.00"),
         date(2026, 6, 20),
         "ARCA",
+        multiplier=100,
     )
     inst2 = await resolver.find_or_create_option(
-        db_session,
         "stock:SPY:US",
         "CALL",
         Decimal("450.00"),
         date(2026, 6, 20),
         "ARCA",
+        multiplier=100,
     )
 
     assert inst1.id == inst2.id

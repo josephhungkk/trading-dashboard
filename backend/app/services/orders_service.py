@@ -44,6 +44,7 @@ from app.services.config import ConfigService
 from app.services.ibkr_maintenance import BrokerMaintenance, compute_broker_maintenance
 from app.services.order_capability_service import KNOWN_BROKERS, OrderCapabilityService
 from app.services.orders_policy import get_account_policy, is_kill_switch_active
+from app.services.quotes.base import canonical_key, country_for_exchange
 from app.services.risk_inflight_counters import (
     commit_bp,
     commit_bp_finalize,
@@ -633,9 +634,9 @@ async def _resolve_instrument_id(
         ).inc()
         return None
 
-    from app.services.quotes.base import canonical_key, country_for_exchange
-
     country = country_for_exchange(contract.exchange) or contract.exchange
+    if not country:
+        raise ValueError(f"Cannot resolve country for exchange {contract.exchange!r}")
     cid = canonical_key(
         asset_class=str(contract.asset_class),
         symbol=contract.symbol,
@@ -1937,7 +1938,6 @@ async def _one_shot_market_mid(
 
     Returns ``None`` on timeout or if price fields are absent/zero.
     """
-    from app.services.quotes.base import canonical_key, country_for_exchange
     from app.services.quotes.engine import QuoteEngine
 
     if not isinstance(quote_engine, QuoteEngine):
