@@ -46,6 +46,11 @@ service Broker {
   // UNIMPLEMENTED. Money fields are Decimal-strings per [C2].
   // Spec: docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md §5.
   rpc PreviewOrder(PreviewOrderRequest) returns (PreviewOrderResponse);
+  // ── Phase 12: Options ───────────────────────────────────────────────────
+  rpc GetOptionChain(OptionChainRequest) returns (OptionChainResponse);
+  rpc GetOptionExpirations(OptionExpirationsRequest) returns (OptionExpirationsResponse);
+  rpc StreamOptionGreeks(OptionGreeksRequest) returns (stream OptionGreeksResponse);
+  rpc ExerciseOption(ExerciseOptionRequest) returns (ExerciseOptionResponse);
 }
 
 // Phase 10a — PreviewOrder messages (spec §5).
@@ -445,14 +450,26 @@ message StreamQuotesRequest {
   }
 }
 
+message OptionContractHint {
+  string conid      = 1;  // broker-native source symbol
+  string strike     = 2;  // string decimal e.g. "450.00"
+  string expiry_iso = 3;  // "2025-01-17"
+  string put_call   = 4;  // "C" | "P"
+  int32  multiplier = 5;
+}
+
 message SymbolRef {
   string canonical_id = 1;
   string raw_symbol = 2;
   AssetClass asset_class = 3;
   string exchange = 4;
   string currency = 5;
-  bytes source_meta = 6;
-  reserved 7 to 15; // Phase 12/14 contract_extra extensions
+  oneof contract_hint {
+    OptionContractHint option_hint = 6;
+    // FutureContractHint future_hint = 7;  Phase 14
+    // ForexContractHint  forex_hint  = 8;  Phase 15
+  }
+  reserved 9 to 15;
 }
 
 message QuoteMessage {
@@ -509,4 +526,78 @@ message TokenRefreshResponse {
   string access_token = 1;
   string refresh_token = 2;
   google.protobuf.Timestamp access_issued_at = 3;
+}
+
+// ── Phase 12: Options ─────────────────────────────────────────────────────
+
+message OptionChainRequest {
+  string underlying_symbol = 1;
+  string expiry_date        = 2;  // ISO "2025-01-17"
+  string currency           = 3;  // "USD" | "HKD"
+  int32  strike_count       = 4;  // max 60 USD, 40 HKD
+}
+
+message OptionChainRow {
+  string conid         = 1;
+  string strike        = 2;  // string decimal (no float precision drift)
+  string put_call      = 3;  // "C" | "P"
+  string bid           = 4;
+  string ask           = 5;
+  double iv            = 6;
+  double delta         = 7;
+  double gamma         = 8;
+  double theta         = 9;
+  double vega          = 10;
+  int64  open_interest = 11;
+  int64  volume        = 12;
+  int32  multiplier    = 13;
+  string exchange      = 14;
+  string style         = 15;  // "A"=American | "E"=European
+}
+
+message OptionChainResponse {
+  repeated OptionChainRow calls         = 1;
+  repeated OptionChainRow puts          = 2;
+  string                  source        = 3;
+  int64                   fetched_at_ms = 4;
+}
+
+message OptionExpirationsRequest {
+  string underlying_symbol = 1;
+  string currency          = 2;
+}
+
+message OptionExpirationsResponse {
+  repeated string expiry_dates = 1;  // ISO dates sorted ascending
+}
+
+message OptionGreeksRequest {
+  repeated string conids     = 1;
+  string          account_id = 2;
+}
+
+message OptionGreeksResponse {
+  string conid         = 1;
+  double delta         = 2;
+  double gamma         = 3;
+  double theta         = 4;
+  double vega          = 5;
+  double rho           = 6;
+  double iv            = 7;
+  double iv_rank       = 8;
+  int64  fetched_at_ms = 9;
+}
+
+message ExerciseOptionRequest {
+  string account_id      = 1;
+  string conid           = 2;
+  int64  qty             = 3;
+  string action          = 4;  // "EXERCISE" | "DO_NOT_EXERCISE" | "LAPSE"
+  string idempotency_key = 5;
+}
+
+message ExerciseOptionResponse {
+  bool   success    = 1;
+  string broker_ref = 2;
+  string message    = 3;
 }
