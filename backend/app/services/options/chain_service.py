@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from datetime import date
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import structlog
 
@@ -50,8 +50,12 @@ class OptionChainService:
             source=source,
         )
 
+    _EXCHANGE_BY_CURRENCY: ClassVar[dict[str, str]] = {"USD": "NYSE", "HKD": "HKEX"}
+
     def _ttl(self, currency: str) -> int:
-        exchange = _USD_EXCHANGE if currency == "USD" else _HKD_EXCHANGE
+        exchange = self._EXCHANGE_BY_CURRENCY.get(currency)
+        if exchange is None:
+            return _TTL_MARKET_CLOSED
         try:
             is_open = market_calendar.is_open(exchange)
         except Exception:
@@ -63,6 +67,10 @@ class OptionChainService:
             if key not in self._sf_locks:
                 self._sf_locks[key] = asyncio.Lock()
             return self._sf_locks[key]
+
+    async def _sf_release(self, key: tuple[str, str, str]) -> None:
+        async with self._sf_lock_meta:
+            self._sf_locks.pop(key, None)
 
     async def get_expirations(self, underlying: str, currency: str) -> list[date]:
         """Return sorted expiry dates for an underlying from the configured primary source."""

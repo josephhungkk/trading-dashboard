@@ -50,7 +50,7 @@ def parse_instrument_meta(raw: dict[str, Any]) -> NonOptionDetails | OptionDetai
     return _adapter.validate_python(raw)
 
 
-@dataclass
+@dataclass(frozen=True)
 class GreeksSnapshot:
     """Greeks for a single option contract. Clamps extreme values to avoid DB overflow."""
 

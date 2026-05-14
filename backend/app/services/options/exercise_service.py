@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import time
 import uuid
-from collections import defaultdict, deque
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -13,10 +11,9 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-log = structlog.get_logger(__name__)
+from app.services.common.rate_limiter import RateLimitExceededError, SlidingWindowRateLimiter
 
-_RATE_LIMIT_MAX = 5
-_RATE_LIMIT_WINDOW = 60.0
+log = structlog.get_logger(__name__)
 
 
 class DuplicateElectionError(Exception):
@@ -32,24 +29,26 @@ class ExerciseService:
         self._db = db
         self._redis = redis
         self._broker_registry = broker_registry
-        self._rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+        self._rate_limiter: SlidingWindowRateLimiter[str] = SlidingWindowRateLimiter(
+            burst=5, window_seconds=60, name="exercise"
+        )
 
     def _check_rate_limit(self, jwt_subject: str) -> None:
-        now = time.monotonic()
-        bucket = self._rate_buckets[jwt_subject]
-        while bucket and now - bucket[0] > _RATE_LIMIT_WINDOW:
-            bucket.popleft()
-        if len(bucket) >= _RATE_LIMIT_MAX:
-            raise ExerciseRateLimitError(f"Exercise rate limit exceeded for {jwt_subject}")
-        bucket.append(now)
+        try:
+            self._rate_limiter.check(jwt_subject)
+        except RateLimitExceededError as exc:
+            raise ExerciseRateLimitError("Exercise rate limit exceeded") from exc
 
-    async def _find_by_idempotency_key(self, ikey: uuid.UUID) -> dict[str, Any] | None:
+    async def _find_by_idempotency_key(
+        self, ikey: uuid.UUID, jwt_subject: str
+    ) -> dict[str, Any] | None:
         result = await self._db.execute(
             text(
                 "SELECT id, idempotency_key, status, broker_ref "
-                "FROM exercise_elections WHERE idempotency_key = :ikey"
+                "FROM exercise_elections "
+                "WHERE idempotency_key = :ikey AND jwt_subject = :subject"
             ),
-            {"ikey": str(ikey)},
+            {"ikey": str(ikey), "subject": jwt_subject},
         )
         row = result.fetchone()
         if row is None:
@@ -134,7 +133,7 @@ class ExerciseService:
         idempotency_key: uuid.UUID,
     ) -> dict[str, Any]:
         """Submit an exercise election. Idempotent on same idempotency_key."""
-        existing = await self._find_by_idempotency_key(idempotency_key)
+        existing = await self._find_by_idempotency_key(idempotency_key, jwt_subject)
         if existing is not None:
             return existing
 
@@ -179,7 +178,8 @@ class ExerciseService:
                 WHERE p.account_id = :acct
                   AND i.asset_class = 'OPTION'
                   AND p.qty != 0
-                  AND (i.meta->>'expiry')::date <= (CURRENT_DATE + INTERVAL '5 days')
+                  AND (i.meta->>'expiry')::date >= CURRENT_DATE
+                  AND (i.meta->>'expiry')::date <= (CURRENT_DATE + INTERVAL '9 days')
                 """
             ),
             {"acct": str(account_id)},
