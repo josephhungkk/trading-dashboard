@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     CHAR,
@@ -28,6 +28,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
+if TYPE_CHECKING:
+    from app.models.options import OptionGreeks
+
 
 class AssetClass(enum.StrEnum):
     """Mirrors instrument_asset_class PG enum (alembic 0009).
@@ -43,6 +46,7 @@ class AssetClass(enum.StrEnum):
     CBBC = "CBBC"
     FOREX = "FOREX"
     CRYPTO = "CRYPTO"
+    OPTION = "OPTION"
 
 
 class Instrument(Base):
@@ -76,6 +80,9 @@ class Instrument(Base):
 
     aliases: Mapped[list[SymbolAlias]] = relationship(
         back_populates="instrument", cascade="all, delete-orphan"
+    )
+    greeks: Mapped[OptionGreeks | None] = relationship(
+        "OptionGreeks", back_populates="instrument", uselist=False
     )
 
     __table_args__ = (
