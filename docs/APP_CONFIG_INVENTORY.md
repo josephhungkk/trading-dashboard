@@ -1,6 +1,7 @@
 # app_config / app_secrets Inventory
 
 **Generated:** 2026-05-12 (Phase 11a CI-debt sweep — recovery from empty-prod-DB finding)
+**Updated:** 2026-05-14 (fix Alpaca key schema to dotted form; add futu.unlock_pwd_md5; note prod-wipe root-cause fix in 0048)
 
 **Purpose:** authoritative list of every `(namespace, key)` row the application
 expects to find in `app_config` (plaintext settings) and `app_secrets`
@@ -54,13 +55,18 @@ Labels (from `SIDECAR_PORTS`): **`isa-live`, `isa-paper`, `normal-live`, `normal
 | `schwab.refresh_token` | Schwab OAuth refresh token (rotates every 90d) | `broker_registry_factory.py:168`, `schwab_oauth.py:72`, `tier2_refresher.py:303` |
 | `schwab.access_token` | Schwab OAuth access token (30-min TTL) | `tier2_refresher.py:229` |
 
-### `broker` namespace — Alpaca (per-mode label)
-Labels: **`alpaca-live`, `alpaca-paper`**
+### `broker` namespace — Alpaca (per-mode, dotted schema)
+Legacy key form (single-account): `alpaca.<mode>.api_key` e.g. `alpaca.paper.api_key`
+Labeled form (multi-account): `alpaca.<account_label>.<mode>.api_key`
 
 | Key pattern | Purpose | Source |
 |---|---|---|
-| `<label>.api_key` | Alpaca API key | `sidecar_alpaca.py:259` (with `legacy_key` fallback) |
-| `<label>.api_secret` | Alpaca API secret | `sidecar_alpaca.py:262` (with `legacy_secret` fallback) |
+| `alpaca.paper.api_key` | Alpaca paper API key (legacy/primary) | `broker_registry_factory.py:256` |
+| `alpaca.paper.api_secret` | Alpaca paper API secret | `broker_registry_factory.py:257` |
+| `alpaca.live.api_key` | Alpaca live API key | `broker_registry_factory.py:256` |
+| `alpaca.live.api_secret` | Alpaca live API secret | `broker_registry_factory.py:257` |
+
+**Note:** Key schema is dotted (alpaca.**.**), NOT hyphenated (alpaca-**). Hyphenated form silently fails the Configure call.
 
 ---
 
@@ -167,15 +173,18 @@ These are test-runner toggles, not app config:
    # Then trigger OAuth flow → seeds schwab.refresh_token + schwab.access_token
    ```
 
-5. **Seed Alpaca**:
+5. **Seed Alpaca** (dotted schema — NOT hyphenated):
    ```
-   PUT /api/admin/secrets { ns: broker, key: alpaca-paper.api_key, value: ... }
-   PUT /api/admin/secrets { ns: broker, key: alpaca-paper.api_secret, value: ... }
+   PUT /api/admin/secrets { ns: broker, key: alpaca.paper.api_key, value: ... }
+   PUT /api/admin/secrets { ns: broker, key: alpaca.paper.api_secret, value: ... }
+   PUT /api/admin/secrets { ns: broker, key: alpaca.live.api_key, value: ... }
+   PUT /api/admin/secrets { ns: broker, key: alpaca.live.api_secret, value: ... }
    ```
 
-6. **Seed Futu**:
+6. **Seed Futu** (1024-bit RSA only — see memory futu_1024_rsa_key.md):
    ```
    PUT /api/admin/secrets { ns: broker, key: futu.rsa_priv_pem, value: <1024-bit PEM> }
+   PUT /api/admin/secrets { ns: broker, key: futu.unlock_pwd_md5, value: <MD5 hash of unlock pwd> }
    PUT /api/admin/config  { ns: broker, key: futu.opend_host, value: 10.10.0.2 }
    PUT /api/admin/config  { ns: broker, key: futu.opend_port, value: 11111 }
    ```
