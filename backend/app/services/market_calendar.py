@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import exchange_calendars as ecals  # type: ignore[import-untyped]
 
@@ -61,6 +62,63 @@ def is_trading_day(exchange: str, d: date) -> bool:
     """True if d is a regular trading session on exchange."""
     cal = _calendar(exchange)
     return bool(cal.is_session(d.isoformat()))
+
+
+def is_open(exchange: str, dt: datetime) -> bool:
+    """True if exchange is open at dt.
+
+    TODO: integrate exchange_calendars fallback for optional installs.
+    """
+    try:
+        cal = _calendar(exchange)
+    except (ValueError, ImportError) as _exc:
+        return True
+    when = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return bool(cal.is_open_on_minute(when.astimezone(UTC)))
+
+
+def is_past_expiry(expiry: date, exchange: str) -> bool:
+    """True once the exchange-local date has reached the option expiry."""
+    return today_in_exchange_tz(exchange) >= expiry
+
+
+def option_cutoff_time(exchange: str, expiry: date) -> datetime:
+    """Return same-day option trading cutoff for exchange on expiry."""
+    exchange_upper = exchange.upper()
+    if exchange_upper in {"HKEX", "SEHK", "XHKG"}:
+        return datetime.combine(expiry, time(16, 0), ZoneInfo("Asia/Hong_Kong"))
+    return datetime.combine(expiry, time(15, 0), ZoneInfo("America/New_York"))
+
+
+def next_trading_days(
+    exchange: str,
+    n: int,
+    from_date: date | None = None,
+) -> list[date]:
+    """Return the next n trading days on exchange, inclusive of from_date."""
+    if n <= 0:
+        return []
+
+    start = from_date or today_in_exchange_tz(exchange)
+    try:
+        cal = _calendar(exchange)
+    except (ValueError, ImportError) as _exc:
+        days: list[date] = []
+        cursor = start
+        while len(days) < n:
+            if cursor.weekday() < 5:
+                days.append(cursor)
+            cursor += timedelta(days=1)
+        return days
+
+    end = start + timedelta(days=max(14, n * 3))
+    days = [session.date() for session in cal.sessions_in_range(start.isoformat(), end.isoformat())]
+    while len(days) < n:
+        end += timedelta(days=max(14, n * 3))
+        days = [
+            session.date() for session in cal.sessions_in_range(start.isoformat(), end.isoformat())
+        ]
+    return days[:n]
 
 
 def eod_for_exchange(exchange: str, expiry_date: date) -> datetime:
