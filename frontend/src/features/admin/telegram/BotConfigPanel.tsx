@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/primitives/Button';
 import { Input } from '@/components/primitives/Input';
 import { adminFetch, mintCsrfNonce } from '@/services/admin/api';
@@ -9,19 +10,22 @@ interface TelegramConfig {
   token_set: boolean;
 }
 
+const CONFIG_QUERY_KEY = ['telegram-config'];
+
 export function BotConfigPanel(): React.JSX.Element {
+  const qc = useQueryClient();
+  const { data: config, isError: configError } = useQuery<TelegramConfig>({
+    queryKey: CONFIG_QUERY_KEY,
+    queryFn: () => adminFetch<TelegramConfig>('/api/admin/telegram/config'),
+  });
+
   const [token, setToken] = React.useState('');
   const [publicUrl, setPublicUrl] = React.useState('');
-  const [config, setConfig] = React.useState<TelegramConfig | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [testChatId, setTestChatId] = React.useState('');
   const [testing, setTesting] = React.useState(false);
   const [testResult, setTestResult] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    void adminFetch<TelegramConfig>('/api/admin/telegram/config').then(setConfig).catch(() => null);
-  }, []);
 
   async function save(): Promise<void> {
     setSaving(true);
@@ -33,8 +37,7 @@ export function BotConfigPanel(): React.JSX.Element {
         headers: { 'X-Confirm-Nonce': nonce },
         body: JSON.stringify({ bot_token: token, public_base_url: publicUrl }),
       });
-      const updated = await adminFetch<TelegramConfig>('/api/admin/telegram/config');
-      setConfig(updated);
+      await qc.invalidateQueries({ queryKey: CONFIG_QUERY_KEY });
       setToken('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed');
@@ -71,6 +74,7 @@ export function BotConfigPanel(): React.JSX.Element {
   return (
     <div className="grid gap-3 rounded-md border border-border bg-panel p-4">
       <h3 className="text-sm font-semibold text-fg">Bot Configuration</h3>
+      {configError && <p className="text-sm text-negative">Failed to load configuration.</p>}
       {config && (
         <p className="text-xs text-fg-muted">
           Webhook: <span className="font-mono">{config.webhook_url || '(not set)'}</span>
@@ -101,16 +105,20 @@ export function BotConfigPanel(): React.JSX.Element {
       <Button type="button" onClick={() => void save()} disabled={saving}>
         {saving ? 'Saving…' : 'Save & rotate webhook secret'}
       </Button>
-      <div className="mt-2 flex gap-2">
-        <Input
-          value={testChatId}
-          onChange={e => setTestChatId(e.currentTarget.value)}
-          placeholder="Chat ID (optional)"
-          className="w-48"
-        />
-        <Button type="button" onClick={() => void sendTest()} disabled={testing}>
-          {testing ? 'Sending…' : 'Send test message'}
-        </Button>
+      <div className="mt-2 grid gap-1 text-sm">
+        <label htmlFor="tg-test-chat-id">Send test message</label>
+        <div className="flex gap-2">
+          <Input
+            id="tg-test-chat-id"
+            value={testChatId}
+            onChange={e => setTestChatId(e.currentTarget.value)}
+            placeholder="Chat ID (optional)"
+            className="w-48"
+          />
+          <Button type="button" onClick={() => void sendTest()} disabled={testing}>
+            {testing ? 'Sending…' : 'Send'}
+          </Button>
+        </div>
       </div>
       {testResult && <p className="text-sm text-fg-muted">{testResult}</p>}
     </div>

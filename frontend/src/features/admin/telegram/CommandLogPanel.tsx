@@ -24,6 +24,7 @@ function outcomeClass(outcome: CommandLogEntry['outcome']): string {
     case 'error':
       return 'text-negative';
     default:
+      outcome satisfies never;
       return 'text-fg-muted';
   }
 }

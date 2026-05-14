@@ -13,6 +13,11 @@ interface AllowlistEntry {
 
 const QUERY_KEY = ['telegram-allowlist'];
 
+function parsePositiveInt(raw: string): number | null {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 export function AllowlistPanel(): React.JSX.Element {
   const qc = useQueryClient();
 
@@ -27,9 +32,20 @@ export function AllowlistPanel(): React.JSX.Element {
   const [label, setLabel] = React.useState('');
   const [adding, setAdding] = React.useState(false);
   const [addError, setAddError] = React.useState<string | null>(null);
+  const [removing, setRemoving] = React.useState<Set<number>>(new Set());
   const [removeError, setRemoveError] = React.useState<string | null>(null);
 
   async function add(): Promise<void> {
+    const parsedChatId = parsePositiveInt(chatId);
+    const parsedFromUserId = parsePositiveInt(fromUserId);
+    if (parsedChatId === null) {
+      setAddError('Chat ID must be a positive integer.');
+      return;
+    }
+    if (parsedFromUserId === null) {
+      setAddError('User ID must be a positive integer.');
+      return;
+    }
     setAdding(true);
     setAddError(null);
     try {
@@ -38,8 +54,8 @@ export function AllowlistPanel(): React.JSX.Element {
         method: 'POST',
         headers: { 'X-Confirm-Nonce': nonce },
         body: JSON.stringify({
-          chat_id: Number(chatId),
-          from_user_id: Number(fromUserId),
+          chat_id: parsedChatId,
+          from_user_id: parsedFromUserId,
           jwt_subject: jwtSubject,
           label,
         }),
@@ -57,6 +73,8 @@ export function AllowlistPanel(): React.JSX.Element {
   }
 
   async function remove(entry: AllowlistEntry): Promise<void> {
+    if (removing.has(entry.chat_id)) return;
+    setRemoving(prev => new Set(prev).add(entry.chat_id));
     setRemoveError(null);
     try {
       const nonce = await mintCsrfNonce();
@@ -67,6 +85,12 @@ export function AllowlistPanel(): React.JSX.Element {
       await qc.invalidateQueries({ queryKey: QUERY_KEY });
     } catch {
       setRemoveError('Remove failed.');
+    } finally {
+      setRemoving(prev => {
+        const next = new Set(prev);
+        next.delete(entry.chat_id);
+        return next;
+      });
     }
   }
 
@@ -92,7 +116,7 @@ export function AllowlistPanel(): React.JSX.Element {
           </thead>
           <tbody>
             {entries.map(e => (
-              <tr key={`${e.chat_id}-${e.from_user_id}`} className="border-t border-border">
+              <tr key={e.chat_id} className="border-t border-border">
                 <td className="py-1 pr-3 font-mono">{e.chat_id}</td>
                 <td className="py-1 pr-3 font-mono">{e.from_user_id}</td>
                 <td className="py-1 pr-3">{e.jwt_subject}</td>
@@ -101,9 +125,10 @@ export function AllowlistPanel(): React.JSX.Element {
                   <Button
                     type="button"
                     onClick={() => void remove(e)}
+                    disabled={removing.has(e.chat_id)}
                     className="text-xs text-negative"
                   >
-                    Remove
+                    {removing.has(e.chat_id) ? 'Removing…' : 'Remove'}
                   </Button>
                 </td>
               </tr>
@@ -111,39 +136,59 @@ export function AllowlistPanel(): React.JSX.Element {
           </tbody>
         </table>
       )}
-      <div className="mt-2 grid gap-2">
-        <p className="text-xs font-medium text-fg-muted">Add entry</p>
+      <fieldset className="mt-2 grid gap-2">
+        <legend className="text-xs font-medium text-fg-muted">Add entry</legend>
         {addError && <p className="text-xs text-negative">{addError}</p>}
-        <div className="flex flex-wrap gap-2">
-          <Input
-            value={chatId}
-            onChange={e => setChatId(e.currentTarget.value)}
-            placeholder="Chat ID"
-            className="w-32"
-          />
-          <Input
-            value={fromUserId}
-            onChange={e => setFromUserId(e.currentTarget.value)}
-            placeholder="User ID"
-            className="w-32"
-          />
-          <Input
-            value={jwtSubject}
-            onChange={e => setJwtSubject(e.currentTarget.value)}
-            placeholder="JWT subject"
-            className="w-40"
-          />
-          <Input
-            value={label}
-            onChange={e => setLabel(e.currentTarget.value)}
-            placeholder="Label"
-            className="w-32"
-          />
-          <Button type="button" onClick={() => void add()} disabled={adding || !chatId || !label}>
-            {adding ? 'Adding…' : 'Add'}
-          </Button>
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+          <div className="grid gap-1 text-xs">
+            <label htmlFor="tg-al-chat-id">Chat ID</label>
+            <Input
+              id="tg-al-chat-id"
+              value={chatId}
+              onChange={e => setChatId(e.currentTarget.value)}
+              placeholder="e.g. 123456789"
+              className="w-32"
+            />
+          </div>
+          <div className="grid gap-1 text-xs">
+            <label htmlFor="tg-al-user-id">User ID</label>
+            <Input
+              id="tg-al-user-id"
+              value={fromUserId}
+              onChange={e => setFromUserId(e.currentTarget.value)}
+              placeholder="e.g. 987654321"
+              className="w-32"
+            />
+          </div>
+          <div className="grid gap-1 text-xs">
+            <label htmlFor="tg-al-jwt-subject">JWT subject</label>
+            <Input
+              id="tg-al-jwt-subject"
+              value={jwtSubject}
+              onChange={e => setJwtSubject(e.currentTarget.value)}
+              placeholder="user@example.com"
+              className="w-40"
+            />
+          </div>
+          <div className="grid gap-1 text-xs">
+            <label htmlFor="tg-al-label">Label</label>
+            <Input
+              id="tg-al-label"
+              value={label}
+              onChange={e => setLabel(e.currentTarget.value)}
+              placeholder="Alice"
+              className="w-32"
+            />
+          </div>
         </div>
-      </div>
+        <Button
+          type="button"
+          onClick={() => void add()}
+          disabled={adding || !chatId || !fromUserId || !label}
+        >
+          {adding ? 'Adding…' : 'Add'}
+        </Button>
+      </fieldset>
     </div>
   );
 }
