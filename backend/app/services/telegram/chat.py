@@ -16,10 +16,12 @@ log = structlog.get_logger(__name__)
 _MAX_TURNS = 20
 _CONV_TTL = 86400  # 24h
 _AI_CAPABILITY = "REASONING"
+_MAX_MESSAGE_LEN = 2000
+_MAX_REPLY_LEN = 4096  # Telegram hard limit per message
 
 
 def _hash_chat_id(chat_id: int, salt: str) -> str:
-    return hmac.new(salt.encode(), str(chat_id).encode(), hashlib.sha256).hexdigest()[:16]
+    return hmac.new(salt.encode(), str(chat_id).encode(), hashlib.sha256).hexdigest()
 
 
 class TelegramChat:
@@ -40,6 +42,7 @@ class TelegramChat:
             try:
                 return json.loads(raw)  # type: ignore[no-any-return]
             except Exception:
+                log.warning("telegram.chat_history_corrupted", key=key)
                 return []
         return []
 
@@ -50,24 +53,36 @@ class TelegramChat:
         chat_id = msg.chat.id
         lock = self._get_lock(chat_id)
 
-        if lock.locked():
+        # Non-blocking acquire: if already held by another in-flight task, reply and bail.
+        # asyncio.Lock has no blocking=False, so use wait_for with a very short timeout.
+        # In the single-threaded event loop, if the lock is free, acquire() returns
+        # synchronously without yielding, so timeout=0.0 never fires on a free lock.
+        try:
+            await asyncio.wait_for(asyncio.shield(lock.acquire()), timeout=0.001)
+        except TimeoutError:
             await msg.answer("Previous reply still in progress, please wait.")
             return
 
-        async with lock:
+        try:
             hash_key = _hash_chat_id(chat_id, self._salt)
             conv_key = f"telegram:chat:{hash_key}"
             history = await self._load_history(conv_key)
-            history.append({"role": "user", "content": msg.text or ""})
+            content = (msg.text or "")[:_MAX_MESSAGE_LEN]
+            history.append({"role": "user", "content": content})
             try:
                 result = await self._ai.complete(
                     capability=_AI_CAPABILITY,
                     messages=history,
                 )
-                reply = result.content
+                reply = str(result.content)[:_MAX_REPLY_LEN]
                 history.append({"role": "assistant", "content": reply})
                 await self._save_history(conv_key, history)
                 await msg.answer(reply)
             except Exception:
                 log.exception("telegram.chat_ai_failed")
                 await msg.answer("AI unavailable, try again later.")
+        finally:
+            lock.release()
+            # Evict the lock once no waiter holds it (safe in single-threaded asyncio).
+            if not lock.locked():
+                self._locks.pop(chat_id, None)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 from datetime import UTC, datetime, timedelta
@@ -281,7 +282,17 @@ def register_handlers(
             await handle_unmute(msg, entry=entry, db=db)
 
     if tg_chat is not None:
-        import asyncio as _asyncio
+
+        def _on_chat_task_done(t: asyncio.Task[None]) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                log.error(
+                    "telegram.chat_task_failed",
+                    error_class=type(exc).__name__,
+                    exc_info=exc,
+                )
 
         @dp.message(F.text & ~F.text.startswith("/"))
         async def _chat_msg(msg: Message) -> None:
@@ -292,14 +303,5 @@ def register_handlers(
             if not await rate_limiter.check_read(chat_id=msg.chat.id, from_user_id=from_user_id):
                 await msg.answer("Rate limit exceeded. Try again later.")
                 return
-            task = _asyncio.create_task(tg_chat.handle(msg))
-            task.add_done_callback(
-                lambda t: (
-                    not t.cancelled()
-                    and t.exception() is not None
-                    and log.error(
-                        "telegram.chat_task_failed",
-                        error_class=type(t.exception()).__name__,
-                    )
-                )
-            )
+            task = asyncio.create_task(tg_chat.handle(msg))
+            task.add_done_callback(_on_chat_task_done)
