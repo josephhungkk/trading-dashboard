@@ -97,7 +97,7 @@ services:
   # the bind mounts target /app/services/ai/ directly.
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
-    container_name: dashboard-litellm
+    container_name: dashboard-litellm-dev
     restart: unless-stopped
     ports:
       - "127.0.0.1:4000:4000"

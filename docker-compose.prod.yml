@@ -186,6 +186,44 @@ services:
         max-file: "3"
     networks: [td-net]
 
+  # AI router proxy. Config and custom_auth callback are bind-mounted so
+  # key rotation and model changes don't require an image rebuild.
+  # Master-key validation is Redis-backed (zero-restart rotation via
+  # PUT /api/admin/secrets/ai/litellm_master_key).
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: dashboard-litellm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+      - ./backend/app/services/ai/litellm_auth_callback.py:/app/services/ai/litellm_auth_callback.py:ro
+      - ./deploy/litellm/__init__.py:/app/services/__init__.py:ro
+      - ./deploy/litellm/__init__.py:/app/services/ai/__init__.py:ro
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      LITELLM_LOG: WARNING
+    healthcheck:
+      test: ["CMD", "litellm", "--health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 512m
+    cpus: "0.5"
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    networks: [td-net]
+
   schwab-sidecar:
     build:
       # Context = repo root so the Dockerfile's `COPY proto/broker/v1/...`
