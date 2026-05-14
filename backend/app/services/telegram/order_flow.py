@@ -30,6 +30,7 @@ from app.services.telegram.allowlist import AllowlistEntry
 log = structlog.get_logger(__name__)
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9.]{1,16}$")
+_OCC_PATTERN = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 _DECIMAL_10_RE = re.compile(r"^\d+(\.\d{1,10})?$")
 _DECIMAL_8_RE = re.compile(r"^\d+(\.\d{1,8})?$")
 
@@ -61,6 +62,8 @@ def parse_place_order(text: str) -> ParsedOrder | None:
     symbol = parts[1].upper()
     if not _SYMBOL_RE.match(symbol):
         return None
+    if _OCC_PATTERN.match(symbol):
+        return None  # options orders not supported via Telegram
 
     side_raw = parts[2].upper()
     if side_raw not in ("BUY", "SELL"):
