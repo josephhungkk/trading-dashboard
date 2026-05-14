@@ -85,3 +85,23 @@ async def test_evict_stale_deletes_old_rows() -> None:
     deleted = await svc.evict_stale(older_than=timedelta(minutes=5))
     assert deleted == 5
     svc._db_delete_stale.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_has_position_or_order_returns_false_when_empty() -> None:
+    from unittest.mock import MagicMock
+
+    svc = _make_service()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    svc._db.execute.return_value = mock_cursor
+    result = await svc._has_position_or_order(42)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_db_upsert_calls_commit() -> None:
+    svc = _make_service()
+    snap = _make_snapshot()
+    await svc._db_upsert(42, snap)
+    assert svc._db.commit.called

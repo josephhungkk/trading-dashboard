@@ -140,3 +140,14 @@ async def test_all_sources_fail_returns_stale() -> None:
 
     assert result["stale"] is True
     assert result["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_reload_config_updates_sources() -> None:
+    config = AsyncMock()
+    config.get_json = AsyncMock(side_effect=[{"USD": ["schwab"]}, None])
+    from app.services.options.chain_service import OptionChainService
+
+    svc = OptionChainService(config=config, redis=AsyncMock(), broker_registry=AsyncMock())
+    await svc.reload_config()
+    assert svc._sources == {"USD": ["schwab"]}

@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { OptionChainTable } from './OptionChainTable';
-import type { OptionChainData } from './types';
+import type { OptionChainData, OptionChainRow } from './types';
 
 function makeRow(strike: string, putCall: 'C' | 'P'): OptionChainRow {
   return {

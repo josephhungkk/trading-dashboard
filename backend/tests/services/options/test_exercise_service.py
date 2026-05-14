@@ -40,7 +40,6 @@ async def test_elect_idempotent_same_key_returns_existing() -> None:
         instrument_id=42,
         action="EXERCISE",
         qty=Decimal("1"),
-        csrf_nonce="nonce123",
         idempotency_key=ikey,
     )
 
@@ -65,7 +64,6 @@ async def test_elect_duplicate_same_day_raises_409() -> None:
             instrument_id=42,
             action="EXERCISE",
             qty=Decimal("1"),
-            csrf_nonce="nonce456",
             idempotency_key=uuid.uuid4(),
         )
 
@@ -90,7 +88,6 @@ async def test_elect_rate_limit_enforced() -> None:
             instrument_id=42,
             action="EXERCISE",
             qty=Decimal("1"),
-            csrf_nonce="nonce789",
             idempotency_key=uuid.uuid4(),
         )
 
@@ -113,9 +110,48 @@ async def test_elect_new_key_submits_to_broker() -> None:
         instrument_id=42,
         action="DO_NOT_EXERCISE",
         qty=Decimal("2"),
-        csrf_nonce="nonce000",
         idempotency_key=ikey,
     )
 
     svc._submit_to_broker.assert_called_once()
     assert result["status"] == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_find_by_idempotency_key_returns_none_when_not_found() -> None:
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=AsyncMock(fetchone=MagicMock(return_value=None)))
+    svc = _make_service(db=db)
+    result = await svc._find_by_idempotency_key(uuid.uuid4(), "user@example.com")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_find_by_idempotency_key_returns_dict_when_found() -> None:
+    ikey = uuid.uuid4()
+    rid = uuid.uuid4()
+    row = (rid, ikey, "submitted", "BR-001")
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=AsyncMock(fetchone=MagicMock(return_value=row)))
+    svc = _make_service(db=db)
+    result = await svc._find_by_idempotency_key(ikey, "user@example.com")
+    assert result["status"] == "submitted"
+    assert result["broker_ref"] == "BR-001"
+
+
+@pytest.mark.asyncio
+async def test_insert_election_raises_duplicate_on_unique_violation() -> None:
+    from app.services.options.exercise_service import DuplicateElectionError
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=Exception("exercise_elections_one_per_day unique"))
+    svc = _make_service(db=db)
+    with pytest.raises(DuplicateElectionError):
+        await svc._insert_election(
+            account_id=uuid.uuid4(),
+            jwt_subject="u",
+            instrument_id=1,
+            action="EXERCISE",
+            qty=Decimal("1"),
+            idempotency_key=uuid.uuid4(),
+        )
