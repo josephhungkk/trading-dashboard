@@ -2,15 +2,30 @@
 
 from __future__ import annotations
 
+import html
+import json
 import re
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
+from uuid import uuid4
 
 import structlog
+from aiogram.types import Message
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.services.brokers import BrokerSidecarTimeout, BrokerSidecarUnavailable
+from app.services.orders_service import (
+    PreviewUnavailable,
+    _is_regular_trading_hours,
+    _preview_payload_hash,
+    place_order,
+    preview_order,
+)
+from app.services.telegram.allowlist import AllowlistEntry
 
 log = structlog.get_logger(__name__)
 
@@ -188,3 +203,497 @@ async def resolve_instrument(
         await db.rollback()
 
     return conid
+
+
+async def _run_preview(
+    parsed: ParsedOrder,
+    *,
+    account_id: str,
+    conid: str,
+    entry: AllowlistEntry,
+    db: AsyncSession,
+    redis: Any,
+    registry: Any,
+    capability: Any,
+    cfg: Any,
+) -> Any:
+    """Call preview_order service. Returns PreviewResponse."""
+    request_data = {
+        "account_id": account_id,
+        "conid": conid,
+        "side": parsed.side,
+        "order_type": parsed.order_type,
+        "tif": parsed.tif,
+        "qty": parsed.qty,
+        "limit_price": parsed.limit_price,
+        "stop_price": parsed.stop_price,
+    }
+    return await preview_order(
+        cfg=cfg,
+        db=db,
+        redis=redis,
+        registry=registry,
+        capability=capability,
+        request_data=request_data,
+        user_key=f"telegram:{entry.from_user_id}",
+    )
+
+
+async def _do_preview_and_write_pending(
+    parsed: ParsedOrder,
+    account: Any,
+    *,
+    msg: Message,
+    entry: AllowlistEntry,
+    db: AsyncSession,
+    redis: Any,
+    registry: Any,
+    capability: Any,
+    cfg: Any,
+) -> None:
+    """Run preview; write pending key or reply with error."""
+    t0 = time.monotonic()
+    conid = await resolve_instrument(
+        parsed.symbol,
+        db=db,
+        registry=registry,
+        broker_label=str(account.gateway_label),
+    )
+    if conid is None:
+        metrics.TELEGRAM_ORDER_ATTEMPTS_TOTAL.labels(result="unknown_symbol").inc()
+        await msg.answer(
+            f"Unknown or ambiguous symbol <b>{html.escape(parsed.symbol)}</b> — "
+            "trade it via the web first to register it."
+        )
+        return
+
+    try:
+        preview = await _run_preview(
+            parsed,
+            account_id=str(account.id),
+            conid=conid,
+            entry=entry,
+            db=db,
+            redis=redis,
+            registry=registry,
+            capability=capability,
+            cfg=cfg,
+        )
+    except PreviewUnavailable as exc:
+        metrics.TELEGRAM_ORDER_PREVIEWS_TOTAL.labels(result="unavailable").inc()
+        await msg.answer(f"Preview unavailable: {html.escape(str(exc.payload))}")
+        return
+    except Exception:
+        log.exception("telegram.preview_failed")
+        metrics.TELEGRAM_ORDER_PREVIEWS_TOTAL.labels(result="unavailable").inc()
+        await msg.answer("Preview failed — try again.")
+        return
+    finally:
+        metrics.TELEGRAM_ORDER_E2E_SECONDS.labels(stage="preview").observe(time.monotonic() - t0)
+
+    if preview.position_sanity.requires_extra_attestation:
+        metrics.TELEGRAM_ORDER_PREVIEWS_TOTAL.labels(result="position_sanity_rejected").inc()
+        await msg.answer(
+            "This order would result in an extreme position change — please confirm via the web."
+        )
+        return
+
+    if preview.risk_blockers:
+        metrics.TELEGRAM_ORDER_PREVIEWS_TOTAL.labels(result="blocked").inc()
+        lines = ["❌ <b>Order blocked by risk gate:</b>"]
+        for b in preview.risk_blockers:
+            code = html.escape(str(b.get("code", "")))
+            message = html.escape(str(b.get("message", "")))
+            lines.append(f"• {code}: {message}")
+        lines.append("\nUse the web to adjust limits or order size.")
+        await msg.answer("\n".join(lines))
+        return
+
+    warning_lines: list[str] = []
+    if preview.risk_warnings:
+        metrics.TELEGRAM_ORDER_PREVIEWS_TOTAL.labels(result="warned").inc()
+        for w in preview.risk_warnings:
+            code = html.escape(str(w.get("code", "")))
+            message = html.escape(str(w.get("message", "")))
+            warning_lines.append(f"⚠️ WARN: {code}: {message}")
+    else:
+        metrics.TELEGRAM_ORDER_PREVIEWS_TOTAL.labels(result="ok").inc()
+
+    pending_payload = {
+        "account_id": str(account.id),
+        "account_alias": str(account.alias),
+        "account_mode": str(account.mode),
+        "account_gateway_label": str(account.gateway_label),
+        "conid": conid,
+        "symbol": parsed.symbol,
+        "side": parsed.side,
+        "qty": parsed.qty,
+        "order_type": parsed.order_type,
+        "tif": parsed.tif,
+        "limit_price": parsed.limit_price,
+        "stop_price": parsed.stop_price,
+    }
+    key = _pending_key(msg.chat.id, entry.from_user_id)
+    await redis.set(key, json.dumps(pending_payload), ex=_PENDING_TTL)
+
+    side_e = html.escape(parsed.side)
+    sym_e = html.escape(parsed.symbol)
+    qty_e = html.escape(parsed.qty)
+    otype_e = html.escape(parsed.order_type)
+    tif_e = html.escape(parsed.tif)
+    alias_e = html.escape(str(account.alias))
+    mode_e = html.escape(str(account.mode))
+    currency_e = html.escape(str(account.currency))
+    notional_e = html.escape(str(getattr(preview, "notional", "?")))
+    notional_currency_e = html.escape(str(getattr(preview, "notional_currency", "")))
+
+    lines = [
+        "📋 <b>Order Preview</b>",
+        f"Symbol: {sym_e}",
+        f"Side: {side_e}  Qty: {qty_e}  Type: {otype_e}  TIF: {tif_e}",
+        f"Account: {alias_e} [{mode_e}] {currency_e}",
+        f"Est. notional: ~{notional_currency_e} {notional_e}",
+    ]
+    if warning_lines:
+        lines.extend(["", *warning_lines])
+
+    if account.mode == "live":
+        lines.append("\n⚠️ <b>Live account</b> — reply <code>/confirm LIVE</code> to place.")
+    else:
+        lines.append("\nReply <code>/confirm</code> to place. Valid for 120s.")
+
+    await msg.answer("\n".join(lines))
+
+
+async def handle_place_order(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    db: AsyncSession,
+    redis: Any,
+    registry: Any,
+    capability: Any,
+    cfg: Any,
+) -> None:
+    """Handle /place_order command."""
+    parsed = parse_place_order(msg.text or "")
+    if parsed is None:
+        metrics.TELEGRAM_ORDER_ATTEMPTS_TOTAL.labels(result="invalid_syntax").inc()
+        await msg.answer(
+            "Usage: <code>/place_order SYMBOL BUY|SELL QTY [--limit PRICE] "
+            "[--stop PRICE] [--tif DAY|GTC]</code>"
+        )
+        return
+
+    rows = (
+        await db.execute(
+            text(
+                "SELECT a.id, a.alias, b.label as broker, a.mode, a.currency_base as currency, "
+                "a.gateway_label "
+                "FROM broker_accounts a JOIN brokers b ON a.broker_id = b.id "
+                "WHERE a.deleted_at IS NULL "
+                "ORDER BY a.display_order LIMIT :limit"
+            ),
+            {"limit": _MAX_ACCOUNTS + 1},
+        )
+    ).fetchall()
+
+    if len(rows) == 0:
+        metrics.TELEGRAM_ORDER_ATTEMPTS_TOTAL.labels(result="no_accounts").inc()
+        await msg.answer("No active accounts found.")
+        return
+
+    if len(rows) > _MAX_ACCOUNTS:
+        metrics.TELEGRAM_ORDER_ATTEMPTS_TOTAL.labels(result="no_accounts").inc()
+        await msg.answer("Too many accounts — please select an account via the web.")
+        return
+
+    old_acct_key = _acct_select_key(msg.chat.id, entry.from_user_id)
+    old_pending_key = _pending_key(msg.chat.id, entry.from_user_id)
+    old_acct = await redis.get(old_acct_key)
+    old_pending = await redis.get(old_pending_key)
+    if old_acct or old_pending:
+        await redis.delete(old_acct_key, old_pending_key)
+        if old_pending:
+            await msg.answer("Previous unconfirmed order cancelled.")
+
+    metrics.TELEGRAM_ORDER_ATTEMPTS_TOTAL.labels(result="parsed").inc()
+
+    if len(rows) == 1:
+        account = rows[0]
+        await _do_preview_and_write_pending(
+            parsed,
+            account,
+            msg=msg,
+            entry=entry,
+            db=db,
+            redis=redis,
+            registry=registry,
+            capability=capability,
+            cfg=cfg,
+        )
+        return
+
+    accounts_json = [
+        {
+            "id": str(r.id),
+            "alias": str(r.alias),
+            "broker": str(r.broker),
+            "mode": str(r.mode),
+            "currency": str(r.currency),
+            "gateway_label": str(r.gateway_label),
+        }
+        for r in rows
+    ]
+    acct_select_payload = {
+        "order": {
+            "symbol": parsed.symbol,
+            "side": parsed.side,
+            "qty": parsed.qty,
+            "order_type": parsed.order_type,
+            "tif": parsed.tif,
+            "limit_price": parsed.limit_price,
+            "stop_price": parsed.stop_price,
+        },
+        "accounts": accounts_json,
+    }
+    await redis.set(old_acct_key, json.dumps(acct_select_payload), ex=_ACCT_SELECT_TTL)
+
+    lines = ["Multiple accounts — reply with a number:"]
+    for i, r in enumerate(rows, 1):
+        alias_e = html.escape(str(r.alias))
+        broker_e = html.escape(str(r.broker))
+        mode_e = html.escape(str(r.mode))
+        currency_e = html.escape(str(r.currency))
+        lines.append(f"{i}. {alias_e} ({broker_e}) [{mode_e}] {currency_e}")
+    await msg.answer("\n".join(lines))
+
+
+async def handle_account_selection(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    db: AsyncSession,
+    redis: Any,
+    registry: Any,
+    capability: Any,
+    cfg: Any,
+) -> bool:
+    """Handle numeric reply for account selection. Returns True if consumed."""
+    acct_key = _acct_select_key(msg.chat.id, entry.from_user_id)
+    raw = await redis.get(acct_key)
+    if raw is None:
+        return False
+
+    try:
+        data = json.loads(raw)
+        accounts = data["accounts"]
+        order_data = data["order"]
+    except Exception:
+        log.warning("telegram.acct_select_corrupted", chat_id=msg.chat.id)
+        await redis.delete(acct_key)
+        return True
+
+    try:
+        idx = int((msg.text or "").strip()) - 1
+    except ValueError:
+        await msg.answer("Please reply with a number from the list.")
+        return True
+
+    if idx < 0 or idx >= len(accounts):
+        await msg.answer(
+            f"Invalid selection. Please reply with a number between 1 and {len(accounts)}."
+        )
+        return True
+
+    await redis.delete(acct_key)
+    account = accounts[idx]
+
+    parsed = ParsedOrder(
+        symbol=order_data["symbol"],
+        side=order_data["side"],
+        qty=order_data["qty"],
+        order_type=order_data["order_type"],
+        tif=order_data["tif"],
+        limit_price=order_data.get("limit_price"),
+        stop_price=order_data.get("stop_price"),
+    )
+
+    class _AccountProxy:
+        def __init__(self, d: dict[str, Any]) -> None:
+            self.id = d["id"]
+            self.alias = d["alias"]
+            self.broker = d["broker"]
+            self.mode = d["mode"]
+            self.currency = d["currency"]
+            self.gateway_label = d["gateway_label"]
+
+    await _do_preview_and_write_pending(
+        parsed,
+        _AccountProxy(account),
+        msg=msg,
+        entry=entry,
+        db=db,
+        redis=redis,
+        registry=registry,
+        capability=capability,
+        cfg=cfg,
+    )
+    return True
+
+
+async def handle_confirm(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    db: AsyncSession,
+    redis: Any,
+    registry: Any,
+    capability: Any,
+    cfg: Any,
+) -> None:
+    """Handle /confirm command — consume pending order and dispatch to broker."""
+    key = _pending_key(msg.chat.id, entry.from_user_id)
+    raw = await redis.execute_command("GETDEL", key)
+
+    if raw is None:
+        metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="expired").inc()
+        await msg.answer(
+            "No pending order (expired or already confirmed). "
+            "If you believe an order was placed, check the web dashboard before retrying."
+        )
+        return
+
+    try:
+        pending = json.loads(raw)
+    except Exception:
+        log.error("telegram.confirm_payload_corrupted")
+        await msg.answer("Internal error — please /place_order again.")
+        return
+
+    account_mode = pending.get("account_mode", "paper")
+
+    if account_mode == "live":
+        text_upper = (msg.text or "").strip().upper()
+        if not text_upper.endswith("LIVE"):
+            await redis.set(key, raw, ex=_PENDING_TTL)
+            await msg.answer(
+                "⚠️ <b>Live account</b> — reply <code>/confirm LIVE</code> to place, "
+                "or /cancel_order to cancel."
+            )
+            return
+
+    t0 = time.monotonic()
+    account_id = pending["account_id"]
+    conid = pending["conid"]
+    side = pending["side"]
+    order_type = pending["order_type"]
+    tif = pending["tif"]
+    qty = pending["qty"]
+    limit_price = pending.get("limit_price")
+    stop_price = pending.get("stop_price")
+
+    nonce_uuid = str(uuid4())
+    payload_hash = _preview_payload_hash(
+        account_id=account_id,
+        conid=conid,
+        side=side,
+        order_type=order_type,
+        tif=tif,
+        qty=qty,
+        limit_price=limit_price,
+        stop_price=stop_price,
+    )
+    now = datetime.now(UTC)
+    rth_at_mint = _is_regular_trading_hours(now)
+    nonce_key = f"nonce:order:{account_id}:{nonce_uuid}"
+    nonce_value = json.dumps({"payload_hash": payload_hash, "rth_at_mint": rth_at_mint})
+    await redis.set(nonce_key, nonce_value, ex=_NONCE_TTL)
+
+    client_order_id = f"telegram-{uuid4()}"
+    request_data: dict[str, Any] = {
+        "account_id": account_id,
+        "conid": conid,
+        "side": side,
+        "order_type": order_type,
+        "tif": tif,
+        "qty": qty,
+        "limit_price": limit_price,
+        "stop_price": stop_price,
+        "nonce": nonce_uuid,
+        "client_order_id": client_order_id,
+    }
+
+    try:
+        order = await place_order(
+            cfg=cfg,
+            db=db,
+            redis=redis,
+            registry=registry,
+            capability=capability,
+            request_data=request_data,
+        )
+        metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="placed").inc()
+        await msg.answer(f"✅ Order placed — ID: <code>{html.escape(str(order.id))}</code>")
+
+    except PreviewUnavailable as exc:
+        error = exc.payload.get("error", "") if isinstance(exc.payload, dict) else ""
+        if error == "risk_gate_blocked":
+            metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="risk_blocked").inc()
+            blockers = exc.payload.get("blockers", []) if isinstance(exc.payload, dict) else []
+            lines = ["❌ <b>Order blocked by risk gate:</b>"]
+            for b in blockers:
+                code = html.escape(str(b.get("code", "")))
+                message = html.escape(str(b.get("message", "")))
+                lines.append(f"• {code}: {message}")
+            await msg.answer("\n".join(lines))
+        elif error in ("max_notional_exceeded", "daily_notional_exceeded"):
+            metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="notional_exceeded").inc()
+            await msg.answer(f"❌ {html.escape(error)}: order exceeds notional cap.")
+        elif error == "rth_changed":
+            metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="rth_changed").inc()
+            await msg.answer("Market session changed since preview — please /place_order again.")
+        elif error in ("unknown_nonce", "payload_mismatch"):
+            log.error("telegram.confirm_nonce_error", error=error)
+            metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="nonce_error").inc()
+            await msg.answer("Internal error — please /place_order again.")
+        elif exc.status_code == 503:
+            metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="maintenance").inc()
+            detail = html.escape(str(exc.payload.get("detail", "maintenance")))
+            await msg.answer(f"Broker maintenance in progress: {detail}")
+        else:
+            metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="other_error").inc()
+            await msg.answer(
+                "Order submission failed — check the web dashboard for status before retrying."
+            )
+    except Exception:
+        log.exception("telegram.confirm_unexpected_error")
+        metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="other_error").inc()
+        await msg.answer(
+            "Order submission failed — check the web dashboard for status before retrying."
+        )
+    finally:
+        metrics.TELEGRAM_ORDER_E2E_SECONDS.labels(stage="confirm").observe(time.monotonic() - t0)
+
+
+async def handle_cancel_order(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    redis: Any,
+) -> None:
+    """Handle /cancel_order — clear any pending state for this user."""
+    pending_k = _pending_key(msg.chat.id, entry.from_user_id)
+    acct_k = _acct_select_key(msg.chat.id, entry.from_user_id)
+
+    pending_raw = await redis.get(pending_k)
+    acct_raw = await redis.get(acct_k)
+
+    await redis.delete(pending_k, acct_k)
+
+    if pending_raw:
+        metrics.TELEGRAM_ORDER_CANCELS_TOTAL.labels(stage="pending_order").inc()
+    if acct_raw:
+        metrics.TELEGRAM_ORDER_CANCELS_TOTAL.labels(stage="acct_select").inc()
+
+    await msg.answer("Pending order cancelled.")
