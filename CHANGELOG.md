@@ -5,6 +5,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 12 — Options single-leg patch (v0.12.1)
+
+Reviewer-chain findings (chunks A+B+F) and 3 integration test fixes applied at v0.12.1 on 2026-05-14.
+
+**Backend**
+
+- `alembic/versions/0047_phase12_options.py`: Named CHECK constraints (`orders_position_effect_check`, `orders_tax_treatment_check`, `fills_tax_treatment_check`) — idempotent DROP+ADD; explicit `ON DELETE RESTRICT` on `exercise_elections.account_id` FK; `DROP INDEX` before `DROP TABLE` in downgrade.
+- `app/models/options.py`: Removed duplicate `BrokerAccount` stub class; removed duplicate `CheckConstraint` from `ExerciseElection.__table_args__` (constraints authoritative in migration).
+- `app/models/orders.py`: Added `position_effect` + `tax_treatment` SQLAlchemy `mapped_column(Text)` (were missing from ORM despite being in migration).
+- `app/services/risk_service.py`: Merged `_get_option_expiry` + `_get_instrument_exchange` into single `_get_option_meta` (1 DB round-trip); added cash-secured-put reserve check at L2 (BLOCK — strike × qty × multiplier × 1.05 vs available cash); added assignment-risk WARN (STO within 5 trading days of expiry AND delta ≥ 0.7 or unavailable); fail-open when exchange is `None` (unknown exchange skips calendar checks entirely).
+- `app/services/quotes/instrument_resolver.py`: `QUOTE_INSTRUMENTS_CREATED_TOTAL` label uses `getattr(asset_class, "value", str(asset_class))` — protobuf `AssetClass` is an int subclass without `.value`; fixes `AttributeError` in `test_full_trade_chain` + `test_full_modify_chain`.
+- `app/services/orders_service.py`: Moved inline `instrument_resolver` import to module level; added country guard (`ValueError` if `country_for_exchange` returns None).
+- `app/core/db.py`: Scoped `statement_cache_size=0` to `TEST_DISABLE_STMT_CACHE` env var only — no longer applied unconditionally in production.
+
+**Tests**
+
+- `tests/services/test_options_risk_checks.py`: All 9 tests mock `_get_option_meta` directly instead of removed individual helpers.
+- `tests/conftest.py`: Sets `TEST_DISABLE_STMT_CACHE=1` so asyncpg statement cache is disabled in all test runs.
+- `tests/services/test_instrument_resolver_option.py`: Updated callers for new `find_or_create_option` signature (no session arg, explicit `multiplier=100`).
+- `tests/integration/test_active_set_query.py`: Self-seeds `broker_account` via `ON CONFLICT DO UPDATE` — conftest seed only runs on port-5433 test DB; this test must work against the Docker prod DB too.
+
+---
+
 ### Phase 12 — Options single-leg (v0.12.0)
 
 Phase 12 shipped across 6 chunks (A–F) at tag `v0.12.0` on 2026-05-14. 32 options-specific tests green; 81% options service coverage; 685/685 FE tests green. Adds the options chain viewer, Greeks display, exercise elections, and options risk gate.
