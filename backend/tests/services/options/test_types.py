@@ -1,76 +1,100 @@
-"""Tests for Phase 12 options Pydantic types."""
+"""Tests for InstrumentMeta Pydantic discriminated union."""
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
-from app.services.options.types import (
-    GreeksSnapshot,
-    NonOptionDetails,
-    OptionDetails,
-    parse_instrument_meta,
-)
 
-pytestmark = pytest.mark.no_db
+def test_parse_stock_empty_meta() -> None:
+    from app.services.options.types import NonOptionDetails, parse_instrument_meta
 
-
-def test_parse_empty_meta_returns_non_option() -> None:
-    parsed = parse_instrument_meta({})
-
-    assert isinstance(parsed, NonOptionDetails)
-    assert parsed.asset_class == ""
+    result = parse_instrument_meta({})
+    assert isinstance(result, NonOptionDetails)
+    assert result.asset_class == ""
 
 
-def test_parse_stock_meta_returns_non_option() -> None:
-    parsed = parse_instrument_meta({"asset_class": "STOCK"})
+def test_parse_stock_explicit() -> None:
+    from app.services.options.types import NonOptionDetails, parse_instrument_meta
 
-    assert isinstance(parsed, NonOptionDetails)
-    assert parsed.asset_class == "STOCK"
-
-
-def test_parse_option_meta_returns_option_details() -> None:
-    parsed = parse_instrument_meta(
-        {
-            "asset_class": "OPTION",
-            "underlying_canonical_id": "stock:SPY:US",
-            "option_type": "CALL",
-            "strike": "450.00",
-            "expiry": "2026-06-20",
-        }
-    )
-
-    assert isinstance(parsed, OptionDetails)
-    assert parsed.multiplier == 100
-    assert parsed.style == "AMERICAN"
-    assert parsed.strike == Decimal("450.00")
+    result = parse_instrument_meta({"asset_class": "STOCK"})
+    assert isinstance(result, NonOptionDetails)
 
 
-def test_parse_option_meta_missing_required_fields_raises() -> None:
+def test_parse_option_details() -> None:
+    from app.services.options.types import OptionDetails, parse_instrument_meta
+
+    raw = {
+        "asset_class": "OPTION",
+        "underlying_canonical_id": "stock:SPY:US",
+        "strike": "450.00",
+        "expiry": "2025-01-17",
+        "put_call": "C",
+        "multiplier": 100,
+        "style": "A",
+    }
+    result = parse_instrument_meta(raw)
+    assert isinstance(result, OptionDetails)
+    assert result.strike == Decimal("450.00")
+    assert result.multiplier == 100
+    assert result.style == "A"
+
+
+def test_option_details_requires_multiplier() -> None:
+    from app.services.options.types import OptionDetails
+
     with pytest.raises(ValidationError):
-        parse_instrument_meta({"asset_class": "OPTION"})
+        OptionDetails(
+            underlying_canonical_id="stock:SPY:US",
+            strike=Decimal("450"),
+            expiry=date(2025, 1, 17),
+            put_call="C",
+            style="A",
+            # multiplier missing
+        )
 
 
-def test_option_details_multiplier_defaults_to_100() -> None:
-    details = OptionDetails(
-        underlying_canonical_id="stock:SPY:US",
-        option_type="PUT",
-        strike=Decimal("400.00"),
-        expiry="2026-06-20",
+def test_option_details_requires_style() -> None:
+    from app.services.options.types import OptionDetails
+
+    with pytest.raises(ValidationError):
+        OptionDetails(
+            underlying_canonical_id="stock:SPY:US",
+            strike=Decimal("450"),
+            expiry=date(2025, 1, 17),
+            put_call="C",
+            multiplier=100,
+            # style missing
+        )
+
+
+def test_unknown_asset_class_raises() -> None:
+    from app.services.options.types import parse_instrument_meta
+
+    with pytest.raises(ValidationError):
+        parse_instrument_meta({"asset_class": "BOND"})
+
+
+def test_greeks_snapshot_clamping() -> None:
+    from app.services.options.types import GreeksSnapshot
+
+    snap = GreeksSnapshot(
+        delta=Decimal("99999"),
+        gamma=Decimal("0.028"),
+        theta=Decimal("-0.12"),
+        vega=Decimal("0.31"),
+        rho=Decimal("0.05"),
+        iv=Decimal("0.175"),
     )
+    assert snap.delta == Decimal("9999.999999")
 
-    assert details.multiplier == 100
 
+def test_subscription_handle_fields() -> None:
+    from app.services.options.types import SubscriptionHandle
 
-def test_greeks_snapshot_accepts_all_none_greeks() -> None:
-    snapshot = GreeksSnapshot(instrument_id=123)
-
-    assert snapshot.delta is None
-    assert snapshot.gamma is None
-    assert snapshot.theta is None
-    assert snapshot.vega is None
-    assert snapshot.rho is None
-    assert snapshot.iv is None
-    assert snapshot.iv_rank is None
+    h = SubscriptionHandle(conid="12345", canonical_id=None, channel="greeks.options.12345")
+    assert h.conid == "12345"
+    assert h.canonical_id is None
