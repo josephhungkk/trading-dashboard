@@ -1,7 +1,7 @@
 # app_config / app_secrets Inventory
 
 **Generated:** 2026-05-12 (Phase 11a CI-debt sweep — recovery from empty-prod-DB finding)
-**Updated:** 2026-05-14 (fix Alpaca key schema to dotted form; add futu.unlock_pwd_md5; note prod-wipe root-cause fix in 0048)
+**Updated:** 2026-05-14 (fix Alpaca key schema to dotted form; remove IBKR per-label rows — never read by app; add futu.unlock_pwd_md5; note prod-wipe root-cause fix in 0048)
 
 **Purpose:** authoritative list of every `(namespace, key)` row the application
 expects to find in `app_config` (plaintext settings) and `app_secrets`
@@ -24,139 +24,117 @@ PUT /api/admin/secrets       { "namespace": "...", "key": "...", "value": "..." 
 ### `ai` namespace
 | Key | Purpose | Source |
 |---|---|---|
-| `litellm_master_key` | LiteLLM master key for proxy auth | `app/main.py:207` — `redis.get("ai:litellm_master_key")` (cached after first `reveal_secret`) |
+| `litellm_master_key` | LiteLLM master key for proxy auth | `app/main.py` — cached in Redis after first reveal |
 
 ### `ai_provider` namespace (per-provider, dynamic keys)
 | Key pattern | Purpose | Source |
 |---|---|---|
-| `<provider>.api_key` | API key for cloud LLM provider | `app/main.py:228`, `litellm_auth_callback.py:41`, `provider_keys.py:77` — providers seen: `anthropic`, `openai`, `xai`, `gemini`, `xai-grok`, `gemini-pro`, `anthropic-sonnet`, `openai-gpt4o` |
+| `<provider>.api_key` | API key for cloud LLM provider | `litellm_auth_callback.py`, `provider_keys.py` — providers: `anthropic`, `openai`, `xai`, `gemini` |
 
-### `broker` namespace — IBKR (per-gateway-label)
-Labels (from `SIDECAR_PORTS`): **`isa-live`, `isa-paper`, `normal-live`, `normal-paper`**
+### `broker` namespace — IBKR
+IBKR labels (`isa-live`, `isa-paper`, `normal-live`, `normal-paper`) connect via mTLS at the gRPC transport level.
+`BrokerConfigurer.configure()` is **not called** for IBKR labels (they are not in `targets`).
+Only the three fleet-wide mTLS secrets are needed — no per-label rows.
 
-| Key pattern | Purpose | Source |
+| Key | Purpose | Source |
 |---|---|---|
-| `mtls.client_cert_pem` | mTLS client cert (one per fleet, NOT per-label) | `broker_registry_factory.py:295` |
-| `mtls.client_key_pem` | mTLS client private key | `broker_registry_factory.py:296` |
-| `mtls.ca_bundle_pem` | mTLS CA bundle | `broker_registry_factory.py:297` |
-| `<label>.unlock_pwd_md5` | IBC unlock password (MD5 hash for IBKR Gateway) | `broker_registry_factory.py:113` |
-| `<label>.rsa_priv_pem` | Per-label RSA private key for IBC secondary auth | `broker_registry_factory.py:116` |
+| `mtls.client_cert_pem` | mTLS client cert (fleet-wide, seeded by `provision-and-publish.ps1`) | `broker_registry_factory.py` |
+| `mtls.client_key_pem` | mTLS client private key | `broker_registry_factory.py` |
+| `mtls.ca_bundle_pem` | mTLS CA bundle | `broker_registry_factory.py` |
 
 ### `broker` namespace — Futu (label = `futu`)
 | Key | Purpose | Source |
 |---|---|---|
-| `futu.rsa_priv_pem` | 1024-bit RSA key for OpenD pairing (memory:futu_1024_rsa_key.md says it MUST be 1024-bit) | `broker_registry_factory.py:116` (`{label}.rsa_priv_pem`) |
+| `futu.rsa_priv_pem` | 1024-bit RSA key for OpenD pairing — MUST be 1024-bit (memory: futu_1024_rsa_key.md) | `broker_registry_factory.py` (`{label}.rsa_priv_pem`) |
+| `futu.unlock_pwd_md5` | OpenD unlock password MD5 hash | `broker_registry_factory.py` (`{label}.unlock_pwd_md5`) |
 
 ### `broker` namespace — Schwab
 | Key | Purpose | Source |
 |---|---|---|
-| `schwab.app_key` | Schwab developer app key | `broker_registry_factory.py:166`, `schwab_oauth.py:68/132`, `sidecar_schwab_oauth.py:90` |
-| `schwab.app_secret` | Schwab developer app secret | `broker_registry_factory.py:167` (and same call sites as above) |
-| `schwab.refresh_token` | Schwab OAuth refresh token (rotates every 90d) | `broker_registry_factory.py:168`, `schwab_oauth.py:72`, `tier2_refresher.py:303` |
-| `schwab.access_token` | Schwab OAuth access token (30-min TTL) | `tier2_refresher.py:229` |
+| `schwab.app_key` | Schwab developer app key | `broker_registry_factory.py`, `schwab_oauth.py` |
+| `schwab.app_secret` | Schwab developer app secret | `broker_registry_factory.py` |
+| `schwab.refresh_token` | Schwab OAuth refresh token (rotates every 90d) | `broker_registry_factory.py`, `schwab_oauth.py` |
+| `schwab.access_token` | Schwab OAuth access token (30-min TTL, written by OAuth flow) | `tier2_refresher.py` |
 
-### `broker` namespace — Alpaca (per-mode, dotted schema)
+### `broker` namespace — Alpaca (dotted schema)
 Legacy key form (single-account): `alpaca.<mode>.api_key` e.g. `alpaca.paper.api_key`
 Labeled form (multi-account): `alpaca.<account_label>.<mode>.api_key`
 
-| Key pattern | Purpose | Source |
+| Key | Purpose | Source |
 |---|---|---|
-| `alpaca.paper.api_key` | Alpaca paper API key (legacy/primary) | `broker_registry_factory.py:256` |
-| `alpaca.paper.api_secret` | Alpaca paper API secret | `broker_registry_factory.py:257` |
-| `alpaca.live.api_key` | Alpaca live API key | `broker_registry_factory.py:256` |
-| `alpaca.live.api_secret` | Alpaca live API secret | `broker_registry_factory.py:257` |
+| `alpaca.paper.api_key` | Alpaca paper API key | `broker_registry_factory.py` |
+| `alpaca.paper.api_secret` | Alpaca paper API secret | `broker_registry_factory.py` |
+| `alpaca.live.api_key` | Alpaca live API key | `broker_registry_factory.py` |
+| `alpaca.live.api_secret` | Alpaca live API secret | `broker_registry_factory.py` |
 
-**Note:** Key schema is dotted (alpaca.**.**), NOT hyphenated (alpaca-**). Hyphenated form silently fails the Configure call.
+**Note:** Key schema is dotted (`alpaca.paper.api_key`), NOT hyphenated (`alpaca-paper.api_key`). Hyphenated form silently fails the Configure call.
+
+### `testing` namespace (real-broker test gates)
+| Key | Purpose | Source |
+|---|---|---|
+| `cf_access_client_id` | CF Access service token ID for IBKR E2E test (hits prod ingress) | `real_broker/conftest.py` |
+| `cf_access_client_secret` | CF Access service token secret | `real_broker/conftest.py` |
 
 ---
 
 ## app_config (plaintext)
 
-### `broker` namespace
+### `broker` namespace — global
 | Key | Type | Purpose | Source |
 |---|---|---|---|
-| `kill_switch` | bool | Global kill switch (legacy name) | `risk_service.py` — `cfg.get_bool` |
-| `kill_switch_enabled` | bool | Global kill switch (current name) | `orders_service.py` — `cfg.get_bool` |
+| `kill_switch_enabled` | bool | Global kill switch | `orders_service.py`, `risk_service.py` |
+| `kill_switch` | bool | Legacy alias for kill switch | `risk_service.py` |
 | `oco.enabled` | bool | OCO endpoint feature flag | `orders_service.py` |
-| `nuc_wg_host` | str | NUC WireGuard IP override (default `10.10.0.2`) | `engine_factory.py:127` |
-| `quote_source_priority` | json | Per-asset-class quote source ordering | `engine_factory.py:107` |
-| `ibkr_gateway_quote_assignment` | json | Quote source → IBKR label routing | `engine_factory.py:108` |
-| `ibkr_gateway_quote_fallback` | json | IBKR quote fallback list | `engine_factory.py:109` |
-| `<gateway_label>.trade_enabled` | bool | Per-label trade enable flag (used by E2E chain tests + admin UI) | `orders_service.py` |
+| `nuc_wg_host` | str | NUC WireGuard IP override (default `10.10.0.2`) | `quotes/engine_factory.py` |
+| `quote_source_priority` | json | Per-asset-class quote source ordering | `quotes/engine_factory.py` |
+| `ibkr_gateway_quote_assignment` | json | Quote source → IBKR label routing | `quotes/engine_factory.py` |
+| `ibkr_gateway_quote_fallback` | json | IBKR quote fallback list | `quotes/engine_factory.py` |
+| `<gateway_label>.trade_enabled` | bool | Per-label trade enable flag | `orders_service.py` |
 
-### `broker` namespace — Schwab
+### `broker` namespace — Schwab (written by OAuth flow, not seeded manually)
 | Key | Type | Purpose | Source |
 |---|---|---|---|
-| `schwab.refresh_token_issued_at` | str (ISO) | When refresh token was minted | `schwab_oauth.py:199/222` |
+| `schwab.refresh_token_issued_at` | str (ISO) | When refresh token was minted | `schwab_oauth.py` |
 | `schwab.access_token_issued_at` | str (ISO) | When access token was minted | `schwab_oauth.py` |
 | `schwab.callback_url` | str | OAuth callback URL | `schwab_oauth.py` |
 | `schwab.tier2_refresh_enabled` | bool | Tier-2 (Playwright auto-refresh) flag | `schwab_oauth.py` |
 | `schwab.tier2_consecutive_failures` | int | Tier-2 failure counter | `schwab_oauth.py` |
 
-### `broker` namespace — Futu (per-label)
-| Key pattern | Type | Purpose | Source |
+### `broker` namespace — Futu
+| Key | Type | Purpose | Source |
 |---|---|---|---|
-| `<label>.opend_host` | str | Futu OpenD host (default `127.0.0.1`) | `broker_registry_factory.py:120` |
-| `<label>.opend_port` | str | Futu OpenD port (default `11111`) | `broker_registry_factory.py:127` |
-| `<label>.connection_id` | str | Futu connection identifier (optional) | `broker_registry_factory.py:135` |
+| `futu.opend_host` | str | Futu OpenD host (default `127.0.0.1`) | `broker_registry_factory.py` |
+| `futu.opend_port` | str | Futu OpenD port (default `11111`) | `broker_registry_factory.py` |
+| `futu.connection_id` | str | Futu connection identifier (optional) | `broker_registry_factory.py` |
 
 ### `ai_router` namespace
 | Key | Type | Purpose | Source |
 |---|---|---|---|
-| `capability_map` | json | Per-model capability override (LLM routing) | `main.py:217` |
+| `capability_map` | json | Per-capability model routing map | `app/main.py` — seeded by Phase 11b migration |
+
+### `alert_capabilities` namespace
+| Key | Type | Purpose | Source |
+|---|---|---|---|
+| `capability_map` | json | Alert engine capability config | Phase 11b migration — seeded automatically |
 
 ### `charts` namespace
 | Key | Type | Purpose | Source |
 |---|---|---|---|
-| `chart_layout_schema_version` | int | klinecharts schema version | Used by `chart_layouts` migration logic |
+| `chart_layout_schema_version` | int | klinecharts schema version | `chart_layouts` migration logic |
+
+### `testing` namespace (real-broker test gates)
+| Key | Type | Purpose | Source |
+|---|---|---|---|
+| `ibkr_test_enabled` | bool | Opt-in to run real IBKR paper E2E test | `real_broker/conftest.py` |
+| `ibkr_paper_account` | str | IBKR paper account UUID | `real_broker/conftest.py` |
+| `futu_test_enabled` | bool | Opt-in to run real Futu paper E2E test (default false — OpenD thread-hang risk) | `real_broker/conftest.py` |
+| `schwab_account_hash` | str | Schwab live account hash for E2E tests (unfillable prices used) | `real_broker/conftest.py` |
 
 ---
 
-## What's likely missing for Phase 11a unskipping
+## Re-seed procedure (after a prod DB wipe)
 
-For the 9 real-broker E2E tests to pass through the DB-driven approach, the following NEEDS to exist in `app_secrets` / `app_config`:
-
-### Schwab (3 tests + `CI_USE_REAL_SCHWAB=1` smoke + capability-drift)
-- ✅ `app_secrets[broker/schwab.app_key]`
-- ✅ `app_secrets[broker/schwab.app_secret]`
-- ✅ `app_secrets[broker/schwab.refresh_token]` (one-time interactive OAuth seed needed via `scripts/mint_schwab_access_token.py`)
-- `app_config[broker/schwab.paper_account_hash]` — NEW (not yet referenced in code; needed by tests that target paper specifically)
-
-### IBKR (3 tests)
-- ✅ `app_secrets[broker/mtls.client_cert_pem]` + `mtls.client_key_pem` + `mtls.ca_bundle_pem` (`deploy/nuc/provision-and-publish.ps1` is the canonical seeder)
-- ✅ `app_secrets[broker/isa-paper.unlock_pwd_md5]` + `isa-paper.rsa_priv_pem` (per-label IBC creds)
-- NEW for tests: `app_config[testing/ibkr_paper_account]` (the DU***** account number)
-- NEW for tests: `app_secrets[testing/cf_access_client_id]` + `cf_access_client_secret` (CF Access service token for hitting prod ingress)
-
-### Alpaca (2 tests)
-- ✅ `app_secrets[broker/alpaca-paper.api_key]`
-- ✅ `app_secrets[broker/alpaca-paper.api_secret]`
-
-### Futu (1 test)
-- ✅ `app_secrets[broker/futu.rsa_priv_pem]`
-- ✅ `app_config[broker/futu.opend_host]` + `futu.opend_port`
-
-### CI flags (kept in `.env.test`, NOT in DB)
-These are test-runner toggles, not app config:
-- `CI_USE_REAL_REDIS=1` + `CI_REDIS_URL`
-- `CI_USE_REAL_SCHWAB=1`
-- `E2E_BACKEND_URL` + `E2E_JWT`
-
----
-
-## Re-seed procedure (after fixing the VPS 502)
-
-1. **Fix VPS 502 first** — per memory `feedback_post_deploy_broker_recovery.md`:
-   ```
-   ssh -p 2222 trader@88.208.197.219
-   cd trading-dashboard
-   # Check what's broken
-   docker compose ps
-   docker compose logs backend --tail 50
-   # Standard recovery
-   docker compose restart backend
-   docker compose restart nginx     # per memory:nginx_backend_recreate_502.md
-   ```
+1. **Run `deploy/nuc/provision-and-publish.ps1`** — seeds 3 mTLS secrets directly via admin API.
 
 2. **Verify admin endpoint** is up:
    ```
@@ -164,7 +142,12 @@ These are test-runner toggles, not app config:
      https://dashboard.kiusinghung.com/api/admin/config
    ```
 
-3. **Mint mTLS** (IBKR) via `deploy/nuc/provision-and-publish.ps1` — that script writes 3 secrets directly via the admin API.
+3. **Run placeholder seeder** to create REPLACE_ME rows for all broker secrets:
+   ```
+   docker compose exec -T -w /app backend bash -c \
+     'PYTHONPATH=/app uv run python /tmp/seed-secrets.py'
+   # (copy scripts/db/seed-prod-app-secrets-placeholders.py to /tmp/seed-secrets.py first)
+   ```
 
 4. **Seed Schwab** in order (per memory `feedback_schwab_app_key_seed_order.md`):
    ```
@@ -189,14 +172,26 @@ These are test-runner toggles, not app config:
    PUT /api/admin/config  { ns: broker, key: futu.opend_port, value: 11111 }
    ```
 
-7. **Run `./scripts/db/copy-prod-creds-to-test-pg.sh`** to mirror into test_postgres.
+7. **Seed CF Access creds** (for IBKR real-broker tests):
+   ```
+   PUT /api/admin/secrets { ns: testing, key: cf_access_client_id, value: ... }
+   PUT /api/admin/secrets { ns: testing, key: cf_access_client_secret, value: ... }
+   ```
 
-8. **Run real-broker tests** — should now pass through the DB-read fixture path.
+8. **Seed app_config defaults**:
+   ```
+   POST /api/admin/config { ns: broker, key: kill_switch_enabled, value: false, value_type: bool }
+   POST /api/admin/config { ns: testing, key: ibkr_test_enabled, value: true, value_type: bool }
+   POST /api/admin/config { ns: testing, key: futu_test_enabled, value: false, value_type: bool }
+   ```
+
+9. **Run `./scripts/db/copy-prod-creds-to-test-pg.sh`** to mirror into test_postgres.
 
 ---
 
 ## Notes
 
-- **Restoration sources**: the IBC unlock passwords + RSA keys were originally generated by `deploy/nuc/provision-and-publish.ps1`. mTLS was rotated via `deploy/nuc/renew-sidecar-mtls.ps1`. If the prod DB has been wiped, you need to re-run these provisioners.
-- **APP_SECRET_KEY rotation invalidates all `app_secrets` ciphertext.** The `feedback_pytest_prod_db_wipe.md` memory and the `MissingBrokerSecrets` path in `broker_registry_factory.py:309` both flag this.
-- **`account_kill_switches`, `risk_limits`** are also operator-tunable but currently empty — re-seed at your own pace (defaults work without them).
+- **IBKR per-label rows removed (2026-05-14):** `isa-paper.*`, `isa-live.*`, `normal-paper.*`, `normal-live.*` (`rsa_priv_pem` + `unlock_pwd_md5`) were seeded as placeholders but are never read. IBKR labels are not in `BrokerConfigurer.targets` — they connect via mTLS transport only.
+- **APP_SECRET_KEY rotation invalidates all `app_secrets` ciphertext.** If a wipe followed a key rotation, all secrets must be re-entered even if the rows survive.
+- **`account_kill_switches`, `risk_limits`** are operator-tunable but defaults work without them.
+- **`alert_capabilities/capability_map`** and **`ai_router/capability_map`** are seeded automatically by alembic migrations — do not seed manually.

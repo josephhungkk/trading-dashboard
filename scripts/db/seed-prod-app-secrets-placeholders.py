@@ -9,21 +9,22 @@ the admin UI can show + replace it.
 
 Run inside the backend container on VPS:
 
-    ssh -p 2222 trader@88.208.197.219
-    cd trading-dashboard
-    docker compose cp scripts/db/seed-prod-app-secrets-placeholders.py \
-        backend:/tmp/seed-secrets.py
-    docker compose exec -T backend uv run python /tmp/seed-secrets.py
+    docker compose exec -T -w /app backend bash -c \\
+      'PYTHONPATH=/app uv run python /tmp/seed-secrets.py'
+    # (copy this file to /tmp/seed-secrets.py first via docker cp)
 
 After it runs, every slot below appears in the admin UI with value
 'REPLACE_ME' — click each row, paste the real value, save.
 
-Slots seeded (19 rows total):
-  - IBKR mTLS triplet (3)        — overwritten by provision-and-publish.ps1
-  - IBKR per-label IBC creds (8) — 4 labels x (unlock_pwd_md5 + rsa_priv_pem)
-  - Schwab triplet (3)           — app_key/app_secret manual, refresh_token via OAuth
-  - Alpaca paper + live (4)      — api_key + api_secret per mode
-  - Futu RSA priv key (1)        — 1024-bit PEM required (memory:futu_1024_rsa_key.md)
+Slots seeded (12 rows total):
+  - IBKR mTLS triplet (3)   — overwritten by provision-and-publish.ps1
+  - Schwab triplet (3)      — app_key/app_secret manual, refresh_token via OAuth
+  - Alpaca paper + live (4) — api_key + api_secret per mode (dotted schema)
+  - Futu (2)                — rsa_priv_pem (1024-bit) + unlock_pwd_md5
+
+Note: IBKR per-label rows (isa-paper.*, isa-live.*, normal-*.*)  are NOT seeded.
+BrokerConfigurer.targets excludes IBKR labels — they connect via mTLS transport
+only and never go through configure(). See docs/APP_CONFIG_INVENTORY.md.
 """
 
 from __future__ import annotations
@@ -48,30 +49,20 @@ SLOTS: list[tuple[str, str]] = [
     ("broker", "mtls.client_cert_pem"),
     ("broker", "mtls.client_key_pem"),
     ("broker", "mtls.ca_bundle_pem"),
-    # IBKR per-label IBC creds (4 labels x 2 = 8 rows).
-    ("broker", "isa-paper.unlock_pwd_md5"),
-    ("broker", "isa-paper.rsa_priv_pem"),
-    ("broker", "isa-live.unlock_pwd_md5"),
-    ("broker", "isa-live.rsa_priv_pem"),
-    ("broker", "normal-paper.unlock_pwd_md5"),
-    ("broker", "normal-paper.rsa_priv_pem"),
-    ("broker", "normal-live.unlock_pwd_md5"),
-    ("broker", "normal-live.rsa_priv_pem"),
     # Schwab triplet.
     ("broker", "schwab.app_key"),
     ("broker", "schwab.app_secret"),
     ("broker", "schwab.refresh_token"),
     # Alpaca paper + live. Schema is dotted (alpaca.<mode>.api_*) NOT
-    # hyphenated (alpaca-<mode>.api_*); broker_registry_factory.py:256
-    # reads `alpaca.{expected_mode}.api_key` as the legacy fallback.
-    # The hyphenated form silently fails the Configure call.
+    # hyphenated (alpaca-<mode>.api_*); broker_registry_factory.py reads
+    # `alpaca.{mode}.api_key` as the legacy fallback. Hyphenated form
+    # silently fails the Configure call.
     ("broker", "alpaca.paper.api_key"),
     ("broker", "alpaca.paper.api_secret"),
     ("broker", "alpaca.live.api_key"),
     ("broker", "alpaca.live.api_secret"),
-    # Futu 1024-bit RSA priv key + OpenD unlock-password MD5 hash.
-    # Both are required by broker_registry_factory.py:146 (the configure
-    # call returns "creds missing" if either is absent).
+    # Futu: 1024-bit RSA priv key + OpenD unlock-password MD5 hash.
+    # Both required; configure() returns "creds missing" if either is absent.
     ("broker", "futu.rsa_priv_pem"),
     ("broker", "futu.unlock_pwd_md5"),
 ]
