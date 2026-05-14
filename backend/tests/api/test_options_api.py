@@ -94,7 +94,6 @@ async def test_post_exercise_requires_csrf(options_client: AsyncClient) -> None:
             "action": "EXERCISE",
             "qty": "1",
             "idempotency_key": str(uuid.uuid4()),
-            "csrf_nonce": "ignored-body-field",
             # X-Confirm-Nonce header intentionally omitted — should 403
         },
     )

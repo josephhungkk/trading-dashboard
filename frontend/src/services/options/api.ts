@@ -44,17 +44,19 @@ export async function mintCsrfNonce(): Promise<string> {
   return data.nonce;
 }
 
-export async function postExerciseElection(body: {
-  account_id: string;
-  instrument_id: number;
-  action: 'EXERCISE' | 'DO_NOT_EXERCISE' | 'LAPSE';
-  qty: string;
-  idempotency_key: string;
-  csrf_nonce: string;
-}): Promise<{ id: string; status: string }> {
+export async function postExerciseElection(
+  body: {
+    account_id: string;
+    instrument_id: number;
+    action: 'EXERCISE' | 'DO_NOT_EXERCISE' | 'LAPSE';
+    qty: string;
+    idempotency_key: string;
+  },
+  csrfNonce: string,
+): Promise<{ id: string; status: string }> {
   const resp = await fetch(`${BASE}/exercise`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Confirm-Nonce': csrfNonce },
     body: JSON.stringify(body),
   });
   if (resp.status === 409) throw new Error('duplicate_election');

@@ -44,6 +44,7 @@ async def ws_options_chain(
     try:
         await require_admin_jwt_ws(websocket)  # raises WebSocketException on failure
     except WebSocketException:
+        await websocket.close(code=1008, reason="auth_failed")
         return
 
     _active_connections += 1

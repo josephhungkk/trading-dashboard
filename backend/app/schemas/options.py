@@ -46,7 +46,6 @@ class ExerciseElectionRequest(BaseModel):
     action: Literal["EXERCISE", "DO_NOT_EXERCISE", "LAPSE"]
     qty: Decimal = Field(gt=0)
     idempotency_key: uuid.UUID
-    csrf_nonce: str
 
 
 class ExerciseElectionResponse(BaseModel):
