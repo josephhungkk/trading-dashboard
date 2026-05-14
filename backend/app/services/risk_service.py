@@ -15,6 +15,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 
@@ -38,6 +39,7 @@ class _ConfigProto(Protocol):
     """Minimal protocol for the ConfigService dependency this service needs."""
 
     async def get_bool(self, namespace: str, key: str, *, default: bool = False) -> bool: ...
+    async def get_int(self, namespace: str, key: str, default: int | None = None) -> int | None: ...
 
 
 class _RedisProto(Protocol):
@@ -93,6 +95,8 @@ class EvaluationContext:
     # branch with "preview unavailable" instead of fail-CLOSED.
     symbol: str | None = None
     asset_class: str | None = None
+    multiplier: int = 1  # 1 for non-options; 100 for standard equity options
+    position_effect: str | None = None  # "OPEN" | "CLOSE" | None (None = equity)
 
 
 class RiskService:
@@ -641,6 +645,111 @@ class RiskService:
 
         return None
 
+    async def _check_options_exposure(self, ctx: EvaluationContext) -> CheckResult:
+        """Phase 12: Options-specific risk checks. Called from evaluate() when asset_class==OPTION.
+
+        Check ordering:
+          1a: trading-level gate  (BLOCK — cheap config read)
+          1b: expiry-day cutoff   (BLOCK — config + datetime)
+          1c: naked-short check   (BLOCK — requires positions query)
+          post-BLOCK: 0DTE WARN
+        """
+        from app.services import market_calendar
+
+        side = ctx.side
+        position_effect = ctx.position_effect
+        trading_level = await self._config.get_int("options", "trading_level", default=1) or 1
+
+        is_sto = side == "sell" and position_effect == "OPEN"
+
+        # Step 1a: naked-short gate
+        if is_sto:
+            existing_cover = await self._get_existing_long_position(ctx)
+            if existing_cover < ctx.qty and trading_level < 3:
+                return (
+                    GateBlockerEntry(
+                        check="options_exposure",
+                        message=(
+                            f"Naked short requires options trading level 3+, "
+                            f"current={trading_level}"
+                        ),
+                        code="naked_short_not_permitted",
+                    ),
+                    None,
+                )
+
+        # Step 1b: expiry-day cutoff
+        option_expiry = await self._get_option_expiry(ctx)
+        if option_expiry is not None:
+            exchange = await self._get_instrument_exchange(ctx) or "NYSE"
+            try:
+                if market_calendar.is_past_expiry(option_expiry, exchange):
+                    return (
+                        GateBlockerEntry(
+                            check="options_exposure",
+                            message=f"Past option cutoff for expiry {option_expiry} on {exchange}",
+                            code="option_cutoff_passed",
+                        ),
+                        None,
+                    )
+            except ValueError:
+                pass  # unknown exchange — skip cutoff check
+
+        # post-BLOCK WARNs
+        if option_expiry is not None and option_expiry == date.today():
+            return (
+                None,
+                GateWarningEntry(
+                    check="options_exposure",
+                    message="0DTE order — option expires today",
+                ),
+            )
+
+        return None
+
+    async def _get_existing_long_position(self, ctx: EvaluationContext) -> Decimal:
+        """Return existing long qty for the instrument (0 if none)."""
+        import sqlalchemy
+
+        if ctx.instrument_id is None:
+            return Decimal("0")
+        result = await self._db.execute(
+            sqlalchemy.text(
+                "SELECT COALESCE(SUM(qty), 0) FROM positions WHERE instrument_id = :iid AND qty > 0"
+            ),
+            {"iid": ctx.instrument_id},
+        )
+        row = result.fetchone()
+        return Decimal(str(row[0])) if row else Decimal("0")
+
+    async def _get_option_expiry(self, ctx: EvaluationContext) -> date | None:
+        """Return expiry date for an option instrument, or None if not an option."""
+        import sqlalchemy
+
+        if ctx.instrument_id is None or ctx.asset_class != "OPTION":
+            return None
+        result = await self._db.execute(
+            sqlalchemy.text("SELECT meta->>'expiry' FROM instruments WHERE id = :iid"),
+            {"iid": ctx.instrument_id},
+        )
+        row = result.fetchone()
+        if row and row[0]:
+            return date.fromisoformat(row[0])
+        return None
+
+    async def _get_instrument_exchange(self, ctx: EvaluationContext) -> str | None:
+        """Return primary_exchange for an instrument."""
+        import sqlalchemy
+
+        if ctx.instrument_id is None:
+            return None
+        result = await self._db.execute(
+            sqlalchemy.text("SELECT primary_exchange FROM instruments WHERE id = :iid"),
+            {"iid": ctx.instrument_id},
+        )
+        row = result.fetchone()
+        return row[0] if row else None
+
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).
 
@@ -657,6 +766,20 @@ class RiskService:
         "warn"; else "allow".
         """
         t0 = time.perf_counter()
+        # Phase 12: options checks run first (serial, before gather) so a
+        # BLOCK short-circuits the expensive concurrent checks.
+        pre_warnings: list[GateWarningEntry] = []
+        if ctx.asset_class == "OPTION":
+            opt_blocker, opt_warning = (await self._check_options_exposure(ctx)) or (None, None)
+            if opt_blocker is not None:
+                return GateVerdict(
+                    final_verdict="block",
+                    blockers=[opt_blocker],
+                    warnings=[],
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            if opt_warning is not None:
+                pre_warnings = [opt_warning]
         fast_check_names = (
             "account_kill_switch",
             "broker_kill_switch",
@@ -684,7 +807,7 @@ class RiskService:
             ("margin", margin_result),
         ]
         blockers: list[GateBlockerEntry] = []
-        warnings: list[GateWarningEntry] = []
+        warnings: list[GateWarningEntry] = list(pre_warnings)
         for check_name, r in named_results:
             if isinstance(r, BaseException):
                 # Re-raise into a live exception frame so structlog's
