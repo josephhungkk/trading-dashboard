@@ -2,19 +2,20 @@
 
 **Date:** 2026-05-14
 **Version target:** v0.12.x
-**Status:** approved for planning (architect review applied 2026-05-14)
+**Status:** approved for planning (architect reviews 1 + 2 applied 2026-05-14)
 
 ---
 
 ## Overview
 
-Phase 12 adds single-leg options trading across IBKR, Schwab, Alpaca, and Futu HK. It ships:
+Phase 12 adds single-leg options trading across IBKR, Schwab (chain data only), Alpaca, and Futu HK. It ships:
 
 1. An option chain viewer at `/options/chain` with live bid/ask/IV/Greeks streaming
 2. Strike picker + `OptionDetailsSection` injected into the existing `TradeTicketModal`
-3. Single-leg place/modify/cancel wired through the existing order pipeline
+3. Single-leg place/modify/cancel on IBKR, Alpaca, and Futu HK (Schwab execution deferred — see CRIT-A)
 4. An exercise elections page at `/options/events`
-5. **Architectural pillar #4**: `contract_details` JSONB on `instruments` with a Pydantic discriminated union — the foundation for Phases 13 (multi-leg), 14 (futures), 15 (forex/crypto), 16 (bonds)
+5. **Architectural pillar #4**: `meta` JSONB on `instruments` — Pydantic discriminated union for options contract shape (foundation for Phases 13–16)
+6. `position_effect` column on `orders` + `RiskContext` — enables BTO/STO/BTC/STC and naked-short detection
 
 Greeks are displayed but **not** wired into the risk gate (deferred to a later phase).
 
@@ -24,10 +25,14 @@ Greeks are displayed but **not** wired into the risk gate (deferred to a later p
 
 | Broker | Chain data | Trade execution | Exercise/Assign |
 |--------|-----------|-----------------|-----------------|
-| **Schwab** | Primary for USD options (`GET /chains`, `GET /expirationchain`) | Yes | No (not in Schwab API) |
-| **IBKR** | Fallback for USD; primary where Schwab unavailable | Yes | Yes (`exerciseOptions`) |
-| **Alpaca** | Fallback for USD (`/v2/options/contracts`) | Yes | No |
+| **Schwab** | Primary for USD options (`GET /chains`, `GET /expirationchain`) | **No** (CRIT-A: schwabdev is read-only; 401 upstream) | No |
+| **IBKR** | Fallback for USD chain data; primary execution | Yes | Yes (`exerciseOptions`) |
+| **Alpaca** | Fallback for USD chain data | Yes | No |
 | **Futu HK** | Primary for HKD options (`get_option_chain`, `get_option_expiration_date`) | Yes | No (Futu HK API limitation) |
+
+**CRIT-A note:** Schwab chain data (`GET /chains`, `GET /expirationchain`) is REST read-only and works via schwabdev today. Schwab option execution (`PlaceOrder` for options) requires a separate productionisation chunk once the upstream Schwab 401 issue is resolved. That chunk is deferred to Phase 12.x; this spec covers Phase 12.0 without Schwab execution.
+
+Trade execution source priority for USD: IBKR → Alpaca. HKD: Futu only.
 
 Chain source routing is config-driven — see §Configuration below.
 
@@ -35,7 +40,7 @@ Chain source routing is config-driven — see §Configuration below.
 
 ## Configuration
 
-### `option_chain_sources` (CRIT-3)
+### `option_chain_sources`
 
 - **Namespace:** `quote_engine`
 - **Key:** `option_chain_sources`
@@ -44,7 +49,7 @@ Chain source routing is config-driven — see §Configuration below.
   ```json
   {"USD": ["schwab", "ibkr", "alpaca"], "HKD": ["futu"]}
   ```
-- **Validation:** on load, assert every source ID exists in `broker_registry`; reject unknown sources with a startup warning (fail-open — use remaining valid sources).
+- **Validation:** on load, assert every source ID exists in `broker_registry`; reject unknown sources with startup warning (fail-open — use remaining valid sources).
 - **Invalidation:** pubsub channel `app_config:invalidate:option_chain_sources` (same pattern as `risk_limits`). `OptionChainService` subscribes at lifespan start and reloads in-memory priority list on message.
 - **Admin endpoint:** `PUT /api/admin/quote-engine/option-chain-sources` (JWT admin + CSRF nonce). Writes to `app_config`, publishes invalidation.
 
@@ -54,30 +59,41 @@ Chain source routing is config-driven — see §Configuration below.
 
 ### Migration 0046
 
-Five changes (MED-7: enum extension must run outside transaction):
+Five schema changes. Enum extension must run outside the transaction (MED-7):
 
 ```python
-# upgrade() preamble — outside main transaction
+# upgrade() preamble — outside main transaction block
 with op.get_context().autocommit_block():
     op.execute("ALTER TYPE instrument_asset_class ADD VALUE IF NOT EXISTS 'OPTION'")
 ```
 
-Then inside the transaction:
+Inside the transaction:
 
-1. **Rename `instruments.meta` → `instruments.contract_details`** — `op.alter_column("instruments", "meta", new_column_name="contract_details")`. No data change; existing `{}` rows remain valid.
-2. **Backfill `contract_details` discriminator** (MED-2) — one-shot UPDATE:
+1. **`instruments.meta` column: semantic shift only — no rename (CRIT-C).** The column stays named `meta`; the ORM model stays `Instrument.meta`; `resolve_or_create(meta=...)` stays unchanged. The Pydantic layer (`parse_instrument_meta`) enforces the typed schema on top of the raw JSONB — no column rename required.
+
+2. **Backfill `meta` discriminator (MED-2, idempotent MED-N):**
    ```sql
    UPDATE instruments
-   SET contract_details = jsonb_set(contract_details, '{asset_class}', to_jsonb(asset_class::text))
-   WHERE contract_details != '{}' AND contract_details->>'asset_class' IS NULL;
+   SET meta = jsonb_set(meta, '{asset_class}', to_jsonb(asset_class::text))
+   WHERE meta != '{}' AND meta->>'asset_class' IS NULL;
    ```
-   Followed by a validation pass: any row whose `contract_details` fails `parse_contract_details()` aborts the migration.
-3. **New `option_greeks` table** — persisted Greeks for held/traded contracts only.
-4. **New `exercise_elections` table** — idempotent election log with partial unique index.
+   Migration is idempotent: the WHERE clause skips rows already backfilled. Followed by a Python validation pass inside `upgrade()`: iterate all non-empty `meta` rows, call `parse_instrument_meta(row.meta)`, abort migration on `ValidationError`.
 
-### `contract_details` JSONB — Pydantic discriminated union (HIGH-1)
+3. **`position_effect` column on `orders` (CRIT-B):**
+   ```sql
+   ALTER TABLE orders
+   ADD COLUMN position_effect TEXT
+       CHECK (position_effect IN ('OPEN', 'CLOSE', 'UNWIND', NULL));
+   ```
+   `NULL` = equity/non-option (existing rows unchanged). Options orders: `'OPEN'` (BTO/STO) or `'CLOSE'` (BTC/STC). `side` remains `BUY`/`SELL`; `position_effect` is the second dimension. Combined label `BTO`/`STO`/`BTC`/`STC` is derived in the UI and in risk checks — never stored as a composite string.
 
-`NonOptionDetails` uses a **closed enum** of known non-option asset classes, enabling native Pydantic v2 discriminator support and fail-fast on unknown values:
+4. **New `option_greeks` table** — persisted Greeks for held/traded contracts only.
+
+5. **New `exercise_elections` table** — idempotent election log with partial unique index.
+
+### `meta` JSONB — Pydantic discriminated union (HIGH-1, CRIT-C)
+
+`NonOptionDetails` uses a **closed enum** of known non-option asset classes — native Pydantic v2 discriminator, fail-fast on unknown values:
 
 ```python
 NonOptionAssetClass = Literal["", "STOCK", "ETF", "INDEX", "WARRANT", "CBBC", "CRYPTO", "FOREX"]
@@ -88,26 +104,55 @@ class NonOptionDetails(BaseModel):
 
 class OptionDetails(BaseModel):
     asset_class: Literal["OPTION"] = "OPTION"
-    underlying_canonical_id: str    # e.g. "SPY-STOCK-USD-NYSE"
-    strike: Decimal                  # e.g. Decimal("450.00")
-    expiry: date                     # e.g. date(2025, 1, 17)
+    underlying_canonical_id: str      # e.g. "stock:SPY:US"
+    strike: Decimal                    # e.g. Decimal("450.00")
+    expiry: date                       # e.g. date(2025, 1, 17)
     put_call: Literal["C", "P"]
-    multiplier: int                  # 100 standard US, 50 mini, varies HK
-    style: Literal["A", "E"] = "E"  # American / European
+    multiplier: int                    # required — not defaulted (HIGH-E)
+    style: Literal["A", "E"]          # required — "A" American, "E" European; no default
 
-# FutureDetails, ForexDetails etc. added additively in Phases 14/15 — no changes to
-# existing branches required.
-ContractDetails = Annotated[
+# FutureDetails, ForexDetails etc. added additively in Phases 14/15
+InstrumentMeta = Annotated[
     NonOptionDetails | OptionDetails,
     Field(discriminator="asset_class")
 ]
+
+_adapter = TypeAdapter(InstrumentMeta)
+
+def parse_instrument_meta(raw: dict) -> InstrumentMeta:
+    return _adapter.validate_python(raw)  # ValidationError on unknown asset_class
 ```
 
-`parse_contract_details(raw: dict) -> ContractDetails` uses `TypeAdapter(ContractDetails).validate_python(raw)`. Unknown `asset_class` values raise `ValidationError` (fail-fast — not silently swallowed). All consumers use `isinstance(details, OptionDetails)` to branch.
+`multiplier` is **required with no default** (HIGH-E: multiplier must be provided by the sidecar; a missing multiplier is a hard error, not silently defaulted to 100).
+
+`style` is **required with no default** — callers must know whether the option is American or European from the broker response. Sidecar handlers map broker-native style fields; unknown style raises `ValidationError`.
+
+All consumers use `isinstance(details, OptionDetails)` to branch. The `meta` column name, ORM field, and `resolve_or_create(meta=...)` kwarg are **unchanged** — only the Pydantic model name changes from `contract_details` terminology to `InstrumentMeta`.
+
+### `position_effect` on orders (CRIT-B)
+
+| `side` | `position_effect` | Combined label | Meaning |
+|--------|------------------|----------------|---------|
+| BUY | OPEN | Buy to Open (BTO) | Open new long option position |
+| SELL | OPEN | Sell to Open (STO) | Open new short option position |
+| BUY | CLOSE | Buy to Close (BTC) | Close existing short position |
+| SELL | CLOSE | Sell to Close (STC) | Close existing long position |
+| BUY/SELL | NULL | — | Equity / non-option order (unchanged) |
+
+**Naked-short detection** in `risk_service._check_options_exposure` (new check, HIGH-D): for STO orders, verify existing long position of ≥ qty exists (covered call / married put allowed); if no cover, gate on `OPTION_LEVEL >= 3` from `app_config[options/trading_level]`.
+
+**`RiskContext` additions:**
+```python
+position_effect: str | None = None   # "OPEN" | "CLOSE" | None
+```
+
+### `tax_treatment` on fills and orders (HIGH-F)
+
+Add nullable `tax_treatment TEXT` column to both `orders` and `fills` tables (migration 0046). Values: `'EQUITY'`, `'OPTION_PREMIUM'`, `'OPTION_EXERCISE'`, `'OPTION_ASSIGNMENT'`, `'OPTION_EXPIRY'`. `NULL` = not yet classified (existing rows). Phase 23 (UK CGT) reads this column — cheap now, expensive to backfill later.
 
 ### Canonical ID format for option contracts (MED-1)
 
-To avoid mixing separators with the existing stock: prefix convention, option canonical IDs use the same colon-separated format:
+Colon-separated, consistent with existing `stock:AAPL:US` and `etf:SPY:US` conventions:
 
 ```
 option:{UNDERLYING_SYMBOL}:{EXCHANGE}:{YYMMDD}:{P|C}:{STRIKE_DECIMAL}
@@ -115,56 +160,40 @@ option:{UNDERLYING_SYMBOL}:{EXCHANGE}:{YYMMDD}:{P|C}:{STRIKE_DECIMAL}
 
 Example: `option:SPY:CBOE:250117:C:450.00`
 
-This is grep-consistent with `stock:AAPL:US` and `etf:SPY:US`. Built deterministically by `InstrumentResolver.find_or_create_option`. The underlying symbol is the human-readable ticker, not the canonical_id, so the option canonical_id is self-describing.
+Built deterministically by `InstrumentResolver.find_or_create_option`.
 
-### `option_greeks` table (CRIT-2, MED-3)
+### `option_greeks` table (MED-3)
 
 ```sql
 CREATE TABLE option_greeks (
     instrument_id  BIGINT PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
-    delta          NUMERIC(12, 6),   -- MED-3: widened from (8,6)
+    delta          NUMERIC(12, 6),
     gamma          NUMERIC(12, 6),
-    theta          NUMERIC(12, 6),   -- can exceed ±10 for high-multiplier contracts
+    theta          NUMERIC(12, 6),
     vega           NUMERIC(12, 6),
     rho            NUMERIC(12, 6),
-    iv             NUMERIC(12, 6),   -- implied vol as decimal (0.18 = 18%)
-    iv_rank        NUMERIC(5, 2),    -- 52-week IV percentile; NULL until Phase 18
+    iv             NUMERIC(12, 6),   -- decimal (0.18 = 18%)
+    iv_rank        NUMERIC(5, 2),    -- NULL until Phase 18
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX ON option_greeks (updated_at);
 ```
 
-**CRIT-2 invariant — `upsert` guard:** `OptionGreeksService.upsert` checks before writing:
+**Upsert guard (CRIT-2):** `OptionGreeksService.upsert` refuses to write if `instrument_id` has no row in `positions` AND no `orders.created_at >= today`. Chain-browse callers use ephemeral Redis Greeks only.
 
-```python
-# Refuse to persist Greeks for contracts not held or recently traded
-exists = await db.scalar(
-    select(1).where(
-        or_(
-            exists(select(Position).where(Position.instrument_id == instrument_id)),
-            exists(select(Order).where(
-                Order.instrument_id == instrument_id,
-                Order.created_at >= date.today()
-            ))
-        )
-    )
-)
-if not exists:
-    return  # silently skip — chain-browse caller gets ephemeral Redis Greeks only
-```
+**Eviction:** APScheduler 60s, year-round, deletes `updated_at < now() - interval '5 minutes'`.
 
-**Eviction:** APScheduler job every 60s, year-round (not market-hours-gated), deletes `updated_at < now() - interval '5 minutes'`.
+**Clamping (MED-3):** `GreeksSnapshot.__post_init__` clamps each field to `(-9999.999999, 9999.999999)`, increments `option_greeks_clamped_total{field}` Counter.
 
-**Observability:** `option_greeks_rows_total` Prometheus Gauge (set after each eviction run).
+**Observability:** `option_greeks_rows_total` Gauge set after each eviction.
 
-**MED-3 clamping:** `GreeksSnapshot.__post_init__` clamps each field to `(-9999.999999, 9999.999999)` and increments `option_greeks_clamped_total{field}` Counter on clamp.
-
-### `exercise_elections` table (HIGH-5)
+### `exercise_elections` table (HIGH-5, HIGH-I)
 
 ```sql
 CREATE TABLE exercise_elections (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    idempotency_key  UUID NOT NULL UNIQUE,           -- client-supplied; retries return original row
+    idempotency_key  UUID NOT NULL UNIQUE,
+    jwt_subject      TEXT NOT NULL,           -- HIGH-I: bound to authed user
     account_id       UUID NOT NULL REFERENCES broker_accounts(id),
     instrument_id    BIGINT NOT NULL REFERENCES instruments(id),
     action           TEXT NOT NULL CHECK (action IN ('EXERCISE', 'DO_NOT_EXERCISE', 'LAPSE')),
@@ -176,23 +205,23 @@ CREATE TABLE exercise_elections (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Prevent duplicate elections for same contract on same day (partial unique index)
 CREATE UNIQUE INDEX exercise_elections_one_per_day
     ON exercise_elections (account_id, instrument_id)
     WHERE created_at::date = CURRENT_DATE AND status != 'failed';
 ```
 
-CSRF nonce is **single-use** (consumed via `consume_confirmation_nonce` — existing pattern). The `idempotency_key` is client-supplied (UUID in request body). Retries with the same key return the original row without re-calling the sidecar.
-
 ### Chain browse data (Redis, not Postgres)
 
 Key: `options:chain:{underlying_canonical_id}:{expiry_iso}:{source}`
-TTL: 30s during market hours, 300s outside.
-Value: JSON list of `OptionChainRow` objects (strike, put_call, bid, ask, iv, delta, gamma, theta, vega, oi, volume, conid, multiplier).
+TTL: exchange-aware (MED-P): 30s during exchange trading hours for the relevant market (NYSE/NASDAQ for USD, HKEX for HKD); 300s outside. `market_calendar.is_open(exchange)` determines the TTL at write time.
 
-**Instruments are NOT created for chain browse rows.** An `instruments` row + `symbol_aliases` row is created by `InstrumentResolver.find_or_create_option` only when:
-- The user clicks a strike to open TradeTicketModal (order-intent), or
-- A position for that contract arrives from a broker sync.
+Value: JSON list of `OptionChainRow` (strike, put_call, bid, ask, iv, delta, gamma, theta, vega, oi, volume, conid, multiplier). All price fields stored as strings to avoid float64 drift (MED-O — see §Float precision policy).
+
+**Instruments are NOT created for chain browse rows.** `InstrumentResolver.find_or_create_option` is called only on order-intent (strike click) or position sync.
+
+### Float precision policy (MED-O)
+
+All monetary values (strike, bid, ask, premium, notional) travel as `Decimal` in Python and as `TEXT` in Redis cache (serialised via `str(Decimal)`). Proto `double` fields for price data are converted to `Decimal` at the sidecar boundary using `Decimal(str(value))`. Greek values (dimensionless ratios) may use `float` internally but are stored as `NUMERIC(12,6)` in Postgres. The `GreeksSnapshot` dataclass holds `Decimal` fields to avoid silent float64 drift in clamping arithmetic.
 
 ---
 
@@ -203,9 +232,11 @@ Value: JSON list of `OptionChainRow` objects (strike, put_call, bid, ask, iv, de
 ```protobuf
 rpc GetOptionChain(OptionChainRequest) returns (OptionChainResponse);
 rpc GetOptionExpirations(OptionExpirationsRequest) returns (OptionExpirationsResponse);
-rpc GetOptionGreeks(OptionGreeksRequest) returns (OptionGreeksResponse);
+rpc StreamOptionGreeks(OptionGreeksRequest) returns (stream OptionGreeksResponse);  // HIGH-J
 rpc ExerciseOption(ExerciseOptionRequest) returns (ExerciseOptionResponse);
 ```
+
+**HIGH-J — streaming Greeks RPC:** `StreamOptionGreeks` is a server-side streaming RPC (not unary `GetOptionGreeks`). The sidecar streams Greeks updates as the market ticks (IBKR: `reqMktData` tick types 10–13; Schwab: not available; Futu: `get_option_condiction` poll). The backend subscribes once per conid and fans out to Redis `greeks.options.<conid>`. The WS options feed reads from this channel, not from `option_greeks` Postgres table (which is the durable store for held contracts only).
 
 ### Key messages
 
@@ -214,24 +245,25 @@ message OptionChainRequest {
   string underlying_symbol = 1;
   string expiry_date        = 2;  // ISO "2025-01-17"
   string currency           = 3;  // "USD" | "HKD"
-  int32  strike_count       = 4;  // strikes around ATM (max 60 USD, 40 HKD)
+  int32  strike_count       = 4;  // max 60 USD, 40 HKD
 }
 
 message OptionChainRow {
   string conid         = 1;
-  double strike        = 2;
+  string strike        = 2;   // MED-O: string to preserve decimal precision
   string put_call      = 3;   // "C" | "P"
-  double bid           = 4;
-  double ask           = 5;
-  double iv            = 6;
+  string bid           = 4;   // string
+  string ask           = 5;   // string
+  double iv            = 6;   // Greek — float ok
   double delta         = 7;
   double gamma         = 8;
   double theta         = 9;
   double vega          = 10;
   int64  open_interest = 11;
   int64  volume        = 12;
-  int32  multiplier    = 13;
+  int32  multiplier    = 13;  // required; sidecar must populate
   string exchange      = 14;
+  string style         = 15;  // "A" | "E"; required
 }
 
 message OptionChainResponse {
@@ -251,26 +283,28 @@ message OptionExpirationsResponse {
 }
 
 message OptionGreeksRequest {
-  string conid      = 1;
-  string account_id = 2;   // some brokers require account context for Greeks
+  repeated string conids    = 1;   // HIGH-J: stream for multiple conids at once
+  string          account_id = 2;
 }
 
 message OptionGreeksResponse {
-  double delta         = 1;
-  double gamma         = 2;
-  double theta         = 3;
-  double vega          = 4;
-  double rho           = 5;
-  double iv            = 6;
-  double iv_rank       = 7;   // 0.0 if unavailable (Phase 18 provides 52w history)
-  int64  fetched_at_ms = 8;
+  string conid         = 1;   // HIGH-J: identifies which conid this update is for
+  double delta         = 2;
+  double gamma         = 3;
+  double theta         = 4;
+  double vega          = 5;
+  double rho           = 6;
+  double iv            = 7;
+  double iv_rank       = 8;   // 0.0 until Phase 18
+  int64  fetched_at_ms = 9;
 }
 
 message ExerciseOptionRequest {
-  string account_id = 1;  // UUID
-  string conid      = 2;
-  int64  qty        = 3;
-  string action     = 4;  // "EXERCISE" | "DO_NOT_EXERCISE" | "LAPSE"
+  string account_id      = 1;
+  string conid           = 2;
+  int64  qty             = 3;
+  string action          = 4;  // "EXERCISE" | "DO_NOT_EXERCISE" | "LAPSE"
+  string idempotency_key = 5;  // UUID; required
 }
 
 message ExerciseOptionResponse {
@@ -282,30 +316,30 @@ message ExerciseOptionResponse {
 
 ### `SymbolRef` — `OptionContractHint` oneof (HIGH-3)
 
-The existing `source_meta bytes = 6` field in `SymbolRef` was reserved in Phase 7b.1 as a typed extension point for asset-class contract metadata. Confirm: the reservation comment in `broker.proto` reads `reserved 7 to 15` on `SymbolRef` — tags 7–15 are reserved for future extension, not tag 6. Tag 6 (`source_meta bytes`) is already defined and in use.
-
-Rather than encoding msgpack inside the bytes field, define a proper oneof:
+Tag 6 in `SymbolRef` was `source_meta bytes`. Replace with a typed oneof to avoid msgpack-in-proto:
 
 ```protobuf
 message OptionContractHint {
   string conid      = 1;
-  double strike     = 2;
-  string expiry_iso = 3;   // "2025-01-17"
-  string put_call   = 4;   // "C" | "P"
+  string strike     = 2;   // string decimal
+  string expiry_iso = 3;
+  string put_call   = 4;
   int32  multiplier = 5;
 }
 
-// Add to SymbolRef:
+// In SymbolRef, replace source_meta bytes = 6 with:
 oneof contract_hint {
-  OptionContractHint option_hint = 6;  // replaces source_meta bytes
-  // FutureContractHint future_hint = 7;   Phase 14
-  // ForexContractHint  forex_hint  = 8;   Phase 15
+  OptionContractHint option_hint = 6;
+  // FutureContractHint future_hint = 7;  Phase 14
+  // ForexContractHint  forex_hint  = 8;  Phase 15
 }
 ```
 
-This replaces the `source_meta bytes` field with a typed oneof. Phases 13–16 add their hint types at tags 7–15 without changing existing fields.
-
-For option chain quote subscriptions before an `instrument_id` exists, the WS gateway populates `option_hint` in `SymbolRef`. The quote gateway resolves to `instrument_id` lazily on first position/order event.
+**HIGH-J — conid→canonical_id swap:** When a conid subscription migrates to canonical_id (on first position/order event), the WS gateway:
+1. Calls `find_or_create_option` to create the `instruments` row
+2. Unsubscribes from `greeks.options.<conid>` Redis channel
+3. Subscribes to `quote.<source>.<canonical_id>` via `SubscriptionRegistry`
+4. Sends a `{type: "canonicalized", conid: "...", canonical_id: "..."}` frame to the FE so it can update its local state map
 
 ---
 
@@ -323,67 +357,73 @@ class OptionChainService:
         underlying: str,
         expiry: date,
         strike_count: int = 20,
-    ) -> OptionChainResponse  # Redis cache → singleflight sidecar fetch → stale fallback
+    ) -> OptionChainResponse
     async def subscribe_strike_window(
         self,
-        underlying: str,
+        underlying_canonical_id: str,
         expiry: date,
-        strikes: list[Decimal],
-    ) -> list[str]  # canonical_ids or option_hint conids for quote subscriptions
+        conids: list[str],               # MED-R: explicit conids, not ambiguous list[str]
+    ) -> list[SubscriptionHandle]        # MED-R: typed return
 ```
 
-Cache key: `options:chain:{underlying_canonical_id}:{expiry_iso}:{source}`, TTL 30s/300s.
+`SubscriptionHandle` is a dataclass `(conid: str, canonical_id: str | None, channel: str)` — unambiguous whether a given strike is on the conid path or canonical_id path.
 
-**HIGH-4 — singleflight on cache miss:** `get_chain` uses an in-process `asyncio.Lock` per `(underlying_canonical_id, expiry_iso)` key (same pattern as `wol.py` circuit breaker). Concurrent misses for the same key share one sidecar call; subsequent waiters receive the cached result.
-
-Stale-on-error: returns last cached value with `stale=True` if sidecar call fails or exceeds timeout (3s Schwab/Alpaca, 6s IBKR, 5s Futu HK). 503 only if no cache exists at all.
-
-Registered as lifespan singleton at `app.state.chain_service`.
+Cache: exchange-aware TTL (MED-P). Singleflight per `(underlying_canonical_id, expiry_iso)` (HIGH-4, MED-M note): in-process `asyncio.Lock` dict. For multi-worker deployments (Phase 24), this becomes a Redis lock — noted as a known single-replica limitation consistent with the project's Phase 24 policy.
 
 **`app/services/options/greeks_service.py`**
 
 ```python
 class OptionGreeksService:
     async def upsert(self, instrument_id: int, greeks: GreeksSnapshot) -> None
-    # upsert REFUSES to write if instrument has no position and no order today
     async def get(self, instrument_id: int) -> GreeksSnapshot | None
     async def evict_stale(self, older_than: timedelta = timedelta(minutes=5)) -> int
+    async def start_streaming(self, conids: list[str], account_id: str) -> None
+    async def stop_streaming(self, conids: list[str]) -> None
 ```
 
-APScheduler 60s eviction job, year-round. Prometheus gauge `option_greeks_rows_total`.
+`start_streaming` calls `StreamOptionGreeks` sidecar RPC, fans updates to `greeks.options.<conid>` Redis channel, and calls `upsert` for conids that have positions/orders. `stop_streaming` cancels the sidecar stream task.
 
 **`app/services/options/exercise_service.py`**
 
 ```python
 class ExerciseService:
-    async def list_pending(self, account_id: UUID) -> list[ExerciseCandidate]
+    async def list_pending(self, account_id: UUID, jwt_subject: str) -> list[ExerciseCandidate]
     async def elect(
         self,
         account_id: UUID,
+        jwt_subject: str,              # HIGH-I: bound to authed user
         instrument_id: int,
         action: Literal["EXERCISE", "DO_NOT_EXERCISE", "LAPSE"],
         qty: Decimal,
-        csrf_nonce: str,       # single-use via consume_confirmation_nonce
-        idempotency_key: UUID, # client-supplied; retries return original row
+        csrf_nonce: str,
+        idempotency_key: UUID,
     ) -> ExerciseResult
 ```
 
-**MED-4 — exercise candidate filter:**
-- `list_pending` uses `market_calendar.next_trading_days(5)` (not raw `date.today() + 5`) to correctly handle NYSE/HKEX holiday calendars.
-- Intrinsic value computed from last underlying spot price via quote engine. Degrades to "expiring within 5 trading sessions" filter when spot is unavailable.
+`list_pending` uses `market_calendar.next_trading_days(5)` (MED-4/MED-K note: style derived from `OptionDetails.style` on the instrument, not hardcoded by currency). `account_id` is resolved via `AccountService._resolve_account` chokepoint (HIGH-I — same pattern as all other account-touching endpoints). Rate-limited 5/min per `jwt_subject` (HIGH-I — exercise is money-moving).
 
-`elect()` flow:
-1. Check `exercise_elections` for existing row with same `idempotency_key` → return it (idempotent).
-2. Check partial unique index (one election per account+instrument per day) → 409 if already submitted.
-3. Consume CSRF nonce (single-use).
-4. Call `ExerciseOption` RPC on sidecar → write `exercise_elections` row with `status='submitted'`.
-5. IBKR is the only supported broker; Schwab/Alpaca/Futu HK log the row with `status='confirmed'` and `broker_ref='broker_unsupported'`.
+### New risk checks (`app/services/risk_service.py`) — HIGH-D
+
+New `_check_options_exposure` method, called from `evaluate()` when `ctx.asset_class == OPTION`:
+
+1. **Options trading level gate:** `app_config[options/trading_level]` (integer L1–L4). Default L1 (covered calls + long options only). Checked at order-intent:
+   - L1: BTO (long calls/puts) and covered calls (STO with existing long stock ≥ qty×100)
+   - L2: L1 + cash-secured puts (STO put with cash reserve ≥ strike×qty×multiplier in account)
+   - L3: L2 + naked calls/puts (STO without cover)
+   - L4: L3 + uncapped risk strategies (not enforced in Phase 12 — deferred to Phase 13 multi-leg)
+2. **Naked short check (CRIT-B):** STO without cover → require L3+; if L < 3, `BLOCK` with `naked_short_not_permitted`.
+3. **Cash-secured put reserve:** STO put at L2 → verify available cash ≥ `strike × qty × multiplier × 1.05` (5% buffer). Uses BP check site (same as CRIT-1 fix).
+4. **Expiry-day cutoff:** On expiry date, block new OPEN orders after `market_calendar.option_cutoff_time(expiry, exchange)` (e.g. 15:00 ET for US equity options).
+5. **0DTE warning:** If `expiry == today`, append `WARN` with `zero_dte_order` code. Not a blocker. FE surfaces as a yellow banner.
+6. **Assignment risk warning:** For STO (short options) within 5 trading days of expiry with delta > 0.7 (ITM), append `WARN` with `high_assignment_risk`.
+
+All new checks respect the existing fail-OPEN policy for audit row insertion failures.
 
 ### Modified services
 
-**`app/services/instruments.py` — `InstrumentResolver.find_or_create_option` (HIGH-2)**
+**`app/services/instruments.py` — `InstrumentResolver.find_or_create_option` (HIGH-2, CRIT-C)**
 
-`find_or_create_option` is a thin wrapper around the existing `resolve_or_create` primitive — it does NOT duplicate the in-process lock + ON CONFLICT + select-fallback logic:
+Delegates to the existing `resolve_or_create(meta=...)` primitive — no duplication of lock/ON CONFLICT logic:
 
 ```python
 async def find_or_create_option(
@@ -393,7 +433,8 @@ async def find_or_create_option(
     strike: Decimal,
     expiry: date,
     put_call: Literal["C", "P"],
-    multiplier: int,
+    multiplier: int,         # required — not defaulted
+    style: Literal["A", "E"],  # required — not defaulted
     exchange: str,
     currency: str,
     source: str,
@@ -405,7 +446,7 @@ async def find_or_create_option(
     details = OptionDetails(
         underlying_canonical_id=underlying_canonical_id,
         strike=strike, expiry=expiry, put_call=put_call,
-        multiplier=multiplier, style="A" if currency == "USD" else "E",
+        multiplier=multiplier, style=style,
     )
     return await self.resolve_or_create(
         db,
@@ -413,48 +454,89 @@ async def find_or_create_option(
         asset_class=AssetClass.OPTION,
         primary_exchange=exchange,
         currency=currency,
-        contract_details=details.model_dump(),  # stored in contract_details JSONB
+        meta=details.model_dump(),   # CRIT-C: meta kwarg — column name unchanged
         source=source,
         raw_symbol=conid,
     )
 ```
 
-Called on order-intent and position sync only — never during chain browse.
-
 **`app/services/orders_service.py` — multiplier-aware notional (CRIT-1)**
 
-All three notional sites must be updated. `multiplier` is plumbed onto `RiskContext`:
+Three sites updated. `multiplier` and `position_effect` plumbed onto `RiskContext`:
 
 ```python
-# RiskContext gains:
-multiplier: int = 1   # 1 for non-options; contract multiplier for options
+# RiskContext additions:
+multiplier: int = 1                  # 1 for non-options
+position_effect: str | None = None   # "OPEN" | "CLOSE" | None
 
-# Sites to update:
-# 1. _native_notional (3 branches):
-#    LIMIT:  qty * limit_price * multiplier
-#    STOP:   qty * stop_price  * multiplier
-#    market: qty * mid * 1.05  * multiplier
+# Site 1 — _native_notional (all 3 branches multiply by ctx.multiplier):
+#   LIMIT:  qty * limit_price * multiplier
+#   STOP:   qty * stop_price  * multiplier
+#   market: qty * mid * 1.05  * multiplier
 
-# 2. risk_service._check_buying_power (line ~380):
-#    order_notional = ctx.qty * ctx.price * ctx.multiplier
+# Site 2 — risk_service._check_buying_power (~line 380):
+#   order_notional = ctx.qty * ctx.price * ctx.multiplier
 
-# 3. RiskContext construction in _evaluate_risk_for_place_order:
-#    multiplier = details.multiplier if isinstance(details, OptionDetails) else 1
-#    ctx = RiskContext(..., multiplier=multiplier)
+# Site 3 — RiskContext construction in _evaluate_risk_for_place_order:
+#   details = parse_instrument_meta(instrument.meta)
+#   multiplier = details.multiplier if isinstance(details, OptionDetails) else 1
+#   position_effect = order.position_effect
+#   ctx = RiskContext(..., multiplier=multiplier, position_effect=position_effect)
 ```
 
-`ctx.price` remains the per-share/per-unit premium; `multiplier` is the separate contract size factor. This ensures `max_notional_per_order`, `daily_notional_cap`, and BP checks all see the correct notional.
+**Concentration check (MED-Q):** `risk_service._check_concentration` uses `position.market_value_base`; for option positions this must include the multiplier: `option_exposure = qty * premium * multiplier`. The position sync path must populate `market_value_base` as `qty × last_price × multiplier` for OPTION asset class.
 
 **`app/services/orders_service.py` — contract expiry check (MED-8)**
 
 ```python
-# contract_expired check uses exchange-aware calendar, not naive date.today()
 if isinstance(details, OptionDetails):
     if market_calendar.is_past_expiry(details.expiry, instrument.primary_exchange):
         raise ContractExpiredError(...)
 ```
 
-`market_calendar.is_past_expiry(expiry, exchange)` anchors to the exchange's timezone and trading calendar — not server local time.
+**`app/services/telegram/commands.py` — reject options at parser layer (HIGH-G)**
+
+`parse_place_order` in `order_flow.py` must explicitly reject OCC-format symbols:
+
+```python
+_OCC_PATTERN = re.compile(r'^[A-Z]{1,5}\d{6}[CP]\d{8}$')
+
+def parse_place_order(text: str) -> ParsedOrder:
+    parts = text.split()
+    symbol = parts[1].upper()
+    if _OCC_PATTERN.match(symbol):
+        raise ParseError(
+            "Options orders are not supported via Telegram. "
+            "Use /place_order SYMBOL SIDE QTY for equity orders only."
+        )
+    ...
+```
+
+### Quote-engine integration (HIGH-6, HIGH-H)
+
+**Subscription budget sizing (HIGH-H):**
+
+| Broker | Known subscription limit | Options WS budget |
+|--------|------------------------|-------------------|
+| IBKR | ~100 concurrent market data lines (paper); ~300 live | 40 per chain WS connection; 10 connections = 400 max |
+| Schwab | No streaming Greeks — chain data only (REST) | N/A for Greeks streaming |
+| Alpaca | Options data: rate-limited per plan | 60 per WS connection; 10 connections = 600 max |
+| Futu HK | ~100 subscriptions per quote context | 40 per connection; 10 connections = 400 max |
+
+**Budget enforcement:** `SubscriptionRegistry` tracks `options_subs_active_{source}` Gauge. When adding a new option subscription would exceed `OPTION_SUB_BUDGET[source]` (loaded from `app_config[quote_engine/option_sub_budgets]` with safe defaults), the subscription is refused and the `subscription_capped` frame is sent.
+
+**In-process conid map (per WS connection):**
+- `dict[conid, OptionContractHint]` — populated on subscribe, torn down entirely on WS close
+- TTL: 5 min idle per conid → `stop_streaming` call at sidecar level
+- Separate Redis namespace: `greeks.options.<conid>` (not `quote.*.*`)
+
+**On conid→canonical_id migration:**
+1. `find_or_create_option` called
+2. `stop_streaming([conid])` on `OptionGreeksService`
+3. `SubscriptionRegistry.subscribe(canonical_id)` via normal path
+4. `{type: "canonicalized", conid, canonical_id}` frame sent to FE
+
+**Observability:** `quote_options_chain_subs_active{source}` Gauge.
 
 ### New API endpoints (`app/api/options.py`)
 
@@ -462,13 +544,15 @@ if isinstance(details, OptionDetails):
 GET  /api/options/expirations?symbol=SPY&currency=USD
 GET  /api/options/chain?symbol=SPY&expiry=2025-01-17&strikes=20
 GET  /api/options/greeks/{instrument_id}
-GET  /api/options/exercise                   # list pending elections
-POST /api/options/exercise                   # submit election (CSRF nonce + idempotency_key in body)
-GET  /api/options/events                     # exercise + assignment event log (last 30d)
-PUT  /api/admin/quote-engine/option-chain-sources  # admin config (JWT admin + CSRF nonce)
+GET  /api/options/exercise             (JWT; account resolved via _resolve_account)
+POST /api/options/exercise             (JWT + CSRF + idempotency_key; rate 5/min)
+GET  /api/options/events               (JWT; last 30 days)
+PUT  /api/admin/quote-engine/option-chain-sources  (JWT admin + CSRF)
+PUT  /api/admin/quote-engine/option-sub-budgets    (JWT admin + CSRF)
+PUT  /api/admin/options/trading-level              (JWT admin + CSRF)
 ```
 
-All JWT-gated. `/chain` and `/expirations`: rate-limited 10/s per `jwt_subject` (anti-abuse; capacity protected by singleflight).
+JWT-gated. `/chain`, `/expirations`: rate-limited 10/s per `jwt_subject`. `/exercise` POST: rate-limited 5/min (money-moving). All account-touching endpoints use `_resolve_account` chokepoint (HIGH-I).
 
 ### New WebSocket (`app/api/ws_options.py`)
 
@@ -476,46 +560,26 @@ All JWT-gated. `/chain` and `/expirations`: rate-limited 10/s per `jwt_subject` 
 WS /ws/options/chain?symbol=SPY&expiry=2025-01-17
 ```
 
-- Streams live bid/ask/IV/Greeks for visible strike window
-- Conflated at 2 Hz
-- Connection cap: 10; each connection subscribes to up to 40 strikes
-
-**HIGH-6 — Quote-engine integration sub-section:**
-
-For option contracts not yet in `instruments` (chain-browse window), the WS gateway maintains an in-process `dict[conid, OptionContractHint]` per connection. This map is:
-- Populated when the WS client sends a `{type: "subscribe", strikes: [...]}` frame
-- Torn down completely when the WS connection closes (no Redis subscription leak)
-- TTL: 5 min idle per conid → unsubscribe at sidecar level
-
-The quote gateway routes:
-1. If `canonical_id` resolves in `instruments` → subscribe via existing `SubscriptionRegistry` path (canonical_id-keyed)
-2. If not yet in `instruments` → subscribe via `OptionContractHint` path: sidecar `StreamQuotes` keyed by `conid` in `SymbolRef.option_hint`; published to Redis `quote.options.<conid>` (separate namespace from canonical quotes to avoid collision)
-
-On first `OrderEvent` or position sync for a conid, `find_or_create_option` is called and the subscription migrates from the conid path to the canonical_id path.
-
-**MED-5 — strike window cap:**
-- BE enforces max 40 strikes per WS connection (Futu HK) / 60 for USD (Schwab/IBKR)
-- If FE requests > cap: BE sends `{type: "subscription_capped", visible: [...conids...], dropped: [...conids...]}` frame
-- Excess strikes receive quotes via 5s REST polling fallback (`useOptionChain` hook handles this)
-- FE surfaces "Showing X of Y strikes — polling for remainder" notice
-
-**Observability:** `quote_options_chain_subs_active` Prometheus Gauge (tracks live conid subscriptions across all WS connections).
-
-**Heartbeat:** 30s; `{type: "stale", strikes: [...]}` on staleness.
+- Conflated at 2 Hz; connection cap 10
+- Per-connection conid map; torn down on close
+- `subscription_capped` frame when > broker budget
+- 30s heartbeat + `{type: "stale"}` on staleness
+- `{type: "canonicalized"}` frame on conid→canonical_id migration (HIGH-J)
 
 ---
 
-## Prometheus Metrics (MED-6)
+## Prometheus Metrics
 
 ```
-option_chain_fetch_seconds{source}              Histogram  — chain RPC latency per source
-option_chain_fetch_total{source, outcome}        Counter    — outcome: ok|stale|timeout|error
-option_expirations_fetch_total{source, outcome}  Counter
-option_greeks_fetch_seconds{source}             Histogram
-option_exercise_total{broker, action, outcome}   Counter    — outcome: ok|broker_unsupported|error
-option_greeks_rows_total                         Gauge      — set after each eviction run
-option_greeks_clamped_total{field}               Counter    — incremented on out-of-range vendor data
-quote_options_chain_subs_active                  Gauge      — live conid WS subscriptions
+option_chain_fetch_seconds{source}               Histogram
+option_chain_fetch_total{source, outcome}         Counter   — ok|stale|timeout|error
+option_expirations_fetch_total{source, outcome}   Counter
+option_greeks_stream_updates_total{source}        Counter   — HIGH-J: streaming, not unary
+option_exercise_total{broker, action, outcome}    Counter
+option_greeks_rows_total                          Gauge
+option_greeks_clamped_total{field}                Counter
+quote_options_chain_subs_active{source}           Gauge
+option_risk_check_total{check, verdict}           Counter   — HIGH-D: per new check type
 ```
 
 ---
@@ -527,118 +591,114 @@ quote_options_chain_subs_active                  Gauge      — live conid WS su
 ```
 frontend/src/
   routes/
-    options.chain.tsx                  # /options/chain route
-    options.events.tsx                 # /options/events route
+    options.chain.tsx
+    options.events.tsx
   features/options/
     OptionChainPage.tsx
-    OptionChainToolbar.tsx             # symbol input + expiry tabs + source badge
-    OptionChainTable.tsx               # butterfly layout: calls | strike | puts
-    OptionGreeksStrip.tsx              # Δ Γ Θ V IV row (reused in table + modal)
-    OptionExpiryTabs.tsx               # horizontal scrollable expiry selector
+    OptionChainToolbar.tsx
+    OptionChainTable.tsx               # butterfly layout
+    OptionGreeksStrip.tsx              # Δ Γ Θ V IV — reused in table + modal
+    OptionExpiryTabs.tsx
     OptionDetailsSection.tsx           # injected into TradeTicketModal above sizing
     OptionEventsPage.tsx
-    ExerciseElectionRow.tsx            # Exercise / DNE / Lapse buttons + CSRF nonce
+    ExerciseElectionRow.tsx
     hooks/
       useOptionChain.ts                # TanStack Query + WS hybrid
-      useOptionExpirations.ts          # TanStack Query, 5 min stale
-      useExerciseElections.ts          # TanStack Query, refetch on focus
+      useOptionExpirations.ts
+      useExerciseElections.ts
     types.ts
 ```
 
 ### `OptionChainTable` layout
 
-Butterfly layout: calls left (green tint for ITM) | strike column (ATM highlighted amber) | puts right (red tint for ITM).
+Butterfly: calls left (green ITM tint) | strike (amber ATM) | puts right (red ITM tint).
 
 Columns: Bid · Ask · IV · Δ · OI | **Strike** | OI · Δ · IV · Bid · Ask
 
-Click any row → opens `TradeTicketModal` pre-filled with contract (underlying, strike, expiry, put_call, conid). `find_or_create_option` is called at this point (order-intent).
+Strike window: default 20, scroll loads +10 up to broker cap (40 HKD / 60 USD). ATM from underlying spot. Click row → `find_or_create_option` (order-intent) → `TradeTicketModal` pre-filled.
 
-Strike window: default 20 strikes (10 each side of ATM). Scroll loads more in increments of 10, up to the per-broker cap (40 HKD / 60 USD). ATM computed from last underlying spot price.
-
-**LOW-3 — mobile fallback:** Below `md` breakpoint, the butterfly table collapses to a single-column list (strike + IV + Δ). Tapping a row opens a vertical detail sheet (call vs put toggle + full Greeks) before opening TradeTicketModal. Uses the same `<Card>` collapse pattern as the positions table.
+**Mobile (LOW-3):** Below `md`, collapses to single-column list (strike + IV + Δ). Tap → vertical detail sheet (put/call toggle + Greeks) → TradeTicketModal.
 
 ### `OptionDetailsSection` in `TradeTicketModal`
 
-Rendered when `instrument.asset_class === 'OPTION'`, inserted above the sizing section:
+Rendered when `instrument.asset_class === 'OPTION'`, above sizing section:
 
 - Contract label: `SPY Jan 17 2025 450C`
-- Sub-label: `American · ×100 · CBOE · expires in N trading days` (LOW-1: trading days, not calendar days)
-- Greeks strip: Δ · Γ · Θ · V · IV (renders `—` placeholders when unavailable — never blocks order entry)
+- Sub-label: `American · ×100 · CBOE · expires in N trading days` (trading days — LOW-1)
+- Greeks strip: Δ · Γ · Θ · V · IV (`—` when unavailable — never blocks order)
 - Premium line: `Premium 5.18 · Notional per contract $518 · 1 contract = 100 shares SPY`
-
-`Qty` label → "Contracts". `Side` → "Buy to Open / Sell to Open / Buy to Close / Sell to Close" (derived from existing position check).
+- Side selector: "Buy to Open / Sell to Open / Buy to Close / Sell to Close" (derived from `position_effect` + `side`)
+- 0DTE warning banner if `expiry === today`
+- Qty label → "Contracts"
 
 ### `OptionEventsPage` (`/options/events`)
 
-Three sections:
-1. **Pending elections** — long options expiring ≤5 trading sessions with intrinsic value > 0 (degrades to "expiring within 5 sessions" when spot unavailable); Exercise / DNE / Lapse buttons; CSRF nonce via `mintCsrfNonce` + client-generated `idempotency_key` UUID
-2. **Recent assignments** — assigned against short positions, last 30 days (LOW-2: cursor pagination deferred to Phase 19+)
-3. **Recent exercises** — exercised by user, last 30 days
+1. **Pending elections** — expiring ≤5 trading sessions, intrinsic > 0 (degrades to "expiring within 5 sessions" when spot unavailable); Exercise / DNE / Lapse + `idempotency_key` UUID generated client-side + CSRF nonce
+2. **Recent assignments** — last 30 days (pagination deferred Phase 19+)
+3. **Recent exercises** — last 30 days
 
 ### `useOptionChain` hook
 
-TanStack Query for initial load + WebSocket push for live bid/ask/IV/Greeks updates (same hybrid pattern as `usePortfolioRollup`). Falls back to 5s REST poll if WS drops or if strikes are capped. Strike window resets on expiry change.
+TanStack Query + WS hybrid (same pattern as `usePortfolioRollup`). Handles `canonicalized` frames by updating the local conid→canonical_id map. Falls back to 5s REST poll if WS drops or strikes are capped.
 
 ### Navigation
 
-Add "Options" entry to sidebar between "Trade" and "Portfolio". `/options/chain` as primary, `/options/events` as sub-link.
+"Options" entry in sidebar between "Trade" and "Portfolio". Primary: `/options/chain`; sub-link: `/options/events`.
 
 ---
 
 ## Error Handling
 
-| Scenario | Backend behaviour | FE behaviour |
-|----------|------------------|--------------|
-| Chain sidecar timeout / error | Return stale cache with `stale: true`; 503 if no cache | "Stale data — last updated X ago" banner on chain table |
-| IBKR slow `reqSecDefOptChain` (up to 5s) | 6s timeout; singleflight coalesces concurrent misses | Loading skeleton on table |
-| Concurrent chain misses (same key) | Singleflight — one sidecar call, all waiters share result | Transparent to FE |
-| Expired contract in order | 422 `contract_expired` from `preview_order` (exchange-tz aware) | Blocking risk banner in TradeTicketModal |
-| Exercise past broker cut-off | `ExerciseService` returns structured error with `reason` | Inline error on election row |
-| Greeks unavailable | `GreeksSnapshot` is null | `—` placeholders in strip; order entry unblocked |
-| Futu HK chain width | `strike_count` capped at 40; cap frame sent to WS | UI shows "Showing X of Y strikes — polling remainder" |
-| Strike WS > cap | `subscription_capped` frame; excess on 5s REST poll | FE hybrid fallback; cap notice shown |
-| Duplicate exercise election | Idempotency key match → return original row; partial unique index → 409 | No duplicate RPC call to broker |
-| `option_greeks` cardinality leak | `upsert` guard refuses write for non-position/non-order contracts | Gauge observable via `option_greeks_rows_total` |
-| Greeks field out of range | `GreeksSnapshot.__post_init__` clamps; counter incremented | Clamped value displayed |
+| Scenario | Backend | FE |
+|----------|---------|-----|
+| Chain sidecar timeout/error | Stale cache + `stale:true`; 503 if no cache | "Stale data — last updated X ago" banner |
+| IBKR slow chain (up to 5s) | 6s timeout; singleflight coalesces misses | Loading skeleton |
+| Expired contract in order | 422 `contract_expired` (exchange-tz aware) | Blocking risk banner |
+| 0DTE order | WARN `zero_dte_order` in preview | Yellow banner in TradeTicketModal |
+| Naked short without L3 | BLOCK `naked_short_not_permitted` | Blocking risk banner |
+| Expiry-day cutoff | BLOCK `option_cutoff_passed` | Blocking risk banner |
+| High assignment risk | WARN `high_assignment_risk` | Yellow banner |
+| Exercise duplicate | Idempotency key → return original; partial index → 409 | No duplicate broker call |
+| Greeks out of range | Clamp + `option_greeks_clamped_total` | Clamped value displayed |
+| Subscription over budget | `subscription_capped` frame + REST fallback | "Showing X of Y strikes — polling remainder" |
+| OCC symbol in Telegram | Parser `ParseError` | Bot replies with rejection message |
+| Multiplier missing in sidecar | `ValidationError` in `parse_instrument_meta` | 500; logged; chain row skipped |
 
 ---
 
 ## Testing
 
-### Backend (`tests/services/options/`)
+### Backend
 
-- `test_chain_service.py` — cache hit/miss, stale fallback, source routing (USD→Schwab, HKD→Futu), TTL expiry, timeout handling per broker, singleflight (concurrent misses share one call)
-- `test_greeks_service.py` — upsert accepted for held position, upsert refused for browse-only instrument, stale eviction (year-round, not market-hours-gated), clamping + counter
-- `test_exercise_service.py` — pending candidate filter uses trading-day calendar, election idempotency key, partial unique index 409, CSRF nonce single-use, unsupported broker path, intrinsic-value degradation when spot unavailable
-- `test_instrument_resolver_option.py` — canonical_id construction (colon format), delegates to `resolve_or_create`, deterministic for same inputs
+- `test_chain_service.py` — cache hit/miss, stale, source routing, singleflight, exchange-aware TTL, budget cap
+- `test_greeks_service.py` — upsert guard (position/order check), eviction year-round, clamping
+- `test_exercise_service.py` — trading-day calendar filter, idempotency, partial unique 409, CSRF single-use, `_resolve_account`, rate limit, unsupported broker
+- `test_instrument_resolver_option.py` — canonical_id colon format, delegates to `resolve_or_create(meta=...)`, required multiplier/style
+- `test_options_risk_checks.py` — naked short L1/L2/L3 gate, cash-secured put reserve, 0DTE WARN, expiry cutoff BLOCK, assignment risk WARN, multiplier-aware notional (×multiplier on all 3 sites)
+- `test_options_api.py` — all 9 endpoints, JWT, rate limits, CSRF, stale shape, expiry 422
+- `test_ws_options.py` — connect, 2Hz, disconnect teardown, cap frame, canonicalized frame, heartbeat
+- `test_telegram_order_flow_options.py` — OCC symbol rejected at parser layer
 
-### Backend (`tests/integration/`)
+### Frontend
 
-- `test_options_api.py` — all 7 REST endpoints, JWT gate, rate limit, stale response shape, expired contract 422, admin config endpoint + CSRF
-- `test_ws_options.py` — WS connect, 2 Hz conflation, disconnect tears down conid subs, connection cap, subscription_capped frame, heartbeat
+- `OptionChainTable.test.tsx` — ATM highlight, ITM/OTM shading, row click → modal pre-fill, mobile collapse
+- `OptionDetailsSection.test.tsx` — Greeks strip, placeholders, notional × multiplier, trading-days countdown, 0DTE banner
+- `OptionEventsPage.test.tsx` — elections, idempotency key, CSRF, spot-unavailable degradation
+- `useOptionChain.test.ts` — REST fallback, stale banner, canonicalized frame handling, cap hybrid
 
-### Broker adapter stubs
-
-Mock sidecar stubs for `GetOptionChain`, `GetOptionExpirations`, `GetOptionGreeks`, `ExerciseOption` — one per broker (IBKR, Schwab, Alpaca, Futu).
-
-### Frontend (`features/options/*.test.tsx`)
-
-- `OptionChainTable.test.tsx` — ATM highlight, ITM/OTM shading, row click opens TradeTicketModal pre-filled, mobile collapse below md
-- `OptionDetailsSection.test.tsx` — Greeks strip renders, placeholders when null, notional = qty × premium × multiplier, expiry countdown in trading days
-- `OptionEventsPage.test.tsx` — pending elections with trading-day filter, Exercise/DNE/Lapse with idempotency key, CSRF nonce flow, spot-unavailable degradation
-- `useOptionChain.test.ts` — REST fallback when WS unavailable, stale banner on `stale: true`, subscription_capped hybrid behaviour
-
-Coverage target: 80%+ per project standard.
+Coverage target: 80%+.
 
 ---
 
-## Deferred (out of scope for Phase 12)
+## Deferred (out of scope for Phase 12.0)
 
-- Greeks wired into risk gate / margin calculation (deferred — requires per-broker margin model)
-- IV rank / percentile display (Phase 18 scanner stores 52-week IV history; `iv_rank` column ships as NULL)
+- **Schwab option execution** — blocked by upstream Schwab 401; deferred to Phase 12.x once resolved
+- Greeks wired into risk gate / margin model (requires per-broker margin semantics)
+- IV rank display (Phase 18 stores 52-week IV history; `iv_rank` ships as NULL)
 - Multi-leg combos (Phase 13)
 - Options position sizing / Kelly on premium (Phase 19)
 - Alpaca exercise (not in Alpaca API)
 - Futu HK exercise (not in Futu HK API)
-- Exercise elections for Schwab (not in Schwab API)
-- Cursor pagination on `/options/events` assignment/exercise history (Phase 19+)
+- Phase 24 multi-worker singleflight (Redis lock replaces in-process asyncio.Lock)
+- Cursor pagination on `/options/events` (Phase 19+)
+- L4 uncapped-risk strategy gate (Phase 13 multi-leg)
