@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -34,7 +35,9 @@ class JobRecord:
 
 
 class _RedisPublisher(Protocol):
-    async def publish(self, channel: str, message: str | bytes) -> int: ...
+    def publish(
+        self, channel: str | bytes, message: str | bytes | int | float, **kwargs: Any
+    ) -> Awaitable[Any]: ...
 
 
 class AIJobStore:

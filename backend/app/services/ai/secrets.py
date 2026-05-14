@@ -74,9 +74,10 @@ class AIProviderKeyCache:
             entry = self._cache.get(provider)
             if entry is not None and self._now() < entry[1]:
                 return entry[0]
-            key = await self._svc.reveal_secret("ai_provider", f"{provider}.api_key")
-            if not key:
+            raw = await self._svc.reveal_secret("ai_provider", f"{provider}.api_key")
+            if not raw:
                 raise ProviderKeyUnavailableError(f"no api_key configured for provider={provider}")
+            key: str = str(raw)
             self._cache[provider] = (key, self._now() + self._ttl)
             return key
 

@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from fastapi import Request
-    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy._types import UserAPIKeyAuth  # type: ignore[import-not-found]
     from redis.asyncio import Redis
 
 
@@ -42,7 +42,7 @@ REDIS_MASTER_KEY = "ai:litellm_master_key"
 def _install_litellm_type_fallback() -> None:
     """Install minimal LiteLLM auth types when tests run without litellm."""
     try:
-        import litellm.proxy._types  # noqa: F401 — availability probe; real import is lazy
+        import litellm.proxy._types  # type: ignore[import-not-found]  # noqa: F401 — availability probe; real import is lazy
     except ModuleNotFoundError as exc:
         if exc.name != "litellm":
             raise

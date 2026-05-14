@@ -118,12 +118,12 @@ async def _dispatch_oco_alpaca_native(
     (sidecar_alpaca owns the SDK). Production callers must run inside an
     image that has alpaca-py installed.
     """
-    from alpaca.trading.enums import (  # type: ignore[import-not-found]
+    from alpaca.trading.enums import (
         OrderClass,
         OrderSide,
         TimeInForce,
     )
-    from alpaca.trading.requests import LimitOrderRequest  # type: ignore[import-not-found]
+    from alpaca.trading.requests import LimitOrderRequest
 
     side = request.side.upper()
     tif = request.tif.upper()

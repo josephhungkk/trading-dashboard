@@ -66,7 +66,7 @@ class AllowlistService:
     def all_chat_ids(self) -> list[int]:
         return sorted({chat_id for chat_id, _from_user_id in self._by_key})
 
-    async def run_pubsub_listener(self, redis: AsyncRedis) -> None:  # type: ignore[type-arg]
+    async def run_pubsub_listener(self, redis: AsyncRedis) -> None:
         while True:
             pubsub = redis.pubsub()
             try:
