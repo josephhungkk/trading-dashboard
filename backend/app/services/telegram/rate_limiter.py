@@ -34,7 +34,7 @@ class TelegramRateLimiter:
             return True
 
     async def check_read(self, *, chat_id: int, from_user_id: int) -> bool:
-        return await self._check(f"telegram:rl:read:{chat_id}", _READ_LIMIT)
+        return await self._check(f"telegram:rl:read:{chat_id}:{from_user_id}", _READ_LIMIT)
 
     async def check_write(self, *, chat_id: int, from_user_id: int) -> bool:
-        return await self._check(f"telegram:rl:write:{chat_id}", _WRITE_LIMIT)
+        return await self._check(f"telegram:rl:write:{chat_id}:{from_user_id}", _WRITE_LIMIT)

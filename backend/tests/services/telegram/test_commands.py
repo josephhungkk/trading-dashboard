@@ -57,6 +57,30 @@ async def test_handle_mute_missing_arg_replies_usage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_mute_zero_duration_rejected() -> None:
+    from app.services.telegram.commands import handle_mute
+
+    msg = _make_message("/mute 42 0m")
+    entry = _make_entry()
+    await handle_mute(msg, entry=entry, db=AsyncMock())  # type: ignore[arg-type]
+    msg.answer.assert_awaited_once()
+    assert "Duration" in msg.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_mute_not_found_replies_not_found() -> None:
+    from app.services.telegram.commands import handle_mute
+
+    msg = _make_message("/mute 999 30m")
+    entry = _make_entry()
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(return_value=MagicMock(fetchone=MagicMock(return_value=None)))
+    await handle_mute(msg, entry=entry, db=mock_db)  # type: ignore[arg-type]
+    msg.answer.assert_awaited_once()
+    assert "not found" in msg.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_handle_unmute_missing_arg_replies_usage() -> None:
     from app.services.telegram.commands import handle_unmute
 

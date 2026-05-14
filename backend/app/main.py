@@ -492,8 +492,8 @@ async def lifespan(_app: FastAPI) -> Any:
                             " RETURNING id"
                         )
                     )
-                    await db.commit()
                     restored = result.fetchall()
+                    await db.commit()
                     if restored:
                         log.info("telegram.mute_expiry_restored", count=len(restored))
             except Exception:

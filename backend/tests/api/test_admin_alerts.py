@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -40,10 +40,11 @@ async def admin_alerts_client(client: AsyncClient) -> AsyncIterator[AsyncClient]
 
 @pytest.mark.asyncio
 async def test_put_webhook_config(admin_alerts_client: AsyncClient) -> None:
-    resp = await admin_alerts_client.put(
-        "/api/admin/alerts/webhooks/1",
-        json={"url": "https://hook.example.com/1", "secret": "mysecret"},
-    )
+    with patch("app.api.admin_alerts._validate_url"):
+        resp = await admin_alerts_client.put(
+            "/api/admin/alerts/webhooks/1",
+            json={"url": "https://hook.example.com/1", "secret": "mysecret"},
+        )
     assert resp.status_code == 200
     assert resp.json()["webhook_id"] == 1
     assert resp.json()["ok"] is True
@@ -51,9 +52,29 @@ async def test_put_webhook_config(admin_alerts_client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_put_webhook_config_no_secret(admin_alerts_client: AsyncClient) -> None:
-    resp = await admin_alerts_client.put(
-        "/api/admin/alerts/webhooks/2",
-        json={"url": "https://hook.example.com/2"},
-    )
+    with patch("app.api.admin_alerts._validate_url"):
+        resp = await admin_alerts_client.put(
+            "/api/admin/alerts/webhooks/2",
+            json={"url": "https://hook.example.com/2"},
+        )
     assert resp.status_code == 200
     assert resp.json()["webhook_id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_put_webhook_config_rejects_private_url(admin_alerts_client: AsyncClient) -> None:
+    resp = await admin_alerts_client.put(
+        "/api/admin/alerts/webhooks/3",
+        json={"url": "http://192.168.1.1/evil"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_put_webhook_config_rejects_negative_id(admin_alerts_client: AsyncClient) -> None:
+    with patch("app.api.admin_alerts._validate_url"):
+        resp = await admin_alerts_client.put(
+            "/api/admin/alerts/webhooks/-1",
+            json={"url": "https://hook.example.com/bad"},
+        )
+    assert resp.status_code == 422
