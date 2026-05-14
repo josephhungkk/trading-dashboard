@@ -5,6 +5,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 11d — Telegram trade execution (v0.11.3.0)
+
+Phase 11d shipped across 10 tasks at tag `v0.11.3.0` on 2026-05-14. 63 telegram tests green (BE); 970 total BE tests passing; 676/676 FE tests green. Adds `/place_order` two-step trade execution (preview → `/confirm`) to the existing Telegram bot.
+
+**Backend**
+
+- `app/services/telegram/order_flow.py` (new): Full order state machine — `ParsedOrder` frozen dataclass, `parse_place_order` (SYMBOL/BUY|SELL/QTY parser with `_DECIMAL_8_RE` price validation + HTML injection guard), `resolve_instrument` (instruments table lookup → live broker fallback → ambiguity guard → cache insert), `_do_preview_and_write_pending` (preview → risk/sanity gate → Redis pending key EX 120s), `handle_place_order` (account query, single-account fast-path, multi-account disambiguation via `acct_select` key EX 120s), `handle_account_selection` (numeric reply consumer, returns bool consumed), `handle_confirm` (atomic GETDEL, 30s web nonce mint with `{payload_hash, rth_at_mint}` envelope via `orders_service._preview_payload_hash` + `_is_regular_trading_hours`, `f"telegram-{uuid4()}"` client_order_id, full `PreviewUnavailable` error dispatch), `handle_cancel_order` (DEL both keys, read-bucket rate limit so always accessible).
+- `app/services/telegram/rate_limiter.py`: Added `check_trade` bucket — 5/min, **fail-CLOSED** on Redis error (only money-moving bucket); existing `check_read`/`check_write` unchanged (fail-open).
+- `app/services/telegram/commands.py`: Extended `register_handlers` with optional `registry`, `capability`, `cfg` kwargs (backward-compatible); registered `/place_order`, `/confirm`, `/cancel_order` handlers with write+trade rate-limit gating; account-selection numeric handler (`^[0-9]+$`) registered BEFORE the AI catch-all; `/cancel_order` uses read bucket; `/help` updated.
+- `app/main.py`: Passes `registry=broker_registry`, `capability=capability_svc`, `cfg=svc` to `register_tg_handlers` in lifespan.
+- `app/core/metrics.py`: Added 6 Prometheus metrics — `telegram_order_attempts_total{result}`, `telegram_order_previews_total{result}`, `telegram_order_confirms_total{result}`, `telegram_order_cancels_total{stage}`, `telegram_rate_limiter_trade_block_total`, `telegram_order_e2e_seconds{stage}` (Histogram).
+
+**Tests**
+
+- `tests/services/telegram/test_order_flow.py` (new, 35 tests): Parser (11), resolve_instrument (5), handle_place_order (4), handle_account_selection (3), handle_confirm (6), handle_cancel_order (1), concurrency/edge-cases (5).
+- `tests/services/telegram/test_rate_limiter.py`: 3 new tests for `check_trade` bucket (independent of write, fail-closed on Redis error, write bucket still fail-open).
+- `tests/services/telegram/test_commands.py`: 3 new tests (backward-compat signature, full-deps registration, `/help` includes order commands).
+
+**Security properties**
+
+- Telegram GETDEL is the real single-use gate; web nonce satisfies `orders_service.place_order` API contract without bypassing it.
+- Risk gate, PDT counters, and broker dispatch run unconditionally — Telegram is not a bypass path.
+- Live accounts require `/confirm LIVE` explicit token.
+- `client_order_id` prefix `telegram-` for auditability.
+- `check_trade` fail-CLOSED prevents money-moving ops when Redis is degraded.
+- `position_sanity.requires_extra_attestation` rejects extreme position changes at Telegram layer.
+
+**Still deferred**
+
+- `TicksSubscriber` lifespan integration (quote-engine dependency).
+- Monaco editor swap.
+
 ### Phase 11c — Telegram bot (v0.11.2.0)
 
 Phase 11c shipped across 3 chunks (A/B/C) at tag `v0.11.2.0` on 2026-05-14. 22 telegram tests green (BE); 676/676 FE tests green. Introduces aiogram 3.28.2 webhook bot, Telegram delivery channel, and AI chat integration.
