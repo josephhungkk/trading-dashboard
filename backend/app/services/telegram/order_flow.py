@@ -150,18 +150,26 @@ async def resolve_instrument(
         return None
 
     equity = [c for c in contracts if c.asset_class == "STOCK"]
+    if len(equity) == 0:
+        return None
+
+    # Ambiguity check: multiple exchanges in equity pool means different economic
+    # instruments (e.g. VOD/LSE in GBP vs VOD/NASDAQ in USD). Always reject.
+    equity_exchanges = {c.exchange for c in equity}
+    if len(equity_exchanges) > 1:
+        log.info(
+            "telegram.resolve_instrument_ambiguous",
+            symbol=symbol,
+            exchanges=list(equity_exchanges),
+        )
+        return None
+
+    # Single exchange: use preferred filter to pick canonical listing, else take all.
     preferred = [c for c in equity if c.exchange in _PREFERRED_EXCHANGES]
     candidates = preferred if preferred else equity
 
     if len(candidates) == 0:
         return None
-    if len(candidates) > 1:
-        exchanges = {c.exchange for c in candidates}
-        if len(exchanges) > 1:
-            log.info(
-                "telegram.resolve_instrument_ambiguous", symbol=symbol, exchanges=list(exchanges)
-            )
-            return None
 
     conid = candidates[0].conid
 
