@@ -186,7 +186,7 @@ async def resolve_instrument(
     if len(candidates) == 0:
         return None
 
-    conid = candidates[0].conid
+    conid: str = str(candidates[0].conid)
 
     try:
         await db.execute(
