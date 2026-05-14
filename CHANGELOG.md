@@ -5,6 +5,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Phase 12 — Options single-leg (v0.12.0)
+
+Phase 12 shipped across 6 chunks (A–F) at tag `v0.12.0` on 2026-05-14. 32 options-specific tests green; 81% options service coverage; 685/685 FE tests green. Adds the options chain viewer, Greeks display, exercise elections, and options risk gate.
+
+**Backend**
+
+- `alembic/versions/0047_options.py` (new): Adds `OPTION` to `AssetClass` enum, `position_effect` (OPEN/CLOSE) + `tax_treatment` (nullable) columns on `orders` + `fills`, `option_greeks` hypertable, `exercise_elections` table with one-per-day uniqueness constraint.
+- `app/services/options/types.py` (new): `InstrumentMeta` Pydantic discriminated union (`OptionDetails` / `NonOptionDetails`), `OptionChainRow`, `GreeksSnapshot` (clamped), `SubscriptionHandle`.
+- `app/services/options/chain_service.py` (new): `OptionChainService` — currency-keyed source routing, Redis-backed singleflight per source, market-aware TTL (300s open / 3600s closed), `reload_config` hot-reload via `option_chain_sources` pubsub.
+- `app/services/options/greeks_service.py` (new): `OptionGreeksService` — upsert guard (position/order check), DB upsert with clamped Decimal values, `evict_stale` cleanup.
+- `app/services/options/exercise_service.py` (new): `ExerciseService` — idempotent on `idempotency_key`, `DuplicateElectionError` on same-day duplicate, `ExerciseRateLimitError` (5/min), broker submission stub.
+- `app/services/market_calendar.py`: Added `is_open`, `is_past_expiry`, `option_cutoff_time`, `next_trading_days` helpers.
+- `app/services/risk_service.py`: `EvaluationContext` gains `multiplier` (default 1) + `position_effect`; `_check_options_exposure` (trading-level gate, naked-short L1/L2/L3, expiry cutoff BLOCK, 0DTE WARN, assignment-risk WARN).
+- `app/services/orders_service.py`: `_native_notional` multiplied by `ctx.multiplier` on all 3 branches; `multiplier` + `position_effect` resolved from `instruments.meta` for OPTION asset class in `_evaluate_risk_for_place_order`.
+- `app/services/telegram/order_flow.py`: `parse_place_order` rejects OCC-format symbols (option notation guard).
+- `app/api/options.py` (new): 9 REST endpoints — `GET /api/options/expirations`, `GET /api/options/chain`, `GET /api/options/greeks/{id}`, `GET /api/options/pending-exercise`, `GET /api/options/exercise-history`, `POST /api/options/exercise`, `GET /api/options/positions`, `GET /api/options/instrument/{id}`, `POST /api/options/instruments/resolve`.
+- `app/api/ws_options.py` (new): `WS /ws/options/chain` — 2 Hz push, heartbeat 30s, 50-connection cap, auth close-on-fail (1008).
+- `app/core/metrics.py`: 11 new Prometheus metrics — `option_chain_fetch_{seconds,total}`, `option_expirations_fetch_total`, `option_greeks_stream_{updates,drops}_total`, `option_exercise_total`, `option_greeks_{rows,clamped}_total`, `quote_options_chain_subs_active`, `option_risk_check_total`, `option_chain_sources_invalid_total`.
+- `proto/broker/v1/broker.proto`: 4 new RPCs — `GetOptionChain`, `GetOptionExpirations`, `StreamOptionGreeks`, `ExerciseOption`; `OptionContractHint` oneof.
+
+**Frontend**
+
+- `src/services/options/types.ts` (new): Shared API-facing types (`OptionChainRow`, `OptionChainData`, `ExerciseCandidate`, `ExerciseElection`) in the services layer.
+- `src/services/options/api.ts` (new): `getExpirations`, `getChain`, `postExerciseElection` (CSRF via `X-Confirm-Nonce` header, not body).
+- `src/features/options/hooks/useOptionExpirations.ts`, `useOptionChain.ts`, `useExerciseElections.ts` (new): TanStack Query hooks with WS 2 Hz push upgrade for the chain.
+- `src/features/options/OptionGreeksStrip.tsx`, `OptionExpiryTabs.tsx`, `OptionChainTable.tsx`, `OptionDetailsSection.tsx` (new): Greeks strip, expiry tabs, butterfly-layout chain table (desktop + mobile collapse), option details section.
+- `src/features/options/OptionChainPage.tsx`, `OptionEventsPage.tsx` (new): Chain viewer at `/options/chain`, exercise elections at `/options/events`.
+- `src/features/orders/TradeTicketModal.tsx`: `OptionDetailsSection` injected for `OPTION` asset class contracts.
+- Routes + nav: `/options/chain` and `/options/events` wired into TanStack Router.
+
+**Security**
+
+- `ExerciseElectionRequest` has no `csrf_nonce` body field — CSRF is header-only via `X-Confirm-Nonce` consumed by `consume_confirmation_nonce` Redis dep.
+- WS auth: `require_admin_jwt_ws` called after `accept()`; explicit `close(1008)` on failure.
+
+**Deferred**
+
+- Schwab chain execution (upstream 401 — Schwab Developer API has no paper trading; live confirmed broken upstream)
+- Greeks in risk gate / margin model (Phase 13+)
+- IV rank (Phase 18)
+- Multi-leg combos (Phase 13)
+- TicksSubscriber wiring (deferred from Phase 11d)
+- Monaco editor in CapabilityMapEditor/ProviderKeyCrud (deferred from Phase 11c)
+
+---
+
 ### Phase 11d — Telegram trade execution (v0.11.3.0)
 
 Phase 11d shipped across 10 tasks at tag `v0.11.3.0` on 2026-05-14. 63 telegram tests green (BE); 970 total BE tests passing; 676/676 FE tests green. Adds `/place_order` two-step trade execution (preview → `/confirm`) to the existing Telegram bot.

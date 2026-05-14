@@ -46,6 +46,12 @@ class _MemoryPubSub:
     async def unsubscribe(self, *_channels: str) -> None:
         return None
 
+    async def get_message(self, **_kw: object) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
     async def listen(self) -> Any:
         # never yields — lifespan cancels the listener task on shutdown
         await asyncio.Event().wait()
@@ -110,6 +116,7 @@ async def test_lifespan_populates_ai_router_stack() -> None:
         patch("app.main.build_quote_engine", return_value=None),
         patch("app.main.BarService", return_value=mock_bar_svc),
         patch("app.main._run_pre_warm", new_callable=AsyncMock),
+        patch("app.main.run_capability_invalidation_listener", new_callable=AsyncMock),
         patch("app.main._update_schwab_token_metrics", side_effect=_metrics_loop),
     ):
         mock_callback_server = AsyncMock()

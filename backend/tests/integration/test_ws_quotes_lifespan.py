@@ -89,6 +89,10 @@ def _make_lifespan_mocks(
     mock_pubsub = AsyncMock()
     mock_pubsub.subscribe = AsyncMock()
     mock_pubsub.unsubscribe = AsyncMock()
+    # Python 3.14: MagicMock.get_message() hangs in _increment_mock_call.
+    # Return None so AlertsBarsRedisSubscriber._consume() sleeps and yields.
+    mock_pubsub.get_message = AsyncMock(return_value=None)
+    mock_pubsub.aclose = AsyncMock()
 
     async def _block_forever_listen():
         await asyncio.Event().wait()
@@ -175,6 +179,7 @@ async def test_app_state_quote_engine_attribute_set_by_lifespan() -> None:
         patch("app.main.OrderCapabilityService") as mock_cap_cls,
         patch("app.main.BarService") as mock_bar_cls,
         patch("app.main._run_pre_warm", new_callable=AsyncMock),
+        patch("app.main.run_capability_invalidation_listener", new_callable=AsyncMock),
     ):
         _make_lifespan_mocks(
             mock_redis_cls, mock_bridge_cls, mock_cache_cls, mock_cbs, mock_bar_cls
@@ -232,6 +237,7 @@ async def test_lifespan_sets_quote_engine_to_none_when_build_returns_none() -> N
         patch("app.main.OrderCapabilityService") as mock_cap_cls,
         patch("app.main.BarService") as mock_bar_cls,
         patch("app.main._run_pre_warm", new_callable=AsyncMock),
+        patch("app.main.run_capability_invalidation_listener", new_callable=AsyncMock),
     ):
         _make_lifespan_mocks(
             mock_redis_cls, mock_bridge_cls, mock_cache_cls, mock_cbs, mock_bar_cls

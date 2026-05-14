@@ -46,6 +46,12 @@ class _MemoryPubSub:
     async def unsubscribe(self, *_channels: str) -> None:
         return None
 
+    async def get_message(self, **_kw: object) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
     async def listen(self) -> Any:
         import asyncio as _asyncio
 
@@ -107,6 +113,7 @@ async def test_lifespan_creates_heavy_wol_singleton() -> None:
         patch("app.main.build_quote_engine", return_value=None),
         patch("app.main.BarService", return_value=mock_bar_svc),
         patch("app.main._run_pre_warm", new_callable=AsyncMock),
+        patch("app.main.run_capability_invalidation_listener", new_callable=AsyncMock),
         patch("app.main._update_schwab_token_metrics", side_effect=_metrics_loop),
     ):
         mock_callback_server = AsyncMock()
@@ -143,6 +150,7 @@ async def test_lifespan_creates_ollama_health_watcher() -> None:
         patch("app.main.build_quote_engine", return_value=None),
         patch("app.main.BarService", return_value=mock_bar_svc),
         patch("app.main._run_pre_warm", new_callable=AsyncMock),
+        patch("app.main.run_capability_invalidation_listener", new_callable=AsyncMock),
         patch("app.main._update_schwab_token_metrics", side_effect=_metrics_loop),
     ):
         mock_callback_server = AsyncMock()

@@ -783,9 +783,9 @@ Ollama router (NUC light + heavy-box WoL with 30s warmup cache), `services/ai/` 
 - [x] **11c** Telegram bot (v0.11.2.0, 2026-05-14) — aiogram 3.28.2 webhook; allowlist CRUD; `/status` `/accounts` `/kill_switch` `/mute` `/unmute` `/help`; 2-bucket rate limiter; mute-expiry job; TelegramChat (per-chat lock, REASONING AI, Redis history); admin page (BotConfigPanel + AllowlistPanel + CommandLogPanel). Memory `phase11c_shipped.md`.
 - [x] **11d** Telegram trade execution (v0.11.3.0, 2026-05-14) — `/place_order` parser (`ParsedOrder`, `DECIMAL_8_RE`, HTML injection guard), `resolve_instrument` (DB→broker fallback→ambiguity guard), two-step confirm flow (preview → `/confirm`), atomic GETDEL pending key, 30s web-nonce mint with `{payload_hash, rth_at_mint}` envelope, `check_trade` fail-closed bucket (5/min), live-account `/confirm LIVE` gate, `client_order_id` prefix `telegram-`, 6 Prometheus metrics. 63 telegram tests; 970 total BE tests; 676 FE tests.
 
-## Phase 12 — Options (single-leg)
+## Phase 12 — Options (single-leg)  *(complete — v0.12.0 · 2026-05-14)*
 
-Option chain viewer, strike/expiry pickers, on-demand strike-window subscribe, Greeks display, exercise/assign events. Polymorphic contract via JSONB `contract_details`.
+Option chain viewer (`/options/chain`), Greeks strip, exercise elections (`/options/events`), `OptionDetailsSection` in `TradeTicketModal`, options risk gate (trading-level, naked-short, expiry cutoff, 0DTE WARN, assignment-risk WARN), multiplier-aware notional in `orders_service`, 11 Prometheus metrics, 4 broker proto RPCs. Deferred: Schwab execution, Greeks in risk gate, IV rank, TicksSubscriber, Monaco swap.
 
 ## Phase 13 — Multi-leg option combos
 

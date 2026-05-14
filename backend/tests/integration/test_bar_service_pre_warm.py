@@ -402,6 +402,9 @@ def _make_lifespan_mocks(
     mock_pubsub = AsyncMock()
     mock_pubsub.subscribe = AsyncMock()
     mock_pubsub.unsubscribe = AsyncMock()
+    # Python 3.14: MagicMock.get_message() hangs in _increment_mock_call.
+    mock_pubsub.get_message = AsyncMock(return_value=None)
+    mock_pubsub.aclose = AsyncMock()
 
     async def _block_forever_listen():
         # Block until the outer task is cancelled — without this `listen()`
@@ -477,6 +480,7 @@ async def test_lifespan_starts_scheduler() -> None:
         patch("app.main.seed_instruments_from_positions", return_value=0),
         patch("app.main.BarService") as mock_bar_cls,
         patch("app.main._run_pre_warm", new_callable=AsyncMock),
+        patch("app.main.run_capability_invalidation_listener", new_callable=AsyncMock),
     ):
         _make_lifespan_mocks(
             mock_redis_cls, mock_bridge_cls, mock_cache_cls, mock_cbs, mock_bar_cls
@@ -491,7 +495,7 @@ async def test_lifespan_starts_scheduler() -> None:
             assert scheduler is not None
             assert scheduler.running is True
             jobs = scheduler.get_jobs()
-            assert len(jobs) == 3, f"Expected 3 cron jobs, got {len(jobs)}"
+            assert len(jobs) == 5, f"Expected 5 scheduled jobs, got {len(jobs)}"
 
 
 async def test_lifespan_runs_initial_pre_warm() -> None:
@@ -525,6 +529,7 @@ async def test_lifespan_runs_initial_pre_warm() -> None:
         patch("app.main.seed_instruments_from_positions", return_value=0),
         patch("app.main.BarService") as mock_bar_cls,
         patch("app.main._run_pre_warm", new_callable=AsyncMock) as mock_pre_warm,
+        patch("app.main.run_capability_invalidation_listener", new_callable=AsyncMock),
     ):
         mock_pre_warm.side_effect = _counting_pre_warm
         _make_lifespan_mocks(
