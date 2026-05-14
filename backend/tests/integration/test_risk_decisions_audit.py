@@ -48,64 +48,75 @@ def _block_verdict(
 
 
 async def _existing_account_id() -> uuid.UUID:
-    """Return any broker_accounts row id; tests assume a populated NUC DB."""
+    """Return a broker_accounts row id, seeding TEST001 if none exists."""
     async with SessionLocal() as s:
-        result = await s.execute(text("SELECT id FROM broker_accounts LIMIT 1"))
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO broker_accounts (
+                    broker_id, account_number, alias, mode, gateway_label,
+                    currency_base, last_seen_via
+                ) VALUES (
+                    'ibkr'::broker_id_enum, 'TEST001', 'test-acct-1',
+                    'paper'::trading_mode_enum, 'isa-paper', 'GBP', 'isa-paper'
+                ) ON CONFLICT (broker_id, account_number) DO UPDATE SET alias = EXCLUDED.alias
+                RETURNING id
+                """
+            )
+        )
         row = result.first()
-    if row is None:
-        pytest.skip("No broker_accounts rows on this DB; can't run audit integration test")
+        await s.commit()
+    assert row is not None
     return row[0]
 
 
-async def _existing_order_id() -> uuid.UUID:
-    """Return any orders row id; modify_order audit needs a real FK target.
+# Fixed UUID so the seeded orders row is idempotent and deletable by teardown.
+_AUDIT_SEED_CLIENT_ORDER_ID = uuid.UUID("00000000-0000-0000-0000-555455455354")
 
-    Seeds an orders row tied to the conftest TEST001 account if no row
-    exists. Created with a UTEST_AUDIT_ prefix so it doesn't collide with
-    fixture/discover_e2e cleanup. Cleanup happens in the autouse
-    finaliser below.
-    """
+
+async def _existing_order_id() -> uuid.UUID:
+    """Seed a deterministic orders row for FK use; cleaned up by _cleanup_audit_seed."""
+    account_id = await _existing_account_id()
     async with SessionLocal() as s:
-        result = await s.execute(text("SELECT id FROM orders LIMIT 1"))
-        row = result.first()
-        if row is not None:
-            return row[0]
-        # Seed via conftest TEST001 account; this fixture should have already
-        # run because of the autouse seed in tests/conftest.py.
-        account_row = await s.execute(
-            text(
-                "SELECT id FROM broker_accounts "
-                "WHERE broker_id = 'ibkr' AND account_number = 'TEST001' LIMIT 1"
-            )
-        )
-        account_id = account_row.scalar_one_or_none()
-        if account_id is None:
-            pytest.skip(
-                "Neither orders rows nor TEST001 broker_account present; "
-                "cannot seed orders row for modify_order audit test"
-            )
-        new_order_id = uuid.uuid4()
-        await s.execute(
+        result = await s.execute(
             text(
                 """
                 INSERT INTO orders (
                   id, account_id, client_order_id, conid, symbol, side,
                   order_type, tif, qty, filled_qty, status, notional
                 )
-                VALUES (
-                  :id, :account_id, :client_order_id, '265598', 'AAPL', 'BUY',
-                  'MARKET', 'DAY', 1, 0, 'pending_submit', 0
+                SELECT
+                  gen_random_uuid(), :account_id, :client_order_id,
+                  '265598', 'AAPL', 'BUY', 'MARKET', 'DAY', 1, 0, 'pending_submit', 0
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM orders WHERE client_order_id = :client_order_id
                 )
+                RETURNING id
                 """
             ),
-            {
-                "id": new_order_id,
-                "account_id": account_id,
-                "client_order_id": uuid.uuid4(),
-            },
+            {"account_id": account_id, "client_order_id": _AUDIT_SEED_CLIENT_ORDER_ID},
+        )
+        new_row = result.first()
+        if new_row is not None:
+            await s.commit()
+            return new_row[0]
+        existing = await s.execute(
+            text("SELECT id FROM orders WHERE client_order_id = :cid"),
+            {"cid": _AUDIT_SEED_CLIENT_ORDER_ID},
+        )
+        return existing.scalar_one()
+
+
+@pytest.fixture(autouse=True, scope="module")
+async def _cleanup_audit_seed():
+    """Delete the deterministic seed order after all tests in this module run."""
+    yield
+    async with SessionLocal() as s:
+        await s.execute(
+            text("DELETE FROM orders WHERE client_order_id = :cid"),
+            {"cid": _AUDIT_SEED_CLIENT_ORDER_ID},
         )
         await s.commit()
-        return new_order_id
 
 
 async def _delete_decisions_by_request_id(request_id: str) -> None:

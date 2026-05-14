@@ -58,12 +58,25 @@ async def admin_client() -> AsyncIterator[AsyncClient]:
 
 
 async def _existing_account_id() -> uuid.UUID:
-    """Return any broker_accounts row id; tests assume a populated NUC DB."""
+    """Return a broker_accounts row id, seeding TEST001 if none exists."""
     async with SessionLocal() as s:
-        result = await s.execute(text("SELECT id FROM broker_accounts LIMIT 1"))
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO broker_accounts (
+                    broker_id, account_number, alias, mode, gateway_label,
+                    currency_base, last_seen_via
+                ) VALUES (
+                    'ibkr'::broker_id_enum, 'TEST001', 'test-acct-1',
+                    'paper'::trading_mode_enum, 'isa-paper', 'GBP', 'isa-paper'
+                ) ON CONFLICT (broker_id, account_number) DO UPDATE SET alias = EXCLUDED.alias
+                RETURNING id
+                """
+            )
+        )
         row = result.first()
-    if row is None:
-        pytest.skip("No broker_accounts rows on this DB")
+        await s.commit()
+    assert row is not None
     return row[0]
 
 

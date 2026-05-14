@@ -35,10 +35,23 @@ pytestmark = [pytest.mark.integration]
 
 
 async def _get_test_instrument_id(session: AsyncSession) -> int:
-    """Return a valid instrument_id for testing (reuse existing row)."""
-    row = (await session.execute(text("SELECT id FROM instruments LIMIT 1"))).one_or_none()
-    if row is None:
-        pytest.skip("no instruments in DB — run seed first")
+    """Return a valid instrument_id, seeding a test instrument if none exists."""
+    result = await session.execute(
+        text(
+            """
+            INSERT INTO instruments
+                (canonical_id, asset_class, primary_exchange, currency, display_name)
+            VALUES (
+                'test_chart_layouts:SPY:US', 'STOCK'::instrument_asset_class,
+                'ARCA', 'USD', 'Chart Layout Test Instrument'
+            )
+            ON CONFLICT (canonical_id) DO UPDATE SET display_name = EXCLUDED.display_name
+            RETURNING id
+            """
+        )
+    )
+    row = result.one()
+    await session.commit()
     return int(row.id)
 
 

@@ -5,6 +5,7 @@ connections stay on the pytest-asyncio event loop. TestClient spawns a portal
 thread with its own loop, which races with the module-global SQLAlchemy engine.
 """
 
+import pathlib
 from collections.abc import AsyncIterator
 
 import fakeredis.aioredis as fakeredis_async
@@ -20,6 +21,8 @@ from app.core.deps import get_config, require_admin_jwt
 from app.main import app
 from app.services.config import ConfigService
 from app.services.config_cache import ConfigCache
+
+_IN_DOCKER = pathlib.Path("/.dockerenv").exists()
 
 
 @pytest.fixture
@@ -42,7 +45,7 @@ async def clean_tables(session_factory):
     # pytest run (memory feedback_pytest_prod_db_wipe.md). If DATABASE_URL
     # points at the prod WG IP, raise loudly instead of destroying state.
     db_url = settings.database_url
-    if "10.10.0.2" in db_url and "localhost" not in db_url:
+    if "10.10.0.2" in db_url and "localhost" not in db_url and not _IN_DOCKER:
         pytest.skip(
             "Refusing to truncate app_config/app_secrets against the prod DB "
             f"({db_url}). Override DATABASE_URL to a local test PG before "

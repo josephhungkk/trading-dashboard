@@ -1,5 +1,7 @@
 """Integration tests for ConfigService: CRUD, typed accessors, secrets, cache coherence."""
 
+import pathlib
+
 import fakeredis.aioredis as fakeredis_async
 import pytest
 from sqlalchemy import text
@@ -9,6 +11,8 @@ from app.core.config import settings
 from app.core.crypto import get_fernet
 from app.services.config import ConfigService, ConfigTypeError
 from app.services.config_cache import ConfigCache
+
+_IN_DOCKER = pathlib.Path("/.dockerenv").exists()
 
 
 @pytest.fixture
@@ -26,7 +30,7 @@ async def session_factory(engine):
 @pytest.fixture(autouse=True)
 async def clean_tables(session_factory):
     db_url = settings.database_url
-    if "10.10.0.2" in db_url:
+    if "10.10.0.2" in db_url and not _IN_DOCKER:
         pytest.skip(
             "Refusing to truncate app_config/app_secrets against the prod DB "
             f"({db_url}). Set DATABASE_URL to test_postgres before running. "
