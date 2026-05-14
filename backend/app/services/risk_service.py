@@ -39,7 +39,9 @@ class _ConfigProto(Protocol):
     """Minimal protocol for the ConfigService dependency this service needs."""
 
     async def get_bool(self, namespace: str, key: str, *, default: bool = False) -> bool: ...
-    async def get_int(self, namespace: str, key: str, default: int | None = None) -> int | None: ...
+    async def get_int(
+        self, namespace: str, key: str, *, default: int | None = None
+    ) -> int | None: ...
 
 
 class _RedisProto(Protocol):
@@ -96,7 +98,7 @@ class EvaluationContext:
     symbol: str | None = None
     asset_class: str | None = None
     multiplier: int = 1  # 1 for non-options; 100 for standard equity options
-    position_effect: str | None = None  # "OPEN" | "CLOSE" | None (None = equity)
+    position_effect: Literal["OPEN", "CLOSE"] | None = None
 
 
 class RiskService:
@@ -658,7 +660,9 @@ class RiskService:
 
         side = ctx.side
         position_effect = ctx.position_effect
-        trading_level = await self._config.get_int("options", "trading_level", default=1) or 1
+        trading_level = await self._config.get_int("options", "trading_level", default=1)
+        if trading_level is None:
+            trading_level = 1
 
         is_sto = side == "sell" and position_effect == "OPEN"
 
@@ -678,12 +682,13 @@ class RiskService:
                     None,
                 )
 
-        # Step 1b: expiry-day cutoff
+        # Step 1b: expiry-day cutoff + 0DTE WARN
         option_expiry = await self._get_option_expiry(ctx)
         if option_expiry is not None:
             exchange = await self._get_instrument_exchange(ctx) or "NYSE"
             try:
-                if market_calendar.is_past_expiry(option_expiry, exchange):
+                today_ex = market_calendar.today_in_exchange_tz(exchange)
+                if today_ex > option_expiry:
                     return (
                         GateBlockerEntry(
                             check="options_exposure",
@@ -692,29 +697,25 @@ class RiskService:
                         ),
                         None,
                     )
+                if today_ex == option_expiry:
+                    return (
+                        None,
+                        GateWarningEntry(
+                            check="options_exposure",
+                            message="0DTE order — option expires today",
+                        ),
+                    )
             except ValueError:
                 pass  # unknown exchange — skip cutoff check
-
-        # post-BLOCK WARNs
-        if option_expiry is not None and option_expiry == date.today():
-            return (
-                None,
-                GateWarningEntry(
-                    check="options_exposure",
-                    message="0DTE order — option expires today",
-                ),
-            )
 
         return None
 
     async def _get_existing_long_position(self, ctx: EvaluationContext) -> Decimal:
         """Return existing long qty for the instrument (0 if none)."""
-        import sqlalchemy
-
         if ctx.instrument_id is None:
             return Decimal("0")
         result = await self._db.execute(
-            sqlalchemy.text(
+            text(
                 "SELECT COALESCE(SUM(qty), 0) FROM positions WHERE instrument_id = :iid AND qty > 0"
             ),
             {"iid": ctx.instrument_id},
@@ -724,12 +725,10 @@ class RiskService:
 
     async def _get_option_expiry(self, ctx: EvaluationContext) -> date | None:
         """Return expiry date for an option instrument, or None if not an option."""
-        import sqlalchemy
-
         if ctx.instrument_id is None or ctx.asset_class != "OPTION":
             return None
         result = await self._db.execute(
-            sqlalchemy.text("SELECT meta->>'expiry' FROM instruments WHERE id = :iid"),
+            text("SELECT meta->>'expiry' FROM instruments WHERE id = :iid"),
             {"iid": ctx.instrument_id},
         )
         row = result.fetchone()
@@ -739,12 +738,10 @@ class RiskService:
 
     async def _get_instrument_exchange(self, ctx: EvaluationContext) -> str | None:
         """Return primary_exchange for an instrument."""
-        import sqlalchemy
-
         if ctx.instrument_id is None:
             return None
         result = await self._db.execute(
-            sqlalchemy.text("SELECT primary_exchange FROM instruments WHERE id = :iid"),
+            text("SELECT primary_exchange FROM instruments WHERE id = :iid"),
             {"iid": ctx.instrument_id},
         )
         row = result.fetchone()

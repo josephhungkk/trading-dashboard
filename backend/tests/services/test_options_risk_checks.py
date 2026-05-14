@@ -79,7 +79,7 @@ def _make_risk_service(*, config_values=None):
     async def get_bool(ns, key, *, default=False):
         return config_values.get(f"{ns}/{key}", default)
 
-    async def get_int(ns, key, default=None):
+    async def get_int(ns, key, *, default=None):
         return config_values.get(f"{ns}/{key}", default)
 
     async def get_json(ns, key, default=None):
@@ -131,11 +131,12 @@ async def test_expiry_cutoff_blocks_open_order():
     svc = _make_risk_service()
     ctx = _make_ctx(side="buy", position_effect="OPEN")
 
-    svc._get_option_expiry = AsyncMock(return_value=datetime.date(2025, 1, 17))
+    expiry = datetime.date(2025, 1, 17)
+    svc._get_option_expiry = AsyncMock(return_value=expiry)
     svc._get_instrument_exchange = AsyncMock(return_value="NYSE")
 
     with patch("app.services.market_calendar") as mc:
-        mc.is_past_expiry.return_value = True
+        mc.today_in_exchange_tz.return_value = datetime.date(2025, 1, 18)  # strictly past
 
         result = await svc._check_options_exposure(ctx)
         assert result is not None
@@ -147,18 +148,18 @@ async def test_expiry_cutoff_blocks_open_order():
 
 @pytest.mark.asyncio
 async def test_zero_dte_warn():
-    """0DTE order produces a WARN after passing all BLOCK checks."""
+    """0DTE order produces a WARN when today == expiry (exchange-local)."""
     import datetime
 
     svc = _make_risk_service(config_values={"options/trading_level": 4})
     ctx = _make_ctx(side="buy", position_effect="OPEN")
 
-    today = datetime.date.today()
-    svc._get_option_expiry = AsyncMock(return_value=today)
+    expiry = datetime.date(2025, 1, 17)
+    svc._get_option_expiry = AsyncMock(return_value=expiry)
     svc._get_instrument_exchange = AsyncMock(return_value="NYSE")
 
     with patch("app.services.market_calendar") as mc:
-        mc.is_past_expiry.return_value = False
+        mc.today_in_exchange_tz.return_value = expiry  # today == expiry → 0DTE
 
         result = await svc._check_options_exposure(ctx)
         assert result is not None
@@ -167,3 +168,30 @@ async def test_zero_dte_warn():
         assert warning is not None
         assert warning.check == "options_exposure"
         assert "0DTE" in warning.message
+
+
+@pytest.mark.asyncio
+async def test_stc_allowed_at_l1():
+    """STC (sell-to-close) always passes even at level 1 — not a naked short."""
+    svc = _make_risk_service(config_values={"options/trading_level": 1})
+    ctx = _make_ctx(side="sell", position_effect="CLOSE")
+
+    svc._get_option_expiry = AsyncMock(return_value=None)
+    svc._get_instrument_exchange = AsyncMock(return_value=None)
+
+    result = await svc._check_options_exposure(ctx)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_sto_with_cover_allowed_at_l1():
+    """STO with existing cover (covered call) passes at level 1."""
+    svc = _make_risk_service(config_values={"options/trading_level": 1})
+    ctx = _make_ctx(side="sell", position_effect="OPEN")
+
+    svc._get_existing_long_position = AsyncMock(return_value=Decimal("5"))
+    svc._get_option_expiry = AsyncMock(return_value=None)
+    svc._get_instrument_exchange = AsyncMock(return_value=None)
+
+    result = await svc._check_options_exposure(ctx)
+    assert result is None
