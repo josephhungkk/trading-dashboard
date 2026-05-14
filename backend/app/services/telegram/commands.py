@@ -17,6 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.account_kill_switch_service import AccountKillSwitchService
 from app.services.telegram.allowlist import AllowlistEntry
+from app.services.telegram.order_flow import (
+    handle_account_selection,
+    handle_cancel_order,
+    handle_confirm,
+    handle_place_order,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -196,6 +202,10 @@ async def handle_help(msg: Message) -> None:
         "/kill_switch &lt;broker&gt; — enable kill-switch for broker accounts\n"
         "/mute &lt;id&gt; [30m|2h|1d] — mute an alert (permanent if no duration)\n"
         "/unmute &lt;id&gt; — restore a muted alert\n"
+        "/place_order &lt;SYMBOL&gt; &lt;BUY|SELL&gt; &lt;QTY&gt;"
+        " [--limit P] [--stop P] [--tif DAY|GTC] — preview a trade\n"
+        "/confirm [LIVE] — execute the previewed order (add LIVE for live accounts)\n"
+        "/cancel_order — cancel pending order\n"
         "/help — this message"
     )
 
@@ -209,6 +219,9 @@ def register_handlers(
     redis: Any,
     request_app: Any = None,
     tg_chat: Any = None,
+    registry: Any = None,
+    capability: Any = None,
+    cfg: Any = None,
 ) -> None:
     async def _authed(msg: Message) -> AllowlistEntry | None:
         from_user_id = msg.from_user.id if msg.from_user else 0
@@ -218,6 +231,17 @@ def register_handlers(
         if entry is None:
             await msg.answer("Unauthorized.")
         return entry
+
+    def _on_chat_task_done(t: asyncio.Task[None]) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.error(
+                "telegram.chat_task_failed",
+                error_class=type(exc).__name__,
+                exc_info=exc,
+            )
 
     @dp.message(Command("help"))
     async def _help(msg: Message) -> None:
@@ -281,18 +305,104 @@ def register_handlers(
         async with db_factory() as db:
             await handle_unmute(msg, entry=entry, db=db)
 
-    if tg_chat is not None:
+    @dp.message(Command("place_order"))
+    async def _place_order(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_write(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        if not await rate_limiter.check_trade(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            from app.core import metrics as _metrics
 
-        def _on_chat_task_done(t: asyncio.Task[None]) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                log.error(
-                    "telegram.chat_task_failed",
-                    error_class=type(exc).__name__,
-                    exc_info=exc,
+            _metrics.TELEGRAM_RATE_LIMITER_TRADE_BLOCK_TOTAL.inc()
+            await msg.answer("Trade rate limit exceeded. Try again in a minute.")
+            return
+        if registry is None or capability is None or cfg is None:
+            raise ValueError("registry, capability, and cfg are required for /place_order")
+        async with db_factory() as db:
+            await handle_place_order(
+                msg,
+                entry=entry,
+                db=db,
+                redis=redis,
+                registry=registry,
+                capability=capability,
+                cfg=cfg,
+            )
+
+    @dp.message(Command("confirm"))
+    async def _confirm(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_write(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        if not await rate_limiter.check_trade(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            from app.core import metrics as _metrics
+
+            _metrics.TELEGRAM_RATE_LIMITER_TRADE_BLOCK_TOTAL.inc()
+            await msg.answer("Trade rate limit exceeded. Try again in a minute.")
+            return
+        if registry is None or capability is None or cfg is None:
+            raise ValueError("registry, capability, and cfg are required for /confirm")
+        async with db_factory() as db:
+            await handle_confirm(
+                msg,
+                entry=entry,
+                db=db,
+                redis=redis,
+                registry=registry,
+                capability=capability,
+                cfg=cfg,
+            )
+
+    @dp.message(Command("cancel_order"))
+    async def _cancel_order(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_read(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        await handle_cancel_order(msg, entry=entry, redis=redis)
+
+    # Account-selection numeric reply — MUST be before the AI chat catch-all
+    @dp.message(F.text.regexp(r"^[0-9]+$"))
+    async def _acct_select(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_write(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        if not await rate_limiter.check_trade(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            from app.core import metrics as _metrics
+
+            _metrics.TELEGRAM_RATE_LIMITER_TRADE_BLOCK_TOTAL.inc()
+            await msg.answer("Trade rate limit exceeded. Try again in a minute.")
+            return
+        if registry is not None and capability is not None and cfg is not None:
+            async with db_factory() as db:
+                consumed = await handle_account_selection(
+                    msg,
+                    entry=entry,
+                    db=db,
+                    redis=redis,
+                    registry=registry,
+                    capability=capability,
+                    cfg=cfg,
                 )
+            if consumed:
+                return
+        # Fall through to AI chat handler if not consumed
+        if tg_chat is not None:
+            task = asyncio.create_task(tg_chat.handle(msg))
+            task.add_done_callback(_on_chat_task_done)
+
+    if tg_chat is not None:
 
         @dp.message(F.text & ~F.text.startswith("/"))
         async def _chat_msg(msg: Message) -> None:

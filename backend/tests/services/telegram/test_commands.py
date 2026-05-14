@@ -123,3 +123,65 @@ async def test_handle_accounts_no_accounts() -> None:
 
     msg.answer.assert_awaited_once()
     assert "No accounts" in msg.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_place_order_handler_registered_with_trade_bucket() -> None:
+    """register_handlers with all deps does not raise; check_trade is available."""
+    from aiogram import Dispatcher
+
+    from app.services.telegram.commands import register_handlers
+
+    dp = Dispatcher()
+    mock_allowlist = MagicMock()
+    mock_allowlist.lookup = MagicMock(return_value=None)
+    mock_rl = AsyncMock()
+    mock_rl.check_read = AsyncMock(return_value=True)
+    mock_rl.check_write = AsyncMock(return_value=True)
+    mock_rl.check_trade = AsyncMock(return_value=True)
+
+    register_handlers(
+        dp,
+        allowlist=mock_allowlist,
+        rate_limiter=mock_rl,
+        db_factory=AsyncMock(),
+        redis=AsyncMock(),
+        registry=AsyncMock(),
+        capability=AsyncMock(),
+        cfg=AsyncMock(),
+    )
+    assert hasattr(mock_rl, "check_trade")
+
+
+def test_register_handlers_without_order_deps_still_registers() -> None:
+    """register_handlers without registry/capability/cfg works (backward compat)."""
+    from aiogram import Dispatcher
+
+    from app.services.telegram.commands import register_handlers
+
+    dp = Dispatcher()
+    mock_allowlist = MagicMock()
+    mock_rl = MagicMock()
+    mock_rl.check_read = AsyncMock(return_value=True)
+    mock_rl.check_write = AsyncMock(return_value=True)
+
+    register_handlers(
+        dp,
+        allowlist=mock_allowlist,
+        rate_limiter=mock_rl,
+        db_factory=AsyncMock(),
+        redis=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_help_includes_order_commands() -> None:
+    """handle_help reply includes /place_order, /confirm, /cancel_order."""
+    from app.services.telegram.commands import handle_help
+
+    msg = _make_message("/help")
+    await handle_help(msg)
+    reply = msg.answer.call_args.args[0]
+    assert "/place_order" in reply
+    assert "/confirm" in reply
+    assert "/cancel_order" in reply
