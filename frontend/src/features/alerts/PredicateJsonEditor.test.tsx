@@ -1,6 +1,23 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+// Shim Monaco with a plain textarea so JSDOM tests work without a real browser engine.
+vi.mock('@monaco-editor/react', () => ({
+  default: ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange?: (v: string) => void;
+  }) => (
+    <textarea
+      data-testid="predicate-json-textarea"
+      value={value}
+      onChange={(e) => onChange?.(e.target.value)}
+    />
+  ),
+}));
+
 import { PredicateJsonEditor } from '@/features/alerts/PredicateJsonEditor';
 
 describe('PredicateJsonEditor', () => {

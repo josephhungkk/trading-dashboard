@@ -1,3 +1,4 @@
+import Editor from '@monaco-editor/react';
 import * as React from 'react';
 import { useState } from 'react';
 
@@ -37,14 +38,28 @@ export function PredicateJsonEditor({
 
   return (
     <div className="flex flex-col gap-2" data-testid="predicate-json-editor">
-      <textarea
+      <div
         aria-label={label}
-        className="min-h-[12rem] w-full rounded-md border border-border bg-background p-3 font-mono text-xs"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        spellCheck={false}
-        data-testid="predicate-json-textarea"
-      />
+        className="min-h-[12rem] overflow-hidden rounded-md border border-border"
+        data-testid="predicate-json-monaco"
+      >
+        <Editor
+          height="12rem"
+          language="json"
+          value={text}
+          onChange={(v) => setText(v ?? '')}
+          options={{
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            fontSize: 12,
+            lineNumbers: 'off',
+            folding: false,
+            wordWrap: 'on',
+            tabSize: 2,
+          }}
+          theme="vs-dark"
+        />
+      </div>
       {parseError && (
         <p
           className="text-xs text-red-600"
