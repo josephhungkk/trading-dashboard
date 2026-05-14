@@ -25,6 +25,13 @@ async def session_factory(engine):
 
 @pytest.fixture(autouse=True)
 async def clean_tables(session_factory):
+    db_url = settings.database_url
+    if "10.10.0.2" in db_url:
+        pytest.skip(
+            "Refusing to truncate app_config/app_secrets against the prod DB "
+            f"({db_url}). Set DATABASE_URL to test_postgres before running. "
+            "See memory feedback_pytest_prod_db_wipe.md."
+        )
     async with session_factory() as s:
         await s.execute(text("DELETE FROM app_config"))
         await s.execute(text("DELETE FROM app_secrets"))
