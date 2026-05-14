@@ -128,12 +128,9 @@ later phase. Each is anchored to its target phase below.
   engine wiring touches both functions heavily; natural extraction
   trigger.
 
-### Phase 12 (Options — single-leg)
-
-- **`TicksSubscriber` lifespan integration** — wire `app/services/alerts/ticks_subscriber.py` into the alerts evaluator lifespan so tick-triggered alert rules evaluate at sub-minute precision. Requires adding `register_internal_subscriber(name, on_quote)` to the Phase 7b quote engine's `SubscriptionRegistry` so the alerts engine can psubscribe `quote.*.<canonical_id>` patterns and count against the global 5000-symbol cap. Deferred from Phase 11b (bars-1m polling is sufficient for MVP alert rules; tick path only becomes load-bearing for high-frequency rules).
-
 ### Phase 18 (Universe scanner + News/filings + Earnings)
 
+- **`TicksSubscriber` lifespan integration** — wire `app/services/alerts/ticks_subscriber.py` into the alerts evaluator lifespan so tick-triggered alert rules evaluate at sub-minute precision. Requires adding `register_internal_subscriber(name, on_quote)` to the Phase 7b quote engine's `SubscriptionRegistry` so the alerts engine can psubscribe `quote.*.<canonical_id>` patterns and count against the global 5000-symbol cap. Deferred from Phase 11b (bars-1m polling is sufficient for MVP alert rules; tick path only becomes load-bearing for high-frequency rules). Scanner and alerts share the same `register_internal_subscriber` API — natural co-delivery.
 - **Phase 7b on-demand quote subscribe for preview** — same per-symbol
   fan-out concern as the scanner.
 - **Phase 7b periodic BASE-tag refresh** — same family.
