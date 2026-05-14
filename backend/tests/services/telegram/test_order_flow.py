@@ -857,3 +857,290 @@ async def test_cancel_clears_both_keys() -> None:
     assert "acct_select" in deleted_keys
     reply = msg.answer.call_args.args[0]
     assert "cancel" in reply.lower() or "Cancel" in reply
+
+
+@pytest.mark.asyncio
+async def test_confirm_double_dispatch_only_one_places_order() -> None:
+    """Two concurrent /confirm calls — only the first GETDEL succeeds."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services.telegram.order_flow import handle_confirm
+
+    entry = _make_entry()
+
+    pending_data = {
+        "account_id": "acct-uuid-1",
+        "account_alias": "IBKR1",
+        "account_mode": "paper",
+        "account_gateway_label": "ibkr",
+        "conid": "265598",
+        "symbol": "AAPL",
+        "side": "BUY",
+        "qty": "10",
+        "order_type": "MARKET",
+        "tif": "DAY",
+        "limit_price": None,
+        "stop_price": None,
+    }
+    raw_payload = _json.dumps(pending_data).encode()
+
+    call_count = 0
+
+    async def _getdel(cmd: str, key: str) -> bytes | None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return raw_payload
+        return None
+
+    mock_redis = AsyncMock()
+    mock_redis.execute_command = AsyncMock(side_effect=_getdel)
+    mock_redis.set = AsyncMock()
+
+    mock_order = MagicMock()
+    mock_order.id = "order-xyz"
+
+    place_order_call_count = 0
+
+    async def _mock_place(**kwargs: Any) -> MagicMock:
+        nonlocal place_order_call_count
+        place_order_call_count += 1
+        return mock_order
+
+    msg1 = _make_msg("/confirm", chat_id=111, from_user_id=222)
+    msg2 = _make_msg("/confirm", chat_id=111, from_user_id=222)
+
+    with patch("app.services.telegram.order_flow.place_order", _mock_place):
+        await asyncio.gather(
+            handle_confirm(
+                msg1,
+                entry=entry,
+                db=AsyncMock(),
+                redis=mock_redis,
+                registry=MagicMock(),
+                capability=MagicMock(),
+                cfg=MagicMock(),
+            ),
+            handle_confirm(
+                msg2,
+                entry=entry,
+                db=AsyncMock(),
+                redis=mock_redis,
+                registry=MagicMock(),
+                capability=MagicMock(),
+                cfg=MagicMock(),
+            ),
+        )
+
+    assert place_order_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_new_place_order_warns_about_dropped_pending() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services.telegram.order_flow import handle_place_order
+
+    msg = _make_msg("/place_order MSFT BUY 5")
+    entry = _make_entry()
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(
+        side_effect=[
+            None,  # no acct_select key (checked first)
+            b'{"symbol":"AAPL"}',  # existing pending key (checked second)
+        ]
+    )
+    mock_redis.delete = AsyncMock()
+    mock_redis.set = AsyncMock()
+
+    account_row = MagicMock()
+    account_row.id = "acct-uuid-1"
+    account_row.alias = "IBKR1"
+    account_row.broker = "IBKR"
+    account_row.mode = "paper"
+    account_row.currency = "USD"
+    account_row.gateway_label = "ibkr"
+
+    instr_row = MagicMock()
+    instr_row.conid = "272093"
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            MagicMock(fetchall=MagicMock(return_value=[account_row])),
+            MagicMock(fetchone=MagicMock(return_value=instr_row)),
+        ]
+    )
+
+    mock_preview = MagicMock()
+    mock_preview.risk_blockers = []
+    mock_preview.risk_warnings = []
+    mock_preview.position_sanity = MagicMock(requires_extra_attestation=False)
+    mock_preview.notional = "800.00"
+    mock_preview.notional_currency = "USD"
+
+    with patch(
+        "app.services.telegram.order_flow.preview_order", AsyncMock(return_value=mock_preview)
+    ):
+        await handle_place_order(
+            msg,
+            entry=entry,
+            db=mock_db,
+            redis=mock_redis,
+            registry=MagicMock(),
+            capability=MagicMock(),
+            cfg=MagicMock(),
+        )
+
+    replies = [call.args[0] for call in msg.answer.call_args_list]
+    assert any("previous" in r.lower() or "cancel" in r.lower() for r in replies)
+
+
+@pytest.mark.asyncio
+async def test_preview_with_warnings_pending_written_and_user_warned() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services.telegram.order_flow import handle_place_order
+
+    msg = _make_msg("/place_order AAPL BUY 1")
+    entry = _make_entry()
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=None)
+    mock_redis.set = AsyncMock()
+    mock_redis.delete = AsyncMock()
+
+    account_row = MagicMock()
+    account_row.id = "acct-uuid-1"
+    account_row.alias = "IBKR1"
+    account_row.broker = "IBKR"
+    account_row.mode = "paper"
+    account_row.currency = "USD"
+    account_row.gateway_label = "ibkr"
+
+    instr_row = MagicMock()
+    instr_row.conid = "265598"
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            MagicMock(fetchall=MagicMock(return_value=[account_row])),
+            MagicMock(fetchone=MagicMock(return_value=instr_row)),
+        ]
+    )
+
+    mock_preview = MagicMock()
+    mock_preview.risk_blockers = []
+    mock_preview.risk_warnings = [{"code": "concentration_limit", "message": "approaching 15%"}]
+    mock_preview.position_sanity = MagicMock(requires_extra_attestation=False)
+    mock_preview.notional = "1820.00"
+    mock_preview.notional_currency = "USD"
+
+    with patch(
+        "app.services.telegram.order_flow.preview_order", AsyncMock(return_value=mock_preview)
+    ):
+        await handle_place_order(
+            msg,
+            entry=entry,
+            db=mock_db,
+            redis=mock_redis,
+            registry=MagicMock(),
+            capability=MagicMock(),
+            cfg=MagicMock(),
+        )
+
+    set_calls = [str(c) for c in mock_redis.set.call_args_list]
+    assert any("pending" in c for c in set_calls)
+    reply = msg.answer.call_args.args[0]
+    assert "WARN" in reply or "warn" in reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_confirm_daily_notional_exceeded() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services.orders_service import PreviewUnavailable
+    from app.services.telegram.order_flow import handle_confirm
+
+    msg = _make_msg("/confirm")
+    entry = _make_entry()
+    mock_redis = AsyncMock()
+
+    pending_data = {
+        "account_id": "acct-uuid-1",
+        "account_alias": "IBKR1",
+        "account_mode": "paper",
+        "account_gateway_label": "ibkr",
+        "conid": "265598",
+        "symbol": "AAPL",
+        "side": "BUY",
+        "qty": "1000",
+        "order_type": "MARKET",
+        "tif": "DAY",
+        "limit_price": None,
+        "stop_price": None,
+    }
+    mock_redis.execute_command = AsyncMock(return_value=_json.dumps(pending_data).encode())
+    mock_redis.set = AsyncMock()
+
+    exc = PreviewUnavailable(422, {"error": "daily_notional_exceeded"})
+
+    with patch("app.services.telegram.order_flow.place_order", AsyncMock(side_effect=exc)):
+        await handle_confirm(
+            msg,
+            entry=entry,
+            db=AsyncMock(),
+            redis=mock_redis,
+            registry=MagicMock(),
+            capability=MagicMock(),
+            cfg=MagicMock(),
+        )
+
+    reply = msg.answer.call_args.args[0]
+    assert "daily_notional_exceeded" in reply or "notional" in reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_telegram_order_confirms_total_placed_increments() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.core import metrics
+    from app.services.telegram.order_flow import handle_confirm
+
+    msg = _make_msg("/confirm")
+    entry = _make_entry()
+    mock_redis = AsyncMock()
+
+    pending_data = {
+        "account_id": "acct-uuid-1",
+        "account_alias": "IBKR1",
+        "account_mode": "paper",
+        "account_gateway_label": "ibkr",
+        "conid": "265598",
+        "symbol": "AAPL",
+        "side": "BUY",
+        "qty": "1",
+        "order_type": "MARKET",
+        "tif": "DAY",
+        "limit_price": None,
+        "stop_price": None,
+    }
+    mock_redis.execute_command = AsyncMock(return_value=_json.dumps(pending_data).encode())
+    mock_redis.set = AsyncMock()
+
+    before = metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="placed")._value.get()
+
+    mock_order = MagicMock()
+    mock_order.id = "order-xyz"
+
+    with patch("app.services.telegram.order_flow.place_order", AsyncMock(return_value=mock_order)):
+        await handle_confirm(
+            msg,
+            entry=entry,
+            db=AsyncMock(),
+            redis=mock_redis,
+            registry=MagicMock(),
+            capability=MagicMock(),
+            cfg=MagicMock(),
+        )
+
+    after = metrics.TELEGRAM_ORDER_CONFIRMS_TOTAL.labels(result="placed")._value.get()
+    assert after == before + 1
