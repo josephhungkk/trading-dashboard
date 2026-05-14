@@ -32,10 +32,14 @@ Phase 11d shipped across 10 tasks at tag `v0.11.3.0` on 2026-05-14. 63 telegram 
 - `check_trade` fail-CLOSED prevents money-moving ops when Redis is degraded.
 - `position_sanity.requires_extra_attestation` rejects extreme position changes at Telegram layer.
 
+**Backlog close-out (post-v0.11.3.0)**
+
+- **5 mypy fixes** (`b66b6e7`): `secrets.py` no-any-return, `jobs.py` `_RedisPublisher` protocol widened, `litellm_auth_callback.py` import-not-found suppressed, `oco_orchestrator.py` + `allowlist.py` stale ignores removed; `uv.lock` aiogram entries committed.
+- **Monaco editor swap** (`df11f60`): `PredicateJsonEditor` textarea replaced with `@monaco-editor/react` (JSON language, no minimap, vs-dark theme). Tests mock Monaco with a controlled textarea shim — all 3 cases pass unchanged.
+
 **Still deferred**
 
 - `TicksSubscriber` lifespan integration (quote-engine dependency).
-- Monaco editor swap.
 
 ### Phase 11c — Telegram bot (v0.11.2.0)
 
