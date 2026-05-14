@@ -71,6 +71,13 @@ services:
       # Phase 11a CI-debt: mount deploy/prometheus so test_metrics_orders
       # tests find alerts.yml at /deploy/prometheus/alerts.yml.
       - ./deploy/prometheus:/deploy/prometheus
+    environment:
+      # Real Redis pubsub fidelity test — uses the dev redis service (no fakeredis).
+      CI_USE_REAL_REDIS: "1"
+      CI_REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      # Bars p95 perf test — points at the dev backend itself.
+      E2E_BACKEND_URL: "http://backend:8000"
+      E2E_JWT: "test-bypass"
     command: ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   frontend:

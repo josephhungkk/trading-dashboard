@@ -48,7 +48,9 @@ _SCHWAB: _MarkerSpec = {
         ("broker", "schwab.app_secret", "SCHWAB_APP_SECRET"),
     ],
     "config": [
-        ("testing", "schwab_paper_account_hash", "SCHWAB_PAPER_ACCOUNT_HASH"),
+        # No Schwab paper account exists; tests use the live account with
+        # deeply-unfillable prices (e.g. LIMIT $1.00 on SPY).
+        ("testing", "schwab_account_hash", "SCHWAB_PAPER_ACCOUNT_HASH"),
     ],
 }
 _FUTU: _MarkerSpec = {
