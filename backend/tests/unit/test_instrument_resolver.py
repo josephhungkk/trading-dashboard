@@ -15,17 +15,19 @@ from app.services.quotes.instrument_resolver import InstrumentResolver
 @pytest.mark.asyncio
 async def test_resolve_or_create_first_observation(db_session: AsyncSession) -> None:
     resolver = InstrumentResolver(db_session)
+    # Use a test-only canonical_id to avoid collision with e2e tests that seed
+    # real tickers (e.g. "stock:AAPL:US") via resolve_or_create in orders_service.
     inst = await resolver.resolve_or_create(
-        canonical_id="stock:AAPL:US",
+        canonical_id="stock:AAPL_UNIT_TEST:US",
         source="schwab",
-        raw_symbol="AAPL",
+        raw_symbol="AAPL_UNIT_TEST",
         asset_class=AssetClass.STOCK,
         primary_exchange="NASDAQ",
         currency="USD",
         meta={"display_name": "Apple Inc."},
     )
 
-    assert inst.canonical_id == "stock:AAPL:US"
+    assert inst.canonical_id == "stock:AAPL_UNIT_TEST:US"
     assert inst.asset_class == AssetClass.STOCK
     assert inst.primary_exchange == "NASDAQ"
     assert inst.currency == "USD"
@@ -33,7 +35,7 @@ async def test_resolve_or_create_first_observation(db_session: AsyncSession) -> 
     aliases = await resolver.list_aliases(inst.id)
     assert len(aliases) == 1
     assert aliases[0].source == "schwab"
-    assert aliases[0].raw_symbol == "AAPL"
+    assert aliases[0].raw_symbol == "AAPL_UNIT_TEST"
 
     await db_session.rollback()
 

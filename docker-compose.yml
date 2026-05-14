@@ -30,8 +30,9 @@ services:
   # The prod PG at 10.10.0.2 holds operator data (broker accounts, positions,
   # encrypted secrets) and must not be touched by test setup/teardown.
   # Tests override DATABASE_URL via scripts/run-tests.sh or pytest env var.
+  # Image tracks prod: PG18 + TimescaleDB latest-pg18 (mirrors NUC native PG18).
   test_postgres:
-    image: timescale/timescaledb:2.21.3-pg16
+    image: timescale/timescaledb:latest-pg18
     environment:
       POSTGRES_USER: test
       POSTGRES_PASSWORD: test

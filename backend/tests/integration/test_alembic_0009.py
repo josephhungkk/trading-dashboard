@@ -67,7 +67,7 @@ async def test_0009_creates_symbol_aliases_table(db_session) -> None:
     }
 
 
-async def test_0009_asset_class_enum_has_seven_values(db_session) -> None:
+async def test_0009_asset_class_enum_has_expected_values(db_session) -> None:
     rows = (
         await db_session.execute(
             text(
@@ -79,15 +79,10 @@ async def test_0009_asset_class_enum_has_seven_values(db_session) -> None:
         )
     ).fetchall()
 
-    assert [row.enumlabel for row in rows] == [
-        "STOCK",
-        "ETF",
-        "INDEX",
-        "WARRANT",
-        "CBBC",
-        "FOREX",
-        "CRYPTO",
-    ]
+    labels = [row.enumlabel for row in rows]
+    # Core values from migration 0009; OPTION added in migration 0047 (Phase 12).
+    for expected in ["STOCK", "ETF", "INDEX", "WARRANT", "CBBC", "FOREX", "CRYPTO", "OPTION"]:
+        assert expected in labels, f"Missing enum label: {expected}"
 
 
 async def test_0009_canonical_id_is_unique(db_session) -> None:

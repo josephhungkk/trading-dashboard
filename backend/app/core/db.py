@@ -9,6 +9,7 @@ engine = create_async_engine(
     pool_size=settings.postgres_pool_size,
     max_overflow=settings.postgres_max_overflow,
     pool_pre_ping=True,
+    connect_args={"statement_cache_size": 0},
 )
 
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

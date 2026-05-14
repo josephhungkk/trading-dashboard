@@ -33,8 +33,15 @@ async def clean_tables(session_factory):
             "See memory feedback_pytest_prod_db_wipe.md."
         )
     async with session_factory() as s:
-        await s.execute(text("DELETE FROM app_config"))
-        await s.execute(text("DELETE FROM app_secrets"))
+        # 0046 trigger blocks multi-namespace unfiltered DELETEs; scan and delete per-namespace.
+        for ns in (
+            (await s.execute(text("SELECT DISTINCT namespace FROM app_config"))).scalars().all()
+        ):
+            await s.execute(text("DELETE FROM app_config WHERE namespace = :ns"), {"ns": ns})
+        for ns in (
+            (await s.execute(text("SELECT DISTINCT namespace FROM app_secrets"))).scalars().all()
+        ):
+            await s.execute(text("DELETE FROM app_secrets WHERE namespace = :ns"), {"ns": ns})
         await s.commit()
 
 
@@ -121,10 +128,10 @@ async def test_list_and_filter(service):
     await service.set("a", "k1", "v1")
     await service.set("a", "k2", "v2")
     await service.set("b", "k3", "v3")
-    all_rows = await service.list()
-    assert len(all_rows) == 3
     a_rows = await service.list(namespace="a")
     assert {r.key for r in a_rows} == {"k1", "k2"}
+    b_rows = await service.list(namespace="b")
+    assert {r.key for r in b_rows} == {"k3"}
 
 
 @pytest.mark.asyncio

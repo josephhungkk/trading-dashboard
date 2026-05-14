@@ -52,8 +52,15 @@ async def clean_tables(session_factory):
         # Phase 5b: orders + order_events FK-ordered (events first).
         await s.execute(text("DELETE FROM order_events"))
         await s.execute(text("DELETE FROM orders"))
-        await s.execute(text("DELETE FROM app_config"))
-        await s.execute(text("DELETE FROM app_secrets"))
+        # 0046 trigger blocks multi-namespace unfiltered DELETEs; scan and delete per-namespace.
+        for ns in (
+            (await s.execute(text("SELECT DISTINCT namespace FROM app_config"))).scalars().all()
+        ):
+            await s.execute(text("DELETE FROM app_config WHERE namespace = :ns"), {"ns": ns})
+        for ns in (
+            (await s.execute(text("SELECT DISTINCT namespace FROM app_secrets"))).scalars().all()
+        ):
+            await s.execute(text("DELETE FROM app_secrets WHERE namespace = :ns"), {"ns": ns})
         await s.commit()
 
 

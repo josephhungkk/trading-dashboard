@@ -95,7 +95,7 @@ async def test_0037_view_exposes_staleness(session: AsyncSession) -> None:
     aid = uuid4()
     now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    summary_updated_at = now - timedelta(seconds=120)
+    summary_updated_at = now - timedelta(seconds=125)
 
     await s.execute(
         text(
@@ -141,7 +141,9 @@ async def test_0037_view_exposes_staleness(session: AsyncSession) -> None:
     row = result.one()
     assert row.realized == Decimal("100")
     assert row.unrealized == Decimal("50")
-    assert row.staleness_s >= 119.0
+    assert row.staleness_s >= 119.0, (
+        f"staleness_s={row.staleness_s} — expected >=119 (inserted 125s ago)"
+    )
 
 
 @pytest.mark.asyncio

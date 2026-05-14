@@ -633,12 +633,20 @@ async def _resolve_instrument_id(
         ).inc()
         return None
 
+    from app.services.quotes.base import canonical_key, country_for_exchange
+
+    country = country_for_exchange(contract.exchange) or contract.exchange
+    cid = canonical_key(
+        asset_class=str(contract.asset_class),
+        symbol=contract.symbol,
+        country=country,
+    )
     result = await resolver.resolve_or_create(
         source=broker_id,
         raw_symbol=conid,
-        canonical_id=contract.canonical_id,
+        canonical_id=str(cid),
         asset_class=contract.asset_class,
-        primary_exchange=contract.primary_exchange,
+        primary_exchange=contract.exchange,
         currency=contract.currency,
     )
     return int(result.id)
