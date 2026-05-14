@@ -88,7 +88,7 @@ Phase 7 → v1.0.0 locked in [`docs/ROADMAP.md`](docs/ROADMAP.md). End-state: ev
 
 Every phase: brainstorm → spec self-review → **architect review (apply CRIT+HIGH+MED inline)** → user approval → plan → impl (subagent-driven) → close-out (CLAUDE.md/CHANGELOG.md/TASKS.md, tag, push). Per-commit reviewer chain (spec-compliance + code-quality + lang-reviewer minimum + others when triggered). Full workflow + tooling list + reviewer table: [`docs/PHASE-WORKFLOW.md`](docs/PHASE-WORKFLOW.md). Catalog: memory `project_tooling_inventory.md`.
 
-### Subagent model routing (updated 2026-05-11, Phase 10a.5)
+### Subagent model routing (updated 2026-05-14, Phase 12)
 
 **Coding is split between Codex and local Qwen.** Anthropic subagents do **not** write production code — they review.
 
@@ -99,18 +99,24 @@ Every phase: brainstorm → spec self-review → **architect review (apply CRIT+
 | Multi-file refactors (≥3 files, cross-cutting renames, file splits) | **Codex** | Maintains coherent context across many files |
 | Lua scripts / Redis atomics / narrow vendor-API specifics | **Codex** | Broader training-set coverage of API edges |
 | Long-context analysis (full spec + plan + repo) | **Codex** | 256K context utilized fully |
-| Self-contained module writes (new file, single class, well-specified) | **Qwen** (local) | Greenfield from focused prompts — 34 t/s, 0-3 small patches per task |
+| Self-contained module writes (new file, single class, well-specified) | **Qwen** (local) | Greenfield from focused prompts — 40 t/s, completes fully |
 | TDD test writers (tests matching a known spec) | **Qwen** | Mechanical, structured output |
 | Schema-driven SQL / Alembic migrations | **Qwen** | Highly structured form |
-| Existing-code integration / multi-site judgment in one file | **Opus direct** | Holistic pattern matching; preserves orchestration context |
+| Protobuf / gRPC schema additions (new messages + RPCs, single .proto file) | **Qwen** | Highly structured, spec-driven; thinking helps with field numbering |
+| Pydantic v2 schema / discriminated union writes | **Qwen** | Structured, type-checked form; thinking prevents discriminator mistakes |
+| Single new risk check (well-specified, isolated method in risk_service.py) | **Qwen** | Bounded scope; thinking handles the sub-check logic |
+| Prometheus metric wiring (labels + counter/gauge/histogram in known file) | **Qwen** | Mechanical from spec; thinking catches label mismatches |
+| Existing-code integration / multi-site judgment across ≥2 files | **Opus direct** | Holistic pattern matching; preserves orchestration context |
+
+**Qwen thinking usage:** Always prepend `<think>\n</think>` to the prompt at the raw completions endpoint to suppress runaway thinking. Thinking is useful for: protobuf field numbering, discriminator logic, sub-check edge cases. Budget: allow up to 512 thinking tokens; truncate if >1024 (signals runaway).
 
 **By availability (fallback ladder when the primary is unavailable):**
 
 | Priority | Provider | Endpoint | Trigger |
 |---|---|---|---|
 | 1 | Codex via `codex exec` | OpenAI API | Default for "Codex tasks" above |
-| 2 | Local Qwen3-Coder-Next via llama.cpp | `http://192.168.50.30:11435/v1/completions` (UD-Q3_K_XL + `--cpu-moe --no-mmap`, ~34 t/s) | Default for "Qwen tasks"; or Codex rate-limit |
-| 3 | Qwen3.6-35B-A3B general-purpose | same endpoint, model `qwen3.6:35b` | Qwen3-Coder-Next misbehaves (rare; > 2 unusable outputs in a row) |
+| 2 | **Local Qwen3.6-35B-A3B Q4_K_M** via llama.cpp | `http://192.168.50.30:11435/v1/completions` (~40 t/s decode, 140 t/s prefill) | Default for "Qwen tasks"; or Codex rate-limit |
+| 3 | Qwen3-Coder-Next Q3_K_XL 79B via llama.cpp | same endpoint | 35B-A3B produces 2+ unusable outputs in a row |
 | 4 | Qwen2.5-Coder-14B (LKG) | Ollama `:11434`, `qwen2.5-coder:14b` | All Qwen3.x fail |
 | 5 | Opus main thread takes the task | — | Both Codex AND Qwen ladder exhausted |
 
@@ -124,7 +130,7 @@ Every phase: brainstorm → spec self-review → **architect review (apply CRIT+
 
 Pass `model: "haiku"`/`"sonnet"` to the `Agent` tool for per-call override.
 
-**User overrides** ("use codex", "use qwen", "claude take over") honor the named model. Phase 10a.5 history: Codex rate-limit window forced Qwen-first for 5 tasks; resumes 2026-05-12 14:11. Memory: `feedback_codex_fallback.md`, `feedback_qwen_protocol`, `phase10a5_runtime_notes.md`.
+**User overrides** ("use codex", "use qwen", "claude take over") honor the named model. Memory: `feedback_codex_fallback.md`, `feedback_qwen_protocol.md`, `feedback_qwen_model_preference.md`.
 
 ## When Claude makes changes
 
