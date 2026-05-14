@@ -575,6 +575,9 @@ async def lifespan(_app: FastAPI) -> Any:
                 redis=redis,
                 request_app=_app,
                 tg_chat=tg_chat,
+                registry=broker_registry,
+                capability=capability_svc,
+                cfg=svc,
             )
             _telegram_api_module.dp = tg_dispatcher
             tg_allowlist_listener = asyncio.create_task(
