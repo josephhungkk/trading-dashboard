@@ -73,7 +73,7 @@ describe('AdminAiPage', () => {
     expect(screen.getAllByText('Heavy-box state')).toHaveLength(2);
   });
 
-  it('capability map save sends X-CSRF-Nonce', async () => {
+  it('capability map save sends X-Confirm-Nonce', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(globalThis.fetch);
     emptyInitialMocks(fetchMock);
@@ -92,11 +92,11 @@ describe('AdminAiPage', () => {
       expect(putCall).toBeDefined();
       const init = putCall?.[1];
       const headers = new Headers(init?.headers);
-      expect(headers.get('X-CSRF-Nonce')).toBe('abc');
+      expect(headers.get('X-Confirm-Nonce')).toBe('abc');
     });
   });
 
-  it('provider key add row sends X-CSRF-Nonce', async () => {
+  it('provider key add row sends X-Confirm-Nonce', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(globalThis.fetch);
     emptyInitialMocks(fetchMock);
@@ -115,7 +115,7 @@ describe('AdminAiPage', () => {
       expect(postCall).toBeDefined();
       const init = postCall?.[1];
       const headers = new Headers(init?.headers);
-      expect(headers.get('X-CSRF-Nonce')).toBe('abc');
+      expect(headers.get('X-Confirm-Nonce')).toBe('abc');
     });
   });
 });

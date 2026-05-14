@@ -23,7 +23,7 @@ function readCapabilityMap(): Promise<ConfigRecord> {
 function createCapabilityMap(value: JsonValue, nonce: string): Promise<ConfigRecord> {
   return adminFetch<ConfigRecord>('/api/admin/config', {
     method: 'POST',
-    headers: { 'X-CSRF-Nonce': nonce },
+    headers: { 'X-Confirm-Nonce': nonce },
     body: JSON.stringify({
       namespace: NAMESPACE,
       key: KEY,
@@ -38,7 +38,7 @@ function updateCapabilityMap(value: JsonValue, nonce: string): Promise<ConfigRec
     `/api/admin/config/${encodeURIComponent(NAMESPACE)}/${encodeURIComponent(KEY)}`,
     {
       method: 'PUT',
-      headers: { 'X-CSRF-Nonce': nonce },
+      headers: { 'X-Confirm-Nonce': nonce },
       body: JSON.stringify({
         namespace: NAMESPACE,
         key: KEY,

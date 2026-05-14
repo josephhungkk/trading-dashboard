@@ -20,7 +20,7 @@ function listProviderSecrets(): Promise<SecretMetadata[]> {
 function createProviderSecret(key: string, value: string, nonce: string): Promise<SecretMetadata> {
   return adminFetch<SecretMetadata>('/api/admin/secrets', {
     method: 'POST',
-    headers: { 'X-CSRF-Nonce': nonce },
+    headers: { 'X-Confirm-Nonce': nonce },
     body: JSON.stringify({ namespace: NAMESPACE, key, value }),
   });
 }
@@ -28,7 +28,7 @@ function createProviderSecret(key: string, value: string, nonce: string): Promis
 function deleteProviderSecret(key: string, nonce: string): Promise<undefined> {
   return adminFetch<undefined>(`/api/admin/secrets/${encodeURIComponent(NAMESPACE)}/${encodeURIComponent(key)}`, {
     method: 'DELETE',
-    headers: { 'X-CSRF-Nonce': nonce },
+    headers: { 'X-Confirm-Nonce': nonce },
   });
 }
 

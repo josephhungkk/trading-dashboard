@@ -21,6 +21,7 @@ import app.api.telegram as _telegram_api_module
 from app.api import admin_instruments
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
+from app.api.admin_alerts import router as admin_alerts_router
 from app.api.admin_metrics import router as admin_metrics_router
 from app.api.admin_risk import router as admin_risk_router
 from app.api.admin_telegram import router as admin_telegram_router
@@ -83,6 +84,8 @@ from app.services.quotes.engine_factory import build_quote_engine
 from app.services.quotes.instruments_seed import seed_instruments_from_positions
 from app.services.telegram.allowlist import AllowlistService as TelegramAllowlistService
 from app.services.telegram.bot import build_dispatcher, telegram_shutdown, telegram_startup
+from app.services.telegram.commands import register_handlers as register_tg_handlers
+from app.services.telegram.rate_limiter import TelegramRateLimiter
 
 configure_logging()
 log = structlog.get_logger(__name__)
@@ -478,6 +481,32 @@ async def lifespan(_app: FastAPI) -> Any:
             replace_existing=True,
         )
 
+        async def _run_mute_expiry_restore() -> None:
+            try:
+                async with session_factory() as db:
+                    result = await db.execute(
+                        text(
+                            "UPDATE alerts SET status='active', muted_until=NULL,"
+                            " updated_at=now() WHERE status='disabled'"
+                            " AND muted_until IS NOT NULL AND muted_until <= now()"
+                            " RETURNING id"
+                        )
+                    )
+                    await db.commit()
+                    restored = result.fetchall()
+                    if restored:
+                        log.info("telegram.mute_expiry_restored", count=len(restored))
+            except Exception:
+                log.exception("telegram.mute_expiry_restore_failed")
+
+        scheduler.add_job(
+            _run_mute_expiry_restore,
+            "interval",
+            seconds=60,
+            id="telegram_mute_expiry",
+            replace_existing=True,
+        )
+
         log.info("alerts.lifespan_started")
     except Exception:
         log.exception("alerts.lifespan_init_failed")
@@ -527,7 +556,17 @@ async def lifespan(_app: FastAPI) -> Any:
             _app.state.telegram_bot = telegram_bot_instance
             _app.state.telegram_webhook_secret = str(webhook_secret or "")
             _app.state.telegram_webhook_status = "set" if webhook_ok else "webhook_failed"
-            _telegram_api_module.dp = build_dispatcher()
+            tg_rate_limiter = TelegramRateLimiter(redis=redis)
+            tg_dispatcher = build_dispatcher()
+            register_tg_handlers(
+                tg_dispatcher,
+                allowlist=telegram_allowlist,
+                rate_limiter=tg_rate_limiter,
+                db_factory=session_factory,
+                redis=redis,
+                request_app=_app,
+            )
+            _telegram_api_module.dp = tg_dispatcher
             tg_allowlist_listener = asyncio.create_task(
                 telegram_allowlist.run_pubsub_listener(redis)
             )
@@ -718,6 +757,7 @@ app.include_router(contracts_router)
 app.include_router(oauth_router)
 app.include_router(sse_router)
 app.include_router(admin_metrics_router)
+app.include_router(admin_alerts_router)
 app.include_router(admin_telegram_router)
 app.include_router(telegram_router)
 app.include_router(ws_quotes_router)
