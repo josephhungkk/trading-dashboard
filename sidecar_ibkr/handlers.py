@@ -607,14 +607,26 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 from sidecar_ibkr.order_builder import attach_oca_group
 
                 attach_oca_group(ib_order, request.oco_group_id)
+            request_algo_strategy = getattr(request, "algo_strategy", "")
+            if request_algo_strategy:
+                from sidecar_ibkr.order_builder import build_ib_algo_order
+
+                build_ib_algo_order(ib_order, request)
             trade: _IbTrade = cast(
                 "_IbTrade",
                 self.ib.placeOrder(contract, ib_order),  # type: ignore[attr-defined, unused-ignore]
             )
-            return broker_pb2.PlaceOrderResponse(
+            response = broker_pb2.PlaceOrderResponse(
                 broker_order_id=str(trade.order.permId),
                 status=str(trade.orderStatus.status),
             )
+            # Phase 17: echo back the internal algo strategy name.
+            if (
+                request_algo_strategy
+                and "algo_strategy" in response.DESCRIPTOR.fields_by_name
+            ):
+                response.algo_strategy = request_algo_strategy
+            return response
 
     async def PreviewOrder(  # noqa: N802
         self,
@@ -1613,6 +1625,8 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
         kind: str = "status",
         exec_id: str = "",
     ) -> broker_pb2.OrderEventMessage:
+        from sidecar_ibkr.order_builder import _ALGO_STRATEGY_MAP_REVERSE
+
         raw: dict[str, object] = self._serialize_trade(trade)
         message = broker_pb2.OrderEventMessage(
             broker_order_id=str(trade.order.permId),
@@ -1625,6 +1639,10 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             kind=kind,
         )
         message.event_at.FromDatetime(datetime.now(UTC))
+        # Phase 17: reverse-map IBKR algoStrategy string to internal enum.
+        _ibkr_algo = getattr(trade.order, "algoStrategy", None) or ""
+        if "algo_strategy" in message.DESCRIPTOR.fields_by_name:
+            message.algo_strategy = _ALGO_STRATEGY_MAP_REVERSE.get(_ibkr_algo, "")
         return message
 
     def _proto_contract(self, ib_contract: _IbContract) -> broker_pb2.Contract:
