@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from app.schemas.orders import OrderModifyRequest, PlaceOrderRequest, PreviewRequest
 
@@ -51,7 +52,7 @@ def test_order_modify_request_accepts_algo_fields():
 
 
 def test_order_modify_request_extra_fields_rejected():
-    with pytest.raises(Exception, match="Extra inputs"):
+    with pytest.raises(ValidationError, match="Extra inputs"):
         OrderModifyRequest(
             nonce="abc",
             qty="100",

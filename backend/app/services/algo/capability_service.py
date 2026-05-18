@@ -126,19 +126,33 @@ class AlgoCapabilityService:
             metrics.algo_capability_invalidate_malformed_total.inc()
 
     async def run_listener(self) -> None:
-        pubsub = self._redis.pubsub()
-        try:
-            await pubsub.subscribe(ALGO_CAPABILITY_INVALIDATION_CHANNEL)
-            async for msg in pubsub.listen():
-                if msg["type"] != "message":
-                    continue
-                data = msg["data"]
-                if isinstance(data, bytes):
-                    data = data.decode()
-                await self._handle_invalidation(data)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("algo_capability.listener_failed")
-        finally:
-            await pubsub.unsubscribe(ALGO_CAPABILITY_INVALIDATION_CHANNEL)
+        # Mirrors OrderCapabilityService.run_listener: reconnect on transient Redis errors.
+        attempt = 0
+        while True:
+            pubsub = self._redis.pubsub()
+            try:
+                await pubsub.subscribe(ALGO_CAPABILITY_INVALIDATION_CHANNEL)
+                attempt = 0
+                async for msg in pubsub.listen():
+                    if msg["type"] != "message":
+                        continue
+                    data = msg["data"]
+                    if isinstance(data, bytes):
+                        data = data.decode()
+                    try:
+                        await self._handle_invalidation(data)
+                    except Exception as exc:
+                        log.exception("algo_capability.listener_error", exc_info=exc)
+            except asyncio.CancelledError:
+                await pubsub.unsubscribe(ALGO_CAPABILITY_INVALIDATION_CHANNEL)
+                raise
+            except (ConnectionError, OSError, TimeoutError) as exc:
+                log.warning(
+                    "algo_capability.listener_disconnected",
+                    attempt=attempt,
+                    err=str(exc),
+                )
+                await asyncio.sleep(min(2**attempt, 30))
+                attempt += 1
+            except Exception:
+                log.exception("algo_capability.listener_failed")

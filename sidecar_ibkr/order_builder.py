@@ -292,8 +292,10 @@ def build_ib_algo_order(order: object, request: object) -> None:
                 raise ValueError(f"display_size must be > 0 for {strategy!r}, got {ds!r}")
         except ValueError:
             raise
-        except Exception as exc:
-            raise ValueError(str(exc)) from exc
+        except _Decimal.InvalidOperation as exc:
+            raise ValueError(
+                f"display_size invalid decimal {ds!r} for {strategy!r}"
+            ) from exc
 
     ibkr_strategy = _ALGO_STRATEGY_MAP.get(strategy)
     if ibkr_strategy is None:

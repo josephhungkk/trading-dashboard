@@ -60,6 +60,18 @@ async def test_pubsub_invalidate_malformed_increments_counter(svc, fake_redis):
 
 
 @pytest.mark.asyncio
+async def test_pubsub_invalidate_broker_wide(svc, fake_redis):
+    await fake_redis.setex("algo_cap:ibkr:STOCK", 300, b"x")
+    await fake_redis.setex("algo_cap:ibkr:OPTION", 300, b"x")
+    await fake_redis.setex("algo_cap:futu:STOCK", 300, b"y")
+    await svc._handle_invalidation(json.dumps({"broker_id": "ibkr"}))
+    ibkr_keys = await fake_redis.keys("algo_cap:ibkr:*")
+    futu_keys = await fake_redis.keys("algo_cap:futu:*")
+    assert ibkr_keys == []
+    assert len(futu_keys) == 1
+
+
+@pytest.mark.asyncio
 async def test_pubsub_flush_all(svc, fake_redis):
     await fake_redis.setex("algo_cap:ibkr:STOCK", 300, b"x")
     await fake_redis.setex("algo_cap:ibkr:OPTION", 300, b"x")
