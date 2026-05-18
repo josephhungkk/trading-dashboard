@@ -938,12 +938,7 @@ class RiskService:
         blockers: list[GateBlockerEntry] = []
         warnings: list[GateWarningEntry] = []
 
-        limits = (
-            await self._resolve_limit(uuid.UUID(ctx.account_id), "", "combo")
-            if hasattr(self, "_db")
-            else getattr(self, "_limits", None)
-        )
-        result = await self._check_combo_envelope(ctx, limits)
+        result = await self._check_combo_envelope(ctx)
         if result is not None:
             blocker, warning = result
             if blocker is not None:
@@ -961,32 +956,24 @@ class RiskService:
             latency_ms=int((time.perf_counter() - t0) * 1000),
         )
 
-    async def _check_combo_envelope(
-        self, ctx: ComboContext, limits: RiskLimit | None
-    ) -> CheckResult:
+    async def _check_combo_envelope(self, ctx: ComboContext) -> CheckResult:
         from app.services.combos.types import ComboEnvelope
 
         env: ComboEnvelope = ctx.envelope
-        naked_ok = getattr(limits, "naked_margin_enabled", False) if limits else False
         if env.max_loss is None:
-            if not naked_ok:
-                return (
-                    GateBlockerEntry(
-                        check="combo_unbounded",
-                        message="Unbounded combo requires naked-margin account level",
-                        code="combo_unbounded_not_permitted",
-                    ),
-                    None,
-                )
-        elif limits is not None and limits.max_combo_loss_native is not None:
+            return None
+        limit_row = await self._resolve_limit(
+            uuid.UUID(ctx.account_id), "", "max_daily_loss_currency_base"
+        )
+        if limit_row is not None and limit_row.max_combo_loss_native is not None:
             effective_loss = env.max_loss * Decimal("100")
-            if effective_loss > limits.max_combo_loss_native:
+            if effective_loss > limit_row.max_combo_loss_native:
                 return (
                     GateBlockerEntry(
                         check="combo_max_loss",
                         message=(
                             f"Combo max loss {effective_loss} exceeds limit "
-                            f"{limits.max_combo_loss_native}"
+                            f"{limit_row.max_combo_loss_native}"
                         ),
                         code="combo_max_loss_exceeded",
                     ),
