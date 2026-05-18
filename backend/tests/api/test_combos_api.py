@@ -36,8 +36,11 @@ async def _instrument_ids(db: AsyncSession) -> tuple[int, int]:
     return int(ids[0]), int(ids[1])
 
 
-def _preview_body(inst1: int, inst2: int) -> dict:
+def _preview_body(
+    inst1: int, inst2: int, account_id: str = "00000000-0000-0000-0000-000000000001"
+) -> dict:
     return {
+        "account_id": account_id,
         "strategy_type": "VERTICAL",
         "underlying_symbol": "AAPL",
         "underlying_canonical_id": "AAPL",
@@ -79,13 +82,15 @@ async def test_preview_returns_envelope(db_session: AsyncSession) -> None:
     fake_redis = _FakeRedis()
     account_id = await _account_id(db_session)
     app.dependency_overrides[require_admin_jwt] = lambda: AdminIdentity(
-        email="t@t.com", kind="google", claims={"account_id": account_id}
+        email="t@t.com", kind="google", claims={}
     )
     app.dependency_overrides[get_combos_redis] = lambda: fake_redis
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             inst1, inst2 = await _instrument_ids(db_session)
-            response = await client.post("/api/combos/preview", json=_preview_body(inst1, inst2))
+            response = await client.post(
+                "/api/combos/preview", json=_preview_body(inst1, inst2, account_id)
+            )
             assert response.status_code == 200
             data = response.json()
             # stub _fetch_mids returns 5.00 for all legs → net = sell - buy = 0 → CREDIT
@@ -101,13 +106,13 @@ async def test_preview_invalid_legs(db_session: AsyncSession) -> None:
     fake_redis = _FakeRedis()
     account_id = await _account_id(db_session)
     app.dependency_overrides[require_admin_jwt] = lambda: AdminIdentity(
-        email="t@t.com", kind="google", claims={"account_id": account_id}
+        email="t@t.com", kind="google", claims={}
     )
     app.dependency_overrides[get_combos_redis] = lambda: fake_redis
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             inst1, inst2 = await _instrument_ids(db_session)
-            body = _preview_body(inst1, inst2)
+            body = _preview_body(inst1, inst2, account_id)
             body["legs"][1]["side"] = "buy"
             response = await client.post("/api/combos/preview", json=body)
             assert response.status_code == 422
@@ -121,7 +126,7 @@ async def test_confirm_expired_nonce(db_session: AsyncSession) -> None:
     fake_redis = _FakeRedis()
     account_id = await _account_id(db_session)
     app.dependency_overrides[require_admin_jwt] = lambda: AdminIdentity(
-        email="t@t.com", kind="google", claims={"account_id": account_id}
+        email="t@t.com", kind="google", claims={}
     )
     app.dependency_overrides[get_combos_redis] = lambda: fake_redis
     try:
@@ -130,6 +135,7 @@ async def test_confirm_expired_nonce(db_session: AsyncSession) -> None:
                 "/api/combos/confirm/nonexistent-nonce-abc123",
                 headers={"X-Csrf-Nonce": "nonexistent-nonce-abc123"},
                 json={
+                    "account_id": account_id,
                     "client_combo_id": "combo-test",
                     "legs": [],
                     "underlying_canonical_id": "AAPL",
@@ -151,7 +157,7 @@ async def test_confirm_csrf_mismatch(db_session: AsyncSession) -> None:
     fake_redis = _FakeRedis()
     account_id = await _account_id(db_session)
     app.dependency_overrides[require_admin_jwt] = lambda: AdminIdentity(
-        email="t@t.com", kind="google", claims={"account_id": account_id}
+        email="t@t.com", kind="google", claims={}
     )
     app.dependency_overrides[get_combos_redis] = lambda: fake_redis
     try:
@@ -160,6 +166,7 @@ async def test_confirm_csrf_mismatch(db_session: AsyncSession) -> None:
                 "/api/combos/confirm/some-nonce-xyz",
                 headers={"X-Csrf-Nonce": "DIFFERENT-nonce"},
                 json={
+                    "account_id": account_id,
                     "client_combo_id": "combo-test",
                     "legs": [],
                     "underlying_canonical_id": "AAPL",
@@ -181,14 +188,14 @@ async def test_confirm_payload_drift(db_session: AsyncSession) -> None:
     fake_redis = _FakeRedis()
     account_id = await _account_id(db_session)
     app.dependency_overrides[require_admin_jwt] = lambda: AdminIdentity(
-        email="t@t.com", kind="google", claims={"account_id": account_id}
+        email="t@t.com", kind="google", claims={}
     )
     app.dependency_overrides[get_combos_redis] = lambda: fake_redis
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             inst1, inst2 = await _instrument_ids(db_session)
             preview_resp = await client.post(
-                "/api/combos/preview", json=_preview_body(inst1, inst2)
+                "/api/combos/preview", json=_preview_body(inst1, inst2, account_id)
             )
             assert preview_resp.status_code == 200
             preview_data = preview_resp.json()
@@ -197,8 +204,9 @@ async def test_confirm_payload_drift(db_session: AsyncSession) -> None:
                 f"/api/combos/confirm/{nonce}",
                 headers={"X-Csrf-Nonce": nonce},
                 json={
+                    "account_id": account_id,
                     "client_combo_id": "combo-TAMPERED",
-                    "legs": _preview_body(inst1, inst2)["legs"],
+                    "legs": _preview_body(inst1, inst2, account_id)["legs"],
                     "underlying_canonical_id": "AAPL",
                     "strategy_type": "VERTICAL",
                     "underlying_symbol": "AAPL",

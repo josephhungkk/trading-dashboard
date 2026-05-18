@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -46,6 +45,7 @@ RedisDep = Annotated[Any, Depends(get_combos_redis)]
 
 
 class PreviewRequest(BaseModel):
+    account_id: str
     strategy_type: str
     underlying_symbol: str
     underlying_canonical_id: str
@@ -54,6 +54,7 @@ class PreviewRequest(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
+    account_id: str
     client_combo_id: str
     legs: list[dict[str, Any]]
     underlying_canonical_id: str
@@ -64,24 +65,30 @@ class ConfirmRequest(BaseModel):
     net_debit_credit_kind: str
 
 
-def _account_id(identity: AdminIdentity) -> str:
-    account_id = identity.claims.get("account_id")
-    if not account_id:
-        raise HTTPException(422, detail={"error_code": "account_id_required"})
-    return str(account_id)
-
-
 class _ComboRiskService:
+    """Stub risk service for Phase 13 combos.
+
+    Full per-broker sidecar injection deferred to Phase 14 (multi-leg order routing).
+    Runs envelope-only check via RiskService._check_combo_envelope directly when wired.
+    """
+
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
-        self._limits = SimpleNamespace(naked_margin_enabled=True, max_combo_loss_native=None)
 
     async def evaluate_combo(self, ctx: ComboContext, mode: str) -> GateVerdict:
+        from app.services.risk_service import RiskService
+
+        svc = RiskService.__new__(RiskService)
+        svc._db = self._db
+        result = await svc._check_combo_envelope(ctx)
+        if result is None:
+            return GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=0)
+        blocker, warning = result
+        if blocker is not None:
+            return GateVerdict(final_verdict="block", blockers=[blocker], warnings=[], latency_ms=0)
+        if warning is not None:
+            return GateVerdict(final_verdict="warn", blockers=[], warnings=[warning], latency_ms=0)
         return GateVerdict(final_verdict="allow", blockers=[], warnings=[], latency_ms=0)
-
-
-def _risk_service(db: AsyncSession) -> _ComboRiskService:
-    return _ComboRiskService(db)
 
 
 @router.post("/preview")
@@ -91,10 +98,10 @@ async def preview_combo(
     identity: IdentityDep,
     redis: RedisDep,
 ) -> dict[str, Any]:
-    account_id = _account_id(identity)
+    risk_svc = _ComboRiskService(db)
     try:
         result = await combo_service.preview(
-            db, account_id, payload.model_dump(), _risk_service(db), redis
+            db, payload.account_id, payload.model_dump(), risk_svc, redis
         )
     except ComboValidationError as e:
         raise HTTPException(
@@ -118,14 +125,13 @@ async def confirm_combo(
 ) -> dict[str, Any]:
     if x_csrf_nonce != nonce:
         raise HTTPException(422, detail={"error_code": "csrf_required"})
-    account_id = _account_id(identity)
     try:
-        return await combo_service.confirm(
+        result = await combo_service.confirm(
             db=db,
             nonce=nonce,
             client_combo_id=payload.client_combo_id,
             legs_payload=payload.legs,
-            account_id=account_id,
+            account_id=payload.account_id,
             redis=redis,
             broker_client=None,
             underlying_canonical_id=payload.underlying_canonical_id,
@@ -135,6 +141,8 @@ async def confirm_combo(
             net_debit_credit=Decimal(payload.net_debit_credit),
             net_debit_credit_kind=payload.net_debit_credit_kind,
         )
+        await db.commit()
+        return result
     except ValueError as exc:
         code = str(exc)
         status = 410 if code == "nonce_invalid" else 409
@@ -145,14 +153,23 @@ async def confirm_combo(
 
 
 @router.get("/{combo_id}")
-async def get_combo(combo_id: str, db: DbDep, identity: IdentityDep) -> dict[str, Any]:
+async def get_combo(
+    combo_id: str,
+    db: DbDep,
+    identity: IdentityDep,
+    account_id: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
     try:
         cid = UUID(combo_id)
     except ValueError as exc:
         raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
-    result = await db.execute(
-        select(ComboOrder).options(selectinload(ComboOrder.legs)).where(ComboOrder.id == cid)
-    )
+    stmt = select(ComboOrder).options(selectinload(ComboOrder.legs)).where(ComboOrder.id == cid)
+    if account_id is not None:
+        try:
+            stmt = stmt.where(ComboOrder.account_id == UUID(account_id))
+        except ValueError as exc:
+            raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
+    result = await db.execute(stmt)
     combo = result.scalar_one_or_none()
     if combo is None:
         raise HTTPException(404, detail={"error_code": "combo_not_found"})
@@ -193,8 +210,10 @@ async def get_combo(combo_id: str, db: DbDep, identity: IdentityDep) -> dict[str
 async def list_combos(
     db: DbDep,
     identity: IdentityDep,
+    account_id: Annotated[str | None, Query()] = None,
     status: str | None = None,
     limit: int = 50,
+    before_created_at: str | None = None,
     before_id: str | None = None,
 ) -> dict[str, Any]:
     cap = min(limit, 100)
@@ -203,14 +222,22 @@ async def list_combos(
         .order_by(ComboOrder.created_at.desc(), ComboOrder.id.desc())
         .limit(cap + 1)
     )
+    if account_id is not None:
+        try:
+            stmt = stmt.where(ComboOrder.account_id == UUID(account_id))
+        except ValueError as exc:
+            raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
     if status is not None:
         stmt = stmt.where(ComboOrder.status == status)
-    if before_id is not None:
+    if before_created_at is not None and before_id is not None:
         try:
             bid = UUID(before_id)
         except ValueError as exc:
             raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
-        stmt = stmt.where(ComboOrder.id < bid)
+        stmt = stmt.where(
+            tuple_(ComboOrder.created_at, ComboOrder.id)
+            < tuple_(literal(before_created_at), literal(bid))
+        )
     rows = (await db.execute(stmt)).scalars().all()
     has_more = len(rows) > cap
     items = rows[:cap]
@@ -245,13 +272,20 @@ async def cancel_combo(
     x_csrf_nonce: Annotated[str, Header()],
     db: DbDep,
     identity: IdentityDep,
+    account_id: Annotated[str | None, Query()] = None,
 ) -> Any:
     try:
         cid = UUID(combo_id)
     except ValueError as exc:
         raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
     async with db.begin_nested():
-        result = await db.execute(select(ComboOrder).where(ComboOrder.id == cid).with_for_update())
+        stmt = select(ComboOrder).where(ComboOrder.id == cid).with_for_update()
+        if account_id is not None:
+            try:
+                stmt = stmt.where(ComboOrder.account_id == UUID(account_id))
+            except ValueError as exc:
+                raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
+        result = await db.execute(stmt)
         combo = result.scalar_one_or_none()
         if combo is None:
             raise HTTPException(404, detail={"error_code": "combo_not_found"})
@@ -262,4 +296,5 @@ async def cancel_combo(
             )
         combo.status = "cancelled"
         await db.flush()
+    await db.commit()
     return Response(status_code=204)

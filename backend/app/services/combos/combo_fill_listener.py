@@ -28,7 +28,10 @@ async def handle_fill(
         combo_result = await db.execute(
             select(ComboOrder).where(ComboOrder.id == combo_id).with_for_update()
         )
-        combo = combo_result.scalar_one()
+        combo = combo_result.scalar_one_or_none()
+        if combo is None:
+            log.warning("combo_fill_orphaned_order", order_id=str(order_id), combo_id=str(combo_id))
+            return
 
         await db.execute(
             update(OrderLeg)
