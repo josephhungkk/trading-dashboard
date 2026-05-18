@@ -57,8 +57,13 @@ export function FxTicketSection({ accountId, pair, onSuccess }: Props) {
 
   const handleCancel = async () => {
     if (!activeQuote) return;
-    await cancelQuote(activeQuote.broker_quote_id, accountId);
-    setActiveQuote(null);
+    try {
+      await cancelQuote(activeQuote.broker_quote_id, accountId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to cancel quote');
+    } finally {
+      setActiveQuote(null);
+    }
   };
 
   return (

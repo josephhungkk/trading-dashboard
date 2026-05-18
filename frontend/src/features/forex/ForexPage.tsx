@@ -81,8 +81,9 @@ export function ForexPage(): React.JSX.Element {
 
   const pairs: FxPair[] = React.useMemo(() => pairsQuery.data ?? [], [pairsQuery.data]);
   const accountId: string | null =
-    (accountsQuery.data?.accounts?.find((a: { mode: string; id: string }) => a.mode === 'paper')
-      ?.id as string) ?? null;
+    (accountsQuery.data?.accounts?.find(
+      (a: { mode: string; id: string }) => a.mode === 'paper',
+    )?.id as string | undefined) ?? null;
 
   const activePair = selectedPair ?? pairs[0] ?? null;
 

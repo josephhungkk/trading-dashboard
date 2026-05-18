@@ -889,6 +889,21 @@ class RiskService:
                     )
                 )
                 return blockers[0], None
+            # Check #3 (spec §4.4): existing open position in same pair → consolidation WARN
+            existing = await self._db.execute(
+                text(
+                    "SELECT id FROM positions WHERE account_id = :aid AND instrument_id = :iid"
+                    " AND qty != 0 LIMIT 1"
+                ),
+                {"aid": str(ctx.account_id), "iid": ctx.instrument_id},
+            )
+            if existing.fetchone() is not None:
+                warnings.append(
+                    GateWarningEntry(
+                        check="forex_consolidation",
+                        message="consolidation_suggested: An open position exists for this pair.",
+                    )
+                )
         except Exception:
             metrics.forex_risk_check_failures_total.inc()
             log.exception("forex_risk_check_infrastructure_error", account_id=str(ctx.account_id))

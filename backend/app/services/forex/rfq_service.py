@@ -178,14 +178,16 @@ async def accept_quote(
     result = await db.execute(
         text(
             """
-            SELECT q.*, i.canonical_id, i.meta->>'conid' AS conid
+            SELECT q.*, i.canonical_id, i.meta->>'conid' AS conid,
+                   a.broker_id AS account_broker_id
               FROM forex_rfq_quotes q
               JOIN instruments i ON i.id = q.instrument_id
+              JOIN broker_accounts a ON a.id = q.account_id
              WHERE q.account_id = :aid
                AND q.broker_quote_id = :bqid
                AND q.status = 'pending'
                AND q.expires_at > now()
-             FOR UPDATE
+             FOR UPDATE OF q
             """
         ),
         {"aid": str(account_id), "bqid": broker_quote_id},
@@ -259,18 +261,19 @@ async def accept_quote(
         text(
             """
             INSERT INTO orders (
-                id, account_id, client_order_id, conid, symbol, side, order_type, tif,
+                id, account_id, broker_id, client_order_id, conid, symbol, side, order_type, tif,
                 qty, limit_price, stop_price, notional, status, filled_qty
             )
             VALUES (
-                :id, :account_id, :client_order_id, :conid, :symbol, :side, 'MARKET', 'IOC',
-                :qty, NULL, NULL, :notional, 'pending_submit', 0
+                :id, :account_id, :broker_id, :client_order_id, :conid, :symbol, :side,
+                'MARKET', 'IOC', :qty, NULL, NULL, :notional, 'pending_submit', 0
             )
             """
         ),
         {
             "id": order_id,
             "account_id": str(account_id),
+            "broker_id": str(row["account_broker_id"]),
             "client_order_id": client_order_id,
             "conid": row["conid"] or row["canonical_id"],
             "symbol": row["canonical_id"],
@@ -325,7 +328,9 @@ async def cancel_quote(
             broker_quote_id=broker_quote_id,
         )
     except Exception:
-        log.info("forex.rfq.cancel_best_effort_failed", broker_quote_id=broker_quote_id)
+        # Best-effort: if this was in 'accepting' state, a fill may have already occurred
+        # on the broker side. Log as warning so ops can reconcile.
+        log.warning("forex.rfq.cancel_best_effort_failed", broker_quote_id=broker_quote_id)
 
 
 async def sweep_expired_quotes(db: AsyncSession) -> None:

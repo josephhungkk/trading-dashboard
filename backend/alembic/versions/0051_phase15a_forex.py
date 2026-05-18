@@ -55,3 +55,5 @@ def downgrade() -> None:
         "DELETE FROM risk_limits "
         "WHERE scope_type = 'global' AND limit_kind = 'forex_max_notional_per_trade'"
     )
+    # NOTE: PostgreSQL does not support ALTER TYPE ... DROP VALUE, so the 'FOREX' enum value
+    # and 'forex_max_notional_per_trade' kind are intentionally left in place after downgrade.

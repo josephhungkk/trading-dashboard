@@ -20,9 +20,15 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
+from app.api.forex import _RATE_BUCKETS
 from app.core.db import SessionLocal
 from app.main import app
 from app.services.forex.rfq_service import sweep_expired_quotes
+
+
+@pytest.fixture(autouse=True)
+def _reset_forex_rate_limiter() -> None:
+    _RATE_BUCKETS.clear()
 
 
 @pytest.mark.asyncio
@@ -88,7 +94,9 @@ async def test_get_forex_pairs_with_auth(test_client_admin: AsyncClient) -> None
     r = await test_client_admin.get("/api/forex/pairs")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert isinstance(body, list)
+    assert isinstance(body, dict)
+    assert "pairs" in body
+    assert isinstance(body["pairs"], list)
 
 
 @pytest.mark.asyncio
