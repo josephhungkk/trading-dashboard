@@ -19,6 +19,10 @@ def validate(
 ) -> ComboSpec:
     if len({leg.currency for leg in legs}) > 1:
         raise ComboValidationError("currency_mismatch")
+    if strategy_type not in _VALIDATORS:
+        raise ComboValidationError(f"unknown_strategy_type:{strategy_type}")
+    if len(legs) < 2:
+        raise ComboValidationError("min_two_legs_required")
     _VALIDATORS[strategy_type](legs)
     return ComboSpec(
         strategy_type=strategy_type,

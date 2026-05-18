@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from redis.asyncio import Redis
-from sqlalchemy import literal, select, tuple_
+from sqlalchemy import cast, literal, select, tuple_
+from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -145,7 +146,14 @@ async def confirm_combo(
         return result
     except ValueError as exc:
         code = str(exc)
-        status = 410 if code == "nonce_invalid" else 409
+        if code == "nonce_invalid":
+            status = 410
+        elif code == "broker_not_configured":
+            # Commit rejected status written by combo_service before re-raising
+            await db.commit()
+            raise HTTPException(503, detail={"error_code": "broker_not_wired"}) from exc
+        else:
+            status = 409
         raise HTTPException(status, detail={"error_code": code}) from exc
     except Exception as exc:
         log.exception("combo_confirm_error")
@@ -236,7 +244,10 @@ async def list_combos(
             raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
         stmt = stmt.where(
             tuple_(ComboOrder.created_at, ComboOrder.id)
-            < tuple_(literal(before_created_at), literal(bid))
+            < tuple_(
+                cast(literal(before_created_at), TIMESTAMP(timezone=True)),
+                literal(bid),
+            )
         )
     rows = (await db.execute(stmt)).scalars().all()
     has_more = len(rows) > cap
@@ -274,11 +285,13 @@ async def cancel_combo(
     identity: IdentityDep,
     account_id: Annotated[str | None, Query()] = None,
 ) -> Any:
+    if x_csrf_nonce != combo_id:
+        raise HTTPException(422, detail={"error_code": "csrf_required"})
     try:
         cid = UUID(combo_id)
     except ValueError as exc:
         raise HTTPException(422, detail={"error_code": "invalid_uuid"}) from exc
-    async with db.begin_nested():
+    async with db.begin():
         stmt = select(ComboOrder).where(ComboOrder.id == cid).with_for_update()
         if account_id is not None:
             try:
@@ -295,6 +308,4 @@ async def cancel_combo(
                 detail={"error_code": "combo_not_cancellable", "current_status": combo.status},
             )
         combo.status = "cancelled"
-        await db.flush()
-    await db.commit()
     return Response(status_code=204)
