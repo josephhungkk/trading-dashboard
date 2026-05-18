@@ -52,6 +52,8 @@ export interface TradeTicketModalProps {
   onClose: () => void;
   /** Called after a successful submit with the returned order id. */
   onSuccess?: (orderId: string) => void;
+  /** Optional slot for multi-leg combo builder (injected by features layer). */
+  comboBuilderSlot?: React.ReactNode;
 }
 
 interface FormState {
@@ -213,6 +215,7 @@ export function TradeTicketModal({
   targetPrice,
   onClose,
   onSuccess,
+  comboBuilderSlot,
 }: TradeTicketModalProps): React.JSX.Element {
   const [form, setForm] = React.useState<FormState>(() =>
     buildInitialForm(conid, initialOrder, stopPrice, targetPrice),
@@ -220,6 +223,7 @@ export function TradeTicketModal({
   const [preview, setPreview] = React.useState<PreviewResponse | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
+  const [tradeMode, setTradeMode] = React.useState<'single' | 'combo'>('single');
   const dialogRef = React.useRef<HTMLDivElement>(null);
 
   const isModify = mode === 'modify';
@@ -432,7 +436,25 @@ export function TradeTicketModal({
           </Button>
         </header>
 
-        {error !== null ? (
+        <div className="mb-3 flex gap-2 border-b border-border pb-2">
+          <button
+            type="button"
+            onClick={() => setTradeMode('single')}
+            className={`rounded px-3 py-1 text-sm ${tradeMode === 'single' ? 'bg-panel-active font-semibold text-fg' : 'text-fg-muted'}`}
+          >
+            Single
+          </button>
+          <button
+            type="button"
+            onClick={() => setTradeMode('combo')}
+            className={`rounded px-3 py-1 text-sm ${tradeMode === 'combo' ? 'bg-panel-active font-semibold text-fg' : 'text-fg-muted'}`}
+          >
+            Multi-Leg
+          </button>
+        </div>
+        {tradeMode === 'combo' ? comboBuilderSlot ?? null : null}
+
+        {tradeMode === 'single' && error !== null ? (
           <div
             role="alert"
             data-testid="trade-ticket-error"
@@ -442,7 +464,7 @@ export function TradeTicketModal({
           </div>
         ) : null}
 
-        <form
+        {tradeMode === 'single' && <form
           className="flex flex-1 flex-col gap-4 overflow-auto"
           onSubmit={(e) => {
             void handleSubmit(e);
@@ -620,7 +642,7 @@ export function TradeTicketModal({
               {submitting ? 'Submitting…' : submitLabel(mode)}
             </Button>
           </div>
-        </form>
+        </form>}
       </div>
     </div>
   );
