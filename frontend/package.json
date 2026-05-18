@@ -13,7 +13,7 @@
     "tsr": "tsr",
     "storybook": "pnpm tsr generate && storybook dev -p 6006",
     "build-storybook": "pnpm tsr generate && storybook build",
-    "lint": "eslint src",
+    "lint": "eslint src --max-warnings 5",
     "stylelint": "stylelint \"src/**/*.{css,tsx}\"",
     "preview": "vite preview",
     "proto:gen": "cd ../proto && buf generate",

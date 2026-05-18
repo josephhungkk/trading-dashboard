@@ -1157,3 +1157,16 @@ crypto_risk_check_failures_total = Counter(
     "Crypto risk check infrastructure failures (fail-open events).",
     registry=registry,
 )
+
+ws_crypto_book_connections = Gauge(
+    "ws_crypto_book_connections_total",
+    "Active crypto book WS connections",
+    registry=registry,
+)
+
+ws_crypto_book_messages_total = Counter(
+    "ws_crypto_book_messages_total",
+    "Crypto book WS messages sent",
+    labelnames=["canonical_id"],
+    registry=registry,
+)

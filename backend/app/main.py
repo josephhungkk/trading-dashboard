@@ -51,6 +51,7 @@ from app.api.sse import router as sse_router
 from app.api.telegram import router as telegram_router
 from app.api.ws_ai import router as ws_ai_router
 from app.api.ws_alerts import router as ws_alerts_router
+from app.api.ws_crypto import router as ws_crypto_router
 from app.api.ws_options import router as ws_options_router
 from app.api.ws_portfolio import router as ws_portfolio_router
 from app.api.ws_quotes import router as ws_quotes_router
@@ -661,6 +662,35 @@ async def lifespan(_app: FastAPI) -> Any:
         _update_schwab_token_metrics(redis, session_factory)
     )
 
+    # Phase 15b: Coinbase WS adapter for real-time crypto quotes + order book.
+    _coinbase_task: asyncio.Task[None] | None = None
+    try:
+        from app.services.crypto.coinbase_ws import CoinbaseWsAdapter
+
+        async def _get_coinbase_products() -> list[str]:
+            try:
+                val = await svc.get_json("coinbase", "products", default=None)
+                if isinstance(val, list):
+                    return [str(product) for product in val]
+                if val:
+                    import json as _json
+
+                    parsed = _json.loads(str(val))
+                    if isinstance(parsed, list):
+                        return [str(product) for product in parsed]
+            except Exception:
+                pass
+            return ["BTC-USD", "ETH-USD"]
+
+        _coinbase_adapter = CoinbaseWsAdapter(
+            redis=redis,
+            config_getter=_get_coinbase_products,
+        )
+        _coinbase_task = asyncio.create_task(_coinbase_adapter.run())
+        log.info("coinbase_ws.lifespan_started")
+    except Exception:
+        log.exception("coinbase_ws.lifespan_init_failed")
+
     log.info("startup_ok", env=settings.env)
     try:
         yield
@@ -696,6 +726,10 @@ async def lifespan(_app: FastAPI) -> Any:
         schwab_metrics_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await schwab_metrics_task
+        if _coinbase_task is not None and not _coinbase_task.done():
+            _coinbase_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _coinbase_task
         scheduler.shutdown(wait=False)
         # ── CRIT-1: stop QuoteEngine before broker/redis shutdown ─────────────
         if quote_engine is not None:
@@ -821,6 +855,7 @@ app.include_router(combos_router)
 app.include_router(futures_router)
 app.include_router(forex_router)
 app.include_router(crypto_router)
+app.include_router(ws_crypto_router)
 app.include_router(options_admin_router)
 app.include_router(ws_options_router)
 
