@@ -44,6 +44,8 @@ Single migration covering all DDL changes.
 
 Add `FUTURE` to the existing PG enum (same `ALTER TYPE … ADD VALUE` pattern as `OPTION` in 0047).
 
+**Also:** add `FUTURE = "FUTURE"` to the Python `AssetClass` StrEnum in `app/models/instruments.py`. Without this, SQLAlchemy's `SAEnum` rejects any row with `asset_class = 'FUTURE'` at the ORM layer with `LookupError`. (Same pattern: `OPTION = "OPTION"` was added to the StrEnum in Phase 12 alongside migration 0047.)
+
 ### 3.2 `futures_roll_rules` table
 
 ```sql
@@ -66,7 +68,7 @@ CREATE TABLE futures_roll_rules (
 ```sql
 CREATE TABLE futures_settlement_events (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id       UUID NOT NULL,
+    account_id       UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
     instrument_id    BIGINT NOT NULL REFERENCES instruments(id),
     settlement_price NUMERIC(20,8) NOT NULL,
     cash_delta       NUMERIC(20,8) NOT NULL,  -- signed; negative = loss
@@ -76,7 +78,14 @@ CREATE TABLE futures_settlement_events (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX ON futures_settlement_events (account_id, settled_at DESC);
+-- Dedup index: prevents duplicate settlement inserts on listener restart
+CREATE UNIQUE INDEX ON futures_settlement_events (account_id, broker_event_id)
+    WHERE broker_event_id IS NOT NULL;
 ```
+
+`ON DELETE RESTRICT` (not CASCADE) — settlement records are financial history and must not be silently wiped when an account row is removed.
+
+`updated_at` trigger is **not** added to `futures_settlement_events` — it is an append-only table; `updated_at` is only added to `futures_roll_rules`.
 
 ### 3.4 `instruments.meta` — `FutureDetails` discriminated union arm
 
@@ -88,7 +97,7 @@ class FutureDetails(BaseModel):
     contract_month: str            # "202506" (YYYYMM)
     tick_size: Decimal             # e.g. Decimal("0.25")
     tick_value: Decimal            # e.g. Decimal("12.50") — USD per tick
-    multiplier: Decimal            # e.g. Decimal("50") for ES
+    multiplier: Decimal            # e.g. Decimal("50") for ES; Decimal("5") for MES
     first_notice_day: date | None  # None for cash-settled contracts
     expiry: date                   # last trading day
     settlement_type: Literal["CASH", "PHYSICAL"]
@@ -98,6 +107,8 @@ class FutureDetails(BaseModel):
 
 `InstrumentMeta` union becomes `NonOptionDetails | OptionDetails | FutureDetails`.
 `NonOptionAssetClass` literal stays unchanged — `FutureDetails` is a full discriminated arm.
+
+**`multiplier` type alignment (H2):** `FutureDetails.multiplier` is `Decimal`. `OptionDetails.multiplier` is widened from `int` to `Decimal` at the same time — a non-breaking change since `Decimal("100") == 100`. `EvaluationContext.multiplier` is widened from `int = 1` to `Decimal = Decimal("1")`. `_native_notional(multiplier: int = 1)` signature becomes `multiplier: Decimal = Decimal("1")`. All existing call sites in `orders_service` cast `details.multiplier` to `Decimal` at the assignment point (already done for options via `int(details.multiplier)`; change to `Decimal(details.multiplier)`).
 
 **Design decision:** `meta` JSONB is the correct extension point for Phase 14 (consistent with Phase 12 options). If JSONB proves painful across Phases 15–16, Phase 24 infra hardening is the right time to extract all asset-class details to typed tables in one migration. No piecemeal switch.
 
@@ -122,7 +133,8 @@ services/futures/
 - Redis cache key: `futures:contracts:{broker}:{root_symbol}`, TTL 300s market-open / 3600s market-closed
 - Singleflight per `(broker, root_symbol)` key — same `asyncio.Lock` pattern as `OptionChainService`
 - Returns `list[FutureContractMonth]` sorted by expiry ascending, front 6 months max (configurable via `app_config`)
-- `FutureContractMonth`: `conid, contract_month, expiry, first_notice_day, tick_size, tick_value, multiplier, settlement_type, exchange, days_to_expiry`
+- `FutureContractMonth`: `conid, contract_month, expiry, first_notice_day, tick_size, tick_value, multiplier, settlement_type, exchange`
+- **`days_to_expiry` is NOT stored in the cached Redis payload.** It is computed at read time as `(expiry - date.today()).days` — both in the REST response serialiser and in the FE (`expiryDate` is cached; `daysToExpiry` is derived client-side). This prevents stale DTE values within the 300s/3600s cache TTL window, which is critical for the DTE badge threshold and roll-rule trigger logic.
 
 ### 4.2 `roll_service.py`
 
@@ -131,33 +143,42 @@ services/futures/
 - `get_roll_rules(db, account_id)` — list all enabled rules for account
 - `delete_roll_rule(db, account_id, instrument_id)` — hard delete
 
+**Roll rule lifecycle:** `instrument_id` in `futures_roll_rules` refers to a **specific contract-month instrument row** (e.g. ESM25, `instrument_id = 42`). After a successful roll, `execute_roll()` automatically upserts a new rule pointing at the newly opened contract's `instrument_id` (e.g. ESU25, `instrument_id = 57`) with the same `days_before`, then deletes the old rule. This keeps the roll rule perpetual without user intervention. If the new contract's instrument row does not yet exist in `instruments`, `contract_resolver` seeds it (same lazy-creation pattern as `seed_instruments_from_positions`).
+
 **APScheduler job — `check_and_notify_rolls()`:**
 - Registered in `app/main.py` lifespan alongside `mute_expiry_job`
-- Runs daily at 09:00 US/Central (CME) and 09:00 Asia/Hong_Kong (HKFE)
-- Queries all `enabled=true` roll rules joined to current open positions
-- For each: compute DTE from `instruments.meta->>'expiry'`
-- If `DTE <= days_before` and no nonce already pending for `(account_id, instrument_id)`:
+- Two registrations: daily at 09:00 US/Central (for CME/CBOT/NYMEX rules) and 09:00 Asia/Hong_Kong (for HKFE rules). Each firing passes an `exchange_filter` parameter (`{"CME","CBOT","NYMEX"}` or `{"HKFE"}`) so only rules for that exchange group are evaluated. Without this filter, CME rules would be evaluated at HK open (~02:00 US/Central) producing misleading cost estimates from pre-market quotes. As more exchanges are added in Phases 15–16, additional `(cron_expr, exchange_filter)` tuples are registered from `app_config`.
+- Queries all `enabled=true` roll rules joined to current open positions, filtered by exchange
+- For each: compute DTE as `(expiry - date.today()).days` (not from cache)
+- If `DTE <= days_before` and no nonce already pending (`EXISTS futures:roll:pending:{account_id}:{nonce}` prefix scan):
   - Fetch next contract month via `contract_resolver`
   - Compute estimated net cost from Redis quote bus mid spread
-  - Mint nonce → `futures:roll:pending:{account_id}:{instrument_id}:{nonce}` with 24h TTL
+  - Mint nonce → `futures:roll:pending:{account_id}:{nonce}` (24h TTL). Payload value: `{instrument_id, close_conid, open_conid, account_id}` as JSON. No `instrument_id` in key — instrument_id lives in the payload only.
   - Send Telegram preview (see §6)
-- Deduplication: nonce key check prevents re-notification on subsequent daily runs
+- Deduplication: `EXISTS futures:roll:pending:{account_id}:*` prefix check (SCAN, not GETDEL) prevents re-notification
 
 **`execute_roll(account_id, nonce)`:**
-1. GETDEL `futures:roll:pending:{account_id}:*:{nonce}` — atomic single-use gate
-2. Validate payload (account_id, instrument_id, close_conid, open_conid) hasn't drifted
+1. `GETDEL futures:roll:pending:{account_id}:{nonce}` — literal key, atomic single-use gate. Returns nil → 404. No wildcard.
+2. Parse payload JSON: `{instrument_id, close_conid, open_conid, account_id}`. Validate `account_id` in payload matches JWT claim (prevents cross-account nonce replay).
 3. Risk gate on close leg — if BLOCK, abort with Telegram error
-4. `place_order(close leg)` — await fill up to 10s by subscribing to Redis pubsub channel `order.filled.{order_id}` (same mechanism as `combo_fill_listener`)
+4. `place_order(close leg)` — await fill by subscribing to existing Redis pubsub channel `orders:events:account:{account_id}`, filter messages where `order_id == close_order_id` and `status == "filled"`. Timeout: 30s (configurable via `app_config[futures/roll_fill_timeout_s]`, default 30 — tighter than 10s to handle volatile sessions).
 5. If close fills: risk gate on open leg → `place_order(open leg)`
 6. Partial fill path: close filled, open failed → Telegram `"⚠ Roll partially executed — {old} closed but {new} open failed. Check positions."` — no second close attempt
 7. Success: Telegram `"✅ Roll executed: {old} → {new} filled @ {price}"`
 
+**Rate limit note:** Roll confirm consumes 1 token from the `check_trade` bucket (5/min, fail-CLOSED), but places up to 2 orders. This is intentional — the roll is treated as a single atomic trade action. The asymmetry is documented here so it is not "fixed" during implementation.
+
 ### 4.3 `settlement_listener.py`
 
-- Background task wired into lifespan (same pattern as `combo_fill_listener`)
-- Subscribes to broker settlement events (IBKR `commissionReport` + `execDetails` on settlement date; Futu poll `get_history_deals()` daily at expiry; Schwab `GET /trader/v1/accounts/{hash}/transactions?types=TRADE`)
-- On event: INSERT `futures_settlement_events`, publish `futures.settlement.{account_id}` Redis channel, send Telegram notify
-- Fail-open: notification failure never raises in the listener loop
+Three separate background tasks wired into lifespan — one per broker type, each with different event delivery characteristics:
+
+- **IBKR** (`_ibkr_settlement_listener`): continuous event subscription via `ib.commissionReport` + `execDetails` filtered to `secType="FUT"` on settlement date. Real-time, event-driven.
+- **Futu** (`_futu_settlement_poller`): APScheduler job, fires daily at HKFE settlement time (16:30 Asia/Hong_Kong). Polls `trade_ctx.get_history_deals()` for futures settlement fills. No real-time push from Futu API.
+- **Schwab** (`_schwab_settlement_poller`): APScheduler job, fires daily at CME settlement time (15:30 US/Central). Polls `GET /trader/v1/accounts/{hash}/transactions?types=TRADE` filtered to futures.
+
+All three share the same `_record_settlement(db, redis, telegram, event)` helper that: INSERTs `futures_settlement_events` (dedup via `broker_event_id` unique index — INSERT ON CONFLICT DO NOTHING), publishes `futures.settlement.{account_id}` Redis channel, sends Telegram notify.
+
+Fail-open: notification failure never raises in any listener loop. Each task is independent — IBKR listener crash does not affect Futu/Schwab pollers.
 
 ---
 
@@ -178,7 +199,7 @@ message FutureContractMonth {
   string conid           = 1;
   string contract_month  = 2;  // "202506"
   string expiry_date     = 3;  // "2025-06-20"
-  string first_notice    = 4;  // "" if cash-settled
+  string first_notice    = 4;  // "" (empty string) if cash-settled; sidecar MUST emit "" not null
   string exchange        = 5;
   string tick_size       = 6;  // decimal string
   string tick_value      = 7;  // decimal string
@@ -206,7 +227,7 @@ message SettlementEvent {
 
 ### 5.2 IBKR sidecar (`sidecar_ibkr/handlers.py`)
 
-- `GetFutureContracts`: `ib.reqContractDetails(Contract(secType="FUT", symbol=root_symbol, exchange="SMART"))` → map to `FutureContractMonth`. `exchange` field populated from returned `ContractDetails.contract.exchange` (IBKR resolves GLOBEX/CBOT/NYMEX via SMART routing). Front 6 months only.
+- `GetFutureContracts`: `ib.reqContractDetails(Contract(secType="FUT", symbol=root_symbol, exchange="SMART"))` → map to `FutureContractMonth`. `exchange` field populated from returned `ContractDetails.contract.exchange` (IBKR resolves GLOBEX/CBOT/NYMEX via SMART routing). Front 6 months only. `first_notice` field: emit `""` (empty string, proto3 default) when `ContractDetails.details.firstNoticeDate` is absent — never omit the field, so the receiver can distinguish "cash-settled" from "unknown".
 - `StreamSettlementEvents`: subscribe `ib.commissionReport` + `execDetails` filtered to `secType="FUT"` on settlement date.
 - `PlaceOrder`: add `secType="FUT"` branch at line ~992 alongside existing `"OPT"` branch. Construct `Contract(secType="FUT", conid=int(request.conid))` — explicit `secType` required for whatIf margin preview to work correctly.
 
@@ -220,7 +241,7 @@ message SettlementEvent {
 
 - `GetFutureContracts`: `GET /trader/v1/instruments?symbol={root}&projection=full` — confirmed present from API schema (`activeContract`, `expirationDate`, `lastTradingDate`, `firstNoticeDate`, `multiplier` fields confirmed).
 - `StreamSettlementEvents`: poll `GET /trader/v1/accounts/{hash}/transactions?types=TRADE` filtered to futures on expiry date.
-- `PlaceOrder`: attempt `POST /trader/v1/accounts/{hash}/orders` with `assetType: "FUTURE"`. If 401 at Phase 14 start: register `FUTURE` in Schwab capability map with `supported=false`, return 503 `broker_not_wired` from `orders_service` for execution only (data still works).
+- `PlaceOrder`: attempt `POST /trader/v1/accounts/{hash}/orders` with `assetType: "FUTURE"`. If 401 at Phase 14 start: insert a row in the `broker_order_capability` table for `(broker_id="schwab", asset_class="FUTURE", supported=false)` via `order_capability_service` — same table/service used for all other capability entries. `orders_service` reads this table via `OrderCapabilityService.is_supported()` and returns 503 `broker_not_wired` for execution only (data via `GetFutureContracts` still works).
 
 ---
 
@@ -253,7 +274,14 @@ Added to `RiskService.evaluate()`, called when `asset_class == "FUTURE"`.
 | Concentration | WARN | Same underlying root > 50% of futures exposure |
 | Margin preview | async | Existing `_check_margin` sidecar path — no change |
 
-`RiskContext` gains two optional fields: `tick_size: Decimal | None` and `first_notice_day: date | None`, populated by `orders_service` when `asset_class == "FUTURE"` via `parse_instrument_meta()` (same pattern as `multiplier` + `position_effect` for options).
+`RiskContext` gains three optional fields, populated by `orders_service` when `asset_class == "FUTURE"` via `parse_instrument_meta()`:
+- `tick_size: Decimal | None`
+- `first_notice_day: date | None`
+- `underlying_symbol: str | None` — root symbol (e.g. `"ES"`, `"HSI"`), populated from `FutureDetails.underlying_symbol`
+
+The concentration check groups open positions by `instruments.meta->>'underlying_symbol'` WHERE `instruments.asset_class = 'FUTURE'` to compute total futures exposure per root. `EvaluationContext.underlying_symbol` is what drives this grouping at risk-gate time.
+
+**Fail-open on `first_notice_day = None`:** When `first_notice_day is None` (cash-settled contract), the physical delivery BLOCK check is skipped entirely — no block, no warn. Cash-settled contracts have no delivery risk. This mirrors Phase 12's fail-open on `exchange is None`.
 
 `_native_notional()` already multiplies by `multiplier` — no change needed.
 
@@ -296,7 +324,7 @@ To skip:  /delete_roll_rule ES
 Positioned below symbol/qty, above order type selector — same slot as `OptionDetailsSection`. Activated when `asset_class === 'FUTURE'`.
 
 Fields displayed:
-- Contract month dropdown (calls `GET /api/futures/contracts/{root}` on mount via React Query)
+- Contract month dropdown (calls `GET /api/futures/contracts/{root}` on mount via React Query, `staleTime: 60_000` — contract list changes infrequently within a session)
 - Multiplier, tick size, tick value
 - Expiry date, first notice date
 - Physical delivery `Alert` (destructive variant) when `settlementType === 'PHYSICAL'`
