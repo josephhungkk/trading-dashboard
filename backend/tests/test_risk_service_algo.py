@@ -158,11 +158,7 @@ async def test_check_algo_capability_blocks_unsupported() -> None:
         "app.services.algo.capability_service.AlgoCapabilityService.get_strategies",
         new=AsyncMock(return_value=[]),
     ):
-        with patch("app.services.risk_service.AlgoCapabilityService") as mock_svc_cls:
-            mock_svc_instance = MagicMock()
-            mock_svc_instance.get_strategies = AsyncMock(return_value=[])
-            mock_svc_cls.return_value = mock_svc_instance
-            result = await svc._check_algo_capability(ctx)
+        result = await svc._check_algo_capability(ctx)
     assert result is not None
     blocker, _ = result
     assert blocker is not None

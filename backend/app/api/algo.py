@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-import structlog
 from fastapi import APIRouter, Depends, Request
 
 from app.core.deps import require_admin_jwt
 from app.services.algo.schemas import ALGO_PARAM_SCHEMAS
 
 router = APIRouter(prefix="/api/algo", tags=["algo"])
-log = structlog.get_logger(__name__)
 
 
 @router.get("/capabilities/{broker_id}/{asset_class}", dependencies=[Depends(require_admin_jwt)])

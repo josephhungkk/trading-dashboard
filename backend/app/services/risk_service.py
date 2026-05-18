@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from app.services.combos.types import ComboContext
 
 CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
-AlgoCapabilityService: type[Any] | None = None
 
 # Phase 10a.5 A3.1 (CRIT-2): 3x the 30s discoverer cycle (brokers.py:1036).
 _STALENESS_WARN_SECONDS = 90.0
@@ -673,13 +672,8 @@ class RiskService:
         if ctx.asset_class is None:
             return None
         try:
-            global AlgoCapabilityService
-            if AlgoCapabilityService is None:
-                from app.services.algo.capability_service import (
-                    AlgoCapabilityService as _AlgoCapabilityService,
-                )
+            from app.services.algo.capability_service import AlgoCapabilityService
 
-                AlgoCapabilityService = _AlgoCapabilityService
             svc = AlgoCapabilityService(redis=self._redis, db=self._db)
             rows = await svc.get_strategies(ctx.broker_id, ctx.asset_class)
             enabled = {r["algo_strategy"] for r in rows}
@@ -708,7 +702,8 @@ class RiskService:
         """Validate display_size for ICEBERG/RESERVE/DARK_ICE orders."""
         from app.services.algo.schemas import DISPLAY_ALGOS
 
-        if ctx.algo_strategy not in {str(s) for s in DISPLAY_ALGOS}:
+        display_algo_strs = {str(s) for s in DISPLAY_ALGOS}
+        if ctx.algo_strategy not in display_algo_strs:
             return None
 
         from decimal import InvalidOperation

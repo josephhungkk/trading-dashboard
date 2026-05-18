@@ -258,6 +258,7 @@ async def preview_order(
         order_type=request.order_type,
         tif=request.tif,
         skip_operational_checks=True,
+        algo_strategy=str(request.algo_strategy) if request.algo_strategy else None,
     )
     client = await registry.get_client(account.gateway_label)
     contract = await _resolve_contract(client, request.conid)
@@ -934,6 +935,7 @@ async def place_order(
         order_type=request.order_type,
         tif=request.tif,
         skip_operational_checks=True,
+        algo_strategy=str(request.algo_strategy) if request.algo_strategy else None,
     )
     client = await registry.get_client(account.gateway_label)
     contract = await _resolve_contract(client, request.conid)
