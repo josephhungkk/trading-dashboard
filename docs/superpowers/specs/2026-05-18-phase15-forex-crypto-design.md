@@ -29,31 +29,38 @@ No trading via Coinbase — execution is IBKR Paxos only. Coinbase is data-only.
 
 ```sql
 CREATE TABLE forex_rfq_quotes (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id      UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
-    instrument_id   BIGINT NOT NULL REFERENCES instruments(id) ON DELETE RESTRICT,
-    bid             NUMERIC(20,8) NOT NULL,
-    ask             NUMERIC(20,8) NOT NULL,
-    ttl_seconds     INT NOT NULL,
-    broker_quote_id TEXT,
-    side            TEXT CHECK (side IN ('BUY', 'SELL')),
-    notional        NUMERIC(20,8),
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id        UUID NOT NULL DEFAULT gen_random_uuid(),
+    account_id        UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
+    instrument_id     BIGINT NOT NULL REFERENCES instruments(id) ON DELETE RESTRICT,
+    bid               NUMERIC(20,8) NOT NULL,
+    ask               NUMERIC(20,8) NOT NULL,
+    ttl_seconds       INT NOT NULL,
+    broker_quote_id   TEXT,
+    side              TEXT CHECK (side IN ('BUY', 'SELL')),
+    notional          NUMERIC(20,8),
     notional_currency TEXT,
-    status          TEXT NOT NULL CHECK (status IN ('pending','accepting','accepted','expired','rejected')),
-    reject_reason   TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at      TIMESTAMPTZ NOT NULL
+    status            TEXT NOT NULL CHECK (status IN ('pending','accepting','accepted','expired','rejected')),
+    reject_reason     TEXT,
+    order_id          UUID REFERENCES orders(id) ON DELETE SET NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at        TIMESTAMPTZ NOT NULL
 );
+-- Partial UNIQUE prevents duplicate pending quotes per broker_quote_id.
+-- ON INSERT conflict: 409 broker_quote_id_already_pending (see §4.2).
 CREATE UNIQUE INDEX forex_rfq_quotes_broker_quote_id_idx
     ON forex_rfq_quotes (broker_quote_id) WHERE broker_quote_id IS NOT NULL;
 CREATE INDEX forex_rfq_quotes_account_status_idx
     ON forex_rfq_quotes (account_id, status, expires_at);
 ```
 
-Note: `instrument_id` replaces bare `canonical_id TEXT` — the resolver guarantees canonical form before write. `status` adds `accepting` intermediate state (H3). `reject_reason` captures broker-side rejection detail.
+Notes:
+- `request_id` minted at `request_quote` time, reused on `accept_quote` as `EvaluationContext.request_id` for risk re-evaluation idempotency.
+- `order_id FK` populated on accept success (step 3, Session 2).
+- `broker_quote_id` UNIQUE index is partial (`WHERE NOT NULL`); if broker reuses an id, INSERT fails → `request_quote` catches and returns 409 `broker_quote_id_already_pending` (log WARNING).
+- `status` adds `accepting` intermediate state; `reject_reason` captures broker-side rejection detail.
 
-- Add `forex_max_notional_per_trade NUMERIC(20,8)` column to `risk_limits` (nullable; NULL = no cap). This is a deliberate denormalization from the `limit_kind` row convention for hot-path lookup — the same approach taken by Phase 13's `max_combo_loss_native` / `max_combo_net_delta` columns (alembic 0049), where per-feature numeric caps were promoted to typed columns rather than `scope_type+limit_kind` rows.
-  - **Scope applicability:** readable at `scope_type IN ('global', 'account')`. NULL at broker scope. Resolution order: account row (if set) → global row (if set) → no cap. Matches the per-account-override pattern used by `max_daily_loss_*`. Resolved in `_check_forex_exposure` via `_resolve_limit(account_id, broker_id, 'forex_max_notional_per_trade')` (same helper used by existing checks).
+- **No new column on `risk_limits`.** FX notional cap uses the existing `limit_kind` row convention (same as all other caps): `INSERT INTO risk_limits (scope_type, scope_id, limit_kind, limit_value) VALUES ('global', NULL, 'forex_max_notional_per_trade', 100000)`. `_resolve_limit(account_id, broker_id, 'forex_max_notional_per_trade')` works as-is — it already queries `RiskLimit.limit_kind == kind` rows. Resolution order: account row → global row → no cap (same as all other limits). No migration column change needed.
 - `ForexDetails` discriminated-union arm added to `app/services/options/types.py` `InstrumentMeta`:
 
 ```python
@@ -98,9 +105,9 @@ CREATE TABLE crypto_order_book_snapshots (
 SELECT create_hypertable('crypto_order_book_snapshots', 'captured_at');
 -- 7-day retention
 SELECT add_retention_policy('crypto_order_book_snapshots', INTERVAL '7 days');
--- 1h CAGG: top-3 levels per side (OHLC of price, avg qty)
+-- 1h CAGG: top-3 levels per side (OHLC of price, avg qty); materialized_only=false for real-time
 CREATE MATERIALIZED VIEW crypto_order_book_1h
-    WITH (timescaledb.continuous) AS
+    WITH (timescaledb.continuous, timescaledb.materialized_only=false) AS
     SELECT time_bucket('1 hour', captured_at) AS bucket,
            instrument_id, source, side, level,
            first(price, captured_at) AS price_open,
@@ -109,6 +116,13 @@ CREATE MATERIALIZED VIEW crypto_order_book_1h
     FROM   crypto_order_book_snapshots
     WHERE  level <= 3
     GROUP BY bucket, instrument_id, source, side, level;
+-- CAGG refresh policy — without this the view exists but never auto-refreshes
+SELECT add_continuous_aggregate_policy(
+    'crypto_order_book_1h',
+    start_offset      => INTERVAL '7 days',
+    end_offset        => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour'
+);
 ```
 
 Volume estimate: 20 pairs × 2 sides × 10 levels × 1/min ≈ 576k rows/day. With 7-day retention: ~4M rows max. Hypertable + retention policy keeps storage bounded without manual pruning.
@@ -158,12 +172,18 @@ Added to `app/services/market_calendar.py` (or `_crypto_calendar.py`):
 account_nlv_base: Decimal | None = None
 # Populated by orders_service.preview_order / place_order before calling
 # RiskService.evaluate(). Source: Redis key account:nlv:{account_id}:{base_ccy}
-# written by BalanceSnapshotWriter on each NLV tick (5s TTL approximation).
+# with 15s TTL (allows for missed ticks during IBKR reset windows).
 # None → concentration check is skipped (logged at INFO; no fail-open counter
 # incremented — this is a data-availability condition, not an error).
 ```
 
-`orders_service` already reads `account.currency_base` before `evaluate()` — the NLV Redis lookup is one additional `await redis.get(f"account:nlv:{account_id}:{base_ccy}")` call at that same point, coerced to `Decimal | None`.
+**`BalanceSnapshotWriter.write_snapshot` is extended** (one line) to additionally write the Redis key after the table insert succeeds:
+
+```python
+await redis.set(f"account:nlv:{account_id}:{base_ccy}", str(nlv), ex=15)
+```
+
+This is a new write in `balance_snapshot_writer.py` — scoped to 15b Chunk B (alongside `crypto_service.py`). The writer already has a Redis reference and runs on each NLV tick. `orders_service` already reads `account.currency_base` before `evaluate()` — the NLV lookup is one additional `await redis.get(...)` call coerced to `Decimal | None`.
 
 ---
 
@@ -229,19 +249,22 @@ rpc StreamFxRates(google.protobuf.Empty) returns (stream FxMidRate);
   1. Calls `_ensure_forex_instrument(db, pair)` to guarantee an `instruments` row exists.
   2. Calls `ForexInstrumentResolver.resolve(pair)` to get the `instrument_id`.
   3. Calls sidecar `RequestFxQuote` RPC.
-  4. Persists `forex_rfq_quotes` row (`status=pending`, `instrument_id` FK).
+  4. Persists `forex_rfq_quotes` row (`status=pending`, `instrument_id` FK, `request_id=gen_random_uuid()`) using `INSERT ... ON CONFLICT (broker_quote_id) DO NOTHING RETURNING id`. If no row returned (broker reused a broker_quote_id from an existing pending quote): raise HTTP 409 `broker_quote_id_already_pending` and log WARNING.
   5. Stores CSRF nonce in Redis key `forex:rfq:nonce:{broker_quote_id}` (TTL = `ttl_seconds`).
   6. Returns `FxQuoteResponse`.
 
 - `accept_quote(account_id, broker_quote_id, side, qty)` — **three-state transition with separate sessions**:
-  1. **Session 1:** `SELECT ... FOR UPDATE` where `status='pending'` and `expires_at > now()`. Raises `QuoteExpiredError` (→ HTTP 409) if not found or expired. `UPDATE status='accepting'`. **Explicit `await db.commit()`** — row is visible to concurrent callers; a second accept on the same quote will find `status='accepting'` and be rejected. This is a deliberate departure from the standard request-scoped session, justified because the sidecar RPC is the long-pole and must not hold a row lock.
+  1. **Session 1:** `SELECT ... FOR UPDATE` where `status='pending'` and `expires_at > now()`. Raises `QuoteExpiredError` (→ HTTP 409) if not found or expired. Re-evaluates risk gate (`EvaluationContext` populated with `request_id` from the quote row, `account_nlv_base` from Redis — session may have closed since `request_quote`). On BLOCK: set `status='rejected', reject_reason=<block reason>`, return 422. `UPDATE status='accepting'`. **Explicit `await db.commit()`** — row is visible to concurrent callers; a second accept finds `status='accepting'` and is rejected.
   2. **Sidecar RPC** (outside any DB transaction): calls `AcceptFxQuote`. May take 1–5s.
-  3. **Session 2 (fresh):** On RPC success: insert an `orders` row (account_id, instrument_id, side, qty, price=fill_price, status='filled', client_order_id=`rfq-{broker_quote_id}`) and `UPDATE forex_rfq_quotes SET status='accepted', order_id=<new_order_id>`. On RPC failure or timeout: `UPDATE forex_rfq_quotes SET status='rejected', reject_reason=<broker error>`. Both committed in one TX. The inserted `orders` row flows through the existing `order_event_consumer` fills pipeline for P&L and audit — no consumer-side changes needed.
+  3. **Session 2 (fresh TX):**
+     - On RPC success: INSERT an `orders` row with **all NOT-NULL columns**:
+       `account_id`, `broker_id` (from account), `instrument_id`, `conid` (from `instrument.conid`), `symbol` (from `instrument.canonical_id`), `side`, `qty`, `order_type='MARKET'` (RFQ is implicitly market-against-quote), `tif='IOC'` (fill-or-cancel), `price=fill_price`, `notional=qty×fill_price`, **`status='pending_submit'`**, `filled_qty=0`, `client_order_id=f'rfq-{broker_quote_id}'`.
+       Then `UPDATE forex_rfq_quotes SET status='accepted', order_id=<new_order_id>`. Both in one TX.
+       **The `orders` row is inserted as `pending_submit` / `filled_qty=0`** — the broker fill event consumed by `order_event_consumer` later flips status to `filled` and writes the actual `exec_id` via the standard pipeline. This avoids the double-fill race (consumer uses `ON CONFLICT (exec_id) DO NOTHING`; if no `exec_id` in initial insert, consumer can't deduplicate — so we defer fill accounting to the consumer entirely).
+     - On RPC failure or timeout: `UPDATE forex_rfq_quotes SET status='rejected', reject_reason=<broker error>`.
 
 - `cancel_quote(account_id, broker_quote_id)` — guard `status IN ('pending', 'accepting')`, set `status='rejected'`, calls `CancelFxQuote` sidecar RPC.
 - APScheduler sweep job (every 5s): `UPDATE forex_rfq_quotes SET status='expired' WHERE status='pending' AND expires_at < now()`. 5s frequency matches typical IDEALPRO TTL (3–10s); `GET /api/forex/quotes` also computes effective status in SELECT (`CASE WHEN status='pending' AND expires_at < now() THEN 'expired' ELSE status END`) so listing is never stale regardless of sweep timing.
-
-**`forex_rfq_quotes` schema addition (M2):** add `order_id UUID REFERENCES orders(id) ON DELETE SET NULL` column (populated on accept success; NULL until then).
 
 ### 4.3 `app/api/forex.py` (new)
 
@@ -444,7 +467,7 @@ coinbase_book_lag_seconds                        # histogram: receipt → Redis 
 
 ### 8.1 Shared Component: `FractionalQtyInput`
 
-`src/components/patterns/FractionalQtyInput.tsx` — shared by FX notional input and crypto qty input:
+`src/components/primitives/FractionalQtyInput.tsx` — shared by FX notional input and crypto qty input. Lives in the `primitives/` layer (pure decimal validation, no domain composition); any Decimal-parsing utility it relies on goes in `src/lib/decimal.ts`, not imported from `patterns/` (see CLAUDE.md FE boundary table).
 - Props: `value`, `onChange`, `step` (Decimal string), `min`, `max`, `decimals` (default 8).
 - Validates input against `step` on blur; shows inline error if precision exceeds `decimals`.
 
@@ -486,9 +509,9 @@ Route: `src/routes/crypto.tsx`.
 
 | Chunk | Content | Route |
 |---|---|---|
-| A | Alembic 0051: `forex_rfq_quotes` (with `order_id FK`, `reject_reason`, `accepting` status), `ForexDetails` meta, `forex_max_notional_per_trade` in `risk_limits`; `ForexDetails` + `EvaluationContext.account_nlv_base` in `options/types.py` + `risk_service.py` | **Qwen** |
+| A | Alembic 0051: `forex_rfq_quotes` (with `request_id UUID`, `order_id FK`, `reject_reason`, `accepting` status), `ForexDetails` meta, `forex_max_notional_per_trade` seed row in `risk_limits`; `ForexDetails` + `EvaluationContext.account_nlv_base` in `options/types.py` + `risk_service.py` | **Qwen** |
 | B | `ForexCalendar` + `CryptoCalendar` in `market_calendar.py` (or siblings); `_check_forex_exposure` in `risk_service.py`; `ForexInstrumentResolver` (read-only, `app/services/forex/instrument_resolver.py`) | **Qwen** |
-| C | Proto additions (4 RPCs + messages); `rfq_service.py` (incl. `_ensure_forex_instrument` upsert helper + three-state accept with separate sessions); `app/api/forex.py`; `sidecar_ibkr/handlers.py` `_resolve_contract` FOREX secType branch; Prometheus metric definitions | **Codex** |
+| C | Proto additions (4 RPCs + messages); `rfq_service.py` (incl. `_ensure_forex_instrument` upsert helper + three-state accept with separate sessions); `app/api/forex.py`; `sidecar_ibkr/handlers.py` `SearchContracts` FOREX→secType=CASH/exchange=IDEALPRO branch (~5 lines); verify `_resolve_contract` (PlaceOrder hot path) works for IDEALPRO conids or add explicit secType fallback; Prometheus metric definitions | **Codex** |
 | D | APScheduler TTL sweep job (5s); Prometheus counter wiring; `forex` lifespan hook in `main.py` | **Qwen** |
 | E | FE: `services/forex/types.ts` + `api.ts`; `FxTicketSection`; `FxQuoteDisplay`; `FractionalQtyInput` (ships complete-and-tested in `src/components/primitives/` per FE boundary table; consumed by 15b Chunk F without re-implementation); TradeTicketModal FX mode toggle | **Codex** |
 | F | FE: `ForexPage.tsx` (4 panels); `routes/forex.tsx`; klinecharts forex source wiring; BE+FE integration tests (RFQ three-state flow, `_ensure_forex_instrument`, session-gap BLOCK, TTL sweep, FX modal countdown) | **Codex** |
@@ -499,8 +522,8 @@ Reviewer chain per chunk: spec-compliance + python-reviewer / typescript-reviewe
 
 | Chunk | Content | Route |
 |---|---|---|
-| A | Alembic 0052: confirm CRYPTO enum, `CryptoDetails` meta arm, `crypto_order_book_snapshots` hypertable + 7d retention + 1h CAGG | **Qwen** |
-| B | `ListCryptoAssets` proto RPC + message; `crypto_service.py`; `app/api/crypto.py` (4 endpoints); `sidecar_ibkr/handlers.py` `_resolve_contract` CRYPTO secType branch | **Codex** |
+| A | Alembic 0052: confirm CRYPTO enum, `CryptoDetails` meta arm, `crypto_order_book_snapshots` hypertable + 7d retention + 1h CAGG + `add_continuous_aggregate_policy` | **Qwen** |
+| B | `ListCryptoAssets` proto RPC + message; `crypto_service.py`; `app/api/crypto.py` (4 endpoints); `sidecar_ibkr/handlers.py` `SearchContracts` CRYPTO→secType=CRYPTO/exchange=PAXOS branch; verify `_resolve_contract` (PlaceOrder hot path) for PAXOS conids; extend `BalanceSnapshotWriter.write_snapshot` with `await redis.set(f"account:nlv:{account_id}:{base_ccy}", str(nlv), ex=15)` (one line after table insert) | **Codex** |
 | C | `coinbase_ws.py`; `book_manager.py` (`OrderBook` dataclass, `apply_delta`, `snapshot`) | **Qwen** |
 | D | `_check_crypto_exposure` in `risk_service.py`; `CryptoCalendar` integration; Prometheus metrics | **Qwen** |
 | E | WS gateway extension (`crypto_book:` subscription type); Redis stream consumer; lifespan wiring | **Codex** |
@@ -518,8 +541,12 @@ Reviewer chain per chunk: spec-compliance + python-reviewer / typescript-reviewe
 - L2 order book for non-crypto asset classes — Phase 18+ (scanner phase).
 - Crypto staking / earn features — out of scope for v1.0.
 - `forex_rfq_quotes` monthly retention policy — add when v1.0 prod traffic warrants it (Phase 24 infra hardening).
+- **L1 (pass-3):** Coinbase reconnect staleness has no server-side flag — FE's `last update > 5s` amber badge is sufficient for v1; a Phase 10b.2-style `{type:"stale", canonical_ids:[...]}` WS frame deferred to Phase 18+ scanner work.
+- **L2 (pass-3):** `FractionalQtyInput` uses `src/components/primitives/` path; any Decimal-parsing utility lives in `src/lib/decimal.ts` (not imported from `patterns/`). Already reflected in §8.1.
 
 ## 11. Architect Review Findings Applied (2026-05-18)
+
+### §11.1 Pass-1 Architect Review (2026-05-18)
 
 0 CRIT · 4 HIGH · 6 MED applied inline. 3 LOW + 2 INFO noted.
 
@@ -555,3 +582,18 @@ Reviewer chain per chunk: spec-compliance + python-reviewer / typescript-reviewe
 - **L1** — Asset_class string-literal style (`"FOREX"`, `"CRYPTO"`) used in dispatch branches to match existing `risk_service.py:877` style. §3.3 updated.
 - **L2** — `/api/forex/pairs` data source specified: `app_config[forex/enabled_pairs]`, defaults to IDEALPRO majors. §5.3 updated.
 - **L3** — `FractionalQtyInput` moved to `src/components/primitives/` (primitive layer, no domain composition). §9 Chunk E updated.
+
+### §11.3 Pass-3 Architect Review Findings Applied (2026-05-18)
+
+2 CRIT · 2 HIGH · 4 MED applied inline. 2 LOW noted in §10.
+
+- **C1** — Redis key `account:nlv:{account_id}:{base_ccy}` was not written by any existing code. Fixed: §3.3 explicitly specifies that `BalanceSnapshotWriter.write_snapshot` is extended with one `await redis.set(...)` line (ex=15) after the table insert. Scoped to 15b Chunk B. §3.3 updated.
+- **C2** — `crypto_order_book_1h` CAGG was missing `add_continuous_aggregate_policy`; CAGG would exist but never auto-refresh. Added the `SELECT add_continuous_aggregate_policy(...)` call with 7d/1h offsets and 1h schedule. §2.2 updated; 15b Chunk A content updated.
+- **H1** — `accept_quote` orders-row INSERT was missing 5 NOT-NULL columns: `conid`, `symbol`, `order_type`, `tif`, `notional`. §4.2 step 3 now specifies all required columns. `request_id` carry-through also clarified. §4.2 updated.
+- **H2** — Internal contradiction: `forex_max_notional_per_trade` was described as both a typed column AND looked up via row-based `_resolve_limit`. Resolved by dropping the typed column; using the `limit_kind` row convention (INSERT seed row). `_resolve_limit` works as-is. §2.1 updated; 15a Chunk A description updated.
+- **M1** — `SearchContracts` vs `_resolve_contract` (PlaceOrder) distinction clarified. The ~5-line secType map extension lands in `SearchContracts` (operator-driven pair browsing). `_resolve_contract` (PlaceOrder hot path, conid-only) must be verified for IDEALPRO/PAXOS conids; explicit secType fallback added if needed. §6.2 updated; 15a Chunk C and 15b Chunk B content updated.
+- **M2** — `request_id UUID NOT NULL DEFAULT gen_random_uuid()` added to `forex_rfq_quotes` schema; set at `request_quote` time; carried through to `accept_quote` for risk re-evaluation idempotency. §2.1 updated.
+- **M3** — Orders row status flow clarified: INSERT as `pending_submit` / `filled_qty=0` (not `filled`). `order_event_consumer` flips to `filled` on broker fill event via `exec_id` — avoids double-fill race. §4.2 updated.
+- **M4** — `INSERT ... ON CONFLICT (broker_quote_id) DO NOTHING RETURNING id` → 409 `broker_quote_id_already_pending` if no row returned. §4.2 step 4 updated.
+- **L1** — Coinbase reconnect staleness WS frame deferred to Phase 18+. Noted in §10.
+- **L2** — `FractionalQtyInput` Decimal utility must live in `src/lib/decimal.ts`. §8.1 corrected to `primitives/` path; note added.
