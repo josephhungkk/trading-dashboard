@@ -76,6 +76,9 @@ class Order(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
     last_event_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    combo_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("combo_orders.id"), nullable=True
+    )
 
     events: Mapped[list[OrderEvent]] = relationship(
         "OrderEvent",
@@ -112,6 +115,7 @@ class Order(Base):
             "created_at",
             postgresql_where=status == "pending_submit",
         ),
+        Index("orders_combo_id_idx", "combo_id", postgresql_where=combo_id.is_not(None)),
     )
 
     def __repr__(self) -> str:

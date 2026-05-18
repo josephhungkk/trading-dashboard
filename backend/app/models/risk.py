@@ -64,6 +64,11 @@ class RiskLimit(Base):
     limit_kind: Mapped[str] = mapped_column(risk_limit_kind, nullable=False)
     limit_value: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     warn_at_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    max_combo_loss_native: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    max_combo_net_delta: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    combo_legout_autoclose: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     notes: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     created_at: Mapped[datetime] = mapped_column(
@@ -133,10 +138,13 @@ class AccountKillSwitchHistory(Base):
 class RiskDecision(Base):
     __tablename__ = "risk_decisions"
     __table_args__ = (
-        CheckConstraint("side IN ('buy', 'sell')", name="risk_decisions_side_check"),
+        CheckConstraint("side IN ('buy', 'sell', 'combo')", name="risk_decisions_side_check"),
         CheckConstraint("latency_ms >= 0", name="risk_decisions_latency_check"),
         CheckConstraint(
-            "attempt_kind IN ('preview', 'place_order', 'modify_order')",
+            "attempt_kind IN ("
+            "'preview', 'place_order', 'modify_order', "
+            "'combo_preview', 'combo_place', 'combo_autoclose'"
+            ")",
             name="risk_decisions_attempt_kind_check",
         ),
     )

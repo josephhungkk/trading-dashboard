@@ -1,6 +1,7 @@
 """ORM models."""
 
 from app.models.base import Base
+from app.models.combos import ComboOrder, OrderLeg
 from app.models.config import AppConfig, AppSecret
 from app.models.instruments import AssetClass, Instrument, SymbolAlias
 from app.models.options import ExerciseElection, OptionGreeks
@@ -23,11 +24,13 @@ __all__ = [
     "AssetClass",
     "Base",
     "BrokerOrderCapability",
+    "ComboOrder",
     "ExerciseElection",
     "Instrument",
     "OptionGreeks",
     "Order",
     "OrderEvent",
+    "OrderLeg",
     "OrderType",
     "RiskDecision",
     "RiskLimit",
