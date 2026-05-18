@@ -22,6 +22,9 @@ def _leg_signed_premium(leg: LegSpec, mid: Decimal) -> Decimal:
 
 
 def compute_envelope(spec: ComboSpec, mids: dict[int, Decimal]) -> ComboEnvelope:
+    missing = [i for i in range(len(spec.legs)) if i not in mids]
+    if missing:
+        raise ValueError(f"mids missing leg indices: {missing}")
     dispatch = {
         "VERTICAL": _vertical,
         "CALENDAR": _calendar,

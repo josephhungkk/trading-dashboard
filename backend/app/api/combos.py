@@ -34,7 +34,7 @@ def get_combos_redis(request: Request) -> Any:
     redis = getattr(request.app.state, "redis", None)
     if redis is not None:
         return redis
-    return Redis.from_url(settings.redis_url, decode_responses=False)
+    return Redis.from_url(settings.redis_url, decode_responses=True)
 
 
 RedisDep = Annotated[Any, Depends(get_combos_redis)]

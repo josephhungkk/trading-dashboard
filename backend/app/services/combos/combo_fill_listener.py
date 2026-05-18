@@ -59,7 +59,13 @@ async def _recompute_combo_status(db: AsyncSession, combo_id: UUID) -> str:
         return "filled"
     if all(s in ("cancelled", "rejected") for s in statuses) and all(q == 0 for q in filled_qtys):
         return "cancelled"
-    if any(q > 0 for q in filled_qtys) and any(s in ("cancelled", "rejected") for s in statuses):
+    terminal = {"filled", "cancelled", "rejected"}
+    all_terminal = all(s in terminal for s in statuses)
+    if (
+        all_terminal
+        and any(q > 0 for q in filled_qtys)
+        and any(s in ("cancelled", "rejected") for s in statuses)
+    ):
         return "legged_out"
     if any(q > 0 for q in filled_qtys):
         return "partially_filled"

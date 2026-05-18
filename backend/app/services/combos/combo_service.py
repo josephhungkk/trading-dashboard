@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import structlog
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.combos import ComboOrder, OrderLeg
 from app.models.orders import Order
+from app.schemas.risk import GateVerdict
 from app.services.combos.pnl_envelope import compute_envelope
 from app.services.combos.strategy_validator import validate
 from app.services.combos.types import ComboContext, LegContext, LegSpec
@@ -19,11 +20,15 @@ from app.services.combos.types import ComboContext, LegContext, LegSpec
 log = structlog.get_logger(__name__)
 
 
+class _ComboRiskProtocol(Protocol):
+    async def evaluate_combo(self, ctx: ComboContext, mode: str) -> GateVerdict: ...
+
+
 async def preview(
     db: AsyncSession,
     account_id: str,
     payload: dict[str, Any],
-    risk_svc: Any,
+    risk_svc: _ComboRiskProtocol,
     redis: Any,
     mode: str = "preview",
 ) -> dict[str, Any]:
@@ -100,7 +105,7 @@ async def confirm(
     if stored_hash is None:
         raise ValueError("nonce_invalid")
     legs = [LegSpec(**leg) for leg in legs_payload]
-    stored_str = stored_hash.decode() if isinstance(stored_hash, bytes) else stored_hash
+    stored_str = stored_hash if isinstance(stored_hash, str) else stored_hash.decode()
     if stored_str != _payload_hash(legs, client_combo_id):
         raise ValueError("payload_drift")
 
@@ -139,7 +144,8 @@ async def confirm(
 
     try:
         response = await broker_client.place_combo(combo, legs)
-    except Exception:
+    except Exception as exc:
+        log.exception("combo_place_failed", combo_id=str(combo.id), error=str(exc))
         combo.status = "rejected"
         await db.flush()
         raise
@@ -192,11 +198,14 @@ def _payload_hash(legs: list[LegSpec], client_combo_id: str) -> str:
             "put_call": leg.put_call,
             "ratio": leg.ratio,
             "qty": str(leg.qty),
+            "limit_price": str(leg.limit_price) if leg.limit_price is not None else None,
             "position_effect": leg.position_effect,
         }
         for i, leg in enumerate(legs)
     ]
-    return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps({"combo_id": client_combo_id, "legs": canonical}, sort_keys=True).encode()
+    ).hexdigest()
 
 
 async def _fetch_mids(legs: list[LegSpec]) -> dict[int, Decimal]:
