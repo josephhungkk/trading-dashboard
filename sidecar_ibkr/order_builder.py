@@ -7,6 +7,7 @@ without triggering the gRPC generated-code sys.modules requirements.
 from __future__ import annotations
 
 from collections.abc import Callable
+from decimal import Decimal as _Decimal
 from typing import Protocol
 
 # MED-sec-4: exchange-aware GTD timezone map.
@@ -23,6 +24,44 @@ _EXCHANGE_TZ = {
 
 # Legacy constant retained for backward-compat with callers that use it directly.
 _IBKR_GTD_EOD_TIME = "23:59:59 US/Eastern"
+
+# Phase 17: IBKR algo strategy string mapping.
+# Casing verified against ibapi AlgoParam constants.
+_ALGO_STRATEGY_MAP: dict[str, str] = {
+    "ADAPTIVE": "Adaptive",
+    "TWAP": "Twap",
+    "VWAP": "Vwap",
+    "ARRIVAL_PRICE": "ArrivalPx",
+    "ICEBERG": "Iceberg",
+    "RESERVE": "PctVol",
+    "DARK_ICE": "DarkIce",
+}
+
+_ALGO_STRATEGY_MAP_REVERSE: dict[str, str] = {v: k for k, v in _ALGO_STRATEGY_MAP.items()}
+assert len(_ALGO_STRATEGY_MAP_REVERSE) == len(_ALGO_STRATEGY_MAP), (
+    "_ALGO_STRATEGY_MAP must be 1:1; reverse mapping would be ambiguous"
+)
+
+_DISPLAY_ALGOS = frozenset({"ICEBERG", "RESERVE", "DARK_ICE"})
+
+_ALGO_TAGVALUE_KEYS: dict[str, dict[str, str]] = {
+    "ADAPTIVE": {"urgency": "adaptPriority"},
+    "TWAP": {
+        "start_time": "startTime",
+        "end_time": "endTime",
+        "allow_past_end_time": "allowPastEndTime",
+    },
+    "VWAP": {
+        "start_time": "startTime",
+        "end_time": "endTime",
+        "max_pct_vol": "maxPctVol",
+        "no_take_liq": "noTakeLiq",
+    },
+    "ARRIVAL_PRICE": {"urgency": "adaptPriority", "max_pct_vol": "maxPctVol"},
+    "ICEBERG": {"display_size": "displaySize"},
+    "RESERVE": {"display_size": "displaySize", "randomize_size": "randomizeSize"},
+    "DARK_ICE": {"display_size": "displaySize"},
+}
 
 
 def _gtd_string(expiry_date: str, exchange: str = "NYSE") -> str:
@@ -216,3 +255,61 @@ def attach_oca_group(order: OrderLike, group_id: str, oca_type: int = 1) -> None
         raise ValueError(f"oca_type must be 1, 2, or 3 (got {oca_type})")
     order.ocaGroup = group_id
     order.ocaType = oca_type
+
+
+def build_ib_algo_order(order: object, request: object) -> None:
+    """Set order.algoStrategy and order.algoParams from request.algo_strategy/algo_params.
+
+    Raises ValueError on invalid params (defence-in-depth; risk gate is primary).
+    Must be called after base order is built.
+    """
+    try:
+        from ibapi.tag_value import TagValue
+    except ImportError:
+
+        class TagValue:  # type: ignore[no-redef]
+            def __init__(self, tag: str, value: str) -> None:
+                self.tag = tag
+                self.value = value
+
+    strategy: str = str(request.algo_strategy)  # type: ignore[attr-defined]
+    params: dict[str, str] = dict(request.algo_params or {})  # type: ignore[attr-defined]
+    order_type: str = str(request.order_type)  # type: ignore[attr-defined]
+
+    if len(params) > 16:
+        raise ValueError(f"algo_params has too many keys ({len(params)}); max 16")
+    for k, v in params.items():
+        if len(v) > 64:
+            raise ValueError(f"algo_params[{k!r}] value too long ({len(v)} chars); max 64")
+
+    if strategy in _DISPLAY_ALGOS and order_type != "LIMIT":
+        raise ValueError(f"strategy {strategy!r} requires LMT order type, got {order_type!r}")
+
+    if strategy in _DISPLAY_ALGOS:
+        ds = params.get("display_size", "0")
+        try:
+            if _Decimal(ds) <= 0:
+                raise ValueError(f"display_size must be > 0 for {strategy!r}, got {ds!r}")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(str(exc)) from exc
+
+    ibkr_strategy = _ALGO_STRATEGY_MAP.get(strategy)
+    if ibkr_strategy is None:
+        raise ValueError(f"Unknown algo strategy: {strategy!r}")
+
+    order.algoStrategy = ibkr_strategy  # type: ignore[attr-defined]
+
+    key_map = _ALGO_TAGVALUE_KEYS.get(strategy, {})
+    tag_values = []
+    for our_key, ibkr_key in key_map.items():
+        if our_key in params:
+            val = params[our_key]
+            if our_key in ("start_time", "end_time") and len(val) == 5:
+                val = val + ":00"
+            if our_key in ("allow_past_end_time", "no_take_liq", "randomize_size"):
+                val = "1" if val.lower() == "true" else "0"
+            tag_values.append(TagValue(ibkr_key, val))  # type: ignore[operator]
+
+    order.algoParams = tag_values  # type: ignore[attr-defined]
