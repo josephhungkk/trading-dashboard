@@ -7,6 +7,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 16 — Bonds + Mutual Funds + CFD (v0.16.0)
+
+Phase 16 shipped on 2026-05-18. 1712 BE tests green (1712 pass, 46 skip); 701 FE tests green. Adds three new instrument asset classes: bonds, mutual funds, and CFDs.
+
+**Migrations (Alembic 0053–0056)**
+
+- `0053_phase16a_bonds.py`: `BOND` added to `instrument_asset_class` PG enum; `bond_max_notional_per_trade` + `bond_max_concentration_pct` added to `risk_limit_kind`; `bonds_accrued_interest` table (instrument_id FK, account_id FK, accrued NUMERIC(20,8), as_of DATE, UNIQUE(instrument_id, account_id, as_of)); global risk limit defaults inserted.
+- `0054_phase16b_funds.py`: `MUTUAL_FUND` added to `instrument_asset_class`; `fund_nav_snapshots` TimescaleDB hypertable partitioned on `captured_at` (instrument_id, nav NUMERIC, nav_date DATE, source TEXT, captured_at TIMESTAMPTZ); UNIQUE (instrument_id, nav_date, source, captured_at) includes partition column.
+- `0055_phase16c_cfd.py`: `CFD` added to `instrument_asset_class`; `cfd_max_notional`, `cfd_max_leverage`, `cfd_max_concentration_pct` added to `risk_limit_kind`; `broker_accounts.country TEXT` column added; CFD global risk limit defaults inserted.
+- `0056_phase16_fixups.py`: `broker_accounts_country_iso2_check` CHECK constraint (ISO-2 uppercase); indexes on `bonds_accrued_interest(account_id)` and `fund_nav_snapshots(instrument_id, captured_at DESC)`.
+
+**Backend**
+
+- `app/services/options/types.py`: `BondDetails`, `MutualFundDetails`, `CFDDetails` Pydantic models + `CouponFrequency(IntEnum)` added as discriminated-union arms in `InstrumentMeta`; `parse_instrument_meta` return type extended.
+- `app/models/instruments.py`: `AssetClass` StrEnum extended with BOND, MUTUAL_FUND, CFD.
+- `app/models/broker_account.py` (new): BrokerAccount ORM model; `country: Mapped[str | None]` column.
+- `app/services/bonds/bond_search_service.py` (new): `BondSearchService` — Redis singleflight search (TTL 300s, cache key includes limit), `get_accrued_interest`, `upsert_accrued_interest` (ON CONFLICT DO UPDATE, no commit).
+- `app/services/funds/fund_search_service.py` (new): `FundSearchService` — Redis singleflight search, `get_nav_snapshot`, `upsert_nav_snapshot`; structlog; bounded `_sf_locks` (512-entry eviction).
+- `app/services/cfd/cfd_search_service.py` (new): `CFDSearchService` — Redis singleflight search + `get_by_id`; structlog; same sf_locks eviction pattern.
+- `app/services/risk_service.py`: `_check_bond_exposure` (notional BLOCK, concentration WARN, min_investment via meta), `_check_fund_exposure` (notional BLOCK, qty < min_investment BLOCK, concentration WARN), `_check_cfd_exposure` (notional BLOCK, country BLOCK from `cfd_allowed_countries` limit kind, leverage BLOCK, concentration WARN); all fail-OPEN; dispatched from `evaluate()` after CRYPTO block.
+- `app/api/bonds.py` (new): `GET /api/bonds/search`, `GET /api/bonds/{id}`, `GET /api/bonds/{id}/accrued`, `POST /api/bonds/{id}/accrued`; account existence check on accrued endpoints; per-user rate limiter.
+- `app/api/funds.py` (new): `GET /api/funds/search`, `GET /api/funds/{id}`, `GET /api/funds/{id}/nav`, `POST /api/funds/{id}/nav`; `_serialize_row` for Decimal/meta serialization; `UpsertFundNavRequest` with date pattern + source max_length validation.
+- `app/api/cfd.py` (new): `GET /api/cfd/search`, `GET /api/cfd/{id}`; `_serialize_instrument` for Decimal serialization.
+- `app/main.py`: bonds, funds, cfd routers registered.
+- `proto/broker/v1/broker.proto`: `SearchBonds`, `GetBondAccruedInterest`, `SearchFunds`, `SearchCFDs` RPCs + message definitions added.
+
+**Frontend**
+
+- `src/services/bonds/types.ts` + `api.ts` (new): `BondInstrument`, `BondMeta` interfaces; `searchBonds`, `getBond`, `getAccruedInterest` API functions.
+- `src/services/funds/types.ts` + `api.ts` (new): `FundInstrument`, `FundMeta` interfaces; `searchFunds`, `getFund`, getFundNav API functions.
+- `src/services/cfd/types.ts` + `api.ts` (new): `CFDInstrument`, `CFDMeta` interfaces; `searchCFDs`, `getCFD` API functions.
+- `src/features/bonds/BondDetailsSection.tsx` (new): bond details grid (coupon, maturity, ISIN/CUSIP, callable warning with `role="alert"`); `data-testid="bond-details-section"`.
+- `src/features/funds/FundDetailsSection.tsx` (new): fund details grid (family, type, NAV, cutoff time); `data-testid="fund-details-section"`.
+- `src/features/cfd/CFDDetailsSection.tsx` (new): CFD details grid (leverage, margin, overnight rates, leverage warning); `data-testid="cfd-details-section"`.
+- `src/features/bonds/BondsPage.tsx`, `src/features/funds/FundsPage.tsx`, `src/features/cfd/CFDPage.tsx` (new): search pages with debounced TanStack Query, responsive tables.
+- `src/routes/bonds.tsx`, `funds.tsx`, `cfd.tsx` (new): TanStack Router file-based routes.
+- `src/features/orders/TradeTicketModal.tsx`: BOND, MUTUAL_FUND, CFD detail sections injected after CRYPTO block.
+
+**Deferred**
+
+- Real broker sidecar dispatch for bonds/funds/CFD (503 until a future phase).
+- Admin UI for `broker_accounts.country` field.
+- CSRF nonce on POST /accrued + POST /nav (current protection: CF Access SameSite=Strict JWT; nonce deferred to Phase 24 auth hardening).
+
+---
+
 ### Phase 15b — Crypto (v0.15.1)
 
 Phase 15b shipped on 2026-05-18 at tag `v0.15.1`. 1711 BE tests green; 701 FE tests green. Adds IBKR Paxos crypto with Coinbase WS order-book feed, real-time WS gateway, crypto risk gate, and `/crypto` UI.
