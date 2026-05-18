@@ -34,19 +34,22 @@ Each sub-phase follows the same cross-cutting pattern established in Phase 14/15
   def add_business_days(exchange: str, start: date, n: int) -> date:
       """Add n business days using exchange_calendars schedule.
 
-      Precondition: start is a session day on exchange (orders cannot
-      be placed on closed exchanges; enforced by _check_*_session helpers).
-      days[0] == start by precondition; the n-th business day after start
-      is days[n].
+      next_trading_days is inclusive of start when start is a session day
+      (days[0] == start). If start is a non-session day (weekend/holiday),
+      days[0] is the next session — the n-th business day after start is
+      then days[n - 1]. Both branches are handled below.
       """
       days = next_trading_days(exchange, n + 1, from_date=start)
-      return days[n]  # days[0] == start; days[n] is n days later
+      if days[0] == start:
+          return days[n]      # start is a session day: skip it
+      return days[n - 1]      # start is non-session: count from days[0]
   ```
 
   `next_trading_days` signature: `next_trading_days(exchange: str, n: int, from_date: date | None = None)`. The spec writes `next_trading_days(exchange, n + 1, from_date=start)` — using keyword arg for `from_date`.
 
-  **Unit tests (Chunk B test plan):**
-  - `add_business_days("XNYS", date(2026, 5, 22), 2) == date(2026, 5, 26)` — T+2 across Memorial Day (May 25)
+  **Unit tests (Chunk B test plan) — both branches must be covered:**
+  - `add_business_days("XNYS", date(2026, 5, 22), 2) == date(2026, 5, 26)` — start on Friday (session day), T+2 across Memorial Day (May 25)
+  - `add_business_days("XNYS", date(2026, 5, 23), 2) == date(2026, 5, 26)` — start on Saturday (non-session), T+2 across Memorial Day
   - `add_business_days("XLON", date(2025, 12, 24), 2) == date(2025, 12, 30)` — T+2 across Christmas
 
   Exchange is resolved from instrument currency: `USD→XNYS`, `GBP→XLON`, `EUR→XTAR`, `HKD→XHKG`, `JPY→XTKS`, default `XNYS`. Spec calls become `add_business_days(exchange_for_currency(currency), trade_date, settlement_days)`.
@@ -397,7 +400,14 @@ Sidecar: IBKR `secType="FUND"`, Schwab `assetType=MUTUAL_FUND` in order dispatch
 
 Called when `ctx.asset_class == AssetClass.MUTUAL_FUND`. Fail-OPEN on infrastructure errors; increments `fund_risk_check_failures_total`.
 
-**Inline position SELECT pattern:** `_check_fund_exposure` executes a one-shot ORM `select(Position).where(Position.account_id == ..., Position.instrument_id == ...)` to determine first vs subsequent purchase. Uses ORM (not raw `text()`) for consistency with `_check_position_concentration` (risk_service.py:308+). Note: existing `_check_forex_exposure` uses a raw `text()` SELECT — migration to ORM is tracked as a follow-up cleanup (§7), not Phase 16 scope.
+**Inline position SELECT pattern:** `_check_fund_exposure` executes a one-shot raw `text()` SELECT for consistency with `_check_position_concentration` and `_check_forex_exposure` — every positions-table query in `risk_service.py` is raw `text()` today; ORM migration is a separate refactor not in Phase 16 scope. Concrete example to copy verbatim:
+```python
+row = await db.execute(
+    text("SELECT qty FROM positions WHERE account_id = :aid AND instrument_id = :iid LIMIT 1"),
+    {"aid": str(ctx.account_id), "iid": ctx.instrument_id},
+)
+existing_qty = row.scalar()  # None if no position
+```
 
 - **WARN** (not hard BLOCK): `now_et >= MutualFundDetails.cutoff_time_et` where `now_et = datetime.now(ZoneInfo('America/New_York')).time()` → `fund_cutoff_passed`. `PreviewResponse.next_nav_date` = next business day via `add_business_days(exchange_for_currency(currency), today, 1)`. Banner: "Will execute at next-day NAV ([date])."
 - **BLOCK (min investment):** `notional < min_investment` (first purchase: no existing position) or `notional < min_subsequent` (existing position). No `existing_qty` field on `EvaluationContext`. → `below_minimum_investment`
@@ -557,7 +567,7 @@ Called when `ctx.asset_class == AssetClass.CFD`. Fail-OPEN on infrastructure err
 
 #### 5.5.0 Prerequisite: `_forex_session_block` refactor (Chunk C sub-task)
 
-Before adding `_check_cfd_exposure`, extract lines 872–882 of `_check_forex_exposure` into a new private method `_forex_session_block(self) -> GateBlockerEntry | None`. Returns `GateBlockerEntry(reason="session_closed", ...)` iff `not is_forex_session_open()`, else `None`.
+Before adding `_check_cfd_exposure`, extract the `if not is_forex_session_open():` block at the top of `_check_forex_exposure` (lines 871–881) into a new private method `_forex_session_block(self) -> GateBlockerEntry | None`. Returns `GateBlockerEntry(reason="session_closed", ...)` iff `not is_forex_session_open()`, else `None`.
 
 Update `_check_forex_exposure` to call `self._forex_session_block()` at its top instead of the inline session check. Re-run the Phase 15a forex gate tests (`tests/test_forex_*`, ~12 tests); none should require changes since externally-observable behavior is identical. Add 1 new test asserting that both `_check_forex_exposure` and `_check_cfd_exposure` return the same blocker entry when forex session is closed.
 
@@ -568,7 +578,7 @@ Both `_check_forex_exposure` and `_check_cfd_exposure` then call `_forex_session
 - **BLOCK (fail-CLOSED):** `broker_accounts.country IS NULL` → `cfd_country_unknown` ("Account country unset; CFD trading requires operator classification. Edit /admin/accounts."). `broker_accounts.country == "US"` → `cfd_not_available_us`. Increments `cfd_country_unknown_block_total` or `cfd_us_block_total` respectively. This is the ONLY gate that fails CLOSED on missing data — consistent with `_check_margin` (risk_service.py:570–580) which fails CLOSED when sidecar unreachable.
 - **BLOCK:** `CFDDetails.margin_rate <= 0` → treat as `implied_leverage = CFDDetails.max_leverage` + emit `WARN cfd_margin_rate_anomalous` (not a hard block; broker placeholder — fail-OPEN). `CFDDetails.margin_rate >= 1` → `implied_leverage = 1` (cash-only, no leverage). Otherwise: `implied_leverage = 1 / CFDDetails.margin_rate`. BLOCK if `implied_leverage > min(_resolve_limit(..., "cfd_max_leverage"), CFDDetails.max_leverage)` → `cfd_leverage_exceeded`.
 - **BLOCK:** `notional > _resolve_limit(..., "cfd_max_notional_per_trade")` (if set) → `cfd_notional_exceeded`
-- **BLOCK (equity CFD session):** `underlying_type == "equity"` and instrument's underlying exchange not currently open → `cfd_equity_session_closed`. Resolution: `SELECT primary_exchange FROM instruments WHERE canonical_id = :underlying_conid`. `primary_exchange` is the column name in `instruments` (instruments.py:54). If `underlying_conid` is None or the lookup returns no row, skip the check + emit `cfd_underlying_resolution_failed_total`. Pass `primary_exchange` to `market_calendar.is_open()`. Index CFDs: skip (broker handles out-of-hours pricing). Commodity CFDs: BLOCK only if `tif == "DAY"` and session closed, otherwise WARN `commodity_cfd_session_advisory`.
+- **BLOCK (equity CFD session):** `underlying_type == "equity"` and instrument's underlying exchange not currently open → `cfd_equity_session_closed`. Resolution: `SELECT primary_exchange FROM instruments WHERE canonical_id = :underlying_conid`. `primary_exchange` is the column name in `instruments` (line ~70). If `underlying_conid` is None or the lookup returns no row, skip the check + emit `cfd_underlying_resolution_failed_total`. Pass `primary_exchange` to `market_calendar.is_open()`. Index CFDs: skip (broker handles out-of-hours pricing). Commodity CFDs: BLOCK only if `tif == "DAY"` and session closed, otherwise WARN `commodity_cfd_session_advisory`.
 - **BLOCK (forex CFD session):** `underlying_type == "forex"` → call `self._forex_session_block()`; propagate if not None.
 - **WARN:** `ctx.account_nlv_base is None` → skip, emit `cfd_concentration_skipped_no_nlv_total.inc()`. Otherwise: single CFD > `cfd_max_concentration_pct` of NLV → `cfd_concentration_warning`.
 - **WARN:** `side == "BUY"` and `tif in ("GTC", "GTD")` → `overnight_financing_advisory` with estimated daily cost.
@@ -644,7 +654,6 @@ InstrumentMeta = Annotated[
 - OANDA as FX CFD data fallback — Phase 18+ (same as Phase 15 deferral).
 - `bonds_accrued_interest` retention / hypertable conversion — Phase 24 infra hardening. Regular table at ~10k rows/year; ~50k rows at 5 years is operationally fine. UK CGT requirement (6 years, extend to 7 to be safe) deferred here. `add_retention_policy` requires a hypertable; migration 0053 deliberately skips it to avoid the BIGSERIAL PK constraint conflict.
 - `PreviewResponse.asset_extras` discriminated consolidation — Phase 17 (three flat optional fields accepted in Phase 16 per MED-7 decision).
-- `_check_forex_exposure` raw `text()` SELECT → ORM migration — follow-up cleanup after Phase 16b; not blocking.
 
 ---
 
@@ -687,8 +696,17 @@ InstrumentMeta = Annotated[
 - **HIGH-B** — `_forex_session_block` refactor scope was unspecified. Added §5.5.0 explicit sub-task: extract lines 872–882 of `_check_forex_exposure`, re-run ~12 Phase 15a forex gate tests (zero changes expected), add 1 regression test for shared session-closed behavior. §5.5 restructured.
 - **HIGH-C** — 16c Chunk D was bundling admin country editor with CFD pages. Split into D1 (admin country editor, ships first) + D2 (CFD pages, ships after D1). Deploy order documented in §5.8. §5.8 updated.
 - **MED-A** — Equity-CFD session check now explicitly names `primary_exchange` (instruments.py:54) as the column to query; `underlying_conid` clarified as broker-native IBKR conid string (not internal BIGINT id); `cfd_underlying_resolution_failed_total` metric added to §5.6. §5.1 `CFDDetails.underlying_conid` field doc updated, §5.5 updated, §5.6 updated.
-- **MED-B** — `_check_fund_exposure` position SELECT changed to ORM pattern (consistent with `_check_position_concentration` at risk_service.py:308+). Raw `text()` legacy (in `_check_forex_exposure`) tracked as §7 follow-up cleanup. §4.5 updated.
+- **MED-B** — `_check_fund_exposure` position SELECT uses raw `text()` for consistency with `_check_position_concentration` and `_check_forex_exposure` (every positions query in `risk_service.py` is `text()`). Concrete example added to §4.5. (Pass-2 said ORM — reversed by CRIT-α in Pass-3.)
 - **MED-C** — Search path now applies same strict cutoff_time parser as sweep: `time.fromisoformat()`, fallback `time(16, 0)`, emit `fund_cutoff_parse_failure_total{stage="search"}`. §4.2 updated, `fund_cutoff_parse_failure_total{stage}` added to §4.7.
 - **MED-D** — §7 INFO-2 Qwen-splittable note dropped. Routing is governed by CLAUDE.md routing table; no hedging language in spec. §7 updated.
 - **LOW-A** — `CouponFrequency` wire form documented: JSON integer (e.g. `2` not `"SEMI_ANNUAL"`). FE int→label map specified in `BondDetails` block and `BondDetailsSection`. §3.1, §3.8 updated.
 - **LOW-B** — `FundDetailsSection` defaults to integer input mode while `allows_fractional` is loading (prevents fractional-entry flicker). §4.8 updated.
+
+---
+
+**Pass-3:** 1 CRIT · 1 HIGH · 2 LOW applied inline.
+
+- **CRIT-α** — Pass-2 MED-B was factually wrong: `_check_position_concentration` at risk_service.py:322–327 uses raw `text()`, not ORM. `_check_fund_exposure` reverted to raw `text()` with a concrete example in §4.5. §7 ORM-migration deferred item removed (there is nothing to migrate toward — the whole module is `text()` for positions queries).
+- **HIGH-α** — `add_business_days` was missing the non-session-start branch. Added `if days[0] == start: return days[n]; return days[n - 1]` guard. Docstring precondition language removed. Unit tests updated in §2 and Chunk B to cover both the session-start and non-session-start branches (Saturday start added).
+- **LOW-α** — `instruments.py:54` citation removed; changed to `line ~70` (actual location of `primary_exchange` column). §5.5 updated.
+- **LOW-β** — "extract lines 872–882" changed to "the `if not is_forex_session_open():` block at the top of `_check_forex_exposure` (lines 871–881)". §5.5.0 updated.
