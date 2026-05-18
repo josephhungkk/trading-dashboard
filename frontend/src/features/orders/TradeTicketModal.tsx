@@ -20,6 +20,7 @@ import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 import { OptionDetailsSection } from '@/features/options/OptionDetailsSection';
 import { ComboBuilder } from '@/features/options/combo/ComboBuilder';
 import { FutureDetailsSection } from '@/features/futures/FutureDetailsSection';
+import { FxTicketSection } from '@/features/forex/FxTicketSection';
 
 type Side = PreviewRequest['side'];
 type SubmittableOrderType = PreviewRequest['order_type'];
@@ -623,6 +624,20 @@ function TradeTicketForm({
             contract={
               (form.contract as TradeTicketContract).futureContract as NonNullable<TradeTicketContract['futureContract']>
             }
+          />
+        )}
+
+      {/* Phase 15a — FX ticket section */}
+      {(form.contract as TradeTicketContract).asset_class === 'FOREX' &&
+        accountId !== null && (
+          <FxTicketSection
+            accountId={accountId}
+            pair={{
+              canonical_id: form.contract.symbol,
+              base_currency: form.contract.symbol.slice(0, 3),
+              quote_currency: form.contract.symbol.slice(3, 6),
+              pip_size: '0.0001',
+            }}
           />
         )}
 
