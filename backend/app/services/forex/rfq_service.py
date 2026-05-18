@@ -158,9 +158,7 @@ async def request_quote(
         raise HTTPException(status_code=409, detail="duplicate_broker_quote_id")
     await db.commit()
     await redis.set(f"forex:rfq:nonce:{broker_quote_id}", secrets.token_hex(16), ex=ttl_seconds)
-    metric = getattr(metrics, "forex_rfq_requests_total", None)
-    if metric is not None:
-        metric.labels(pair=f"{base}{quote}").inc()
+    metrics.forex_rfq_requests_total.labels(pair=f"{base}{quote}").inc()
     return dict(row)
 
 
@@ -288,10 +286,8 @@ async def accept_quote(
         {"id": row["id"], "order_id": order_id},
     )
     await db.commit()
-    metric = getattr(metrics, "forex_rfq_accepts_total", None)
-    if metric is not None:
-        pair = str(row["canonical_id"]).split(":")[-1]
-        metric.labels(pair=pair, outcome="success").inc()
+    pair = str(row["canonical_id"]).split(":")[-1]
+    metrics.forex_rfq_accepts_total.labels(pair=pair, outcome="success").inc()
     return {"order_id": str(order_id), "fill_price": str(fill_price), "status": "accepted"}
 
 
@@ -330,3 +326,20 @@ async def cancel_quote(
         )
     except Exception:
         log.info("forex.rfq.cancel_best_effort_failed", broker_quote_id=broker_quote_id)
+
+
+async def sweep_expired_quotes(db: AsyncSession) -> None:
+    result = await db.execute(
+        text(
+            "UPDATE forex_rfq_quotes SET status = 'expired'"
+            " WHERE status = 'pending' AND expires_at <= now()"
+            " RETURNING id"
+        )
+    )
+    await db.commit()
+    rows = result.fetchall()
+    if rows:
+        metric = getattr(metrics, "forex_rfq_expired_total", None)
+        if metric is not None:
+            metric.inc(len(rows))
+        log.info("forex.rfq.sweep_expired", count=len(rows))

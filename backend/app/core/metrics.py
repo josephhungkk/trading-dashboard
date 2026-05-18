@@ -1077,3 +1077,43 @@ forex_risk_check_failures_total = Counter(
     "FX risk gate infrastructure errors (fail-open)",
     registry=registry,
 )
+
+forex_rfq_requests_total = Counter(
+    "forex_rfq_requests_total",
+    "FX RFQ requests by currency pair.",
+    labelnames=["pair"],
+    registry=registry,
+)
+
+forex_rfq_accepts_total = Counter(
+    "forex_rfq_accepts_total",
+    "FX RFQ accept attempts by currency pair and outcome.",
+    labelnames=["pair", "outcome"],
+    registry=registry,
+)
+
+forex_rfq_expired_total = Counter(
+    "forex_rfq_expired_total",
+    "FX RFQ quotes swept as expired by the TTL sweeper.",
+    registry=registry,
+)
+
+forex_quote_stream_updates_total = Counter(
+    "forex_quote_stream_updates_total",
+    "FX mid-rate stream ticks received by currency pair.",
+    labelnames=["pair"],
+    registry=registry,
+)
+
+forex_risk_blocks_total = Counter(
+    "forex_risk_blocks_total",
+    "FX risk gate BLOCK verdicts by check code.",
+    labelnames=["code"],
+    registry=registry,
+)
+
+forex_rfq_latency_seconds = Histogram(
+    "forex_rfq_latency_seconds",
+    "End-to-end RFQ request latency in seconds.",
+    registry=registry,
+)

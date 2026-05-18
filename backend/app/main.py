@@ -428,6 +428,15 @@ async def lifespan(_app: FastAPI) -> Any:
         _run_hkfe_roll_check,
         CronTrigger(hour=9, minute=0, timezone="Asia/Hong_Kong"),
     )
+    # ── Phase 15a — Forex RFQ TTL sweeper ────────────────────────────────────
+    from app.services.forex.rfq_service import sweep_expired_quotes
+
+    async def _run_forex_sweep() -> None:
+        async with session_factory() as sweep_db:
+            await sweep_expired_quotes(sweep_db)
+
+    scheduler.add_job(_run_forex_sweep, CronTrigger(minute="*/1"))
+
     # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
     # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery
     # dispatcher + capability-flip pubsub listener + nightly retention sweep.
