@@ -14,6 +14,7 @@ export interface LegRequest {
 }
 
 export interface ComboPreviewRequest {
+  account_id: string;
   strategy_type: string;
   underlying_symbol: string;
   underlying_canonical_id: string;
@@ -39,6 +40,7 @@ export interface PreviewResponse {
 }
 
 export interface ConfirmRequest {
+  account_id: string;
   client_combo_id: string;
   legs: LegRequest[];
   underlying_canonical_id: string;

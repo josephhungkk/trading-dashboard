@@ -42,6 +42,7 @@ export function ComboBuilder({ accountId, onClose }: Props) {
     setError(null)
     try {
       const result = await previewCombo({
+        account_id: accountId,
         strategy_type: strategy,
         underlying_symbol: 'AAPL',
         underlying_canonical_id: 'AAPL',
@@ -64,6 +65,7 @@ export function ComboBuilder({ accountId, onClose }: Props) {
     setError(null)
     try {
       await confirmCombo(preview.csrf_nonce, {
+        account_id: accountId,
         client_combo_id: preview.client_combo_id,
         legs: [],
         underlying_canonical_id: 'AAPL',
