@@ -1223,9 +1223,50 @@
       "type": "object"
     },
     "OrderModifyRequest": {
+      "$defs": {
+        "AlgoStrategy": {
+          "enum": [
+            "ADAPTIVE",
+            "TWAP",
+            "VWAP",
+            "ARRIVAL_PRICE",
+            "ICEBERG",
+            "RESERVE",
+            "DARK_ICE"
+          ],
+          "title": "AlgoStrategy",
+          "type": "string"
+        }
+      },
       "additionalProperties": false,
       "description": "PUT /api/orders/{id} body. account_id/conid/side immutable.",
       "properties": {
+        "algo_params": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Algo Params"
+        },
+        "algo_strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/AlgoStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "expiry_date": {
           "anyOf": [
             {
