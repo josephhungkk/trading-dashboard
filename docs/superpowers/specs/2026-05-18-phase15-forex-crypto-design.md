@@ -22,13 +22,15 @@ No trading via Coinbase — execution is IBKR Paxos only. Coinbase is data-only.
 ### 2.1 Alembic 0051 (Phase 15a)
 
 - Confirm `FOREX` present in `instrument_asset_class` PG enum (originally seeded in alembic 0009); add if missing.
+- `ForexInstrumentResolver` (new, `app/services/forex/instrument_resolver.py`, mirrors `ContractResolver` from Phase 14): resolves `(base_currency, quote_currency)` → `instruments` row with `ForexDetails` meta. Called at `request_quote` time before persisting the RFQ. Uses Redis singleflight key `forex:instrument:{base}{quote}` (60 min TTL). Upserts `instruments` on cache miss (same pattern as `ContractResolver._fetch_from_sidecar`).
+
 - New table `forex_rfq_quotes`:
 
 ```sql
 CREATE TABLE forex_rfq_quotes (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id      UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
-    canonical_id    TEXT NOT NULL,
+    instrument_id   BIGINT NOT NULL REFERENCES instruments(id) ON DELETE RESTRICT,
     bid             NUMERIC(20,8) NOT NULL,
     ask             NUMERIC(20,8) NOT NULL,
     ttl_seconds     INT NOT NULL,
@@ -36,7 +38,8 @@ CREATE TABLE forex_rfq_quotes (
     side            TEXT CHECK (side IN ('BUY', 'SELL')),
     notional        NUMERIC(20,8),
     notional_currency TEXT,
-    status          TEXT NOT NULL CHECK (status IN ('pending','accepted','expired','rejected')),
+    status          TEXT NOT NULL CHECK (status IN ('pending','accepting','accepted','expired','rejected')),
+    reject_reason   TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at      TIMESTAMPTZ NOT NULL
 );
@@ -46,18 +49,22 @@ CREATE INDEX forex_rfq_quotes_account_status_idx
     ON forex_rfq_quotes (account_id, status, expires_at);
 ```
 
-- Add `forex_max_notional_per_trade NUMERIC(20,8)` column to `risk_limits` (nullable; NULL = no cap).
+Note: `instrument_id` replaces bare `canonical_id TEXT` — the resolver guarantees canonical form before write. `status` adds `accepting` intermediate state (H3). `reject_reason` captures broker-side rejection detail.
+
+- Add `forex_max_notional_per_trade NUMERIC(20,8)` column to `risk_limits` (nullable; NULL = no cap). Note: this is a deliberate denormalization from the `limit_kind` row convention for hot-path lookup — the same pattern as `risk_limits.combo_max_loss_pct` added in Phase 13.
 - `ForexDetails` discriminated-union arm added to `app/services/options/types.py` `InstrumentMeta`:
 
 ```python
 class ForexDetails(BaseModel):
     asset_class: Literal["FOREX"] = "FOREX"
-    base_currency: str       # e.g. "EUR"
-    quote_currency: str      # e.g. "USD"
-    pip_size: Decimal        # e.g. 0.0001
-    contract_size: Decimal   # e.g. 25000 for EUR.USD mini
-    trading_hours: str       # human-readable, e.g. "Sun 17:00 – Fri 17:00 ET"
+    base_currency: str            # e.g. "EUR"
+    quote_currency: str           # e.g. "USD"
+    pip_size: Decimal             # e.g. 0.0001
+    contract_size: Decimal | None = None  # None for IDEALPRO spot (notional-based, not lot-based)
+    trading_hours: str            # human-readable, e.g. "Sun 17:00 – Fri 17:00 ET"
 ```
+
+`contract_size` is optional because IDEALPRO spot FX is notional-based, not lot-based. FX futures (if added later) may populate it. The FX notional input in §5.2 does NOT divide by `contract_size`.
 
 ### 2.2 Alembic 0052 (Phase 15b)
 
@@ -74,7 +81,7 @@ class CryptoDetails(BaseModel):
     min_notional: Decimal | None  # e.g. 1.00 USD
 ```
 
-- New table `crypto_order_book_snapshots` (periodic audit snapshots; live book in Redis stream):
+- New table `crypto_order_book_snapshots` (periodic audit snapshots written by `CoinbaseWsAdapter` every 60s, top-10 levels per side; live book lives in Redis stream `crypto:book:{canonical_id}` and hash `crypto:book:snap:{canonical_id}`):
 
 ```sql
 CREATE TABLE crypto_order_book_snapshots (
@@ -128,7 +135,7 @@ Added to `app/services/market_calendar.py` (or `_crypto_calendar.py`):
 
 ### 3.3 Risk Gate Integration
 
-`EvaluationContext` gains `asset_class: AssetClass`. Sub-checks `_check_forex_exposure` and `_check_crypto_exposure` call the respective calendar functions. FOREX/CRYPTO asset classes bypass `exchange_calendars` entirely (no IDEALPRO or Paxos entry exists in that library).
+`EvaluationContext.asset_class` already exists as `str | None` in `risk_service.py:102` — no schema change needed. The new dispatch arms `_check_forex_exposure` and `_check_crypto_exposure` are added to `risk_service.evaluate()` as additional `elif ctx.asset_class == AssetClass.FOREX` / `AssetClass.CRYPTO` branches. FOREX/CRYPTO asset classes bypass `exchange_calendars` entirely (no IDEALPRO or Paxos entry exists in that library).
 
 ---
 
@@ -190,10 +197,13 @@ rpc StreamFxRates(google.protobuf.Empty) returns (stream FxMidRate);
 
 ### 4.2 `app/services/forex/rfq_service.py` (new)
 
-- `request_quote(account_id, pair, notional, notional_currency)` — calls sidecar `RequestFxQuote`, persists `forex_rfq_quotes` row (`status=pending`), returns `FxQuoteResponse`.
-- `accept_quote(account_id, broker_quote_id, side, qty)` — fetches row with `FOR UPDATE`, checks `expires_at > now()` (raises `QuoteExpiredError` → HTTP 409 if expired), calls sidecar `AcceptFxQuote`, updates status to `accepted`, wires fill into existing orders pipeline via `order_event_consumer`.
-- `cancel_quote(account_id, broker_quote_id)` — status → `rejected`, calls `CancelFxQuote` sidecar RPC.
-- APScheduler sweep job (every 30s): `UPDATE forex_rfq_quotes SET status='expired' WHERE status='pending' AND expires_at < now()`.
+- `request_quote(account_id, pair, notional, notional_currency)` — calls `ForexInstrumentResolver` to resolve/upsert instrument row, calls sidecar `RequestFxQuote`, persists `forex_rfq_quotes` row (`status=pending`, `instrument_id` FK), stores CSRF nonce in Redis key `forex:rfq:nonce:{broker_quote_id}` (TTL = `ttl_seconds`), returns `FxQuoteResponse`.
+- `accept_quote(account_id, broker_quote_id, side, qty)` — **three-state transition**:
+  1. `SELECT ... FOR UPDATE` where `status='pending'` and `expires_at > now()` — raises `QuoteExpiredError` (→ HTTP 409) if not found.
+  2. `UPDATE status='accepting'` + commit (visible to concurrent callers — second accept attempt hits `status != 'pending'` guard).
+  3. Calls sidecar `AcceptFxQuote` RPC. On RPC success: `UPDATE status='accepted'`. On RPC failure or timeout: `UPDATE status='rejected', reject_reason=<broker error>`. Fills wired via `order_event_consumer` on success only.
+- `cancel_quote(account_id, broker_quote_id)` — guard `status IN ('pending', 'accepting')`, set `status='rejected'`, calls `CancelFxQuote` sidecar RPC.
+- APScheduler sweep job (every 5s): `UPDATE forex_rfq_quotes SET status='expired' WHERE status='pending' AND expires_at < now()`. 5s frequency matches typical IDEALPRO TTL (3–10s); `GET /api/forex/quotes` also computes effective status in SELECT (`CASE WHEN status='pending' AND expires_at < now() THEN 'expired' ELSE status END`) so listing is never stale regardless of sweep timing.
 
 ### 4.3 `app/api/forex.py` (new)
 
@@ -205,11 +215,11 @@ rpc StreamFxRates(google.protobuf.Empty) returns (stream FxMidRate);
 | GET | `/api/forex/quotes` | JWT | — |
 | GET | `/api/forex/pairs` | JWT | — |
 
-`accept` endpoint: validates `X-Csrf-Nonce` header matches nonce stored in Redis key `forex:rfq:nonce:{broker_quote_id}` (TTL = quote `ttl_seconds`, set at `request_quote` time, consumed via GETDEL). Pattern mirrors futures roll confirm CSRF — two-key nonce scheme.
+`accept` endpoint: validates `X-Csrf-Nonce` header matches nonce consumed via GETDEL from Redis key `forex:rfq:nonce:{broker_quote_id}` (TTL = quote `ttl_seconds`, set at `request_quote` time). This is a **single-use CSRF** — not the two-key futures roll pattern. Single key is sufficient because `broker_quote_id` is broker-issued and globally unique, so no per-pair de-dupe lock is needed.
 
 ### 4.4 Risk Gate `_check_forex_exposure`
 
-Called from `risk_service.evaluate()` when `ctx.asset_class == AssetClass.FOREX`.
+Called from `risk_service.evaluate()` when `ctx.asset_class == AssetClass.FOREX`. **Fail-OPEN on infrastructure errors** (DB/Redis failures) — same policy as Phase 14 `_check_futures_exposure`. Failures increment `forex_risk_check_failures_total`.
 
 - BLOCK: `not is_forex_session_open()` → `session_closed` + `retry_after`.
 - BLOCK: `notional > risk_limits.forex_max_notional_per_trade` (if set) → `forex_notional_exceeded`.
@@ -223,6 +233,7 @@ forex_rfq_accepts_total{pair, outcome}       # outcome: filled|expired|rejected
 forex_rfq_expired_total{pair}
 forex_quote_stream_updates_total{pair}
 forex_risk_blocks_total{reason}
+forex_risk_check_failures_total              # fail-open infrastructure errors
 forex_rfq_latency_seconds{stage}            # stage: request|accept
 ```
 
@@ -285,7 +296,11 @@ rpc ListCryptoAssets(ListCryptoAssetsRequest) returns (ListCryptoAssetsResponse)
 
 - `list_assets(account_id)` — calls sidecar `ListCryptoAssets`, upserts `instruments` rows with `CryptoDetails` meta, Redis-caches result 5 min.
 - `resolve_crypto_instrument(symbol, broker_id)` — instrument registry lookup → `list_assets` fallback if not found (mirrors `resolve_instrument` pattern from Telegram order flow).
-- Crypto orders flow through existing `orders_service.place_order` unchanged. `DECIMAL_10_PATTERN` qty already supports 8 decimal places.
+- Crypto orders flow through existing `orders_service.place_order` unchanged. `DECIMAL_10_PATTERN` already accepts up to 10 decimal places; crypto qty validation against `CryptoDetails.qty_step` precision happens at the risk gate (§6.4 `invalid_qty_precision`).
+- **Sidecar dispatch:** `IbkrBrokerService.PlaceOrder` in `sidecar_ibkr/` is extended with asset_class dispatch branches:
+  - `AssetClass.CRYPTO` → `ib_async.Crypto(symbol=base_asset, exchange='PAXOS', currency=quote_asset)`
+  - `AssetClass.FOREX` → `ib_async.Forex(pair=f'{base_currency}{quote_currency}', exchange='IDEALPRO')` (required by §4, implemented in 15a Chunk C)
+  Both branches are in scope for their respective phase chunks — without them, orders cannot route to the broker regardless of what the backend emits.
 
 ### 6.3 `app/api/crypto.py` (new)
 
@@ -294,16 +309,16 @@ rpc ListCryptoAssets(ListCryptoAssetsRequest) returns (ListCryptoAssetsResponse)
 | GET | `/api/crypto/assets` | JWT | 5-min cache |
 | GET | `/api/crypto/positions` | JWT | account-scoped |
 | GET | `/api/crypto/trades` | JWT | cursor pagination |
-| GET | `/api/crypto/book/{canonical_id}` | JWT | top-20 snapshot from Redis hash |
+| GET | `/api/crypto/book/{canonical_id}` | JWT | top-20 snapshot from Redis hash `crypto:book:snap:{canonical_id}` |
 
 ### 6.4 Risk Gate `_check_crypto_exposure`
 
-Called when `ctx.asset_class == AssetClass.CRYPTO`.
+Called when `ctx.asset_class == AssetClass.CRYPTO`. **Fail-OPEN on infrastructure errors** — same policy as Phase 14. Failures increment `crypto_risk_check_failures_total`.
 
 - BLOCK: `not is_crypto_session_open()` → `session_closed` + `retry_after`.
 - BLOCK: qty precision exceeds `CryptoDetails.qty_step` → `invalid_qty_precision`.
 - BLOCK: notional < `CryptoDetails.min_notional` (if set) → `below_min_notional`.
-- WARN: single crypto asset > 20% of account NLV → `concentration_warning`.
+- WARN: single crypto asset > 20% of **per-account** NLV — denominator is `ctx.account_nlv_base` (base-currency converted via existing `_fx_rate` helper, at evaluate-time snapshot, 5s Redis cache, same pattern as existing concentration check). Scope is per-account (not cross-broker). → `concentration_warning`.
 - WARN: current time in 00:00–04:00 UTC → `wide_spread_advisory` (low-liquidity hours).
 
 ### 6.5 Prometheus Metrics (Phase 15b)
@@ -312,6 +327,7 @@ Called when `ctx.asset_class == AssetClass.CRYPTO`.
 crypto_assets_list_total{broker, outcome}
 crypto_order_attempts_total{asset, side}
 crypto_risk_blocks_total{reason}
+crypto_risk_check_failures_total             # fail-open infrastructure errors
 crypto_position_stream_updates_total{broker}
 crypto_instrument_resolve_total{outcome}
 ```
@@ -326,25 +342,39 @@ crypto_instrument_resolve_total{outcome}
 - Subscriptions from `app_config[coinbase/subscribed_pairs]` (JSON array of product_ids, e.g. `["BTC-USD","ETH-USD"]`).
 - **`ticker` channel (L1):** publishes `quote.coinbase.<canonical_id>` to Redis pub/sub (same shape as Alpaca/Schwab quote bus). Also writes `fx:mid:{base}:{quote}` for stablecoin pairs.
 - **`level2` channel (L2):** applies incremental deltas to in-process `OrderBook` instances via `book_manager.py`. Publishes:
-  - Incremental deltas → `XADD crypto:book:{canonical_id} MAXLEN ~ 1000 {side, price, qty, seq}`.
-  - Full top-20 snapshot → Redis hash `crypto:book:snap:{canonical_id}` every 5s.
-- Reconnect: bounded backoff `[1s, 2s, 5s, 15s, 30s]`. On reconnect: replays last 1000 entries from Redis stream to reconstruct book state before re-subscribing.
+  - Incremental deltas → `XADD crypto:book:{canonical_id} MAXLEN ~ 1000 {side, price, qty, seq}` (stream is for downstream WS-gateway consumers only — see §7.3).
+  - Full top-N snapshot (N=100) → Redis hash `crypto:book:snap:{canonical_id}` every 5s.
+- **Sequence number tracking:** Coinbase Advanced Trade WS carries `sequence_num` on every L2 message. The adapter tracks the last seen `sequence_num` per pair. On gap detect (`received_seq != last_seq + 1`): drop the in-memory `OrderBook`, unsubscribe and re-subscribe — Coinbase replays a fresh snapshot on re-subscribe. Increment `coinbase_book_sequence_gap_total{canonical_id}` counter.
+- **Bounded book depth:** `OrderBook` keeps only top-N price levels per side (N=100). Levels outside top-N are discarded on `apply_delta` (not stored). The snapshot API serves top-20 — deeper levels are dead weight.
+- **Recovery path:** on reconnect or sequence gap, the book recovers from Coinbase's initial snapshot message (sent automatically by Coinbase on subscribe), NOT from Redis stream replay. The Redis stream is for downstream consumers only and MUST NOT be used as a source of truth for book reconstruction.
+- Reconnect: bounded backoff `[1s, 2s, 5s, 15s, 30s]`.
 - Lifespan: started alongside existing quote engine adapters in `app/main.py`.
 
 ### 7.2 `app/services/crypto/book_manager.py` (new)
 
 ```python
+MAX_BOOK_DEPTH = 100  # keep only top-100 levels per side
+
 @dataclass
 class OrderBook:
-    bids: dict[Decimal, Decimal]  # price → qty
+    bids: dict[Decimal, Decimal]  # price → qty; bounded to top-MAX_BOOK_DEPTH
     asks: dict[Decimal, Decimal]
+    last_seq: int = 0
 
-    def apply_delta(self, side: str, price: Decimal, qty: Decimal) -> None:
+    def apply_delta(self, side: str, price: Decimal, qty: Decimal, seq: int) -> None:
         book = self.bids if side == "bid" else self.asks
         if qty == 0:
             book.pop(price, None)
         else:
             book[price] = qty
+        # Evict levels beyond MAX_BOOK_DEPTH after update
+        if side == "bid" and len(book) > MAX_BOOK_DEPTH:
+            for p in sorted(book)[:len(book) - MAX_BOOK_DEPTH]:
+                del book[p]
+        elif side == "ask" and len(book) > MAX_BOOK_DEPTH:
+            for p in sorted(book, reverse=True)[:len(book) - MAX_BOOK_DEPTH]:
+                del book[p]
+        self.last_seq = seq
 
     def snapshot(self, depth: int = 20) -> dict:
         bids = sorted(self.bids.items(), reverse=True)[:depth]
@@ -352,7 +382,7 @@ class OrderBook:
         return {"bids": bids, "asks": asks}
 ```
 
-One `OrderBook` per subscribed pair, held in-process.
+One `OrderBook` per subscribed pair, held in-process. Book is reset (cleared) and rebuilt from Coinbase's snapshot message on subscribe or sequence-gap recovery — never from the Redis stream.
 
 ### 7.3 WS Gateway Extension
 
@@ -367,7 +397,8 @@ One `OrderBook` per subscribed pair, held in-process.
 coinbase_ws_messages_total{channel, outcome}
 coinbase_ws_reconnects_total
 coinbase_book_publish_total{canonical_id}
-coinbase_book_lag_seconds                    # histogram: receipt → Redis XADD
+coinbase_book_sequence_gap_total{canonical_id}  # sequence gap → book reset + re-subscribe
+coinbase_book_lag_seconds                        # histogram: receipt → Redis XADD
 ```
 
 ---
@@ -422,8 +453,8 @@ Route: `src/routes/crypto.tsx`.
 | B | `ForexCalendar` + `CryptoCalendar` in `market_calendar.py` (or siblings); `_check_forex_exposure` in `risk_service.py` | **Qwen** |
 | C | Proto additions (4 RPCs + messages); `rfq_service.py`; `app/api/forex.py`; Prometheus metric definitions | **Codex** |
 | D | APScheduler TTL sweep job; Prometheus counter wiring; `forex` lifespan hook in `main.py` | **Qwen** |
-| E | FE: `services/forex/types.ts` + `api.ts`; `FxTicketSection`; `FxQuoteDisplay`; `FractionalQtyInput`; TradeTicketModal FX mode toggle | **Codex** |
-| F | FE: `ForexPage.tsx` (4 panels); `routes/forex.tsx`; klinecharts forex source wiring | **Codex** |
+| E | FE: `services/forex/types.ts` + `api.ts`; `FxTicketSection`; `FxQuoteDisplay`; `FractionalQtyInput` (ships complete-and-tested in `components/patterns/` per FE boundary table; consumed by 15b Chunk F without re-implementation); TradeTicketModal FX mode toggle | **Codex** |
+| F | FE: `ForexPage.tsx` (4 panels); `routes/forex.tsx`; klinecharts forex source wiring; BE+FE integration tests (RFQ three-state flow, `ForexInstrumentResolver`, session-gap BLOCK, TTL sweep, FX modal countdown) | **Codex** |
 
 Reviewer chain per chunk: spec-compliance + python-reviewer / typescript-reviewer (haiku); code-reviewer + security-reviewer + database-reviewer (sonnet); ARCHITECT-REVIEW once at phase close (opus).
 
@@ -449,3 +480,24 @@ Reviewer chain per chunk: spec-compliance + python-reviewer / typescript-reviewe
 - Crypto options (IBKR crypto options if/when available) — deferred post-v1.0.
 - L2 order book for non-crypto asset classes — Phase 18+ (scanner phase).
 - Crypto staking / earn features — out of scope for v1.0.
+- `forex_rfq_quotes` monthly retention policy — add when v1.0 prod traffic warrants it (Phase 24 infra hardening).
+
+## 11. Architect Review Findings Applied (2026-05-18)
+
+0 CRIT · 4 HIGH · 6 MED applied inline. 3 LOW + 2 INFO noted.
+
+- **H1** — RFQ nonce clarified as single-use CSRF (not two-key); justified by broker-issued unique `broker_quote_id`. §4.3 updated.
+- **H2** — `ForexInstrumentResolver` added (§4.2); `forex_rfq_quotes` now uses `instrument_id BIGINT FK` instead of bare `canonical_id TEXT`. §2.1 updated.
+- **H3** — Three-state RFQ transition (`pending → accepting → accepted | rejected`) with `reject_reason` column added. §4.2 and §2.1 updated.
+- **H4** — Coinbase L2: sequence number tracking + gap-triggered resubscribe; bounded book depth (N=100); recovery from Coinbase snapshot (not Redis stream); `coinbase_book_sequence_gap_total` metric added. §7.1, §7.2, §7.4 updated.
+- **M1** — `DECIMAL_10_PATTERN` corrected to "10 decimal places". §6.2 updated.
+- **M2** — `FractionalQtyInput` note added to 15a Chunk E (ships complete in `components/patterns/`, consumed by 15b). §9 updated.
+- **M3** — APScheduler sweep changed to 5s; `GET /api/forex/quotes` computes effective status in SELECT. §4.2 updated.
+- **M4** — Fail-OPEN policy + `forex_risk_check_failures_total` / `crypto_risk_check_failures_total` counters added to §4.4 and §6.4.
+- **M5** — Concentration check denominator specified: per-account `ctx.account_nlv_base`, base-currency converted via `_fx_rate`, at evaluate-time, 5s Redis cache. §6.4 updated.
+- **M6** — Sidecar dispatch branches (`AssetClass.CRYPTO → ib_async.Crypto(exchange='PAXOS')`, `AssetClass.FOREX → ib_async.Forex(exchange='IDEALPRO')`) explicitly specified in §6.2, assigned to their respective chunks.
+- **L1** — `ForexDetails.contract_size` made `Decimal | None = None`; notional input does not divide by it. §2.1 updated.
+- **L2** — `forex_max_notional_per_trade` denormalization noted (same pattern as `combo_max_loss_pct`). §2.1 updated.
+- **L3** — Redis key `crypto:book:snap:{canonical_id}` used consistently in §6.3 and §7.1. §6.3 updated.
+- **I1** — 15a tags v0.15.0 and ships before 15b starts; 15b tags v0.15.1. Sequencing preserved as designed.
+- **I2** — `crypto_order_book_snapshots` writer specified: `CoinbaseWsAdapter` writes every 60s, top-10 levels per side. §2.2 updated.
