@@ -51,6 +51,8 @@ class ParsedOrder:
     tif: Literal["DAY", "GTC"]
     limit_price: str | None
     stop_price: str | None
+    algo_strategy: str | None = None  # Phase 17
+    algo_params: dict[str, str] | None = None  # Phase 17
 
 
 def parse_place_order(text: str) -> ParsedOrder | None:
@@ -73,6 +75,62 @@ def parse_place_order(text: str) -> ParsedOrder | None:
     qty = parts[3]
     if not _DECIMAL_10_RE.match(qty):
         return None
+
+    from app.services.algo.schemas import (
+        ALGO_PARAM_SCHEMAS,
+        DISPLAY_ALGOS,
+        REQUIRED_PARAMS,
+        AlgoStrategy,
+    )
+
+    algo_strategy: str | None = None
+    algo_params: dict[str, str] | None = None
+
+    if len(parts) > 4 and parts[4].upper() in AlgoStrategy.__members__:
+        # Algo path
+        algo_strategy = parts[4].upper()
+        algo_params = {}
+        known_keys = {p["name"] for p in ALGO_PARAM_SCHEMAS.get(algo_strategy, [])}
+        for token in parts[5:]:
+            if "=" not in token:
+                return None
+            k, _, v = token.partition("=")
+            k = k.strip()
+            v = v.strip()
+            if k not in known_keys:
+                return None
+            algo_params[k] = v
+
+        missing = REQUIRED_PARAMS.get(algo_strategy, frozenset()) - set(algo_params)
+        if missing:
+            return None
+
+        if algo_strategy in {str(s) for s in DISPLAY_ALGOS}:
+            ds = algo_params.get("display_size", "")
+            try:
+                from decimal import Decimal
+
+                if Decimal(ds) <= 0:
+                    return None
+            except Exception:
+                return None
+
+        if algo_strategy in {str(s) for s in DISPLAY_ALGOS}:
+            algo_order_type: Literal["MARKET", "LIMIT", "STOP_LIMIT"] = "LIMIT"
+        else:
+            algo_order_type = "MARKET"
+
+        return ParsedOrder(
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            order_type=algo_order_type,
+            tif="DAY",
+            limit_price=None,
+            stop_price=None,
+            algo_strategy=algo_strategy,
+            algo_params=algo_params,
+        )
 
     limit_price: str | None = None
     stop_price: str | None = None
