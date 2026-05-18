@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-18
 **Version target:** v0.17.0
-**Status:** Architect-review Pass-2 findings applied (CRIT-A/B, HIGH-A/B/C, MED-A/B/C/D)
+**Status:** Architect-review Pass-3 findings applied (CRIT-C, HIGH-D/E/F, MED-E/F/G/H, LOW-C/D) — ready for implementation plan
 
 ---
 
@@ -46,7 +46,9 @@ ALTER TABLE orders
     ));
 ```
 
-Both columns nullable. Non-algo orders leave them NULL. `algo_status` column dropped (HIGH-A: duplicates existing `orders.status`; the FE badge shows strategy name, lifecycle state comes from the existing status column).
+Both columns nullable. Non-algo orders leave them NULL. `algo_status` column dropped (HIGH-A: duplicates existing `orders.status`).
+
+`algo_params` is stored as JSONB but all values are **string-typed** end-to-end (matching the `map<string,string>` proto convention). Booleans are stored as `"true"/"false"`, integers as decimal strings (e.g. `"15"`). A `_normalize_algo_params(params: dict) -> dict[str, str]` helper (in `app/services/algo/schemas.py`) converts Python bool/int values to lowercased strings at both write-time (`OrderRequest` validation) and read-time (DB → `EvaluationContext`). This ensures JSONB round-trip produces identical strings regardless of PG native-type coercion.
 
 ### 2.2 Alembic 0057 — `broker_algo_capability` table
 
@@ -98,15 +100,17 @@ All other brokers (`schwab`, `futu`, `alpaca`) get zero rows — the FE algo sec
 
 ### 2.3 `algo_params` shapes
 
+All values are **string-encoded** on the wire and in the DB (see §2.1 normalization note). The logical types below describe what the string encodes.
+
 | Strategy | Required | Optional |
 |---|---|---|
-| `ADAPTIVE` | `urgency: PATIENT\|NORMAL\|URGENT` | — |
-| `TWAP` | `start_time: HH:MM`, `end_time: HH:MM` | `allow_past_end_time: bool` |
-| `VWAP` | `start_time: HH:MM`, `end_time: HH:MM` | `max_pct_vol: int (0–100)`, `no_take_liq: bool` |
-| `ARRIVAL_PRICE` | `urgency: PATIENT\|NORMAL\|URGENT` | `max_pct_vol: int (0–100)` |
-| `ICEBERG` | `display_size: Decimal` | — |
-| `RESERVE` | `display_size: Decimal` | `randomize_size: bool` |
-| `DARK_ICE` | `display_size: Decimal` | — |
+| `ADAPTIVE` | `urgency: "PATIENT"\|"NORMAL"\|"URGENT"` | — |
+| `TWAP` | `start_time: "HH:MM"`, `end_time: "HH:MM"` | `allow_past_end_time: "true"\|"false"` |
+| `VWAP` | `start_time: "HH:MM"`, `end_time: "HH:MM"` | `max_pct_vol: "0"–"100"`, `no_take_liq: "true"\|"false"` |
+| `ARRIVAL_PRICE` | `urgency: "PATIENT"\|"NORMAL"\|"URGENT"` | `max_pct_vol: "0"–"100"` |
+| `ICEBERG` | `display_size: Decimal string` | — |
+| `RESERVE` | `display_size: Decimal string` | `randomize_size: "true"\|"false"` |
+| `DARK_ICE` | `display_size: Decimal string` | — |
 
 ---
 
@@ -200,13 +204,28 @@ IBKR `TagValue` key mapping per strategy:
 | `RESERVE` | `displaySize`, `randomizeSize` 0/1 |
 | `DARK_ICE` | `displaySize` Decimal string (non-zero required by IBKR) |
 
+**Defence-in-depth note (MED-H):** The risk gate's `_check_iceberg_display_size` (§5.5) is the **primary** enforcement point for `display_size > 0` on ICEBERG / RESERVE / DARK_ICE. The sidecar builder also raises `ValueError` if `display_size ≤ 0` is reached here — this is defence-in-depth and should never happen when the risk gate is working correctly. Counted under `algo_sidecar_errors_total{error_type="oversize_params"}`.
+
 **Constraint enforcement in builder:**
-- ICEBERG / RESERVE / DARK_ICE: base `orderType` must be `LMT`; raises `ValueError` if `MKT`.
+- ICEBERG / RESERVE / DARK_ICE: base `orderType` must be `LMT`; raises `ValueError` if `MKT` (server-side 422 `algo_requires_limit` fires first — see §5.3).
 - TWAP / VWAP / ARRIVAL_PRICE / ADAPTIVE: base `orderType` must be `MKT`; coerced automatically.
 
 ### 4.3 Enriched order event
 
-`order_event_consumer.py`: reads `algo_strategy` off the `OrderEventMessage` wire (tag 10, §3.4) — no DB lookup per event. Includes `algo_strategy` in the existing WS order-event push payload so the FE can render the algo badge on incoming events. No new WS endpoint.
+**Sidecar emit side** (`sidecar_ibkr/handlers.py` — `OrderEventMessage` construction):
+
+IBKR's `trade.order.algoStrategy` returns the IBKR string (e.g. `"Twap"`, `"Adaptive"`). The sidecar must reverse-map to our internal enum before populating tag 10:
+
+```python
+_ALGO_STRATEGY_MAP_REVERSE: dict[str, str] = {v: k for k, v in _ALGO_STRATEGY_MAP.items()}
+
+# when building OrderEventMessage:
+algo_strategy = _ALGO_STRATEGY_MAP_REVERSE.get(trade.order.algoStrategy or "", "")
+```
+
+Empty string (`""`) is the absent-value sentinel for non-algo orders — proto `optional string` treats `""` as unset on the consumer side.
+
+**Consumer side** (`order_event_consumer.py`): reads `algo_strategy` off the `OrderEventMessage` wire (tag 10, §3.4) — no DB lookup per event. Includes `algo_strategy` in the existing WS order-event push payload so the FE can render the algo badge on incoming events. No new WS endpoint.
 
 ---
 
@@ -228,10 +247,12 @@ algo_params:   dict[str, str] | None = Field(default=None, max_length=16)
 
 Returns enabled strategies + parameter schemas for the FE dynamic form. JWT required. Rate-limited at 60/min. Cached in Redis 5 minutes per `(broker_id, asset_class)` key.
 
-Invalidation: subscribes to `app_config:invalidate:algo_capability` pubsub channel.
-- Payload `{"broker_id": "ibkr", "asset_class": "STOCK"}` → invalidate that key only.
-- Payload `{}` → invalidate all cached entries.
-Publisher deferred to the admin UI phase; consumer wired this phase.
+Invalidation: subscribes to `broker_algo_capability:invalidate` pubsub channel (named after the table; distinct from the `app_config:invalidate:*` family which covers `app_config` rows). Publisher deferred to the admin UI phase; consumer wired this phase.
+
+Payload schema (closed enum — consumer rejects any other shape with structlog WARN + `algo_capability_invalidate_malformed_total` counter):
+- `{"broker_id": "ibkr", "asset_class": "STOCK"}` → invalidate exactly that `(broker_id, asset_class)` Redis key.
+- `{"broker_id": "ibkr"}` → invalidate all asset_class entries for that broker (wildcard by broker).
+- `{}` → invalidate all cached entries (admin "flush all").
 
 Response:
 ```json
@@ -265,14 +286,17 @@ New `algo_strategy: str | None = None` kwarg (default `None` — backward-compat
 | `place_bracket` parent | Yes | fail-CLOSED |
 | `place_bracket` SL/TP legs | Reject | 422 `algo_on_bracket_leg_unsupported` if `algo_strategy` present |
 
-#### §5.3a Modify rule (HIGH-C)
+**LOW-C — `algo_requires_limit` pre-DB check:** If `algo_strategy IN ('ICEBERG', 'RESERVE', 'DARK_ICE')` and `request.order_type != 'LIMIT'`, `validate_pre_dispatch` must return `422 algo_requires_limit` **before** the DB write. Without this, a caller bypassing the FE (e.g. direct API call or Telegram) would receive a raw Postgres CHECK constraint error instead of a clean 422. This check runs in `validate_pre_dispatch` alongside the capability check, before any DB INSERT.
 
-IBKR does not allow changing `algoStrategy` on a live order (requires cancel+replace). The modify rule for v0.17.0:
+#### §5.3a Modify rule (v0.17.0)
 
-1. Read `stored_algo = orders.algo_strategy` for the order being modified.
-2. If `request.algo_strategy != stored_algo` (including NULL→non-NULL or non-NULL→NULL) → `422 algo_modify_strategy_change_unsupported`. User must cancel + re-place.
-3. If `request.algo_strategy == stored_algo` AND `request.algo_params != stored_algo_params` → `422 algo_modify_params_change_unsupported` (IBKR also forbids param changes; deferred to post-v0.17.0).
-4. If `request.algo_strategy == stored_algo` AND `request.algo_params == stored_algo_params` → allow modify (qty/price change only); pass `algo_strategy` + `algo_params` through to sidecar unchanged.
+IBKR does not allow changing `algoStrategy` on a live order (requires cancel+replace).
+
+**Rule:** Read `stored_algo = orders.algo_strategy`.
+- If `request.algo_strategy != stored_algo` (any strategy change, including NULL→non-NULL or non-NULL→NULL) → `422 algo_modify_strategy_change_unsupported`. Counter: `algo_orders_modify_rejected_total{reason="strategy_change"}`.
+- If `request.algo_strategy == stored_algo` → allow modify (qty/price change only). The server **ignores `request.algo_params` entirely** and passes `stored_algo_params` from the DB to the sidecar unchanged. This eliminates JSONB round-trip comparison hazards (HIGH-E) — params are effectively immutable post-creation in v0.17.0. FE must not show algo-param fields in the modify flow.
+
+`algo_orders_modify_rejected_total{reason}` valid values: `strategy_change`, `bracket_leg` (§5.3 row 5).
 
 ### 5.4 `ALGO_PARAM_SCHEMAS` location
 
@@ -280,7 +304,18 @@ Lives in `app/services/algo/schemas.py` (leaf module — no imports from other `
 
 ### 5.5 Risk gate additions (`risk_service.py`)
 
-**`_check_algo_capability`**
+#### §5.5.0 `EvaluationContext` extension (CRIT-C)
+
+`EvaluationContext` (defined in `app/services/risk_service.py`) must be extended with two new optional fields:
+
+```python
+algo_strategy: str | None = None        # AlgoStrategy value, or None for non-algo orders
+algo_params:   dict[str, str] | None = None  # normalized string dict
+```
+
+All three risk-gate call-sites in `orders_service` (`preview_order`, `place_order`, `modify_order`) must populate these fields from the validated `OrderRequest` before calling `RiskService.evaluate`. For `modify_order`, `algo_params` is read from `orders.algo_params` (the stored value) not from the request (per §5.3a).
+
+#### `_check_algo_capability`
 - BLOCK if `broker_algo_capability` has no enabled row for this broker + asset class + strategy.
 - Fail-CLOSED on `place_order`. Fail-OPEN on `preview_order`.
 
@@ -301,6 +336,8 @@ if display_size >= ctx.qty:
 if display_size < Decimal("1"):
     return WARN("display_size_sub_lot")    # fractional; legal on some venues
 ```
+
+**MED-G — pseudocode return type:** The `BLOCK(...)` / `WARN(...)` calls above are illustrative shorthand. Actual return values must be `CheckResult` objects consistent with the existing 7 checks — e.g. `CheckResult(verdict=Verdict.BLOCK, code="display_size_nonpositive", message="...")`. See `_check_options_exposure` in `risk_service.py` as the structural reference for return shape.
 
 Fail-OPEN both paths (pure math; no external dependency).
 
@@ -389,11 +426,12 @@ Inserted into `TradeTicketModal` below TIF row, above sizing section.
 |---|---|---|
 | `algo_orders_submitted_total` | `strategy`, `broker_id`, `asset_class` | orders_service on place |
 | `algo_orders_cancelled_total` | `strategy`, `broker_id` | order_event_consumer on cancel |
-| `algo_orders_modify_rejected_total` | `strategy`, `reason` | orders_service on modify attempt |
+| `algo_orders_modify_rejected_total` | `strategy`, `reason ∈ {strategy_change, bracket_leg, other}` | orders_service on modify attempt |
 | `algo_capability_cache_hits_total` | `broker_id` | algo_capability_service |
 | `algo_capability_cache_misses_total` | `broker_id` | algo_capability_service |
 | `algo_risk_blocks_total` | `check`, `strategy` | risk_service |
 | `algo_sidecar_errors_total` | `strategy`, `error_type` | sidecar order_builder |
+| `algo_capability_invalidate_malformed_total` | — | algo_capability_service pubsub consumer |
 
 ---
 
