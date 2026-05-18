@@ -49,9 +49,12 @@ export function AlgoSection({ brokerId, assetClass, onAlgoChange }: Props): Reac
       onAlgoChange(null);
       return;
     }
-    setSelectedStrategy(strategy as AlgoStrategy);
+    const s = strategy as AlgoStrategy;
+    setSelectedStrategy(s);
     setParams({});
-    onAlgoChange(null);
+    // Notify parent immediately so order-type coercion fires on selection,
+    // before any params are filled in.
+    onAlgoChange({ algo_strategy: s, algo_params: {} });
   }
 
   function handleParamChange(name: string, value: string): void {

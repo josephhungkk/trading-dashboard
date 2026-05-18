@@ -1,12 +1,21 @@
-"""E2E integration test for algo order flow: preview → risk → place → WS event."""
+"""E2E smoke tests for algo order paths through preview endpoint.
+
+These tests verify the preview endpoint is reachable and does not crash on
+algo payloads.  Full algo validation logic is covered by unit tests:
+  - test_orders_service_algo.py (validate_pre_dispatch checks)
+  - test_risk_service_algo.py  (_check_algo_capability, _check_iceberg_display_size)
+
+Note: account_id '00000000-0000-0000-0000-000000000001' is not seeded in the
+test DB, so resolve_account raises 404 before algo checks fire.  503 is
+returned when the broker layer is also absent.  Both are acceptable here.
+"""
 
 import pytest
 
 
 @pytest.mark.asyncio
-async def test_twap_on_bond_rejected_422(test_client_admin):
-    """TWAP on BOND is not in broker_algo_capability → 422 unsupported_algo_strategy."""
-
+async def test_twap_on_bond_rejected(test_client_admin):
+    """Endpoint accepts TWAP payload and returns 422/503/404 (not 500)."""
     resp = await test_client_admin.post(
         "/api/orders/preview",
         json={
@@ -20,37 +29,40 @@ async def test_twap_on_bond_rejected_422(test_client_admin):
             "algo_params": {"start_time": "10:00", "end_time": "14:00"},
         },
     )
-    # The test DB has no BOND instruments seeded, but the capability check
-    # will fire via risk gate: TWAP not in broker_algo_capability for BOND.
-    # If account resolution fails first, that's also acceptable (503).
-    # 404 is OK if the endpoint isn't wired yet during Phase 17.
-    assert resp.status_code in (404, 422, 503)
+    assert resp.status_code in (404, 422, 503), (
+        f"Expected 404/422/503, got {resp.status_code}: {resp.text[:200]}"
+    )
+    assert resp.status_code != 500
 
 
 @pytest.mark.asyncio
-async def test_iceberg_market_order_rejected_algo_requires_limit(test_client_admin):
-    """ICEBERG with MARKET order type should return 422 algo_requires_limit."""
+async def test_iceberg_market_order_smoke(test_client_admin):
+    """Endpoint does not 500 on ICEBERG+MARKET payload."""
     resp = await test_client_admin.post(
         "/api/orders/preview",
         json={
             "account_id": "00000000-0000-0000-0000-000000000001",
             "conid": "265598",
             "side": "BUY",
-            "order_type": "MARKET",  # should be LIMIT for ICEBERG
+            "order_type": "MARKET",
             "tif": "DAY",
             "qty": "100",
             "algo_strategy": "ICEBERG",
             "algo_params": {"display_size": "10"},
         },
     )
-    assert resp.status_code in (404, 422, 503)
+    assert resp.status_code in (404, 422, 503), (
+        f"Expected 404/422/503, got {resp.status_code}: {resp.text[:200]}"
+    )
+    assert resp.status_code != 500
+    # When algo check fires before account lookup, assert correct error code.
     if resp.status_code == 422:
         assert "algo_requires_limit" in resp.text
 
 
 @pytest.mark.asyncio
-async def test_iceberg_display_size_zero_rejected(test_client_admin):
-    """ICEBERG display_size=0 should be blocked by risk gate."""
+async def test_iceberg_display_size_zero_smoke(test_client_admin):
+    """Endpoint does not 500 on ICEBERG+display_size=0 payload."""
     resp = await test_client_admin.post(
         "/api/orders/preview",
         json={
@@ -65,6 +77,7 @@ async def test_iceberg_display_size_zero_rejected(test_client_admin):
             "algo_params": {"display_size": "0"},
         },
     )
-    # Either account resolution fails (503) or risk gate blocks (422)
-    # 404 is OK if the endpoint isn't wired yet during Phase 17.
-    assert resp.status_code in (404, 422, 503)
+    assert resp.status_code in (404, 422, 503), (
+        f"Expected 404/422/503, got {resp.status_code}: {resp.text[:200]}"
+    )
+    assert resp.status_code != 500
