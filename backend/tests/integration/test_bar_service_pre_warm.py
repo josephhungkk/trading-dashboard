@@ -496,7 +496,8 @@ async def test_lifespan_starts_scheduler() -> None:
             assert scheduler.running is True
             jobs = scheduler.get_jobs()
             # Phase 14 added 2 futures roll checker jobs (CME + HKFE)
-            assert len(jobs) == 7, f"Expected 7 scheduled jobs, got {len(jobs)}"
+            # Phase 15a added 1 forex RFQ TTL sweep job
+            assert len(jobs) == 8, f"Expected 8 scheduled jobs, got {len(jobs)}"
 
 
 async def test_lifespan_runs_initial_pre_warm() -> None:

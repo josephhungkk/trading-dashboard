@@ -27,7 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.models.risk import AccountKillSwitch, RiskLimit
 from app.schemas.risk import GateBlockerEntry, GateVerdict, GateWarningEntry
-from app.services.market_calendar import is_forex_session_open, next_forex_session_open
+from app.services.market_calendar import (
+    is_crypto_session_open,
+    is_forex_session_open,
+    next_crypto_session_open,
+    next_forex_session_open,
+)
 from app.services.risk_inflight_counters import inflight_bp_committed, inflight_pdt_remaining
 
 if TYPE_CHECKING:
@@ -914,6 +919,64 @@ class RiskService:
             return None, warnings[0]
         return None, None
 
+    async def _check_crypto_exposure(self, ctx: EvaluationContext) -> CheckResult:
+        """Phase 15b: Paxos/IBKR crypto risk checks. Fail-OPEN on infrastructure errors."""
+        log = structlog.get_logger(__name__)
+        blockers: list[GateBlockerEntry] = []
+        warnings: list[GateWarningEntry] = []
+        try:
+            if not is_crypto_session_open():
+                retry_at = next_crypto_session_open().isoformat()
+                return (
+                    GateBlockerEntry(
+                        check="crypto_session",
+                        code="session_closed",
+                        message=f"Crypto trading is in maintenance window. Next open: {retry_at}",
+                    ),
+                    None,
+                )
+            if ctx.instrument_id is not None:
+                meta_row = await self._db.execute(
+                    text("SELECT meta FROM instruments WHERE id = :id LIMIT 1"),
+                    {"id": ctx.instrument_id},
+                )
+                meta_result = meta_row.scalar_one_or_none()
+                if meta_result is not None:
+                    qty_step_str = (meta_result or {}).get("qty_step")
+                    if qty_step_str:
+                        qty_step = Decimal(qty_step_str)
+                        if qty_step > 0 and (ctx.qty % qty_step) != 0:
+                            blockers.append(
+                                GateBlockerEntry(
+                                    check="crypto_qty_precision",
+                                    code="invalid_qty_precision",
+                                    message=f"Qty {ctx.qty} is not a multiple of step {qty_step}.",
+                                )
+                            )
+                            return blockers[0], None
+            if ctx.account_nlv_base is not None and ctx.account_nlv_base > 0:
+                notional = ctx.qty * (ctx.price or Decimal("1"))
+                concentration = notional / ctx.account_nlv_base
+                if concentration > Decimal("0.20"):
+                    warnings.append(
+                        GateWarningEntry(
+                            check="crypto_concentration",
+                            message=(
+                                f"concentration_warning: crypto notional is "
+                                f"{concentration:.1%} of account NLV."
+                            ),
+                        )
+                    )
+        except Exception:
+            metrics.crypto_risk_check_failures_total.inc()
+            log.exception("crypto_risk_check_infrastructure_error", account_id=str(ctx.account_id))
+            return None, None  # fail-OPEN
+        if blockers:
+            return blockers[0], None
+        if warnings:
+            return None, warnings[0]
+        return None, None
+
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).
 
@@ -968,6 +1031,21 @@ class RiskService:
                 )
             if fx_warning is not None:
                 pre_warnings = [fx_warning]
+        # Phase 15b: crypto checks
+        if ctx.asset_class == "CRYPTO":
+            crypto_blocker, crypto_warning = (await self._check_crypto_exposure(ctx)) or (
+                None,
+                None,
+            )
+            if crypto_blocker is not None:
+                return GateVerdict(
+                    final_verdict="block",
+                    blockers=[crypto_blocker],
+                    warnings=[],
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            if crypto_warning is not None:
+                pre_warnings = [crypto_warning]
         fast_check_names = (
             "account_kill_switch",
             "broker_kill_switch",

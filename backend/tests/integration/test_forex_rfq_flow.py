@@ -53,8 +53,35 @@ async def test_forex_api_requires_auth() -> None:
 async def test_sweep_expires_pending_quotes() -> None:
     row_id = str(uuid.uuid4())
     broker_quote_id = str(uuid.uuid4())
+    account_id = str(uuid.uuid4())
 
     async with SessionLocal() as db:
+        # Ensure a broker_accounts row exists (FK requirement)
+        await db.execute(
+            text(
+                """
+                INSERT INTO broker_accounts
+                    (id, broker_id, account_number, alias, mode,
+                     gateway_label, last_seen_via, currency_base)
+                VALUES (:id, 'ibkr', :acct, 'test-sweep', 'paper', 'ibkr-ci', 'ibkr-ci', 'USD')
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {"id": account_id, "acct": f"TEST-{account_id[:8]}"},
+        )
+        # Ensure an instrument row exists (FK requirement)
+        instr_result = await db.execute(
+            text(
+                """
+                INSERT INTO instruments
+                    (canonical_id, asset_class, primary_exchange, currency, display_name)
+                VALUES ('forex:EURUSD:sweep_test', 'FOREX', 'IDEALPRO', 'USD', 'EUR/USD')
+                ON CONFLICT (canonical_id) DO UPDATE SET updated_at = now()
+                RETURNING id
+                """
+            )
+        )
+        instrument_id = instr_result.scalar_one()
         await db.execute(
             text(
                 """
@@ -62,7 +89,7 @@ async def test_sweep_expires_pending_quotes() -> None:
                     id, account_id, instrument_id, bid, ask, ttl_seconds,
                     broker_quote_id, notional, notional_currency, status, expires_at
                 ) VALUES (
-                    :id, :account_id, 1, '1.0800', '1.0802', 30,
+                    :id, :account_id, :instrument_id, '1.0800', '1.0802', 30,
                     :broker_quote_id, '10000', 'base', 'pending',
                     now() - interval '10 seconds'
                 )
@@ -71,7 +98,8 @@ async def test_sweep_expires_pending_quotes() -> None:
             ),
             {
                 "id": row_id,
-                "account_id": str(uuid.uuid4()),
+                "account_id": account_id,
+                "instrument_id": instrument_id,
                 "broker_quote_id": broker_quote_id,
             },
         )

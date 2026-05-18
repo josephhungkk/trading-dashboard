@@ -28,6 +28,7 @@ dependencies = [
     "urllib3>=2.7.0",
     "uuid-utils>=0.14.1",
     "uvicorn[standard]>=0.45.0",
+    "websockets>=16.0",
 ]
 
 [dependency-groups]
@@ -56,7 +57,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py314"
-exclude = ["alembic/"]
+exclude = ["alembic/", "app/_generated/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "ASYNC", "RUF"]
@@ -88,6 +89,7 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = [".", "app/_generated/broker", "app/_generated"]
 # Deselect live-broker / env-gated tests by default. Run them explicitly via:
 #   pytest -m real_broker  (or real_schwab/real_futu/real_ibkr/real_alpaca_equity)
 # They're not "skipped" — they're invisible unless you opt in, so the

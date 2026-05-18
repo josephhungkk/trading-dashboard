@@ -61,6 +61,25 @@ service Broker {
   rpc AcceptFxQuote(FxAcceptRequest) returns (FxAcceptResponse);
   rpc CancelFxQuote(FxCancelRequest) returns (google.protobuf.Empty);
   rpc StreamFxRates(google.protobuf.Empty) returns (stream FxMidRate);
+  rpc ListCryptoAssets(ListCryptoAssetsRequest) returns (ListCryptoAssetsResponse);
+}
+
+message CryptoAsset {
+  string symbol = 1;
+  string base_asset = 2;
+  string quote_asset = 3;
+  string min_qty = 4;
+  string qty_step = 5;
+  string min_notional = 6;
+  bool available_24h = 7;
+}
+
+message ListCryptoAssetsRequest {
+  string account_id = 1;
+}
+
+message ListCryptoAssetsResponse {
+  repeated CryptoAsset assets = 1;
 }
 
 // Phase 10a — PreviewOrder messages (spec §5).

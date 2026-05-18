@@ -1117,3 +1117,43 @@ forex_rfq_latency_seconds = Histogram(
     "End-to-end RFQ request latency in seconds.",
     registry=registry,
 )
+
+# Phase 15b — Crypto / Coinbase metrics
+coinbase_ws_messages_total = Counter(
+    "coinbase_ws_messages_total",
+    "Coinbase WS messages received by channel and outcome.",
+    labelnames=["channel", "outcome"],
+    registry=registry,
+)
+
+coinbase_ws_reconnects_total = Counter(
+    "coinbase_ws_reconnects_total",
+    "Coinbase WS reconnection attempts.",
+    registry=registry,
+)
+
+coinbase_book_publish_total = Counter(
+    "coinbase_book_publish_total",
+    "Order book deltas published to Redis stream by canonical_id.",
+    labelnames=["canonical_id"],
+    registry=registry,
+)
+
+coinbase_book_sequence_gap_total = Counter(
+    "coinbase_book_sequence_gap_total",
+    "Sequence gaps detected in Coinbase L2 feed by canonical_id.",
+    labelnames=["canonical_id"],
+    registry=registry,
+)
+
+coinbase_book_lag_seconds = Histogram(
+    "coinbase_book_lag_seconds",
+    "Latency from Coinbase message receipt to Redis XADD in seconds.",
+    registry=registry,
+)
+
+crypto_risk_check_failures_total = Counter(
+    "crypto_risk_check_failures_total",
+    "Crypto risk check infrastructure failures (fail-open events).",
+    registry=registry,
+)

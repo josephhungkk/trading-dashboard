@@ -253,6 +253,7 @@ dependencies = [
     { name = "urllib3" },
     { name = "uuid-utils" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -299,6 +300,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.7.0" },
     { name = "uuid-utils", specifier = ">=0.14.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.45.0" },
+    { name = "websockets", specifier = ">=16.0" },
 ]
 
 [package.metadata.requires-dev]

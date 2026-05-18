@@ -16,12 +16,36 @@ pytestmark = pytest.mark.asyncio
 
 async def _account_id(db) -> UUID:
     result = await db.execute(text("SELECT id FROM broker_accounts LIMIT 1"))
-    return result.scalar_one()
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return UUID(str(row))
+    r2 = await db.execute(
+        text(
+            "INSERT INTO broker_accounts"
+            " (broker_id, account_number, alias, mode, gateway_label, last_seen_via, currency_base)"
+            " VALUES ('ibkr', 'FILL_TEST01', 'fill-test', 'paper', 'ibkr-ci', 'ibkr-ci', 'USD')"
+            " RETURNING id"
+        )
+    )
+    await db.commit()
+    return UUID(str(r2.scalar_one()))
 
 
 async def _instrument_id(db) -> int:
     result = await db.execute(select(Instrument.id).limit(1))
-    return result.scalar_one()
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return int(row)
+    r2 = await db.execute(
+        text(
+            "INSERT INTO instruments"
+            " (canonical_id, asset_class, primary_exchange, currency, display_name)"
+            " VALUES ('test:AAPL_FILL:ci', 'OPTION', 'CBOE', 'USD', 'AAPL Fill Test')"
+            " ON CONFLICT (canonical_id) DO NOTHING RETURNING id"
+        )
+    )
+    await db.commit()
+    return int(r2.scalar_one())
 
 
 async def _make_combo(db, status: str = "working") -> ComboOrder:

@@ -27,13 +27,40 @@ class _FakeRedis:
 
 async def _account_id(db: AsyncSession) -> str:
     result = await db.execute(text("SELECT id FROM broker_accounts LIMIT 1"))
-    return str(result.scalar_one())
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return str(row)
+    r2 = await db.execute(
+        text(
+            "INSERT INTO broker_accounts"
+            " (broker_id, account_number, alias, mode, gateway_label, last_seen_via, currency_base)"
+            " VALUES ('ibkr', 'COMBO_TEST01', 'combo-test', 'paper', 'ibkr-ci', 'ibkr-ci', 'USD')"
+            " RETURNING id"
+        )
+    )
+    await db.commit()
+    return str(r2.scalar_one())
 
 
 async def _instrument_ids(db: AsyncSession) -> tuple[int, int]:
     result = await db.execute(select(Instrument.id).limit(2))
     ids = result.scalars().all()
-    return int(ids[0]), int(ids[1])
+    if len(ids) >= 2:
+        return int(ids[0]), int(ids[1])
+    for i in range(2 - len(ids)):
+        await db.execute(
+            text(
+                "INSERT INTO instruments"
+                " (canonical_id, asset_class, primary_exchange, currency, display_name)"
+                " VALUES (:cid, 'OPTION', 'CBOE', 'USD', :name)"
+                " ON CONFLICT (canonical_id) DO NOTHING"
+            ),
+            {"cid": f"test:COMBO{i}:ci", "name": f"Test Combo {i}"},
+        )
+    await db.commit()
+    result2 = await db.execute(select(Instrument.id).limit(2))
+    ids2 = result2.scalars().all()
+    return int(ids2[0]), int(ids2[1])
 
 
 def _preview_body(

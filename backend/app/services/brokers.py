@@ -490,6 +490,19 @@ class BrokerSidecarClient:
         )
         return [_contract_from_proto(contract) for contract in response.contracts]
 
+    async def list_crypto_assets(self, *, account_id: str) -> broker_pb2.ListCryptoAssetsResponse:
+        request = broker_pb2.ListCryptoAssetsRequest(account_id=account_id)
+        return await self._call(
+            method="ListCryptoAssets",
+            rpc=cast(
+                "_UnaryUnary["
+                "broker_pb2.ListCryptoAssetsRequest, "
+                "broker_pb2.ListCryptoAssetsResponse]",
+                self.stub.ListCryptoAssets,
+            ),
+            request=request,
+        )
+
     async def order_event_stream(
         self,
         account_number: str,

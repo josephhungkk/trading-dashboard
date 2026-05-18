@@ -6,7 +6,13 @@
 pytest_plugins = ("tests.fixtures.db_session",)
 
 import os  # noqa: E402
+import sys  # noqa: E402
 from collections.abc import AsyncIterator  # noqa: E402
+
+# grpc-generated stubs use bare `from broker.v1 import ...`; add _generated to sys.path
+_generated = os.path.join(os.path.dirname(__file__), "..", "app", "_generated")
+if _generated not in sys.path:
+    sys.path.insert(0, _generated)
 
 import pytest  # noqa: E402
 from alembic.config import Config  # noqa: E402

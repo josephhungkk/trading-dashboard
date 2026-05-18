@@ -88,6 +88,16 @@ class BalanceSnapshotWriter:
                     },
                 )
             metrics.portfolio_rollup_snapshot_writes_total.inc()
+            # Phase 15b: expose NLV for crypto concentration check (15s TTL)
+            if self._redis is not None:
+                try:
+                    await self._redis.set(
+                        f"account:nlv:{account_id}:{currency}",
+                        str(nlv),
+                        ex=15,
+                    )
+                except Exception:
+                    log.warning("crypto_nlv_redis_write_failed", account_id=str(account_id))
         except Exception:
             metrics.portfolio_rollup_snapshot_write_errors_total.inc()
             log.exception(
