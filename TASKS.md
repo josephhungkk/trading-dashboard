@@ -854,9 +854,12 @@ IBKR IDEALPRO FX. IBKR Paxos crypto. Coinbase WS as free crypto data source (dat
 
 CUSIP search, accrued-interest, T+2. Mutual-fund EOD NAV ordering. CFD on IBKR (ex-US jurisdictions only).
 
-## Phase 17 — IBKR algos
+## Phase 17 — IBKR algos ✅ shipped v0.17.0 (2026-05-19)
 
 Adaptive, TWAP, VWAP, Arrival, Iceberg / Hidden / Reserve. Algo parameter UI.
+All 7 strategies across IBKR STOCK/ETF/OPTION/FUTURE/FOREX. Dynamic AlgoSection
+in TradeTicketModal. Telegram syntax. Risk gate checks. 8 Prometheus counters.
+Deferred: real broker TWS string casing verification; admin CRUD for capability table.
 
 ## Phase 18 — Universe scanner + News/filings + Earnings-event handling
 

@@ -7,6 +7,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 17 — IBKR Algo Orders (v0.17.0)
+
+Phase 17 shipped on 2026-05-19. 1754 BE tests green; 709 FE tests green. Adds IBKR algo order support for all 7 strategies across applicable asset classes.
+
+**Migration (Alembic 0057)**
+
+- `0057_phase17_algo_orders.py`: `algo_strategy` TEXT + `algo_params` JSONB nullable columns on `orders` table with CHECK constraint; `broker_algo_capability` table (PK: broker_id + asset_class + algo_strategy) with CHECK constraints + printable-ASCII notes guard; seeded with IBKR STOCK/ETF (7 strategies), OPTION (ADAPTIVE+ICEBERG), FUTURE (6), FOREX (ADAPTIVE+TWAP+VWAP).
+
+**Proto (broker.proto)**
+
+- `PlaceOrderRequest`: `optional string algo_strategy = 26` + `map<string,string> algo_params = 27`; `reserved 28 to 35`.
+- `PlaceOrderResponse`: `optional string algo_strategy = 3`.
+- `Order` message: `optional string algo_strategy = 25`.
+- `OrderEventMessage`: `optional string algo_strategy = 10`.
+
+**Backend**
+
+- `app/services/algo/__init__.py` + `schemas.py` (new): `AlgoStrategy` StrEnum (7 values), `DISPLAY_ALGOS` frozenset (ICEBERG/RESERVE/DARK_ICE), `ALGO_PARAM_SCHEMAS` per-strategy param list, `REQUIRED_PARAMS` computed dict, `_normalize_algo_params()`.
+- `app/services/algo/capability_service.py` (new): `AlgoCapabilityService` — Redis TTL cache (300s, key `algo_cap:{broker}:{asset}`) + pubsub invalidation on `broker_algo_capability:invalidate` channel; `get_strategies()` returns enabled rows; `_handle_invalidation()` supports exact-key / broker-flush / full-flush; `run_listener()` background task.
+- `app/core/metrics.py`: 8 new Prometheus counters — `algo_orders_submitted_total{strategy,broker_id,asset_class}`, `algo_orders_cancelled_total{strategy,broker_id}`, `algo_orders_modify_rejected_total{strategy,reason}`, `algo_capability_cache_hits_total{broker_id}`, `algo_capability_cache_misses_total{broker_id}`, `algo_risk_blocks_total{check,strategy}`, `algo_sidecar_errors_total{strategy,error_type}`, `algo_capability_invalidate_malformed_total`.
+- `app/schemas/orders.py`: `PreviewRequest` + `OrderModifyRequest` extended with optional `algo_strategy: AlgoStrategy | None` and `algo_params: dict[str,str] | None`.
+- `app/api/algo.py` (new): `GET /api/algo/capabilities/{broker_id}/{asset_class}` (admin JWT) — returns enabled strategies + param schemas; `GET /api/algo/schemas` (admin JWT) — returns static `ALGO_PARAM_SCHEMAS`.
+- `app/main.py`: algo router registered; `AlgoCapabilityService` singleton wired in lifespan + `run_listener()` background task.
+- `app/services/risk_service.py`: `EvaluationContext` extended with `algo_strategy: str | None` + `algo_params: dict[str,str] | None`; `_check_algo_capability()` (fail-OPEN, BLOCK `unsupported_algo_strategy`); `_check_iceberg_display_size()` (BLOCK on missing/malformed/non-positive/gte-qty display_size; WARN on sub-lot); both wired into `evaluate()` gather.
+- `app/services/orders_service.py`: `validate_pre_dispatch()` extended with `algo_strategy` + `is_bracket_leg` kwargs; BLOCK on bracket-leg+algo and display-algo+non-LIMIT; both `EvaluationContext` call sites pass `algo_strategy`/`algo_params`; `modify_order` algo strategy immutability check (§5.3a); `place_order` increments `algo_orders_submitted_total`.
+- `sidecar_ibkr/order_builder.py`: `_ALGO_STRATEGY_MAP` + `_ALGO_STRATEGY_MAP_REVERSE` (1:1 invariant assert at import); `_ALGO_TAGVALUE_KEYS` per-strategy; `build_ib_algo_order()` with size/length/display-size guards.
+- `sidecar_ibkr/handlers.py`: `PlaceOrder` calls `build_ib_algo_order()`; `PlaceOrderResponse.algo_strategy` echoed; `OrderEventMessage.algo_strategy` reverse-mapped from IBKR `algoStrategy`.
+- `app/services/telegram/order_flow.py`: `ParsedOrder` extended with `algo_strategy` + `algo_params`; `parse_place_order()` detects algo token at position 4, validates known keys + required params + display_size>0; returns early with algo `ParsedOrder`; non-algo path unchanged.
+
+**Frontend**
+
+- `src/services/algo/types.ts` (new): `AlgoStrategy` union, `DISPLAY_ALGOS` ReadonlySet, `AlgoParamSchema`/`AlgoCapabilityEntry`/`AlgoCapabilitiesResponse`/`AlgoSchemasResponse`/`AlgoOrderFields` interfaces.
+- `src/services/algo/api.ts` (new): `getAlgoCapabilities(brokerId, assetClass)` + `getAlgoSchemas()` using raw fetch with `encodeURIComponent`.
+- `src/features/orders/AlgoSection.tsx` (new): Collapsible "Algo Execution" section; fetches capabilities on mount; hidden when no strategies; LIMIT/MARKET coercion notice per strategy class; dynamic param form (enum→select, boolean→checkbox, time→time input, decimal→text); `onAlgoChange` callback fires immediately on strategy select.
+- `src/features/orders/TradeTicketModal.tsx`: `algoFields` state; `AlgoSection` rendered below TIF row; `buildRequest()` coerces `effectiveOrderType` and spreads `algo_strategy`/`algo_params` into `PreviewRequest`.
+- `src/features/orders/OrdersPage.tsx`: `algoStrategy` field in `UiOrder`; `algo` column in DataTable showing strategy or `—`.
+- `src/services/types.ts`: `PreviewRequest` extended with optional `algo_strategy` + `algo_params`.
+
+**Tests added**
+
+- `tests/test_algo_schemas.py` (9 unit tests, no_db)
+- `tests/test_algo_capability_service.py` (6 tests)
+- `tests/test_risk_service_algo.py` (9 unit tests, no_db)
+- `tests/test_orders_service_algo.py` (4 integration tests)
+- `tests/test_api_algo.py` (4 tests)
+- `tests/test_telegram_algo.py` (11 unit tests, no_db)
+- `tests/integration/test_algo_order_e2e.py` (3 smoke tests)
+- `sidecar_ibkr/tests/test_algo_order_builder.py` (8 unit tests)
+- FE: `AlgoSection.test.tsx` (4 tests) + `api.test.ts` (4 tests)
+
+**Deferred**
+
+- Real broker dispatch (sidecar `algo_strategy` TWS string casing unverified — LOW-A in spec; stub structure in place).
+- Admin UI for `broker_algo_capability` CRUD.
+
+---
+
 ### Phase 16 — Bonds + Mutual Funds + CFD (v0.16.0)
 
 Phase 16 shipped on 2026-05-18. 1712 BE tests green (1712 pass, 46 skip); 701 FE tests green. Adds three new instrument asset classes: bonds, mutual funds, and CFDs.
