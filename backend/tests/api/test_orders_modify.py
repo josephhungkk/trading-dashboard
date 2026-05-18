@@ -57,6 +57,7 @@ class _OrderRow:
     filled_qty: Decimal = Decimal("0")
     parent_order_id: UUID | None = None
     client_order_id: UUID = field(default_factory=uuid4)
+    algo_strategy: str | None = None
 
 
 class _Result:
@@ -120,6 +121,7 @@ class _Session:
                     "parent_order_id": self.order.parent_order_id,
                     "client_order_id": self.order.client_order_id,
                     "notional": self.order.notional,
+                    "algo_strategy": self.order.algo_strategy,
                 }
             )
         if "FROM orders" in sql and "parent_order_id = :p" in sql:
