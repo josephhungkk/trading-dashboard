@@ -150,12 +150,12 @@ services/futures/
 - Two registrations: daily at 09:00 US/Central (for CME/CBOT/NYMEX rules) and 09:00 Asia/Hong_Kong (for HKFE rules). Each firing passes an `exchange_filter` parameter (`{"CME","CBOT","NYMEX"}` or `{"HKFE"}`) so only rules for that exchange group are evaluated. Without this filter, CME rules would be evaluated at HK open (~02:00 US/Central) producing misleading cost estimates from pre-market quotes. As more exchanges are added in Phases 15–16, additional `(cron_expr, exchange_filter)` tuples are registered from `app_config`.
 - Queries all `enabled=true` roll rules joined to current open positions, filtered by exchange
 - For each: compute DTE as `(expiry - date.today()).days` (not from cache)
-- If `DTE <= days_before` and no nonce already pending (`EXISTS futures:roll:pending:{account_id}:{nonce}` prefix scan):
+- If `DTE <= days_before` and no nonce already pending for this specific instrument (see dedup below):
   - Fetch next contract month via `contract_resolver`
   - Compute estimated net cost from Redis quote bus mid spread
-  - Mint nonce → `futures:roll:pending:{account_id}:{nonce}` (24h TTL). Payload value: `{instrument_id, close_conid, open_conid, account_id}` as JSON. No `instrument_id` in key — instrument_id lives in the payload only.
+  - In a single Redis pipeline: SET `futures:roll:instrument:{account_id}:{instrument_id}` = nonce (24h TTL) + SET `futures:roll:pending:{account_id}:{nonce}` = `{instrument_id, close_conid, open_conid, account_id}` JSON (24h TTL). Both keys set atomically before sending Telegram.
   - Send Telegram preview (see §6)
-- Deduplication: `EXISTS futures:roll:pending:{account_id}:*` prefix check (SCAN, not GETDEL) prevents re-notification
+- **Deduplication (Option A):** `EXISTS futures:roll:instrument:{account_id}:{instrument_id}` — single O(1) lookup per rule, no SCAN. Scoped to the specific instrument so a pending ESM25 roll does not suppress a NQM25 notification on the same account. On nonce consumption via GETDEL, also DELETE `futures:roll:instrument:{account_id}:{instrument_id}`. On TTL expiry (24h), both keys naturally expire together.
 
 **`execute_roll(account_id, nonce)`:**
 1. `GETDEL futures:roll:pending:{account_id}:{nonce}` — literal key, atomic single-use gate. Returns nil → 404. No wildcard.
@@ -222,6 +222,10 @@ message SettlementEvent {
   string cash_delta       = 4;  // signed decimal string
   string settlement_type  = 5;
   string settled_at       = 6;  // ISO8601
+  string broker_event_id  = 7;  // broker-native dedup key; "" if unavailable
+                                 // IBKR → ExecDetails.execId
+                                 // Futu  → deal_id (from get_history_deals)
+                                 // Schwab → activityId (from transactions response)
 }
 ```
 
@@ -255,9 +259,9 @@ message SettlementEvent {
 | `DELETE` | `/api/futures/roll-rules/{instrument_id}` | JWT | Delete roll rule |
 | `GET` | `/api/futures/settlements` | JWT | Paginated settlement history |
 | `POST` | `/api/futures/roll/preview` | JWT | UI-initiated roll: mints nonce, returns next month + estimated cost |
-| `POST` | `/api/futures/roll/confirm/{nonce}` | JWT + CSRF | Execute pending roll (UI or Telegram path) |
+| `POST` | `/api/futures/roll/confirm/{nonce}` | JWT + CSRF | Execute pending roll — UI callers only; CSRF header required |
 
-`POST /api/futures/roll/confirm/{nonce}` requires CSRF nonce header (same pattern as `POST /api/combos/confirm/{nonce}`). Uses the existing `check_trade` Telegram rate-limit bucket (5/min, fail-CLOSED on Redis error).
+`POST /api/futures/roll/confirm/{nonce}` requires `X-Csrf-Nonce` header (same pattern as `POST /api/combos/confirm/{nonce}`). This endpoint is the **UI path only**. The Telegram `/confirm_roll <nonce>` command calls `execute_roll()` directly at the service layer via `handle_confirm_roll()` in `order_flow.py` — no HTTP hop, no CSRF header (same pattern as existing `handle_confirm → place_order()` in Phase 11d). Both paths share the same underlying `execute_roll()` function. The `check_trade` rate-limit bucket (5/min, fail-CLOSED on Redis error) is consumed in both paths.
 
 ---
 
@@ -282,6 +286,8 @@ Added to `RiskService.evaluate()`, called when `asset_class == "FUTURE"`.
 The concentration check groups open positions by `instruments.meta->>'underlying_symbol'` WHERE `instruments.asset_class = 'FUTURE'` to compute total futures exposure per root. `EvaluationContext.underlying_symbol` is what drives this grouping at risk-gate time.
 
 **Fail-open on `first_notice_day = None`:** When `first_notice_day is None` (cash-settled contract), the physical delivery BLOCK check is skipped entirely — no block, no warn. Cash-settled contracts have no delivery risk. This mirrors Phase 12's fail-open on `exchange is None`.
+
+**Physical delivery BLOCK does not apply to closing trades:** When `position_effect == "CLOSE"`, the physical delivery BLOCK (`date.today() >= first_notice_day`) is skipped. Closing a position reduces delivery risk; blocking the close would trap a user unable to exit a past-notice-day physical contract. The physical delivery WARN (DTE ≤ 10) is also suppressed on CLOSE — it is informational for open decisions only. `execute_roll()`'s close leg must pass `position_effect="CLOSE"` to `EvaluationContext`. This mirrors Phase 12's options gate skipping the naked-short ladder for closing trades.
 
 `_native_notional()` already multiplies by `multiplier` — no change needed.
 
@@ -313,7 +319,11 @@ To skip:  /delete_roll_rule ES
 - Cash: `"💰 ESM25 settled at 5,234.25 · Cash delta: +$1,250.00 (CASH settlement)"`
 - Physical: `"⚠ ESH25 physical delivery initiated — contact broker to arrange delivery"`
 
-**`handle_confirm_roll`** added to `order_flow.py`. Uses existing `check_trade` rate-limit bucket.
+**`handle_confirm_roll`** added to `order_flow.py`. Calls `execute_roll(account_id, nonce)` directly at the service layer — no HTTP call to the REST endpoint. Uses existing `check_trade` rate-limit bucket.
+
+**`handle_delete_roll_rule`** added to `order_flow.py`. The Telegram command takes a root symbol (e.g. `ES`), but `delete_roll_rule(db, account_id, instrument_id)` takes a BIGINT. Resolution: query `instruments` for rows where `asset_class = 'FUTURE'` AND `meta->>'underlying_symbol' = '{root}'` and the account has an active roll rule. If exactly one match: delete it. If multiple (two contract months both have rules, unusual post-roll but possible): reply with an ambiguity list and ask the user to use `/delete_roll_rule <instrument_id>` instead.
+
+**`DELETE /api/futures/roll-rules/{instrument_id}` (UI path):** The FE positions tab already has the full `RollRule` object (with `instrumentId: number`) fetched from `GET /api/futures/roll-rules`. The "Edit Rule" and delete actions map directly to `instrumentId` — no root-symbol resolution needed on the FE side.
 
 ---
 
@@ -435,7 +445,8 @@ tests/db/
 | `test_roll_partial_fill` | close fills, open rejected → Telegram partial-fill alert, no second close |
 | `test_physical_delivery_block` | risk gate BLOCKs open when `date.today() >= first_notice_day` |
 | `test_physical_delivery_warn` | risk gate WARNs at `DTE ≤ 10` and `settlement_type == PHYSICAL` |
-| `test_roll_checker_deduplication` | second daily run skips re-notify when nonce already pending |
+| `test_roll_checker_deduplication` | second daily run skips re-notify when nonce already pending (same instrument) |
+| `test_roll_checker_dedup_cross_instrument` | pending ESM25 roll does NOT suppress NQM25 notification on same account |
 | `test_settlement_listener_cash` | cash settlement → DB insert + correct Telegram message |
 | `test_settlement_listener_physical` | physical settlement → warning message variant |
 | `test_multiplier_notional` | `_native_notional` × multiplier correct for ES (50), HSI (50), MES (5) |
