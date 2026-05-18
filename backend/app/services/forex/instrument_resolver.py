@@ -34,7 +34,7 @@ class ForexInstrumentResolver:
             return json.loads(cached)
         result = await self._db.execute(
             text(
-                "SELECT id, canonical_id, conid, asset_class, meta "
+                "SELECT id, canonical_id, meta->>'conid' AS conid, asset_class, meta "
                 "FROM instruments WHERE asset_class = 'FOREX' "
                 "AND meta->>'base_currency' = :base AND meta->>'quote_currency' = :quote "
                 "LIMIT 1"
