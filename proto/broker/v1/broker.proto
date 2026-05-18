@@ -14,6 +14,7 @@ syntax = "proto3";
 package broker.v1;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
 
 service Broker {
   rpc Health(HealthRequest) returns (HealthResponse);
@@ -56,6 +57,10 @@ service Broker {
   rpc GetSupportedComboStrategies(GetSupportedComboStrategiesRequest) returns (GetSupportedComboStrategiesResponse);
   rpc GetFutureContracts(GetFutureContractsRequest) returns (GetFutureContractsResponse);
   rpc StreamSettlementEvents(StreamSettlementEventsRequest) returns (stream SettlementEvent);
+  rpc RequestFxQuote(FxQuoteRequest) returns (FxQuoteResponse);
+  rpc AcceptFxQuote(FxAcceptRequest) returns (FxAcceptResponse);
+  rpc CancelFxQuote(FxCancelRequest) returns (google.protobuf.Empty);
+  rpc StreamFxRates(google.protobuf.Empty) returns (stream FxMidRate);
 }
 
 // Phase 10a — PreviewOrder messages (spec §5).
@@ -676,4 +681,45 @@ message SettlementEvent {
   string settlement_type  = 5;
   string settled_at       = 6;  // ISO8601
   string broker_event_id  = 7;  // IBKR execId / Futu deal_id / Schwab activityId; "" if unavailable
+}
+
+message FxQuoteRequest {
+  string account_id        = 1;
+  string base_currency     = 2;
+  string quote_currency    = 3;
+  string notional          = 4;  // decimal string
+  string notional_currency = 5;  // 'base' or 'quote'
+}
+
+message FxQuoteResponse {
+  string broker_quote_id = 1;
+  string bid             = 2;
+  string ask             = 3;
+  int32  ttl_seconds     = 4;
+  string expires_at      = 5;  // ISO8601 UTC
+}
+
+message FxAcceptRequest {
+  string account_id      = 1;
+  string broker_quote_id = 2;
+  string side            = 3;  // 'BUY' or 'SELL'
+  string qty             = 4;  // decimal string
+}
+
+message FxAcceptResponse {
+  string order_id    = 1;
+  string fill_price  = 2;
+  string status      = 3;
+}
+
+message FxCancelRequest {
+  string account_id      = 1;
+  string broker_quote_id = 2;
+}
+
+message FxMidRate {
+  string base_currency  = 1;
+  string quote_currency = 2;
+  string mid            = 3;
+  string timestamp      = 4;  // ISO8601 UTC
 }

@@ -1504,10 +1504,14 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                 return broker_pb2.SearchContractsResponse(contracts=contracts)
 
         async with self._search_limiter:
-            ib_contract = ib_async.Contract(
-                symbol=request.query,
-                secType=request.asset_class or "STK",
-            )
+            # Phase 15: FOREX->CASH/IDEALPRO, CRYPTO->CRYPTO/PAXOS, default STK
+            asset_class = request.asset_class or "STK"
+            if asset_class == "FOREX":
+                ib_contract = ib_async.Forex(symbol=request.query, exchange="IDEALPRO")
+            elif asset_class == "CRYPTO":
+                ib_contract = ib_async.Crypto(symbol=request.query, exchange="PAXOS")
+            else:
+                ib_contract = ib_async.Contract(symbol=request.query, secType=asset_class)
             details = await self.ib.reqContractDetailsAsync(ib_contract)  # type: ignore[attr-defined, unused-ignore]
 
         contracts = [self._proto_contract_from_details(detail) for detail in details]
