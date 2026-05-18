@@ -8,6 +8,8 @@ from app.services.algo.schemas import (
     _normalize_algo_params,
 )
 
+pytestmark = pytest.mark.no_db
+
 
 def test_algo_strategy_members():
     assert set(AlgoStrategy) == {

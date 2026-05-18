@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.accounts import BrokerMaintenance
+from app.services.algo.schemas import AlgoStrategy
 
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal[
@@ -65,6 +66,8 @@ class PreviewRequest(BaseModel):
     trail_offset_type: TrailOffsetType | None = None
     trail_limit_offset: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
     expiry_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    algo_strategy: AlgoStrategy | None = None
+    algo_params: dict[str, str] | None = None
 
     @field_validator(
         "qty",
@@ -389,6 +392,8 @@ class OrderModifyRequest(BaseModel):
     trail_offset_type: TrailOffsetType | None = None
     trail_limit_offset: str | None = Field(default=None, pattern=DECIMAL_8_PATTERN)
     expiry_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    algo_strategy: AlgoStrategy | None = None
+    algo_params: dict[str, str] | None = None  # accepted but ignored server-side (§5.3a)
 
     @field_validator(
         "qty",
