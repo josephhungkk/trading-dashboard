@@ -50,6 +50,13 @@ def _service(db: AsyncSession, redis: Any) -> CFDSearchService:
     return CFDSearchService(redis=redis, db=db)
 
 
+def _serialize_instrument(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k: str(v) if hasattr(v, "quantize") else (v.isoformat() if hasattr(v, "isoformat") else v)
+        for k, v in data.items()
+    }
+
+
 @router.get("/search")
 async def search_cfd(
     identity: IdentityDep,
@@ -72,4 +79,4 @@ async def get_cfd(
     instrument = await _service(db, redis).get_by_id(instrument_id)
     if instrument is None:
         raise HTTPException(status_code=404, detail="cfd_not_found")
-    return instrument
+    return _serialize_instrument(instrument)

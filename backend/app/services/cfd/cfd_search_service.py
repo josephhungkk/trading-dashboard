@@ -4,10 +4,12 @@ import asyncio
 import json
 from typing import Any, ClassVar, cast
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _CACHE_TTL_SECONDS = 300
+log = structlog.get_logger(__name__)
 
 
 class CFDSearchService:
@@ -21,9 +23,16 @@ class CFDSearchService:
     @classmethod
     async def _sf_lock(cls, key: str) -> asyncio.Lock:
         async with cls._sf_lock_meta:
-            if key not in cls._sf_locks:
-                cls._sf_locks[key] = asyncio.Lock()
-            return cls._sf_locks[key]
+            lock = cls._sf_locks.get(key)
+            if lock is None:
+                if len(cls._sf_locks) > 512:
+                    # evict oldest half to bound memory
+                    evict = list(cls._sf_locks.keys())[:256]
+                    for k in evict:
+                        del cls._sf_locks[k]
+                lock = asyncio.Lock()
+                cls._sf_locks[key] = lock
+            return lock
 
     @staticmethod
     def _loads(raw: Any) -> list[dict[str, Any]]:
@@ -33,7 +42,7 @@ class CFDSearchService:
 
     async def search(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
         normalized = query.lower()
-        cache_key = f"cfd:search:{normalized}"
+        cache_key = f"cfd:search:{normalized}:{limit}"
         cached = await self._redis.get(cache_key)
         if cached:
             return self._loads(cached)
@@ -66,7 +75,10 @@ class CFDSearchService:
                 r = dict(row)
                 meta = r.get("meta")
                 if isinstance(meta, str):
-                    r["meta"] = json.loads(meta)
+                    try:
+                        r["meta"] = json.loads(meta)
+                    except Exception:
+                        log.exception("cfd_search_meta_decode_failed", instrument_id=r.get("id"))
                 rows.append(r)
             await self._redis.setex(cache_key, _CACHE_TTL_SECONDS, json.dumps(rows, default=str))
             return rows

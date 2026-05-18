@@ -85,9 +85,17 @@ async def search_bonds(
 async def get_accrued_interest(
     instrument_id: int,
     identity: IdentityDep,
+    db: DbDep,
     account_id: str = Query(...),
     service: BondSearchService = Depends(_get_bond_service),  # noqa: B008
 ) -> dict[str, str | None]:
+    acct = await db.execute(
+        text("SELECT 1 FROM broker_accounts WHERE id = :aid LIMIT 1"),
+        {"aid": account_id},
+    )
+    if acct.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="account_not_found")
+
     accrued = await service.get_accrued_interest(instrument_id, account_id)
     return {"accrued": str(accrued) if accrued is not None else None}
 
@@ -97,8 +105,17 @@ async def upsert_accrued_interest(
     instrument_id: int,
     body: UpsertAccruedInterestBody,
     identity: IdentityDep,
+    db: DbDep,
     service: BondSearchService = Depends(_get_bond_service),  # noqa: B008
 ) -> dict[str, str]:
+    # CSRF: protected by CF Access SameSite=Strict JWT; future: add nonce for defense-in-depth
+    acct = await db.execute(
+        text("SELECT 1 FROM broker_accounts WHERE id = :aid LIMIT 1"),
+        {"aid": body.account_id},
+    )
+    if acct.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="account_not_found")
+
     await service.upsert_accrued_interest(
         instrument_id,
         body.account_id,

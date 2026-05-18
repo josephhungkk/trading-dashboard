@@ -1051,6 +1051,30 @@ class RiskService:
                     )
                 )
                 return blockers[0], None
+            # BLOCK if qty below fund min_investment
+            if ctx.instrument_id is not None:
+                meta_row = await self._db.execute(
+                    text("SELECT meta FROM instruments WHERE id = :id LIMIT 1"),
+                    {"id": ctx.instrument_id},
+                )
+                fund_meta = meta_row.scalar_one_or_none() or {}
+                if isinstance(fund_meta, str):
+                    fund_meta = json.loads(fund_meta)
+                min_inv_str = fund_meta.get("min_investment")
+                if min_inv_str is not None:
+                    min_inv = Decimal(str(min_inv_str))
+                    if ctx.qty < min_inv:
+                        return (
+                            GateBlockerEntry(
+                                check="fund_min_investment",
+                                code="fund_below_min_investment",
+                                message=(
+                                    f"Order qty {ctx.qty} is below fund minimum "
+                                    f"investment {min_inv}."
+                                ),
+                            ),
+                            None,
+                        )
             conc_row = await self._resolve_limit(
                 ctx.account_id, ctx.broker_id, "fund_max_concentration_pct"
             )
@@ -1104,6 +1128,36 @@ class RiskService:
                     ),
                     None,
                 )
+            # BLOCK if broker account country not in allowed countries
+            # (when cfd_allowed_countries limit kind is configured)
+            if ctx.account_id is not None:
+                acct_row = await self._db.execute(
+                    text("SELECT country FROM broker_accounts WHERE id = :id LIMIT 1"),
+                    {"id": ctx.account_id},
+                )
+                account_country = acct_row.scalar_one_or_none()
+                allowed_row = await self._resolve_limit(
+                    ctx.account_id, ctx.broker_id, "cfd_allowed_countries"
+                )
+                if allowed_row is not None and account_country is not None:
+                    # limit_value encodes as comma-separated ISO-2 country list
+                    allowed_countries = [
+                        c.strip().upper()
+                        for c in str(allowed_row.limit_value).split(",")
+                        if c.strip()
+                    ]
+                    if allowed_countries and account_country.upper() not in allowed_countries:
+                        return (
+                            GateBlockerEntry(
+                                check="cfd_country_restriction",
+                                code="cfd_country_not_allowed",
+                                message=(
+                                    f"CFD trading not permitted for account "
+                                    f"country {account_country}."
+                                ),
+                            ),
+                            None,
+                        )
             # Check leverage cap from meta
             if ctx.instrument_id is not None:
                 meta_row = await self._db.execute(

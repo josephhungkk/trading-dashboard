@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,8 +29,8 @@ _RATE_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 
 class UpsertFundNavRequest(BaseModel):
     nav: str
-    nav_date: str
-    source: str
+    nav_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    source: str = Field(max_length=128)
 
 
 def _get_user_id(identity: AdminIdentity) -> str:
@@ -57,6 +57,19 @@ def _check_rate_limit(identity: AdminIdentity) -> None:
 
 def _service(db: AsyncSession, redis: Any) -> FundSearchService:
     return FundSearchService(redis=redis, db=db)
+
+
+def _serialize_row(row: Any) -> dict[str, Any]:
+    import json as _json
+
+    data = dict(row)
+    meta = data.get("meta")
+    if isinstance(meta, str):
+        data["meta"] = _json.loads(meta)
+    return {
+        k: str(v) if hasattr(v, "quantize") else (v.isoformat() if hasattr(v, "isoformat") else v)
+        for k, v in data.items()
+    }
 
 
 @router.get("/search")
@@ -91,7 +104,7 @@ async def get_fund(
     row = result.mappings().one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="fund_not_found")
-    return dict(row)
+    return _serialize_row(row)
 
 
 @router.get("/{instrument_id}/nav")
@@ -115,6 +128,7 @@ async def post_fund_nav(
     db: DbDep,
     redis: RedisDep,
 ) -> dict[str, str]:
+    # CSRF: protected by CF Access SameSite=Strict JWT; future: add nonce for defense-in-depth
     await _service(db, redis).upsert_nav_snapshot(
         instrument_id,
         Decimal(body.nav),

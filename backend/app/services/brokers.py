@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, TypeVar, cast
 from uuid import UUID
 
-import grpc  # type: ignore[import-untyped]
+import grpc
 import structlog
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import RowMapping
@@ -445,7 +445,7 @@ class BrokerSidecarClient:
         limit: int = 1000,
     ) -> base.HistoricalBarsResult:
         """Fetch historical OHLCV bars from the sidecar (Phase 9 BarService)."""
-        from google.protobuf.timestamp_pb2 import Timestamp  # type: ignore[import-untyped]
+        from google.protobuf.timestamp_pb2 import Timestamp
 
         request = broker_pb2.GetHistoricalBarsRequest(
             canonical_id=canonical_id,

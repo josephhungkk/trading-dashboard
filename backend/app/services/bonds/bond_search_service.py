@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import structlog
 from sqlalchemy import text
@@ -36,7 +36,7 @@ class BondSearchService:
         if cached:
             if isinstance(cached, bytes):
                 cached = cached.decode("utf-8")
-            return json.loads(cached)
+            return cast(list[dict[str, Any]], json.loads(cached))
 
         lock = await self._sf_lock(cache_key)
         async with lock:
@@ -44,7 +44,7 @@ class BondSearchService:
             if cached:
                 if isinstance(cached, bytes):
                     cached = cached.decode("utf-8")
-                return json.loads(cached)
+                return cast(list[dict[str, Any]], json.loads(cached))
 
             result = await self._db.execute(
                 text(
