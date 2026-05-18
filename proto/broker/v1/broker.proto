@@ -62,6 +62,13 @@ service Broker {
   rpc CancelFxQuote(FxCancelRequest) returns (google.protobuf.Empty);
   rpc StreamFxRates(google.protobuf.Empty) returns (stream FxMidRate);
   rpc ListCryptoAssets(ListCryptoAssetsRequest) returns (ListCryptoAssetsResponse);
+  // Phase 16a: Bonds
+  rpc SearchBonds(SearchBondsRequest) returns (SearchBondsResponse);
+  rpc GetBondAccruedInterest(GetBondAccruedInterestRequest) returns (GetBondAccruedInterestResponse);
+  // Phase 16b: Mutual Funds
+  rpc SearchFunds(SearchFundsRequest) returns (SearchFundsResponse);
+  // Phase 16c: CFDs
+  rpc SearchCFDs(SearchCFDsRequest) returns (SearchCFDsResponse);
 }
 
 message CryptoAsset {
@@ -741,4 +748,91 @@ message FxMidRate {
   string quote_currency = 2;
   string mid            = 3;
   string timestamp      = 4;  // ISO8601 UTC
+}
+
+// ── Phase 16a: Bonds ────────────────────────────────────────────────────────
+
+message BondInstrument {
+  int64 id = 1;
+  string canonical_id = 2;
+  string display_name = 3;
+  string currency = 4;
+  string primary_exchange = 5;
+  string isin = 6;
+  string cusip = 7;
+  string coupon_rate = 8;   // Decimal string
+  int32 coupon_frequency = 9;
+  string maturity_date = 10; // YYYY-MM-DD
+  string face_value = 11;   // Decimal string
+  string bond_type = 12;
+  string credit_rating = 13;
+}
+
+message SearchBondsRequest {
+  string query = 1;
+  int32 limit = 2;
+}
+
+message SearchBondsResponse {
+  repeated BondInstrument bonds = 1;
+}
+
+message GetBondAccruedInterestRequest {
+  int64 instrument_id = 1;
+  string account_id = 2;
+}
+
+message GetBondAccruedInterestResponse {
+  string accrued = 1;   // Decimal string, empty if unknown
+  string as_of = 2;     // YYYY-MM-DD
+}
+
+// ── Phase 16b: Mutual Funds ─────────────────────────────────────────────────
+
+message FundInstrument {
+  int64 id = 1;
+  string canonical_id = 2;
+  string display_name = 3;
+  string currency = 4;
+  string fund_family = 5;
+  string fund_type = 6;
+  string isin = 7;
+  string cusip = 8;
+  string min_investment = 9;   // Decimal string
+  bool allows_fractional = 10;
+  string nav_currency = 11;
+}
+
+message SearchFundsRequest {
+  string query = 1;
+  int32 limit = 2;
+}
+
+message SearchFundsResponse {
+  repeated FundInstrument funds = 1;
+}
+
+// ── Phase 16c: CFDs ──────────────────────────────────────────────────────────
+
+message CFDInstrument {
+  int64 id = 1;
+  string canonical_id = 2;
+  string display_name = 3;
+  string currency = 4;
+  string underlying_type = 5;
+  string underlying_symbol = 6;
+  string tick_size = 7;    // Decimal string
+  string multiplier = 8;   // Decimal string
+  string margin_rate = 9;  // Decimal string
+  string max_leverage = 10; // Decimal string
+  string exchange = 11;
+}
+
+message SearchCFDsRequest {
+  string query = 1;
+  int32 limit = 2;
+}
+
+message SearchCFDsResponse {
+  repeated CFDInstrument cfds = 1;
 }

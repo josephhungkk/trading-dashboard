@@ -3,10 +3,8 @@
 Spec: docs/superpowers/specs/2026-05-08-phase10a-risk-engine-design.md §3.
 
 NOTE: account_id and order_id reference broker_accounts(id) and orders(id)
-at the DB layer (enforced by Alembic 0036). The orders ORM model lives in
-``app.models.orders``; broker_accounts has no ORM model in this codebase
-(Phase 4/5a uses raw SQL), so we omit ORM-level ForeignKey() args on
-account_id / instrument_id to avoid metadata resolution errors at import.
+at the DB layer (enforced by Alembic 0036). The DB-level constraints remain
+the source of truth for those links.
 """
 
 from __future__ import annotations

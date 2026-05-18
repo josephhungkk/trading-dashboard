@@ -29,14 +29,17 @@ from app.api.ai import router as ai_router
 from app.api.alerts import router as alerts_router
 from app.api.bars import router as bars_router  # Task 28: GET /api/bars
 from app.api.bars import ws_router as bars_ws_router  # Task 31: WS /ws/bars
+from app.api.bonds import router as bonds_router
 from app.api.brokers import router as brokers_router
 from app.api.brokers_admin import router as brokers_admin_router
 from app.api.capabilities import router as capabilities_router
+from app.api.cfd import router as cfd_router
 from app.api.chart_layouts import router as chart_layouts_router
 from app.api.combos import router as combos_router
 from app.api.contracts import router as contracts_router
 from app.api.crypto import router as crypto_router
 from app.api.forex import router as forex_router
+from app.api.funds import router as funds_router
 from app.api.futures import router as futures_router
 from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
@@ -855,6 +858,9 @@ app.include_router(combos_router)
 app.include_router(futures_router)
 app.include_router(forex_router)
 app.include_router(crypto_router)
+app.include_router(bonds_router)
+app.include_router(funds_router)
+app.include_router(cfd_router)
 app.include_router(ws_crypto_router)
 app.include_router(options_admin_router)
 app.include_router(ws_options_router)

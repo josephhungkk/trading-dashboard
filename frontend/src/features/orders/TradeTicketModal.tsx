@@ -21,6 +21,14 @@ import { OptionDetailsSection } from '@/features/options/OptionDetailsSection';
 import { ComboBuilder } from '@/features/options/combo/ComboBuilder';
 import { FutureDetailsSection } from '@/features/futures/FutureDetailsSection';
 import { FxTicketSection } from '@/features/forex/FxTicketSection';
+import { CryptoDetailsSection } from '@/features/crypto/CryptoDetailsSection';
+import type { CryptoAsset } from '@/services/crypto/types';
+import { BondDetailsSection } from '@/features/bonds/BondDetailsSection';
+import { FundDetailsSection } from '@/features/funds/FundDetailsSection';
+import { CFDDetailsSection } from '@/features/cfd/CFDDetailsSection';
+import type { BondInstrument } from '@/services/bonds/types';
+import type { FundInstrument } from '@/services/funds/types';
+import type { CFDInstrument } from '@/services/cfd/types';
 
 type Side = PreviewRequest['side'];
 type SubmittableOrderType = PreviewRequest['order_type'];
@@ -28,10 +36,13 @@ type OrderType = SubmittableOrderType | 'TRAIL' | 'TRAIL_LIMIT' | 'MOC' | 'MOO' 
 type Tif = PreviewRequest['tif'];
 type TradeTicketContract = ContractSearchInputValue & {
   asset_class?: string;
+  canonical_id?: string;
+  display_name?: string;
   optionRow?: import('@/features/options/types').OptionChainRow;
   expiryIso?: string;
   positionEffect?: 'OPEN' | 'CLOSE';
   futureContract?: import('@/services/futures/types').FutureContractMonth;
+  cryptoAsset?: CryptoAsset;
 };
 
 interface MaintenanceBanner {
@@ -627,6 +638,34 @@ function TradeTicketForm({
           />
         )}
 
+      {(form.contract as TradeTicketContract).asset_class === 'CRYPTO' && (
+        <CryptoDetailsSection asset={cryptoAssetFromContract(form.contract as TradeTicketContract)} />
+      )}
+
+      {/* ── Phase 16a — Bond details section ────────────────────────── */}
+      {(form.contract as TradeTicketContract).asset_class === 'BOND' &&
+        (form.contract as TradeTicketContract & { bondInstrument?: BondInstrument }).bondInstrument != null && (
+          <BondDetailsSection
+            bond={(form.contract as TradeTicketContract & { bondInstrument: BondInstrument }).bondInstrument}
+          />
+        )}
+
+      {/* ── Phase 16b — Mutual fund details section ─────────────────── */}
+      {(form.contract as TradeTicketContract).asset_class === 'MUTUAL_FUND' &&
+        (form.contract as TradeTicketContract & { fundInstrument?: FundInstrument }).fundInstrument != null && (
+          <FundDetailsSection
+            fund={(form.contract as TradeTicketContract & { fundInstrument: FundInstrument }).fundInstrument}
+          />
+        )}
+
+      {/* ── Phase 16c — CFD details section ─────────────────────────── */}
+      {(form.contract as TradeTicketContract).asset_class === 'CFD' &&
+        (form.contract as TradeTicketContract & { cfdInstrument?: CFDInstrument }).cfdInstrument != null && (
+          <CFDDetailsSection
+            cfd={(form.contract as TradeTicketContract & { cfdInstrument: CFDInstrument }).cfdInstrument}
+          />
+        )}
+
       {/* Phase 15a — FX ticket section */}
       {(form.contract as TradeTicketContract).asset_class === 'FOREX' &&
         accountId !== null && (
@@ -993,6 +1032,28 @@ function buildRequest(accountId: string, form: FormState): PreviewRequest | null
     qty: qty as DecimalString,
     limit_price: form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT' ? form.limitPrice.trim() as DecimalString : null,
     stop_price: form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT' ? form.stopPrice.trim() as DecimalString : null,
+  };
+}
+
+function cryptoAssetFromContract(contract: TradeTicketContract): CryptoAsset {
+  if (contract.cryptoAsset != null) return contract.cryptoAsset;
+  const canonicalId = contract.canonical_id ?? contract.symbol;
+  const pairText = contract.display_name ?? canonicalId;
+  const parts = pairText.includes('/')
+    ? pairText.split('/')
+    : pairText.includes('-')
+      ? pairText.split('-')
+      : pairText.includes('.')
+        ? pairText.split('.')
+        : [pairText.slice(0, 3), pairText.slice(3)];
+  return {
+    canonical_id: canonicalId,
+    base_asset: parts[0]?.toUpperCase() || contract.symbol,
+    quote_asset: parts[1]?.toUpperCase() || 'USD',
+    min_qty: '—',
+    qty_step: '—',
+    min_notional: null,
+    available_24h: true,
   };
 }
 

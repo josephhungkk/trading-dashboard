@@ -48,6 +48,9 @@ class AssetClass(enum.StrEnum):
     CRYPTO = "CRYPTO"
     OPTION = "OPTION"
     FUTURE = "FUTURE"
+    BOND = "BOND"  # Phase 16a
+    MUTUAL_FUND = "MUTUAL_FUND"  # Phase 16b
+    CFD = "CFD"  # Phase 16c
 
 
 class Instrument(Base):

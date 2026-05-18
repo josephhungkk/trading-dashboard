@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date
+from datetime import time as time_type
 from decimal import Decimal
+from enum import IntEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
@@ -72,8 +74,75 @@ class CryptoDetails(BaseModel):
     min_notional: Decimal | None = None  # e.g. 1.00 USD; None if not specified
 
 
+class CouponFrequency(IntEnum):
+    ZERO_COUPON = 0
+    ANNUAL = 1
+    SEMI_ANNUAL = 2
+    QUARTERLY = 4
+    MONTHLY = 12
+
+
+class BondDetails(BaseModel):
+    asset_class: Literal["BOND"] = "BOND"
+    cusip: str | None = None
+    isin: str | None = None
+    issuer_id: str | None = None
+    coupon_rate: Decimal
+    coupon_frequency: CouponFrequency
+    maturity_date: date
+    face_value: Decimal
+    issue_date: date | None = None
+    bond_type: str
+    currency: str
+    settlement_days: int = 2
+    callable: bool = False
+    yield_to_maturity: Decimal | None = None
+    duration: Decimal | None = None
+    credit_rating: str | None = None
+
+
+class MutualFundDetails(BaseModel):
+    asset_class: Literal["MUTUAL_FUND"] = "MUTUAL_FUND"
+    isin: str | None = None
+    cusip: str | None = None
+    fund_family: str
+    fund_type: str
+    currency: str
+    min_investment: Decimal
+    min_subsequent: Decimal
+    settlement_days: int = 1
+    allows_fractional: bool = True
+    cutoff_time_et: time_type
+    expense_ratio: Decimal | None = None
+    nav_currency: str
+
+
+class CFDDetails(BaseModel):
+    asset_class: Literal["CFD"] = "CFD"
+    underlying_type: str
+    underlying_symbol: str
+    underlying_conid: str | None = None
+    currency: str
+    tick_size: Decimal
+    qty_step: Decimal = Decimal("1")
+    multiplier: Decimal
+    margin_rate: Decimal
+    overnight_rate_long: Decimal
+    overnight_rate_short: Decimal
+    max_leverage: Decimal
+    listed_country: str | None = None
+    exchange: str = "IBCFD"
+
+
 InstrumentMeta = Annotated[
-    NonOptionDetails | OptionDetails | FutureDetails | ForexDetails | CryptoDetails,
+    NonOptionDetails
+    | OptionDetails
+    | FutureDetails
+    | ForexDetails
+    | CryptoDetails
+    | BondDetails
+    | MutualFundDetails
+    | CFDDetails,
     Field(discriminator="asset_class"),
 ]
 
@@ -82,7 +151,16 @@ _adapter: TypeAdapter[InstrumentMeta] = TypeAdapter(InstrumentMeta)
 
 def parse_instrument_meta(
     raw: str | dict[str, Any],
-) -> NonOptionDetails | OptionDetails | FutureDetails | ForexDetails | CryptoDetails:
+) -> (
+    NonOptionDetails
+    | OptionDetails
+    | FutureDetails
+    | ForexDetails
+    | CryptoDetails
+    | BondDetails
+    | MutualFundDetails
+    | CFDDetails
+):
     """Parse instruments.meta JSONB dict into a typed model. Raises ValidationError on bad shape."""
     data: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else raw
     if "asset_class" not in data:

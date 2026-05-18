@@ -12,6 +12,7 @@ sidecar). Returns a ``GateVerdict``.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -977,6 +978,188 @@ class RiskService:
             return None, warnings[0]
         return None, None
 
+    async def _check_bond_exposure(self, ctx: EvaluationContext) -> CheckResult:
+        """Phase 16a: Bond risk checks — notional cap + concentration WARN. Fail-OPEN."""
+        blockers: list[GateBlockerEntry] = []
+        warnings: list[GateWarningEntry] = []
+        try:
+            notional = getattr(ctx, "notional", None) or (ctx.qty * (ctx.price or Decimal("1")))
+            limit_row = await self._resolve_limit(
+                ctx.account_id, ctx.broker_id, "bond_max_notional_per_trade"
+            )
+            if limit_row is not None and notional > limit_row.limit_value:
+                blockers.append(
+                    GateBlockerEntry(
+                        check="bond_notional",
+                        code="bond_notional_exceeded",
+                        message=(
+                            f"Notional {notional} exceeds bond per-trade cap "
+                            f"{limit_row.limit_value}."
+                        ),
+                    )
+                )
+                return blockers[0], None
+            conc_row = await self._resolve_limit(
+                ctx.account_id, ctx.broker_id, "bond_max_concentration_pct"
+            )
+            if (
+                conc_row is not None
+                and ctx.account_nlv_base is not None
+                and ctx.account_nlv_base > 0
+            ):
+                conc_pct = (notional / ctx.account_nlv_base) * Decimal("100")
+                if conc_pct > conc_row.limit_value:
+                    warnings.append(
+                        GateWarningEntry(
+                            check="bond_concentration",
+                            message=(
+                                f"Bond concentration {conc_pct:.1f}% exceeds warning "
+                                f"threshold {conc_row.limit_value}%."
+                            ),
+                        )
+                    )
+        except Exception:
+            log.exception(
+                "bond_risk_check_infrastructure_error",
+                account_id=str(ctx.account_id),
+            )
+            return None, None  # fail-OPEN
+        if blockers:
+            return blockers[0], None
+        if warnings:
+            return None, warnings[0]
+        return None, None
+
+    async def _check_fund_exposure(self, ctx: EvaluationContext) -> CheckResult:
+        """Phase 16b: Mutual fund risk checks — notional cap + concentration WARN. Fail-OPEN."""
+        blockers: list[GateBlockerEntry] = []
+        warnings: list[GateWarningEntry] = []
+        try:
+            notional = getattr(ctx, "notional", None) or (ctx.qty * (ctx.price or Decimal("1")))
+            limit_row = await self._resolve_limit(
+                ctx.account_id, ctx.broker_id, "fund_max_notional_per_trade"
+            )
+            if limit_row is not None and notional > limit_row.limit_value:
+                blockers.append(
+                    GateBlockerEntry(
+                        check="fund_notional",
+                        code="fund_notional_exceeded",
+                        message=(
+                            f"Notional {notional} exceeds fund per-trade cap "
+                            f"{limit_row.limit_value}."
+                        ),
+                    )
+                )
+                return blockers[0], None
+            conc_row = await self._resolve_limit(
+                ctx.account_id, ctx.broker_id, "fund_max_concentration_pct"
+            )
+            if (
+                conc_row is not None
+                and ctx.account_nlv_base is not None
+                and ctx.account_nlv_base > 0
+            ):
+                conc_pct = (notional / ctx.account_nlv_base) * Decimal("100")
+                if conc_pct > conc_row.limit_value:
+                    warnings.append(
+                        GateWarningEntry(
+                            check="fund_concentration",
+                            message=(
+                                f"Fund concentration {conc_pct:.1f}% exceeds warning threshold "
+                                f"{conc_row.limit_value}%."
+                            ),
+                        )
+                    )
+        except Exception:
+            log.exception("fund_risk_check_infrastructure_error", account_id=str(ctx.account_id))
+            return None, None  # fail-OPEN
+        if blockers:
+            return blockers[0], None
+        if warnings:
+            return None, warnings[0]
+        return None, None
+
+    async def _check_cfd_exposure(self, ctx: EvaluationContext) -> CheckResult:
+        """Phase 16c: CFD risk checks.
+
+        Notional cap + leverage cap + concentration WARN. Fail-OPEN.
+        """
+        blockers: list[GateBlockerEntry] = []
+        warnings: list[GateWarningEntry] = []
+        try:
+            notional = getattr(ctx, "notional", None) or (ctx.qty * (ctx.price or Decimal("1")))
+            # Check notional cap
+            notional_limit = await self._resolve_limit(
+                ctx.account_id, ctx.broker_id, "cfd_max_notional_per_trade"
+            )
+            if notional_limit is not None and notional > notional_limit.limit_value:
+                return (
+                    GateBlockerEntry(
+                        check="cfd_notional",
+                        code="cfd_notional_exceeded",
+                        message=(
+                            f"CFD notional {notional} exceeds per-trade cap "
+                            f"{notional_limit.limit_value}."
+                        ),
+                    ),
+                    None,
+                )
+            # Check leverage cap from meta
+            if ctx.instrument_id is not None:
+                meta_row = await self._db.execute(
+                    text("SELECT meta FROM instruments WHERE id = :id LIMIT 1"),
+                    {"id": ctx.instrument_id},
+                )
+                meta = meta_row.scalar_one_or_none() or {}
+                if isinstance(meta, str):
+                    meta = json.loads(meta)
+                max_leverage_str = meta.get("max_leverage")
+                if max_leverage_str:
+                    max_leverage = Decimal(str(max_leverage_str))
+                    lev_limit = await self._resolve_limit(
+                        ctx.account_id, ctx.broker_id, "cfd_max_leverage"
+                    )
+                    if lev_limit is not None and max_leverage > lev_limit.limit_value:
+                        blockers.append(
+                            GateBlockerEntry(
+                                check="cfd_leverage",
+                                code="cfd_leverage_exceeded",
+                                message=(
+                                    f"CFD max leverage {max_leverage}x exceeds permitted "
+                                    f"{lev_limit.limit_value}x."
+                                ),
+                            )
+                        )
+                        return blockers[0], None
+            # Concentration WARN
+            conc_row = await self._resolve_limit(
+                ctx.account_id, ctx.broker_id, "cfd_max_concentration_pct"
+            )
+            if (
+                conc_row is not None
+                and ctx.account_nlv_base is not None
+                and ctx.account_nlv_base > 0
+            ):
+                conc_pct = (notional / ctx.account_nlv_base) * Decimal("100")
+                if conc_pct > conc_row.limit_value:
+                    warnings.append(
+                        GateWarningEntry(
+                            check="cfd_concentration",
+                            message=(
+                                f"CFD concentration {conc_pct:.1f}% exceeds warning threshold "
+                                f"{conc_row.limit_value}%."
+                            ),
+                        )
+                    )
+        except Exception:
+            log.exception("cfd_risk_check_infrastructure_error", account_id=str(ctx.account_id))
+            return None, None  # fail-OPEN
+        if blockers:
+            return blockers[0], None
+        if warnings:
+            return None, warnings[0]
+        return None, None
+
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).
 
@@ -1046,6 +1229,42 @@ class RiskService:
                 )
             if crypto_warning is not None:
                 pre_warnings = [crypto_warning]
+        # Phase 16a: bond checks
+        if ctx.asset_class == "BOND":
+            bond_blocker, bond_warning = (await self._check_bond_exposure(ctx)) or (None, None)
+            if bond_blocker is not None:
+                return GateVerdict(
+                    final_verdict="block",
+                    blockers=[bond_blocker],
+                    warnings=[],
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            if bond_warning is not None:
+                pre_warnings = [bond_warning]
+        # Phase 16b: mutual fund checks
+        if ctx.asset_class == "MUTUAL_FUND":
+            fund_blocker, fund_warning = (await self._check_fund_exposure(ctx)) or (None, None)
+            if fund_blocker is not None:
+                return GateVerdict(
+                    final_verdict="block",
+                    blockers=[fund_blocker],
+                    warnings=[],
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            if fund_warning is not None:
+                pre_warnings = [fund_warning]
+        # Phase 16c: CFD checks
+        if ctx.asset_class == "CFD":
+            cfd_blocker, cfd_warning = (await self._check_cfd_exposure(ctx)) or (None, None)
+            if cfd_blocker is not None:
+                return GateVerdict(
+                    final_verdict="block",
+                    blockers=[cfd_blocker],
+                    warnings=[],
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            if cfd_warning is not None:
+                pre_warnings = [cfd_warning]
         fast_check_names = (
             "account_kill_switch",
             "broker_kill_switch",

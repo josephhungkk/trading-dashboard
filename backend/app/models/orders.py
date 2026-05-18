@@ -10,12 +10,8 @@ from uuid import UUID
 from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, Numeric, String, Text, func
 
 # NOTE: orders.account_id and order_events.account_id reference
-# broker_accounts(id) at the DB layer (enforced by alembic 0004), but no
-# BrokerAccount(Base) ORM model exists in this codebase — Phase 4/5a uses
-# raw text() SQL for that table. We omit the ORM-level ForeignKey() arg
-# on those columns to avoid sqlalchemy.exc.NoReferencedTableError at
-# metadata resolution time. The DB-level constraint is the source of
-# truth.
+# broker_accounts(id) at the DB layer (enforced by alembic 0004). The DB-level
+# constraint remains the source of truth for order/account integrity.
 from sqlalchemy.dialects.postgresql import ENUM, JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
