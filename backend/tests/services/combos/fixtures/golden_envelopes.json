@@ -1,0 +1,30 @@
+[
+  {
+    "strategy": "VERTICAL",
+    "legs": [
+      {"side":"buy","strike":"250.00","expiry":"2026-01-17","put_call":"C","mid":"5.27500000"},
+      {"side":"sell","strike":"260.00","expiry":"2026-01-17","put_call":"C","mid":"2.17500000"}
+    ],
+    "expected": {
+      "kind": "DEBIT",
+      "net_debit_credit": "3.10000000",
+      "max_loss": "310.00000000",
+      "max_profit": "690.00000000",
+      "break_even": ["253.10000000"]
+    }
+  },
+  {
+    "strategy": "STRADDLE",
+    "legs": [
+      {"side":"buy","strike":"250.00","expiry":"2026-01-17","put_call":"C","mid":"5.00000000"},
+      {"side":"buy","strike":"250.00","expiry":"2026-01-17","put_call":"P","mid":"4.00000000"}
+    ],
+    "expected": {
+      "kind": "DEBIT",
+      "net_debit_credit": "9.00000000",
+      "max_loss": "900.00000000",
+      "max_profit": null,
+      "break_even": ["241.00000000","259.00000000"]
+    }
+  }
+]
