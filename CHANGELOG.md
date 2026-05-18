@@ -5,6 +5,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+---
+
+### Phase 13 — Multi-leg option combos (v0.13.0)
+
+Phase 13 shipped across 6 chunks (A–F) at tag `v0.13.0` on 2026-05-18. 31 combo-specific tests green; 690/690 FE tests green. Adds 5-strategy preview→confirm combo flow with CSRF, risk-gate envelope check, and Single/Multi-Leg toggle in TradeTicketModal.
+
+**Backend**
+
+- `alembic/versions/0049_combo_orders_order_legs.py` (new): `combo_orders` table (UUID PK, account_id FK, strategy_type, status enum CHECK, net_debit_credit/kind, max_loss/profit, break_even JSONB, tif, broker_combo_id, timestamps); `order_legs` table (FK combo_orders + orders); `orders.combo_id` nullable FK; `risk_limits.combo_max_loss_pct` + `risk_decisions.combo_id` widening.
+- `alembic/versions/0049a_combo_orders_updated_at_trigger.py` (new): `updated_at` auto-update triggers for `combo_orders` and `order_legs`.
+- `app/services/combos/types.py` (new): `LegSpec`, `ComboSpec`, `ComboContext` Pydantic models.
+- `app/services/combos/strategy_validator.py` (new): `validate()` dispatcher for 5 strategies; guards unknown strategy type (→ `ComboValidationError`) and short legs list before dispatch.
+- `app/services/combos/pnl_envelope.py` (new): `PnlEnvelopeService` — net debit/credit, max-loss/profit, break-evens using `Decimal` arithmetic (decimal.js-parity golden fixture).
+- `app/services/combos/combo_service.py` (new): `preview()` (nonce mint, Redis store, risk gate); `confirm()` (GETDEL nonce, payload-drift check, DB persist, broker stub); `cancel()` (status guard, FOR UPDATE, soft-cancel).
+- `app/services/combos/combo_fill_listener.py` (new): `ComboFillListener` — fills fan-out to `order_legs`; uses `scalar_one_or_none` with orphan warning on missing combo.
+- `app/services/risk_service.py`: `_check_combo_envelope` (max-loss BLOCK, degenerate max-profit WARN, break-even spread WARN); `evaluate_combo` entry point; `_ComboRiskService` wired via `RiskService.__new__` in API layer.
+- `app/api/combos.py` (new): 5 REST endpoints — `POST /api/combos/preview`, `POST /api/combos/confirm/{nonce}`, `GET /api/combos/{id}`, `GET /api/combos`, `DELETE /api/combos/{id}`; CSRF nonce validation; account scoping; cursor pagination with `cast(literal(...), TIMESTAMP(timezone=True))`; `broker_not_configured` → HTTP 503 `broker_not_wired`; `begin()` outer transaction for cancel; cancel CSRF nonce validation.
+- `proto/broker/v1/broker.proto`: `PlaceComboOrder` + `CancelComboOrder` RPCs; `ComboLeg` message.
+
+**Frontend**
+
+- `src/features/options/combo/ComboBuilder.tsx` (new): preview→confirm flow; `listCombos` on mount to restore pending combo.
+- `src/features/options/combo/StrategyPicker.tsx` (new): 5-strategy selector.
+- `src/features/options/combo/LegSlot.tsx` (new): leg display row with bid/ask and side indicator.
+- `src/features/options/combo/ComboPayoffChart.tsx` (new): SVG payoff diagram from envelope.
+- `src/features/options/combo/ComboSummary.tsx` (new): net debit/credit, max-loss/profit, break-even summary row.
+- `src/features/options/combo/computeEnvelope.ts` (new): client-side P&L envelope calculation (decimal.js); guards `find()` results with explicit null-checks.
+- `src/services/combos/api.ts` (new): `previewCombo`, `confirmCombo`, `cancelCombo`, `listCombos` with `credentials: 'include'` and `_throw()` helper.
+- `src/services/combos/types.ts` (new): `LegRequest`, `ComboPreviewRequest`, `ConfirmRequest`, `ComboEnvelope`, `PreviewResponse`, `ComboOrder`, `CombosListResponse`.
+- `src/features/orders/TradeTicketModal.tsx`: Single/Multi-Leg toggle (state `tradeMode`); renders `ComboBuilder` when combo mode active and `accountId` is set; toggle buttons are first focusable elements (focus-trap tests updated).
+
+**Deferred**
+
+- Real broker dispatch: `PlaceComboOrder` RPC stub returns `broker_not_wired` 503 until Phase 14 wires the sidecar routing.
+- Put-spread break-even direction: `computeEnvelope.ts` and `pnl_envelope.py` currently handle call-spread break-even direction only.
+
+---
+
 ### Phase 12 — Options single-leg patch (v0.12.1)
 
 Reviewer-chain findings (chunks A+B+F) and 3 integration test fixes applied at v0.12.1 on 2026-05-14.

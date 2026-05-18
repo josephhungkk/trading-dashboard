@@ -791,9 +791,21 @@ Reviewer chain (chunks A+B+F+CI) applied at v0.12.1: named CHECK constraints in 
 
 Deferred: Schwab execution, Greeks in risk gate, IV rank, TicksSubscriber, Monaco swap.
 
-## Phase 13 — Multi-leg option combos
+## Phase 13 — Multi-leg option combos  *(complete — v0.13.0 · 2026-05-18)*
 
-Spread / straddle / strangle / collar / butterfly / condor / iron-condor ticket. Net-debit/credit preview. Schwab `complexOrderStrategyType` + IBKR combo legs.
+5-strategy preview→confirm combo flow (VERTICAL / CALENDAR / DIAGONAL / STRADDLE / STRANGLE). Net-debit/credit envelope. CSRF nonce. Single/Multi-Leg toggle in TradeTicketModal.
+
+- [x] Chunk A — Migration 0049: `combo_orders` + `order_legs` tables, `orders.combo_id` FK, `risk_limits`/`risk_decisions` widening; 0049a `updated_at` triggers
+- [x] Chunk B — BE service layer: `ComboContext` / `LegSpec` / `ComboSpec` types; `StrategyValidator` (5 strategies + unknown-type + short-legs guards); `PnlEnvelopeService` (net debit/credit, max-loss/profit, break-evens via decimal.js-parity)
+- [x] Chunk C — Risk gate extension: `RiskService._check_combo_envelope` (max-loss block, max-profit degenerate warn, break-even spread warn); `evaluate_combo` wired; 36 combo tests
+- [x] Chunk D — Proto + sidecars: `PlaceComboOrder` / `CancelComboOrder` RPCs in broker.proto; 4 sidecar stubs (IBKR/Futu/Schwab/Alpaca)
+- [x] Chunk E — Combo service + fill listener + API: `combo_service.preview/confirm/cancel`; `ComboFillListener` (orphan-safe `scalar_one_or_none`); REST API (preview/confirm/GET/LIST/DELETE) with CSRF, account scoping, cursor pagination, broker_not_wired 503, begin() transaction for cancel
+- [x] Chunk F — Frontend: `ComboBuilder` / `StrategyPicker` / `LegSlot` / `ComboPayoffChart` / `ComboSummary` / `computeEnvelope.ts`; `combos/api.ts` + `combos/types.ts`; Single/Multi-Leg toggle wired into production `TradeTicketModal` in features layer
+- [x] Reviewer chains applied (Chunks A+B: Codex; C+D: Codex; E+F: typescript-reviewer + code-reviewer)
+- [x] All CRIT+HIGH findings applied inline (unknown strategy type, short legs guard, broker_not_wired 503, TIMESTAMPTZ cast, cancel CSRF validation, begin() outer tx, ComboBuilder slot injection)
+- [x] Close-out: CHANGELOG / CLAUDE.md / TASKS.md + v0.13.0 tag
+
+**Deferred to Phase 14:** real broker dispatch (PlaceComboOrder RPC called; broker_not_wired 503 until Phase 14 wires sidecar); put-spread break-even direction fix (currently only handles call-spread direction).
 
 ## Phase 14 — Futures
 
