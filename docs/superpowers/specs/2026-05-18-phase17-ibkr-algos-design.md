@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-18
 **Version target:** v0.17.0
-**Status:** Architect-review Pass-3 findings applied (CRIT-C, HIGH-D/E/F, MED-E/F/G/H, LOW-C/D) — ready for implementation plan
+**Status:** Architect-review Pass-4 findings applied (HIGH-G, MED-I/J/K, LOW-E/F) — ready for implementation plan
 
 ---
 
@@ -48,7 +48,13 @@ ALTER TABLE orders
 
 Both columns nullable. Non-algo orders leave them NULL. `algo_status` column dropped (HIGH-A: duplicates existing `orders.status`).
 
-`algo_params` is stored as JSONB but all values are **string-typed** end-to-end (matching the `map<string,string>` proto convention). Booleans are stored as `"true"/"false"`, integers as decimal strings (e.g. `"15"`). A `_normalize_algo_params(params: dict) -> dict[str, str]` helper (in `app/services/algo/schemas.py`) converts Python bool/int values to lowercased strings at both write-time (`OrderRequest` validation) and read-time (DB → `EvaluationContext`). This ensures JSONB round-trip produces identical strings regardless of PG native-type coercion.
+`algo_params` is stored as JSONB but all values are **string-typed** end-to-end (matching the `map<string,string>` proto convention). Booleans are stored as `"true"/"false"`, integers as decimal strings (e.g. `"15"`). A `_normalize_algo_params(params: dict) -> dict[str, str]` helper (in `app/services/algo/schemas.py`) converts values at both write-time (`PreviewRequest`/`PlaceOrderRequest` validation) and read-time (DB → `EvaluationContext`). Conversion rules:
+- `True` → `"true"`, `False` → `"false"`
+- `int` → `str(value)`, `Decimal` → canonical string via `str(Decimal(...))`
+- `str` → unchanged
+- Any other type (list, dict, `None` as a value) → raises `ValueError` (surfaced as 500 to flush the underlying bug rather than silently mangling).
+
+This ensures JSONB round-trip produces identical strings regardless of PG native-type coercion. The JSONB column itself does not have a DB-level string-values CHECK constraint (avoidable complexity given the Python-layer normalizer); the Python guard is the single enforcement point.
 
 ### 2.2 Alembic 0057 — `broker_algo_capability` table
 
@@ -218,6 +224,10 @@ IBKR's `trade.order.algoStrategy` returns the IBKR string (e.g. `"Twap"`, `"Adap
 
 ```python
 _ALGO_STRATEGY_MAP_REVERSE: dict[str, str] = {v: k for k, v in _ALGO_STRATEGY_MAP.items()}
+# 1:1 invariant guard — catches any future duplicate-value addition at import time:
+assert len(_ALGO_STRATEGY_MAP_REVERSE) == len(_ALGO_STRATEGY_MAP), (
+    "_ALGO_STRATEGY_MAP must be 1:1; reverse mapping would be ambiguous"
+)
 
 # when building OrderEventMessage:
 algo_strategy = _ALGO_STRATEGY_MAP_REVERSE.get(trade.order.algoStrategy or "", "")
@@ -231,15 +241,28 @@ Empty string (`""`) is the absent-value sentinel for non-algo orders — proto `
 
 ## 5. Backend API
 
-### 5.1 `OrderRequest` Pydantic model additions
+### 5.1 Schema additions (`backend/app/schemas/orders.py`)
+
+No `OrderRequest` base class exists. Three discrete classes must be updated (verified in `app/schemas/orders.py`):
+
+- **`PreviewRequest`** (base class, `POST /api/orders/preview`): add `algo_strategy` + `algo_params`. These fields inherit automatically into `PlaceOrderRequest(PreviewRequest)`.
+- **`OrderModifyRequest`** (standalone class, `model_config = ConfigDict(extra="forbid")`): must also declare `algo_strategy` + `algo_params`. Without this, submitting these fields on a modify request raises Pydantic's `Extra inputs are not permitted` 422 **before** the §5.3a strategy-comparison rule runs — the error code would be wrong. The fields must be declared so the comparison can execute.
 
 ```python
+# Add to PreviewRequest (and thus PlaceOrderRequest via inheritance):
 algo_strategy: AlgoStrategy | None = None
 algo_params:   dict[str, str] | None = Field(default=None, max_length=16)
-# Individual value lengths enforced in validate_pre_dispatch (max 64 chars each)
+
+# Add to OrderModifyRequest (standalone — must be explicit):
+algo_strategy: AlgoStrategy | None = None
+algo_params:   dict[str, str] | None = None  # accepted but ignored server-side (§5.3a)
 ```
 
+Per §5.3a, `OrderModifyRequest.algo_params` is accepted by the model but the server **ignores its contents** and uses `orders.algo_params` from the DB. The FE may omit `algo_params` entirely on modify; if present, the server reads but ignores them.
+
 `AlgoStrategy` is a `StrEnum`: `ADAPTIVE`, `TWAP`, `VWAP`, `ARRIVAL_PRICE`, `ICEBERG`, `RESERVE`, `DARK_ICE`.
+
+Individual value lengths enforced in `validate_pre_dispatch` (max 64 chars each).
 
 ### 5.2 New endpoints
 
@@ -322,22 +345,36 @@ All three risk-gate call-sites in `orders_service` (`preview_order`, `place_orde
 **`_check_iceberg_display_size`** — applies when `algo_strategy IN ('ICEBERG', 'RESERVE', 'DARK_ICE')`:
 
 ```python
+# CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
+# (verified at risk_service.py:42 — no Verdict enum, no CheckResult constructor)
+# See _check_options_exposure / _check_futures_exposure as structural references.
+
 display_size_str = (ctx.algo_params or {}).get("display_size")
 if display_size_str is None:
-    return BLOCK("display_size_required")   # defensive; required-param check runs earlier
+    return (GateBlockerEntry(code="display_size_required",
+                             message="display_size is required for ICEBERG/RESERVE/DARK_ICE"),
+            None)
 try:
     display_size = Decimal(display_size_str)
 except InvalidOperation:
-    return BLOCK("display_size_malformed")
+    return (GateBlockerEntry(code="display_size_malformed",
+                             message="display_size must be a valid decimal string"),
+            None)
+# Both sides are Decimal — no float coercion needed (LOW-E).
 if display_size <= 0:
-    return BLOCK("display_size_nonpositive")
+    return (GateBlockerEntry(code="display_size_nonpositive",
+                             message="display_size must be > 0"),
+            None)
 if display_size >= ctx.qty:
-    return BLOCK("display_size_gte_qty")
+    return (GateBlockerEntry(code="display_size_gte_qty",
+                             message="display_size must be less than order qty"),
+            None)
 if display_size < Decimal("1"):
-    return WARN("display_size_sub_lot")    # fractional; legal on some venues
+    return (None,
+            GateWarningEntry(code="display_size_sub_lot",
+                             message="fractional display sizes may be rejected by some venues"))
+return None  # pass
 ```
-
-**MED-G — pseudocode return type:** The `BLOCK(...)` / `WARN(...)` calls above are illustrative shorthand. Actual return values must be `CheckResult` objects consistent with the existing 7 checks — e.g. `CheckResult(verdict=Verdict.BLOCK, code="display_size_nonpositive", message="...")`. See `_check_options_exposure` in `risk_service.py` as the structural reference for return shape.
 
 Fail-OPEN both paths (pure math; no external dependency).
 
@@ -441,7 +478,7 @@ Inserted into `TradeTicketModal` below TIF row, above sizing section.
 - `test_algo_capability_service.py` — capability query, cache hit/miss, pubsub invalidation, unsupported broker returns empty
 - `test_algo_order_builder.py` — each strategy's TagValue output; ICEBERG/RESERVE/DARK_ICE require LMT; TWAP/VWAP coerce MKT; `display_size=0` raises ValueError; oversize params raises ValueError
 - `test_risk_service_algo.py` — `_check_algo_capability` fail-CLOSED/OPEN, `_check_iceberg_display_size` all five cases (None, malformed, ≤0, ≥qty, <1)
-- `test_orders_service_algo.py` — preview + place; 422 unsupported; modify strategy-change 422; modify params-change 422; modify matching algo+params+qty-only allowed; bracket SL with algo 422
+- `test_orders_service_algo.py` — preview + place; 422 unsupported; modify strategy-change 422 (`algo_orders_modify_rejected_total{reason="strategy_change"}` increments); modify with `algo_params` in body — server ignores them, modify proceeds using stored params; bracket SL with algo 422
 - `test_telegram_algo.py` — all 6 strategies, `ARRIVAL` typo hint, unknown key, missing required, DARK_ICE display_size=0 rejected
 - `tests/integration/test_algo_order_e2e.py` — happy path (TWAP on STOCK, preview→risk→place→WS event with algo_strategy); rejected path (TWAP on BOND → 422)
 
