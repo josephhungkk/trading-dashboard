@@ -1170,3 +1170,53 @@ ws_crypto_book_messages_total = Counter(
     labelnames=["canonical_id"],
     registry=registry,
 )
+
+
+# --- Phase 17: Algo orders ---
+algo_orders_submitted_total = Counter(
+    "algo_orders_submitted_total",
+    "Algo orders successfully placed",
+    labelnames=["strategy", "broker_id", "asset_class"],
+    registry=registry,
+)
+algo_orders_cancelled_total = Counter(
+    "algo_orders_cancelled_total",
+    "Algo orders cancelled (from order event stream)",
+    labelnames=["strategy", "broker_id"],
+    registry=registry,
+)
+algo_orders_modify_rejected_total = Counter(
+    "algo_orders_modify_rejected_total",
+    "Modify attempts rejected due to algo strategy or bracket-leg constraint",
+    labelnames=["strategy", "reason"],
+    registry=registry,
+)
+algo_capability_cache_hits_total = Counter(
+    "algo_capability_cache_hits_total",
+    "AlgoCapabilityService Redis cache hits",
+    labelnames=["broker_id"],
+    registry=registry,
+)
+algo_capability_cache_misses_total = Counter(
+    "algo_capability_cache_misses_total",
+    "AlgoCapabilityService Redis cache misses",
+    labelnames=["broker_id"],
+    registry=registry,
+)
+algo_risk_blocks_total = Counter(
+    "algo_risk_blocks_total",
+    "Risk gate BLOCK results from algo checks",
+    labelnames=["check", "strategy"],
+    registry=registry,
+)
+algo_sidecar_errors_total = Counter(
+    "algo_sidecar_errors_total",
+    "Sidecar order builder errors for algo orders",
+    labelnames=["strategy", "error_type"],
+    registry=registry,
+)
+algo_capability_invalidate_malformed_total = Counter(
+    "algo_capability_invalidate_malformed_total",
+    "Malformed broker_algo_capability:invalidate pubsub payloads rejected",
+    registry=registry,
+)
