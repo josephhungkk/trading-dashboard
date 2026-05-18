@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import grpc  # type: ignore[import-untyped]
 import structlog
@@ -28,6 +28,9 @@ from app.core import metrics
 from app.models.risk import AccountKillSwitch, RiskLimit
 from app.schemas.risk import GateBlockerEntry, GateVerdict, GateWarningEntry
 from app.services.risk_inflight_counters import inflight_bp_committed, inflight_pdt_remaining
+
+if TYPE_CHECKING:
+    from app.services.combos.types import ComboContext
 
 CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
 
@@ -929,3 +932,64 @@ class RiskService:
             warnings=warnings,
             latency_ms=int((time.perf_counter() - t0) * 1000),
         )
+
+    async def evaluate_combo(self, ctx: ComboContext, mode: EvalMode) -> GateVerdict:
+        t0 = time.perf_counter()
+        blockers: list[GateBlockerEntry] = []
+        warnings: list[GateWarningEntry] = []
+
+        limits = (
+            await self._resolve_limit(uuid.UUID(ctx.account_id), "", "combo")
+            if hasattr(self, "_db")
+            else getattr(self, "_limits", None)
+        )
+        result = await self._check_combo_envelope(ctx, limits)
+        if result is not None:
+            blocker, warning = result
+            if blocker is not None:
+                blockers.append(blocker)
+            if warning is not None:
+                warnings.append(warning)
+
+        verdict: Literal["allow", "warn", "block"] = (
+            "block" if blockers else ("warn" if warnings else "allow")
+        )
+        return GateVerdict(
+            final_verdict=verdict,
+            blockers=blockers,
+            warnings=warnings,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+        )
+
+    async def _check_combo_envelope(
+        self, ctx: ComboContext, limits: RiskLimit | None
+    ) -> CheckResult:
+        from app.services.combos.types import ComboEnvelope
+
+        env: ComboEnvelope = ctx.envelope
+        naked_ok = getattr(limits, "naked_margin_enabled", False) if limits else False
+        if env.max_loss is None:
+            if not naked_ok:
+                return (
+                    GateBlockerEntry(
+                        check="combo_unbounded",
+                        message="Unbounded combo requires naked-margin account level",
+                        code="combo_unbounded_not_permitted",
+                    ),
+                    None,
+                )
+        elif limits is not None and limits.max_combo_loss_native is not None:
+            effective_loss = env.max_loss * Decimal("100")
+            if effective_loss > limits.max_combo_loss_native:
+                return (
+                    GateBlockerEntry(
+                        check="combo_max_loss",
+                        message=(
+                            f"Combo max loss {effective_loss} exceeds limit "
+                            f"{limits.max_combo_loss_native}"
+                        ),
+                        code="combo_max_loss_exceeded",
+                    ),
+                    None,
+                )
+        return None

@@ -80,9 +80,14 @@ def test_validator_always_returns_spec_or_known_reason(
     legs = [_make_leg(side1, s1, e1, pc1), _make_leg(side2, s2, e2, pc2)]
     known_reasons = {
         "expiry_mismatch",
+        "different_expiry_required",
         "same_strike_required",
+        "different_strike_required",
+        "expiry_or_strike_must_differ",
+        "same_put_call_required",
         "opposite_put_call_required",
         "opposite_side_required",
+        "same_side_required",
         "currency_mismatch",
     }
     try:

@@ -35,9 +35,9 @@ def _validate_vertical(legs: list[LegSpec]) -> None:
     if a.expiry != b.expiry:
         raise ComboValidationError("expiry_mismatch")
     if a.put_call != b.put_call:
-        raise ComboValidationError("opposite_put_call_required")
+        raise ComboValidationError("same_put_call_required")
     if a.strike == b.strike:
-        raise ComboValidationError("same_strike_required")
+        raise ComboValidationError("different_strike_required")
     if a.side == b.side:
         raise ComboValidationError("opposite_side_required")
 
@@ -45,9 +45,9 @@ def _validate_vertical(legs: list[LegSpec]) -> None:
 def _validate_calendar(legs: list[LegSpec]) -> None:
     a, b = legs[0], legs[1]
     if a.expiry == b.expiry:
-        raise ComboValidationError("expiry_mismatch")
+        raise ComboValidationError("different_expiry_required")
     if a.put_call != b.put_call:
-        raise ComboValidationError("opposite_put_call_required")
+        raise ComboValidationError("same_put_call_required")
     if a.strike != b.strike:
         raise ComboValidationError("same_strike_required")
     if a.side == b.side:
@@ -57,9 +57,9 @@ def _validate_calendar(legs: list[LegSpec]) -> None:
 def _validate_diagonal(legs: list[LegSpec]) -> None:
     a, b = legs[0], legs[1]
     if a.expiry == b.expiry and a.strike == b.strike:
-        raise ComboValidationError("expiry_mismatch")
+        raise ComboValidationError("expiry_or_strike_must_differ")
     if a.put_call != b.put_call:
-        raise ComboValidationError("opposite_put_call_required")
+        raise ComboValidationError("same_put_call_required")
     if a.side == b.side:
         raise ComboValidationError("opposite_side_required")
 
@@ -73,7 +73,7 @@ def _validate_straddle(legs: list[LegSpec]) -> None:
     if a.put_call == b.put_call:
         raise ComboValidationError("opposite_put_call_required")
     if a.side != b.side:
-        raise ComboValidationError("opposite_side_required")
+        raise ComboValidationError("same_side_required")
 
 
 def _validate_strangle(legs: list[LegSpec]) -> None:
@@ -81,11 +81,11 @@ def _validate_strangle(legs: list[LegSpec]) -> None:
     if a.expiry != b.expiry:
         raise ComboValidationError("expiry_mismatch")
     if a.strike == b.strike:
-        raise ComboValidationError("same_strike_required")
+        raise ComboValidationError("different_strike_required")
     if a.put_call == b.put_call:
         raise ComboValidationError("opposite_put_call_required")
     if a.side != b.side:
-        raise ComboValidationError("opposite_side_required")
+        raise ComboValidationError("same_side_required")
 
 
 _VALIDATORS = {

@@ -30,7 +30,7 @@ def test_vertical_valid():
 
 
 def test_vertical_same_strike_rejected():
-    with pytest.raises(ComboValidationError, match="same_strike_required"):
+    with pytest.raises(ComboValidationError, match="different_strike_required"):
         validate(
             "VERTICAL",
             [_leg("buy", 250), _leg("sell", 250)],
@@ -69,7 +69,7 @@ def test_vertical_same_side_rejected():
 
 
 def test_vertical_different_put_call_rejected():
-    with pytest.raises(ComboValidationError, match="opposite_put_call_required"):
+    with pytest.raises(ComboValidationError, match="same_put_call_required"):
         validate(
             "VERTICAL",
             [_leg("buy", 250, put_call="C"), _leg("sell", 260, put_call="P")],
