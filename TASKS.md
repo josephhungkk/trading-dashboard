@@ -823,9 +823,32 @@ CME/CBOT/NYMEX on IBKR + Schwab; HKFE (HSI/HHI) on Futu. Contract-month roll UI.
 
 **Deferred (stubs ship, full dispatch in a follow-up):** real broker sidecar dispatch for `GetFutureContracts` / `StreamSettlementEvents` (3 stubs); `execute_roll` places orders (logs+metrics but no order submission yet); `check_and_notify_rolls` queries DB roll rules and sends Telegram previews.
 
-## Phase 15 — Forex + Crypto
+## Phase 15 — Forex + Crypto  *(complete — v0.15.0 (15a) + v0.15.1 (15b) · 2026-05-18)*
 
 IBKR IDEALPRO FX. IBKR Paxos crypto. Coinbase WS as free crypto data source (data-only). 24/7 maintenance handling. Decimal qty (not integer).
+
+### Phase 15a — Forex RFQ
+
+- [x] Task 1 — Alembic 0051: `forex_rfq_quotes` table + `FOREX` enum; `ForexDetails` discriminated-union arm; `account_nlv_base` column in `broker_accounts`
+- [x] Task 2 — `ForexCalendar` + `CryptoCalendar` (24/7 overrides) + `ForexInstrumentResolver` (IDEALPRO canonical_id)
+- [x] Task 3 — `_check_forex_exposure` risk gate in `risk_service.py` (notional limit BLOCK, concentration WARN, session WARN, consolidation WARN)
+- [x] Task 4 — Proto FX RPCs (`PlaceForexOrder`, `GetForexQuote`, `CancelForexOrder`) + sidecar FOREX/CRYPTO secType branch
+- [x] Task 5 — `rfq_service.py` (mint/expire RFQ quotes) + `app/api/forex.py` (9 endpoints: pairs, quote, accept, cancel, history)
+- [x] Task 6 — APScheduler TTL sweep (`sweep_expired_quotes`) + 6 Prometheus metrics (`forex_rfq_*`, `forex_exposure_check_*`)
+- [x] Task 7 — FE: `services/forex/types.ts` + `api.ts`; `FractionalQtyInput`; `FxTicketSection` injected into `TradeTicketModal`
+- [x] Task 8 — `ForexPage` (/forex route) + integration tests
+
+### Phase 15b — Crypto
+
+- [x] Task 9 — Alembic 0052: `crypto_order_book_snapshots` hypertable + `CRYPTO` enum; `CryptoDetails` discriminated-union arm
+- [x] Task 10 — `CryptoService` + proto `ListCryptoAssets` RPC + `/api/crypto` endpoints + `crypto:nlv:{account_id}` Redis key
+- [x] Task 11 — `CoinbaseWsAdapter` (WS reconnect, HMAC auth, snapshot publish) + `book_manager.py` (`OrderBook` dataclass, bounded depth, delta/snapshot)
+- [x] Task 12 — `_check_crypto_exposure` risk gate (session limit, concentration WARN) + `CryptoCalendar` integration
+- [x] Task 13 — WS `/ws/crypto/book/{canonical_id}` endpoint (XREAD stream, 500ms conflation, 50-conn cap) + CoinbaseWsAdapter lifespan wiring
+- [x] Task 14 — FE: `services/crypto/types.ts` + `api.ts`; `OrderBookDisplay`; `CryptoDetailsSection` (injected into TradeTicketModal); `CryptoPage` + `/crypto` route
+- [x] Task 15 — Integration tests (`test_crypto_full_flow.py`: 10 tests, auth guards + DB seed + OrderBook unit) + close-out
+
+**Deferred:** real Coinbase WebSocket auth + HMAC key storage in `app_secrets`; Coinbase REST fallback on WS disconnect; Futu crypto (Phase deferred — IBKR Paxos only in Phase 15).
 
 ## Phase 16 — Bonds + Mutual Funds + CFD
 

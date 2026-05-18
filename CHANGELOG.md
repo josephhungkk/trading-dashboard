@@ -7,6 +7,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 15b — Crypto (v0.15.1)
+
+Phase 15b shipped on 2026-05-18 at tag `v0.15.1`. 1711 BE tests green; 701 FE tests green. Adds IBKR Paxos crypto with Coinbase WS order-book feed, real-time WS gateway, crypto risk gate, and `/crypto` UI.
+
+**Backend**
+
+- `alembic/versions/0052_crypto.py` (new): `crypto_order_book_snapshots` TimescaleDB hypertable (canonical_id, ts, bids/asks JSONB, seq); `CRYPTO` added to `instrument_asset_class` PG enum + Python `AssetClass` StrEnum; `CryptoDetails` discriminated-union arm in `instruments.meta`.
+- `app/services/crypto/book_manager.py` (new): `OrderBook` dataclass — `bids`/`asks` `dict[Decimal, Decimal]`, `last_seq`; `apply_delta` (remove on qty=0, evict worst levels beyond `MAX_BOOK_DEPTH=100`); `snapshot(depth)` returns sorted tuples best-first.
+- `app/services/crypto/coinbase_ws.py` (new): `CoinbaseWsAdapter` — HMAC-SHA256 subscribe auth, exponential-backoff reconnect, Redis `HSET crypto:book:snap:{id}` on snapshot + `XADD crypto:book:{id}` per delta, `MAX_BOOK_DEPTH` bounded; `run()` task for lifespan.
+- `app/services/crypto/crypto_service.py` (new): `CryptoService` — `list_assets(account_id)` via proto `ListCryptoAssets`; `resolve_instrument(symbol)` with DB upsert + Redis NLV key `crypto:nlv:{account_id}`.
+- `app/services/risk_service.py`: `_check_crypto_exposure` — session-notional BLOCK, per-asset concentration WARN; wired into `RiskService.evaluate` for `CRYPTO` asset class.
+- `app/api/crypto.py` (new): `GET /api/crypto/assets` + `GET /api/crypto/instrument/{symbol}`; JWT auth; 503 on broker-not-configured.
+- `app/api/ws_crypto.py` (new): WS `/ws/crypto/book/{canonical_id}` — initial snapshot from `crypto:book:snap:{id}` Redis hash, delta stream via `XREAD block=500ms`, 500ms conflation (max 2 frames/s), 50-connection cap, 30s heartbeat, `WSEnvelopeConfig` origin check + JWT auth.
+- `app/main.py`: `ws_crypto_router` registered; `CoinbaseWsAdapter.run()` started as `asyncio.Task` in lifespan with cancel on shutdown.
+- `app/core/metrics.py`: 2 new metrics — `ws_crypto_book_connections_total` (Gauge), `ws_crypto_book_messages_total{canonical_id}` (Counter); plus `crypto_risk_check_failures_total`, `crypto_exposure_check_total`, `crypto_book_snapshots_stored_total`, `crypto_book_deltas_published_total`.
+
+**Tests**
+
+- `tests/api/test_ws_crypto_book.py` (new): 2 unit tests — snapshot-from-Redis with data, empty snapshot on cache miss.
+- `tests/integration/test_crypto_full_flow.py` (new): 10 tests — auth guards (assets + instrument), DB instrument seed, `OrderBook` unit tests (add/update/remove delta, bid/ask sort, depth truncation, seq tracking).
+
+**Frontend**
+
+- `src/services/crypto/types.ts` (new): `CryptoAsset`, `OrderBookLevel`, `OrderBookSnapshot` interfaces.
+- `src/services/crypto/api.ts` (new): `listAssets`, `subscribeOrderBook` (WS connection returning unsubscribe fn).
+- `src/features/crypto/OrderBookDisplay.tsx` (new): bids/asks two-column table, stale indicator, max 20 levels.
+- `src/features/crypto/CryptoDetailsSection.tsx` (new): asset detail section injected into `TradeTicketModal` for `CRYPTO` asset class.
+- `src/features/crypto/CryptoPage.tsx` (new): `/crypto` page — asset list + live order book; `displaySnapshot` derived from `canonical_id` match to avoid setState-in-effect; interval ticker for stale detection.
+- `src/routes/crypto.tsx` (new): TanStack Router `/crypto` file-based route.
+- `src/features/orders/TradeTicketModal.tsx`: `CryptoDetailsSection` wired for `CRYPTO` asset class.
+
+---
+
+### Phase 15a — Forex RFQ (v0.15.0)
+
+Phase 15a shipped on 2026-05-18 at tag `v0.15.0`. Adds IBKR IDEALPRO FX RFQ flow with quote lifecycle, forex risk gate, and `/forex` UI.
+
+**Backend**
+
+- `alembic/versions/0051_forex.py` (new): `forex_rfq_quotes` table (account_id FK, instrument_id FK, bid/ask NUMERIC, ttl_seconds, broker_quote_id, notional, notional_currency, status CHECK pending/accepted/cancelled/expired, expires_at TIMESTAMPTZ); `FOREX` added to `instrument_asset_class` PG enum + Python `AssetClass` StrEnum; `account_nlv_base` column in `broker_accounts`.
+- `app/services/forex/forex_calendar.py` + `app/services/crypto/crypto_calendar.py` (new): `ForexCalendar` / `CryptoCalendar` (24/7 overrides returning `always_open=True`).
+- `app/services/forex/forex_instrument_resolver.py` (new): `ForexInstrumentResolver` — canonical_id `forex:{pair}:{exchange}` (IDEALPRO default), DB upsert, Redis TTL cache.
+- `app/services/risk_service.py`: `_check_forex_exposure` — notional BLOCK, per-currency consolidation WARN, session-notional WARN, concentration WARN.
+- `proto/broker/v1/broker.proto`: `PlaceForexOrder` + `GetForexQuote` + `CancelForexOrder` RPCs; `ForexQuote` message; `FOREX`/`CRYPTO` `SecType` enum values.
+- `app/services/forex/rfq_service.py` (new): `RfqService` — `mint_quote` (DB insert + Redis TTL key), `accept_quote` (GETDEL nonce, idempotent status update), `cancel_quote`, `sweep_expired_quotes` (APScheduler).
+- `app/api/forex.py` (new): 9 endpoints — `GET /api/forex/pairs`, `POST /api/forex/quote`, `GET /api/forex/quote/{id}`, `POST /api/forex/quote/{id}/accept`, `POST /api/forex/quote/{id}/cancel`, `GET /api/forex/history`; JWT auth; per-pair rate limiter via `_RATE_BUCKETS`.
+- `app/core/metrics.py`: 6 Prometheus metrics — `forex_rfq_quotes_total{status}`, `forex_rfq_accept_latency_seconds`, `forex_rfq_sweep_expired_total`, `forex_exposure_check_total{outcome}`, `forex_exposure_check_failures_total`, `forex_calendar_sessions_total`.
+
+**Frontend**
+
+- `src/services/forex/types.ts` + `api.ts` (new): `ForexPair`, `ForexQuote`, `ForexAcceptRequest` interfaces; `fetchPairs`, `requestQuote`, `acceptQuote`, `cancelQuote`, `fetchHistory`.
+- `src/components/primitives/FractionalQtyInput.tsx` (new): decimal-aware quantity input (step-validated, max 8 decimal places).
+- `src/features/forex/FxTicketSection.tsx` (new): RFQ flow section injected into `TradeTicketModal` for `FOREX` asset class; TTL countdown timer; accept/cancel actions.
+- `src/features/forex/ForexPage.tsx` (new): `/forex` page — pair list + quote history.
+- `src/routes/forex.tsx` (new): TanStack Router `/forex` file-based route.
+- `src/features/orders/TradeTicketModal.tsx`: `FxTicketSection` wired for `FOREX` asset class; `FractionalQtyInput` used for qty field when asset is forex/crypto.
+
+**Tests**
+
+- `tests/integration/test_forex_rfq_flow.py` (new): auth guards, sweep-expired-quotes DB test, GET /api/forex/pairs with auth, accept-with-expired-nonce 422 check.
+
+---
+
 ### Phase 14 — Futures trading (v0.14.0)
 
 Phase 14 shipped across 9 chunks on 2026-05-18 at tag `v0.14.0`. 1645 BE tests green; 690 FE tests green. Adds CME/CBOT/NYMEX futures on IBKR + Schwab and HKFE (HSI/HHI) futures on Futu, with contract-month roll UI, settlement events, physical-delivery risk gate, Telegram roll commands, and 6 Prometheus metrics.

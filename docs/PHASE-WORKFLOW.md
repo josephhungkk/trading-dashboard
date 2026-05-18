@@ -64,3 +64,5 @@ Invoke these skills when the current phase's subject area is being touched:
 - **MCP servers live and ready:** `chrome-devtools`, `playwright`, `context7`, `github`, `memory`, `sequential-thinking`, `exa`. Load via ToolSearch when a task calls for them.
 
 Full catalog + user/project scope scan results live in memory at `project_tooling_inventory.md`. Consult that FIRST before reaching for the global catalog of 250+ skills and 48 agents.
+
+**Trading-domain skills with phase-surface triggers and routine chains:** [`docs/SKILLS-CATALOG.md`](docs/SKILLS-CATALOG.md). Read this when starting any phase that touches forex/crypto, autonomous bots, LLM signal generation, or data infrastructure.
