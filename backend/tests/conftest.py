@@ -8,11 +8,24 @@ pytest_plugins = ("tests.fixtures.db_session",)
 import os  # noqa: E402
 import sys  # noqa: E402
 from collections.abc import AsyncIterator  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 # grpc-generated stubs use bare `from broker.v1 import ...`; add _generated to sys.path
 _generated = os.path.join(os.path.dirname(__file__), "..", "app", "_generated")
 if _generated not in sys.path:
     sys.path.insert(0, _generated)
+
+# Load backend/.env.test before any setdefault calls so DATABASE_URL always
+# points at the test container (localhost:5433), never the prod NUC (10.10.0.2).
+# CI workflows set DATABASE_URL explicitly in the workflow env — os.environ
+# entries already present are NOT overwritten by this block.
+_env_test = Path(__file__).parent.parent / ".env.test"
+if _env_test.exists():
+    for _line in _env_test.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _key, _, _val = _line.partition("=")
+            os.environ.setdefault(_key.strip(), _val.strip())
 
 import pytest  # noqa: E402
 from alembic.config import Config  # noqa: E402
@@ -27,6 +40,7 @@ os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-at-least-32-chars-ok")
 os.environ.setdefault("APP_CORS_ORIGINS", '["http://localhost:5173"]')
 os.environ.setdefault(
     "DATABASE_URL",
+    # Last-resort fallback; should never be reached when .env.test is present.
     "postgresql+asyncpg://trader:ci@localhost:5432/dashboard",
 )
 os.environ.setdefault("POSTGRES_POOL_SIZE", "2")
