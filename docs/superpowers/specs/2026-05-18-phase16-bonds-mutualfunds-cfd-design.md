@@ -2,7 +2,7 @@
 
 **Version:** v0.16.0 (16a Bonds) · v0.16.1 (16b Mutual Funds) · v0.16.2 (16c CFD)
 **Date:** 2026-05-18
-**Status:** Approved — architect review applied
+**Status:** Approved — architect review Pass-1 + Pass-2 applied
 
 ---
 
@@ -26,15 +26,29 @@ Each sub-phase follows the same cross-cutting pattern established in Phase 14/15
 
 ## 2. Cross-Cutting Architecture Decisions
 
-- **`risk_limit_kind` enum extension (CRIT-1):** `risk_limit_kind` is a strict PG ENUM (created in alembic 0036, extended in 0051). Every new `limit_kind` literal must be added via `ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS '<kind>'` outside the transaction block (same pattern as alembic 0051:16). Each migration must include these statements before any `INSERT INTO risk_limits` seed row. Phase 16 adds seven new kinds across three migrations (listed in each sub-phase's data model section).
+- **`risk_limit_kind` enum extension (CRIT-1, CRIT-B):** `risk_limit_kind` is a strict PG ENUM (created in alembic 0036, extended in 0051). Every new `limit_kind` literal must be added via `ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS '<kind>'` inside `op.get_context().autocommit_block()`. The seed `INSERT INTO risk_limits` rows run **outside** that block (normal transaction) so the brand-new enum literals have committed before the INSERT reads them. Without `autocommit_block`, PostgreSQL raises `unsafe use of new value of enum type 'risk_limit_kind'`. See §3.1, §4.1, §5.1 for the exact Python upgrade() pattern to copy.
 
 - **Settlement-date computation (CRIT-2):** `BusDayOffset` and `market_calendar.us_holidays()` do not exist. All settlement-date computation uses a new helper added to `app/services/market_calendar.py` in 16a Chunk B:
+
   ```python
   def add_business_days(exchange: str, start: date, n: int) -> date:
-      """Add n business days using exchange_calendars schedule."""
-      days = next_trading_days(exchange, start, n + 1)
-      return days[-1]
+      """Add n business days using exchange_calendars schedule.
+
+      Precondition: start is a session day on exchange (orders cannot
+      be placed on closed exchanges; enforced by _check_*_session helpers).
+      days[0] == start by precondition; the n-th business day after start
+      is days[n].
+      """
+      days = next_trading_days(exchange, n + 1, from_date=start)
+      return days[n]  # days[0] == start; days[n] is n days later
   ```
+
+  `next_trading_days` signature: `next_trading_days(exchange: str, n: int, from_date: date | None = None)`. The spec writes `next_trading_days(exchange, n + 1, from_date=start)` — using keyword arg for `from_date`.
+
+  **Unit tests (Chunk B test plan):**
+  - `add_business_days("XNYS", date(2026, 5, 22), 2) == date(2026, 5, 26)` — T+2 across Memorial Day (May 25)
+  - `add_business_days("XLON", date(2025, 12, 24), 2) == date(2025, 12, 30)` — T+2 across Christmas
+
   Exchange is resolved from instrument currency: `USD→XNYS`, `GBP→XLON`, `EUR→XTAR`, `HKD→XHKG`, `JPY→XTKS`, default `XNYS`. Spec calls become `add_business_days(exchange_for_currency(currency), trade_date, settlement_days)`.
 
 - **`PreviewResponse` extension (MED-7):** Three new optional fields added as flat fields for Phase 16. This is the accepted deviation; consolidation into a discriminated `asset_extras` dict is deferred to Phase 17. Fields:
@@ -48,7 +62,7 @@ Each sub-phase follows the same cross-cutting pattern established in Phase 14/15
 
 - **Accrued interest (HIGH-7):** Preview-time accrued-interest lookup is **read-only from the table**. If no row exists, `PreviewResponse.accrued_interest` is `None` and UI displays "—". The broker RPC is the only writer: daily sweep at 16:30 ET plus opportunistic write on first fill (fill listener triggers one-shot `GetBondAccruedInterest` and upserts).
 
-- **`risk_limit_kind` seed defaults (INFO-1):** Each migration seeds global default rows after the `ALTER TYPE` statements:
+- **`risk_limit_kind` seed defaults (INFO-1):** Each migration seeds global default rows after the `autocommit_block` (in the normal-transaction section):
   - 0053: `bond_max_notional_per_trade=1_000_000`, `bond_max_concentration_pct=25`
   - 0054: `fund_max_notional_per_trade=500_000`, `fund_max_concentration_pct=25`
   - 0055: `cfd_max_notional_per_trade=250_000`, `cfd_max_leverage=20`, `cfd_max_concentration_pct=25`
@@ -61,22 +75,41 @@ Each sub-phase follows the same cross-cutting pattern established in Phase 14/15
 
 ### 3.1 Data Model
 
-**Alembic 0053** (outside transaction block first):
+**Alembic 0053** — Python upgrade() with explicit autocommit_block wrapper:
 
-```sql
--- Outside transaction:
-ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'bond_max_notional_per_trade';
-ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'bond_max_concentration_pct';
--- Then in upgrade():
-ALTER TYPE instrument_asset_class ADD VALUE IF NOT EXISTS 'BOND';
-```
-
-Default seed rows (after enum additions):
-```sql
-INSERT INTO risk_limits (scope_type, scope_id, limit_kind, limit_value)
-VALUES ('global', NULL, 'bond_max_notional_per_trade', 1000000),
-       ('global', NULL, 'bond_max_concentration_pct', 25)
-ON CONFLICT DO NOTHING;
+```python
+def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.execute("ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'bond_max_notional_per_trade'")
+        op.execute("ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'bond_max_concentration_pct'")
+        op.execute("ALTER TYPE instrument_asset_class ADD VALUE IF NOT EXISTS 'BOND'")
+    # Normal transaction continues below — new enum values committed above
+    op.execute("""
+        INSERT INTO risk_limits (scope_type, scope_id, limit_kind, limit_value)
+        VALUES ('global', NULL, 'bond_max_notional_per_trade', 1000000),
+               ('global', NULL, 'bond_max_concentration_pct', 25)
+        ON CONFLICT DO NOTHING
+    """)
+    op.execute("""
+        CREATE TABLE bonds_accrued_interest (
+            id             BIGSERIAL PRIMARY KEY,
+            instrument_id  BIGINT NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+            account_id     UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE CASCADE,
+            accrued        NUMERIC(20,8) NOT NULL,
+            as_of          DATE NOT NULL,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (instrument_id, account_id, as_of)
+        )
+    """)
+    op.execute("""
+        CREATE INDEX bonds_accrued_interest_instrument_idx
+            ON bonds_accrued_interest(instrument_id, as_of DESC)
+    """)
+    # Note: bonds_accrued_interest is a regular table (NOT a hypertable).
+    # add_retention_policy() requires a hypertable and would fail here.
+    # Volume: ~10k rows/year × 5 years = ~50k rows; unbounded but operationally fine.
+    # Deferred: Phase 24 converts to hypertable or adds manual purge job (§7).
+    # ... remainder of schema changes
 ```
 
 - `BondDetails` discriminated-union arm added to `InstrumentMeta`:
@@ -88,6 +121,9 @@ class CouponFrequency(IntEnum):
     SEMI_ANNUAL = 2
     QUARTERLY = 4
     MONTHLY = 12
+    # Wire form: JSON integer (e.g. 2 for SEMI_ANNUAL, not "SEMI_ANNUAL").
+    # FE must map int → human label: {0: "Zero Coupon", 1: "Annual",
+    # 2: "Semi-Annual", 4: "Quarterly", 12: "Monthly"}.
 
 class BondDetails(BaseModel):
     asset_class: Literal["BOND"] = "BOND"
@@ -95,7 +131,7 @@ class BondDetails(BaseModel):
     isin: str | None = None            # 12-char ISIN (non-US)
     issuer_id: str | None = None       # broker-supplied issuer identifier for concentration grouping
     coupon_rate: Decimal               # e.g. 4.250 (%)
-    coupon_frequency: CouponFrequency  # ZERO_COUPON=0, ANNUAL=1, SEMI_ANNUAL=2, QUARTERLY=4, MONTHLY=12
+    coupon_frequency: CouponFrequency  # serialises as int on the wire; FE maps to label
     maturity_date: date
     face_value: Decimal                # par, e.g. 1000.00
     issue_date: date | None = None
@@ -108,23 +144,7 @@ class BondDetails(BaseModel):
     credit_rating: str | None = None   # e.g. "A+", "Baa2"
 ```
 
-- New table `bonds_accrued_interest` (with 5-year retention for UK CGT records):
-
-```sql
-CREATE TABLE bonds_accrued_interest (
-    id             BIGSERIAL PRIMARY KEY,
-    instrument_id  BIGINT NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
-    account_id     UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE CASCADE,
-    accrued        NUMERIC(20,8) NOT NULL,
-    as_of          DATE NOT NULL,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (instrument_id, account_id, as_of)
-);
-CREATE INDEX bonds_accrued_interest_instrument_idx
-    ON bonds_accrued_interest(instrument_id, as_of DESC);
--- 5-year retention (UK CGT records require 6 years; extend to 7 in Phase 24)
-SELECT add_retention_policy('bonds_accrued_interest', INTERVAL '5 years');
-```
+- New table `bonds_accrued_interest` (regular table, see alembic 0053 above for DDL). No retention policy in Phase 16; see §7 for deferred cleanup.
 
 - `limit_kind` rows: `bond_max_notional_per_trade`, `bond_max_concentration_pct` (seeded above).
 
@@ -139,7 +159,7 @@ SELECT add_retention_policy('bonds_accrued_interest', INTERVAL '5 years');
 
 **Fill listener extension** — on first bond fill (no existing `bonds_accrued_interest` row for today): one-shot `GetBondAccruedInterest` RPC + upsert. Scoped to 16a Chunk B.
 
-**`add_business_days` helper** — added to `app/services/market_calendar.py` in 16a Chunk B (see §2).
+**`add_business_days` helper** — added to `app/services/market_calendar.py` in 16a Chunk B (see §2 for full implementation + unit tests).
 
 ### 3.3 Sidecar + Proto Additions
 
@@ -228,7 +248,7 @@ bond_concentration_skipped_no_nlv_total
 ### 3.8 Frontend
 
 **`TradeTicketModal` injection** when `asset_class === 'BOND'`:
-- `BondDetailsSection`: coupon rate + frequency (human label from `CouponFrequency`), maturity date, YTM, credit rating, accrued interest (`None` displays "—"), settlement date (from `PreviewResponse.settlement_date`), callable badge if applicable.
+- `BondDetailsSection`: coupon rate + frequency (human label from `CouponFrequency` int→string map: `{0: "Zero Coupon", 1: "Annual", 2: "Semi-Annual", 4: "Quarterly", 12: "Monthly"}`), maturity date, YTM, credit rating, accrued interest (`None` displays "—"), settlement date (from `PreviewResponse.settlement_date`), callable badge if applicable.
 - Qty input: standard integer (face-value units, 1 = face_value par).
 
 **`/bonds` workspace page** — four panels:
@@ -241,10 +261,10 @@ bond_concentration_skipped_no_nlv_total
 
 | Chunk | Content | Route |
 |---|---|---|
-| A | Alembic 0053: `ALTER TYPE risk_limit_kind` (2 values) + `instrument_asset_class` BOND; `BondDetails` meta arm with `CouponFrequency` enum + `issuer_id`; `bonds_accrued_interest` table + 5yr retention; seed `risk_limits` defaults | **Qwen** |
-| B | `BondSearchService` (IBKR-only search + Schwab read-only constraint); `get_accrued_interest` (read-only); APScheduler sweep (rate-capped + sweep_enabled gate); fill-listener accrued hook; `add_business_days` + `exchange_for_currency` in `market_calendar.py` | **Codex** |
+| A | Alembic 0053: `autocommit_block` wrapping `ALTER TYPE risk_limit_kind` (2 values) + `instrument_asset_class` BOND; `BondDetails` meta arm with `CouponFrequency` IntEnum (wire=int) + `issuer_id`; `bonds_accrued_interest` regular table (no retention policy — see §7); seed `risk_limits` defaults outside autocommit_block | **Qwen** |
+| B | `BondSearchService` (IBKR-only search + Schwab read-only constraint); `get_accrued_interest` (read-only); APScheduler sweep (rate-capped + sweep_enabled gate); fill-listener accrued hook; `add_business_days` + `exchange_for_currency` in `market_calendar.py` with unit tests | **Codex** |
 | C | Proto `SearchBonds` + `GetBondAccruedInterest` RPCs; `_resolve_contract_bond` sidecar helper; `app/api/bonds.py`; `_check_bond_exposure` in `risk_service.py`; `PreviewResponse.settlement_date` field | **Codex** |
-| D | FE: `services/bonds/types.ts` + `api.ts`; `BondDetailsSection`; TradeTicketModal BOND mode; `BondsPage.tsx` + `/bonds` route | **Codex** |
+| D | FE: `services/bonds/types.ts` + `api.ts`; `BondDetailsSection` (CouponFrequency int→label map); TradeTicketModal BOND mode; `BondsPage.tsx` + `/bonds` route | **Codex** |
 | E | Integration tests (IBKR search flow, Schwab 400 rejection, accrued read-only at preview, fill-listener upsert, settling-past-maturity BLOCK, concentration WARN + no-id skip, settlement-date computation); Prometheus metric wiring | **Qwen** |
 
 ---
@@ -253,22 +273,22 @@ bond_concentration_skipped_no_nlv_total
 
 ### 4.1 Data Model
 
-**Alembic 0054** (outside transaction block first):
+**Alembic 0054** — Python upgrade() with explicit autocommit_block wrapper:
 
-```sql
--- Outside transaction:
-ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'fund_max_notional_per_trade';
-ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'fund_max_concentration_pct';
--- Then in upgrade():
-ALTER TYPE instrument_asset_class ADD VALUE IF NOT EXISTS 'MUTUAL_FUND';
-```
-
-Default seed rows:
-```sql
-INSERT INTO risk_limits (scope_type, scope_id, limit_kind, limit_value)
-VALUES ('global', NULL, 'fund_max_notional_per_trade', 500000),
-       ('global', NULL, 'fund_max_concentration_pct', 25)
-ON CONFLICT DO NOTHING;
+```python
+def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.execute("ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'fund_max_notional_per_trade'")
+        op.execute("ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'fund_max_concentration_pct'")
+        op.execute("ALTER TYPE instrument_asset_class ADD VALUE IF NOT EXISTS 'MUTUAL_FUND'")
+    # Normal transaction continues below
+    op.execute("""
+        INSERT INTO risk_limits (scope_type, scope_id, limit_kind, limit_value)
+        VALUES ('global', NULL, 'fund_max_notional_per_trade', 500000),
+               ('global', NULL, 'fund_max_concentration_pct', 25)
+        ON CONFLICT DO NOTHING
+    """)
+    # ... fund_nav_snapshots hypertable + index + retention policy
 ```
 
 - `MutualFundDetails` discriminated-union arm:
@@ -316,11 +336,11 @@ Volume estimate: ~500 held funds × 1 row/day × 2 brokers ≈ 1000 rows/day. 2-
 ### 4.2 Services
 
 **`app/services/funds/fund_search_service.py`** (new):
-- `search_funds(query, account_id, broker_id)` — ISIN/CUSIP/name search via proto `SearchFunds` RPC; upserts `instruments` rows with `MutualFundDetails` meta; Redis-caches 10 min.
+- `search_funds(query, account_id, broker_id)` — ISIN/CUSIP/name search via proto `SearchFunds` RPC; upserts `instruments` rows with `MutualFundDetails` meta; Redis-caches 10 min. On upsert: `cutoff_time_et` parsed via `time.fromisoformat(proto_field.cutoff_time_et)`; on parse failure, set `cutoff_time_et = time(16, 0)` (4 PM ET default) + emit `fund_cutoff_parse_failure_total{stage="search"}`. Do NOT leave the field unset downstream — `MutualFundDetails` validation would reject it anyway.
 - `resolve_fund_instrument(isin_or_cusip, broker_id)` — registry lookup with sidecar fallback.
 - `get_current_nav(instrument_id, db)` — reads latest `fund_nav_snapshots` row; returns `None` if no snapshot yet.
 
-**APScheduler sweep** — daily at 17:00 ET (after NAV publication), per-broker rate caps (IBKR=10/s, Schwab=5/s), gated on `app_config[risk/sweep_enabled]`. Calls `GetFundNAV` per held fund position, upserts `fund_nav_snapshots` (idempotent via UNIQUE index). Also refreshes `MutualFundDetails.expense_ratio` + `cutoff_time_et` from broker; strict parse for `cutoff_time_et`. Emits `fund_nav_sweep_duration_seconds{broker}` histogram.
+**APScheduler sweep** — daily at 17:00 ET (after NAV publication), per-broker rate caps (IBKR=10/s, Schwab=5/s), gated on `app_config[risk/sweep_enabled]`. Calls `GetFundNAV` per held fund position, upserts `fund_nav_snapshots` (idempotent via UNIQUE index). Also refreshes `MutualFundDetails.expense_ratio` + `cutoff_time_et` from broker; same strict parse for `cutoff_time_et` as search (WARN-log + preserve on failure). Emits `fund_nav_sweep_duration_seconds{broker}` histogram.
 
 ### 4.3 Proto Additions
 
@@ -340,7 +360,7 @@ message FundSearchResult {
   string currency        = 7;
   string nav             = 8;
   string nav_date        = 9;    // ISO8601 date
-  string cutoff_time_et  = 10;   // "HH:MM" format
+  string cutoff_time_et  = 10;   // "HH:MM" format; parsed to time(HH,MM) on upsert; default time(16,0) on failure
   string min_investment  = 11;
   string expense_ratio   = 12;   // may be empty
   int32  settlement_days = 13;
@@ -377,8 +397,10 @@ Sidecar: IBKR `secType="FUND"`, Schwab `assetType=MUTUAL_FUND` in order dispatch
 
 Called when `ctx.asset_class == AssetClass.MUTUAL_FUND`. Fail-OPEN on infrastructure errors; increments `fund_risk_check_failures_total`.
 
+**Inline position SELECT pattern:** `_check_fund_exposure` executes a one-shot ORM `select(Position).where(Position.account_id == ..., Position.instrument_id == ...)` to determine first vs subsequent purchase. Uses ORM (not raw `text()`) for consistency with `_check_position_concentration` (risk_service.py:308+). Note: existing `_check_forex_exposure` uses a raw `text()` SELECT — migration to ORM is tracked as a follow-up cleanup (§7), not Phase 16 scope.
+
 - **WARN** (not hard BLOCK): `now_et >= MutualFundDetails.cutoff_time_et` where `now_et = datetime.now(ZoneInfo('America/New_York')).time()` → `fund_cutoff_passed`. `PreviewResponse.next_nav_date` = next business day via `add_business_days(exchange_for_currency(currency), today, 1)`. Banner: "Will execute at next-day NAV ([date])."
-- **BLOCK (min investment):** `notional < min_investment` (first purchase: no existing position) or `notional < min_subsequent` (existing position). Distinction: `_check_fund_exposure` executes a one-shot `SELECT qty FROM positions WHERE account_id=... AND instrument_id=...` inline (same pattern as `_check_forex_exposure` which does its own DB round-trip at risk_service.py:898–906). No `existing_qty` field on `EvaluationContext` — this avoids the CRIT-3 blast radius. → `below_minimum_investment`
+- **BLOCK (min investment):** `notional < min_investment` (first purchase: no existing position) or `notional < min_subsequent` (existing position). No `existing_qty` field on `EvaluationContext`. → `below_minimum_investment`
 - **BLOCK:** `notional > _resolve_limit(account_id, broker_id, "fund_max_notional_per_trade")` (if set) → `fund_notional_exceeded`
 - **WARN:** `ctx.account_nlv_base is None` → skip, emit `fund_concentration_skipped_no_nlv_total.inc()`. Otherwise: single fund > `fund_max_concentration_pct` of NLV → `fund_concentration_warning`.
 - **WARN:** `fund_type == "CLOSED_END"` → `closed_end_fund_advisory`
@@ -400,13 +422,14 @@ fund_risk_blocks_total{reason}
 fund_risk_check_failures_total
 fund_cutoff_warnings_total{broker}
 fund_concentration_skipped_no_nlv_total
+fund_cutoff_parse_failure_total{stage}               # stage="search"|"sweep"
 ```
 
 ### 4.8 Frontend
 
 **`TradeTicketModal` injection** when `asset_class === 'MUTUAL_FUND'`:
 - `FundDetailsSection`: fund family, type, current NAV (with date), expense ratio, cut-off time (amber badge if within 30 min of cut-off), min investment, settlement date.
-- Qty input: `FractionalQtyInput` when `allows_fractional == true` (`decimals=3`); standard integer input when `allows_fractional == false` (whole units only — covers CEFs and institutional share classes). Units↔notional $ toggle when fractional; notional divides by current NAV client-side.
+- Qty input: `FractionalQtyInput` when `allows_fractional == true` (`decimals=3`); standard integer input when `allows_fractional == false` (whole units only — covers CEFs and institutional share classes). **Default while `allows_fractional` is loading:** integer mode (prevents fractional entry flicker before instrument details arrive). Units↔notional $ toggle when fractional; notional divides by current NAV client-side.
 - Next-day NAV WARN banner if `PreviewResponse.next_nav_date` is set.
 
 **`/funds` workspace page** — four panels:
@@ -419,11 +442,11 @@ fund_concentration_skipped_no_nlv_total
 
 | Chunk | Content | Route |
 |---|---|---|
-| A | Alembic 0054: `ALTER TYPE risk_limit_kind` (2 values) + `instrument_asset_class` MUTUAL_FUND; `MutualFundDetails` meta arm (`cutoff_time_et: time`); `fund_nav_snapshots` hypertable + 2yr retention + CHECK + unique index; seed `risk_limits` defaults | **Qwen** |
-| B | `FundSearchService` + `get_current_nav`; APScheduler sweep (rate-capped + idempotent + sweep_enabled gate + strict cutoff_time parse); `fund_nav_sweep_duration_seconds` histogram | **Qwen** |
-| C | Proto `SearchFunds` + `GetFundNAV` RPCs; `app/api/funds.py`; `_check_fund_exposure` (incl. inline SELECT for first/subsequent, cutoff ZoneInfo comparison); `PreviewResponse.indicative_nav` + `next_nav_date` fields; sidecar `MUTUAL_FUND→secType="FUND"` / Schwab `assetType=MUTUAL_FUND` branch | **Codex** |
-| D | FE: `services/funds/types.ts` + `api.ts`; `FundDetailsSection` (conditional FractionalQtyInput / integer based on `allows_fractional`); units↔notional toggle; TradeTicketModal MUTUAL_FUND mode; `FundsPage.tsx` + `/funds` route + NAV chart | **Codex** |
-| E | Integration tests (search, NAV sweep upsert + idempotency, cutoff WARN + ZoneInfo, min-investment first vs subsequent BLOCK, next_nav_date, NAV chart data, fractional/whole-unit input rendering); Prometheus metric wiring | **Qwen** |
+| A | Alembic 0054: `autocommit_block` wrapping `ALTER TYPE risk_limit_kind` (2 values) + `instrument_asset_class` MUTUAL_FUND; `MutualFundDetails` meta arm (`cutoff_time_et: time`); `fund_nav_snapshots` hypertable + 2yr retention + CHECK + unique index; seed `risk_limits` defaults outside autocommit_block | **Qwen** |
+| B | `FundSearchService` + `get_current_nav`; APScheduler sweep (rate-capped + idempotent + sweep_enabled gate + strict cutoff_time parse at both search + sweep); `fund_cutoff_parse_failure_total{stage}` metric | **Qwen** |
+| C | Proto `SearchFunds` + `GetFundNAV` RPCs; `app/api/funds.py`; `_check_fund_exposure` (ORM inline SELECT for first/subsequent, cutoff ZoneInfo comparison); `PreviewResponse.indicative_nav` + `next_nav_date` fields; sidecar `MUTUAL_FUND→secType="FUND"` / Schwab `assetType=MUTUAL_FUND` branch | **Codex** |
+| D | FE: `services/funds/types.ts` + `api.ts`; `FundDetailsSection` (conditional FractionalQtyInput / integer based on `allows_fractional`, integer default while loading); units↔notional toggle; TradeTicketModal MUTUAL_FUND mode; `FundsPage.tsx` + `/funds` route + NAV chart | **Codex** |
+| E | Integration tests (search, NAV sweep upsert + idempotency, cutoff parse failure + fallback, cutoff WARN + ZoneInfo, min-investment first vs subsequent BLOCK, next_nav_date, NAV chart data, fractional/whole-unit input rendering, integer-mode-while-loading); Prometheus metric wiring | **Qwen** |
 
 ---
 
@@ -431,25 +454,25 @@ fund_concentration_skipped_no_nlv_total
 
 ### 5.1 Data Model
 
-**Alembic 0055** (outside transaction block first):
+**Alembic 0055** — Python upgrade() with explicit autocommit_block wrapper:
 
-```sql
--- Outside transaction:
-ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'cfd_max_notional_per_trade';
-ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'cfd_max_leverage';
-ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'cfd_max_concentration_pct';
--- Then in upgrade():
-ALTER TYPE instrument_asset_class ADD VALUE IF NOT EXISTS 'CFD';
-ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS country TEXT;
-```
-
-Default seed rows:
-```sql
-INSERT INTO risk_limits (scope_type, scope_id, limit_kind, limit_value)
-VALUES ('global', NULL, 'cfd_max_notional_per_trade', 250000),
-       ('global', NULL, 'cfd_max_leverage', 20),
-       ('global', NULL, 'cfd_max_concentration_pct', 25)
-ON CONFLICT DO NOTHING;
+```python
+def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.execute("ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'cfd_max_notional_per_trade'")
+        op.execute("ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'cfd_max_leverage'")
+        op.execute("ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS 'cfd_max_concentration_pct'")
+        op.execute("ALTER TYPE instrument_asset_class ADD VALUE IF NOT EXISTS 'CFD'")
+    # Normal transaction continues below
+    op.execute("ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS country TEXT")
+    op.execute("""
+        INSERT INTO risk_limits (scope_type, scope_id, limit_kind, limit_value)
+        VALUES ('global', NULL, 'cfd_max_notional_per_trade', 250000),
+               ('global', NULL, 'cfd_max_leverage', 20),
+               ('global', NULL, 'cfd_max_concentration_pct', 25)
+        ON CONFLICT DO NOTHING
+    """)
+    # ... remainder of upgrade()
 ```
 
 - `CFDDetails` discriminated-union arm:
@@ -459,7 +482,12 @@ class CFDDetails(BaseModel):
     asset_class: Literal["CFD"] = "CFD"
     underlying_type: str           # "equity" | "index" | "forex" | "commodity"
     underlying_symbol: str         # e.g. "BARC", "UK100", "EUR/USD", "GOLD"
-    underlying_conid: str | None   # IBKR conid of the underlying
+    underlying_conid: str | None   # IBKR conid string of the underlying equity/index.
+                                   # This is the broker-native IBKR conid (string), NOT
+                                   # the internal instruments.id (BIGINT). Used only for
+                                   # the equity-CFD session check (lookup in instruments
+                                   # table via canonical_id column). May be None for
+                                   # index/forex/commodity CFDs.
     currency: str                  # margin + P&L currency
     tick_size: Decimal             # minimum price movement
     qty_step: Decimal = Decimal("1")  # minimum qty increment; 1 for most CFDs, <1 for some commodities
@@ -472,7 +500,7 @@ class CFDDetails(BaseModel):
     exchange: str = "IBCFD"
 ```
 
-`CFDDetails.country` dropped; replaced with `listed_country` (display-only, where the underlying equity is listed). The compliance question (account holder jurisdiction) is answered by `broker_accounts.country` exclusively. `qty_step` added — used by `FractionalQtyInput` for commodity CFDs; default `1` for equity/index.
+`CFDDetails.listed_country` is display-only (where the underlying equity is listed). The compliance question (account holder jurisdiction) is answered by `broker_accounts.country` exclusively. `qty_step` added — used by `FractionalQtyInput` for commodity CFDs; default `1` for equity/index.
 
 - No new table for overnight financing. Broker-reported financing charges flow through `fills` pipeline.
 - `limit_kind` rows: `cfd_max_notional_per_trade`, `cfd_max_leverage`, `cfd_max_concentration_pct` (seeded above).
@@ -527,15 +555,21 @@ Sidecar: `_resolve_contract` maps `asset_class="CFD"` → `secType="CFD"`, `exch
 
 Called when `ctx.asset_class == AssetClass.CFD`. Fail-OPEN on infrastructure errors except the US-person check (fail-CLOSED — see below).
 
-**Factored helper `_forex_session_block(self) -> GateBlockerEntry | None`** (new private method, Chunk C sub-task): extracts the session-open check from `_check_forex_exposure`. Returns `GateBlockerEntry(reason="session_closed", ...)` iff `not is_forex_session_open()`, else `None`. Both `_check_forex_exposure` and `_check_cfd_exposure` call it. Prevents instrument_id mismatch and double-jeopardy from FX notional cap.
+#### 5.5.0 Prerequisite: `_forex_session_block` refactor (Chunk C sub-task)
 
-Risk gate checks (in order):
+Before adding `_check_cfd_exposure`, extract lines 872–882 of `_check_forex_exposure` into a new private method `_forex_session_block(self) -> GateBlockerEntry | None`. Returns `GateBlockerEntry(reason="session_closed", ...)` iff `not is_forex_session_open()`, else `None`.
+
+Update `_check_forex_exposure` to call `self._forex_session_block()` at its top instead of the inline session check. Re-run the Phase 15a forex gate tests (`tests/test_forex_*`, ~12 tests); none should require changes since externally-observable behavior is identical. Add 1 new test asserting that both `_check_forex_exposure` and `_check_cfd_exposure` return the same blocker entry when forex session is closed.
+
+Both `_check_forex_exposure` and `_check_cfd_exposure` then call `_forex_session_block()`. This prevents instrument_id mismatch and FX notional cap double-jeopardy.
+
+#### Risk gate checks (in order)
 
 - **BLOCK (fail-CLOSED):** `broker_accounts.country IS NULL` → `cfd_country_unknown` ("Account country unset; CFD trading requires operator classification. Edit /admin/accounts."). `broker_accounts.country == "US"` → `cfd_not_available_us`. Increments `cfd_country_unknown_block_total` or `cfd_us_block_total` respectively. This is the ONLY gate that fails CLOSED on missing data — consistent with `_check_margin` (risk_service.py:570–580) which fails CLOSED when sidecar unreachable.
 - **BLOCK:** `CFDDetails.margin_rate <= 0` → treat as `implied_leverage = CFDDetails.max_leverage` + emit `WARN cfd_margin_rate_anomalous` (not a hard block; broker placeholder — fail-OPEN). `CFDDetails.margin_rate >= 1` → `implied_leverage = 1` (cash-only, no leverage). Otherwise: `implied_leverage = 1 / CFDDetails.margin_rate`. BLOCK if `implied_leverage > min(_resolve_limit(..., "cfd_max_leverage"), CFDDetails.max_leverage)` → `cfd_leverage_exceeded`.
 - **BLOCK:** `notional > _resolve_limit(..., "cfd_max_notional_per_trade")` (if set) → `cfd_notional_exceeded`
-- **BLOCK (equity CFD session):** `underlying_type == "equity"` and instrument's underlying exchange not currently open (resolved from `CFDDetails.underlying_conid` → `instruments` lookup → `exchange_calendars`) → `cfd_equity_session_closed`. Index CFDs: skip (broker handles out-of-hours pricing). Commodity CFDs: BLOCK only if `tif == "DAY"` and session closed, otherwise WARN `commodity_cfd_session_advisory`.
-- **BLOCK (forex CFD session):** `underlying_type == "forex"` → call `_forex_session_block()`; propagate if not None.
+- **BLOCK (equity CFD session):** `underlying_type == "equity"` and instrument's underlying exchange not currently open → `cfd_equity_session_closed`. Resolution: `SELECT primary_exchange FROM instruments WHERE canonical_id = :underlying_conid`. `primary_exchange` is the column name in `instruments` (instruments.py:54). If `underlying_conid` is None or the lookup returns no row, skip the check + emit `cfd_underlying_resolution_failed_total`. Pass `primary_exchange` to `market_calendar.is_open()`. Index CFDs: skip (broker handles out-of-hours pricing). Commodity CFDs: BLOCK only if `tif == "DAY"` and session closed, otherwise WARN `commodity_cfd_session_advisory`.
+- **BLOCK (forex CFD session):** `underlying_type == "forex"` → call `self._forex_session_block()`; propagate if not None.
 - **WARN:** `ctx.account_nlv_base is None` → skip, emit `cfd_concentration_skipped_no_nlv_total.inc()`. Otherwise: single CFD > `cfd_max_concentration_pct` of NLV → `cfd_concentration_warning`.
 - **WARN:** `side == "BUY"` and `tif in ("GTC", "GTD")` → `overnight_financing_advisory` with estimated daily cost.
 - **WARN:** `underlying_type == "commodity"` and not session-blocked above → `commodity_cfd_advisory` (wide spread outside session).
@@ -551,6 +585,7 @@ cfd_overnight_advisory_total{underlying_type}
 cfd_us_block_total
 cfd_country_unknown_block_total
 cfd_concentration_skipped_no_nlv_total
+cfd_underlying_resolution_failed_total
 ```
 
 ### 5.7 Frontend
@@ -566,17 +601,18 @@ cfd_concentration_skipped_no_nlv_total
 3. **Detail panel** — selected CFD: full `CFDDetails` fields, price chart (klinecharts).
 4. **Order history** — fills + open CFD orders.
 
-**`/admin/accounts` country editor (ships in 16c Chunk D):** Simple `<select>` for ISO2 country on each account row. Needed because fail-CLOSED on NULL makes the gate unusable without an operator UI.
-
 ### 5.8 Chunk Breakdown (16c)
 
 | Chunk | Content | Route |
 |---|---|---|
-| A | Alembic 0055: `ALTER TYPE risk_limit_kind` (3 values) + `instrument_asset_class` CFD; `broker_accounts.country` column; `CFDDetails` meta arm (`listed_country`, `qty_step`); seed `risk_limits` defaults | **Qwen** |
+| A | Alembic 0055: `autocommit_block` wrapping `ALTER TYPE risk_limit_kind` (3 values) + `instrument_asset_class` CFD; `broker_accounts.country` column; `CFDDetails` meta arm (`listed_country`, `qty_step`, `underlying_conid` doc); seed `risk_limits` defaults outside autocommit_block | **Qwen** |
 | B | `CFDSearchService`; proto `SearchCFDs` RPC; sidecar `CFD→secType="CFD"/exchange="IBCFD"` branch | **Codex** |
-| C | `app/api/cfd.py`; `_forex_session_block` refactor in `risk_service.py`; `_check_cfd_exposure` (fail-CLOSED US-person, leverage formula, equity/forex/commodity session, concentration) | **Codex** |
-| D | FE: `services/cfd/types.ts` + `api.ts`; `CFDDetailsSection` (qty_step-driven FractionalQtyInput); overnight financing estimate; TradeTicketModal CFD mode; `CFDPage.tsx` + `/cfd` route; `/admin/accounts` country editor | **Codex** |
-| E | Integration tests (search, US-person fail-CLOSED, country-unknown fail-CLOSED, leverage BLOCK, margin_rate=0 edge, equity-session BLOCK, forex-CFD session delegation, overnight advisory, commodity advisory); Prometheus metric wiring | **Qwen** |
+| C | `app/api/cfd.py`; `_forex_session_block` refactor in `risk_service.py` (extract lines 872–882, re-run forex tests); `_check_cfd_exposure` (fail-CLOSED US-person, leverage formula, equity-session `primary_exchange` lookup + `cfd_underlying_resolution_failed_total`, forex-CFD `_forex_session_block` delegation, commodity TIF-conditional, concentration) | **Codex** |
+| D1 | FE: `/admin/accounts` country editor — ISO2 `<select>` on each account row. Ships first; can deploy ahead of CFD pages with no harm (column is NULL by default and nothing reads it until gate is active). **Prerequisite for D2.** | **Codex** |
+| D2 | FE: `services/cfd/types.ts` + `api.ts`; `CFDDetailsSection` (qty_step-driven FractionalQtyInput); overnight financing estimate; TradeTicketModal CFD mode; `CFDPage.tsx` + `/cfd` route. Ships after D1 is deployed. | **Codex** |
+| E | Integration tests (search, US-person fail-CLOSED, country-unknown fail-CLOSED, leverage BLOCK, margin_rate=0 edge, equity-session BLOCK + resolution failure, forex-CFD session delegation, overnight advisory, commodity advisory); Prometheus metric wiring | **Qwen** |
+
+**Deploy order:** D1 must merge and deploy before D2. Until D1 is deployed, operators must seed `broker_accounts.country` via SQL to prevent `cfd_country_unknown` blocking all CFD orders. CFD pages (D2) should not be deployed until D1 is live.
 
 ---
 
@@ -606,9 +642,9 @@ InstrumentMeta = Annotated[
 - CFD dividend adjustments — broker-reported via fills pipeline; no special handling in Phase 16.
 - Commodity CFD storage/delivery risk (oil roll) — Phase 17+; Phase 16c only trades near-front.
 - OANDA as FX CFD data fallback — Phase 18+ (same as Phase 15 deferral).
-- `bonds_accrued_interest` retention extension to 7 years — Phase 24 infra hardening.
+- `bonds_accrued_interest` retention / hypertable conversion — Phase 24 infra hardening. Regular table at ~10k rows/year; ~50k rows at 5 years is operationally fine. UK CGT requirement (6 years, extend to 7 to be safe) deferred here. `add_retention_policy` requires a hypertable; migration 0053 deliberately skips it to avoid the BIGSERIAL PK constraint conflict.
 - `PreviewResponse.asset_extras` discriminated consolidation — Phase 17 (three flat optional fields accepted in Phase 16 per MED-7 decision).
-- INFO-2: proto-only additions in 16a Chunk C and 16c Chunk B could split to Qwen if Codex capacity is constrained — not blocking.
+- `_check_forex_exposure` raw `text()` SELECT → ORM migration — follow-up cleanup after Phase 16b; not blocking.
 
 ---
 
@@ -618,15 +654,15 @@ InstrumentMeta = Annotated[
 
 - **CRIT-1** — `risk_limit_kind` is a strict PG enum. Each migration now leads with `ALTER TYPE risk_limit_kind ADD VALUE IF NOT EXISTS` for all new literals + default seed rows. §2, §3.1, §4.1, §5.1 updated.
 - **CRIT-2** — `BusDayOffset` / `us_holidays()` do not exist. Replaced with `add_business_days(exchange, date, n)` helper (new in 16a Chunk B) + `exchange_for_currency` map. §2, §3.6, §4.6 updated.
-- **CRIT-3** — `EvaluationContext.existing_qty` has 17+ construction sites. Dropped entirely; `_check_fund_exposure` does its own one-shot `SELECT qty FROM positions` inline (same pattern as `_check_forex_exposure`). §4.5 updated.
+- **CRIT-3** — `EvaluationContext.existing_qty` has 17+ construction sites. Dropped entirely; `_check_fund_exposure` does its own one-shot ORM SELECT (see MED-B). §4.5 updated.
 - **HIGH-1** — Bond sidecar: `_resolve_contract_bond` helper added (separate from 200-line `_resolve_contract`); CUSIP→`secIdType="CUSIP"`, ISIN→`secIdType="ISIN"`, `exchange="SMART"`. Schwab read-only constraint explicit: execution IBKR-only, search 400 for `broker_id=schwab`. §3.3, §3.4, §3.9 updated.
 - **HIGH-2** — `cutoff_time_et` changed to `datetime.time`; Pydantic parses `"16:00"` natively. Comparison uses `ZoneInfo('America/New_York')`. Sweep strict-parses broker strings, WARN-logs and preserves existing value on failure. §4.1, §4.2, §4.5 updated.
-- **HIGH-3** — `existing_qty` race resolved by using inline SELECT in `_check_fund_exposure` rather than a context field (aligns with CRIT-3 fix). §4.5 updated.
-- **HIGH-4** — CFD US-person check flipped to fail-CLOSED on `NULL country`: returns `cfd_country_unknown` BLOCK. `broker_accounts.country` admin UI editor promoted from deferred to ships in 16c Chunk D. §5.5, §5.8, §7 updated.
+- **HIGH-3** — Subsumed by CRIT-3 fix (ORM inline SELECT). §4.5 updated.
+- **HIGH-4** — CFD US-person check flipped to fail-CLOSED on `NULL country`: returns `cfd_country_unknown` BLOCK. `broker_accounts.country` admin UI editor promoted from deferred to ships in 16c Chunk D1. §5.5, §5.8 updated.
 - **HIGH-5** — Forex-CFD delegation refactored: new `_forex_session_block()` helper extracts session-only check. `_check_cfd_exposure` calls it directly; `_check_forex_exposure` also refactored to call it. Prevents instrument_id mismatch and FX notional cap double-jeopardy. §2, §5.5, §5.8 updated.
 - **HIGH-6** — "Skip silently" for missing NLV now emits `*_concentration_skipped_no_nlv_total` counters for all three asset classes. §3.5, §4.5, §5.5, §3.7, §4.7, §5.6 updated.
 - **HIGH-7** — `get_accrued_interest` changed to read-only at preview time; broker RPC moved to daily sweep + opportunistic fill-listener write. §2, §3.2 updated.
-- **MED-1** — `bonds_accrued_interest` 5-year retention policy added to alembic 0053. §3.1 updated.
+- **MED-1** — 5-year retention deferred — see CRIT-A (Pass-2) below.
 - **MED-2** — Issuer concentration uses `BondDetails.issuer_id` (broker-supplied) first; fallback to `cusip[:6]` for US CORP only; otherwise skip + `bond_issuer_concentration_skipped_no_id_total`. `issuer_id` added to `BondDetails` and proto. §3.1, §3.3, §3.5, §3.7 updated.
 - **MED-3** — `CHECK (source IN ('ibkr', 'schwab'))` added to `fund_nav_snapshots`. §4.1 updated.
 - **MED-4** — `CFDDetails.country` dropped; replaced with `listed_country` (display-only). §5.1, §5.5 updated.
@@ -639,4 +675,20 @@ InstrumentMeta = Annotated[
 - **LOW-3** — `CFDDetails.qty_step` added; `FractionalQtyInput` uses it; eliminates `tick_size < 1` heuristic. §5.1, §5.7 updated.
 - **LOW-4** — Clarified `settlement_days` comes from broker metadata, not hardcoded default. §3.1 note added.
 - **INFO-1** — Default seed rows for all 7 new `limit_kind` values added to each migration. §2 sub-bullet added.
-- **INFO-2** — Proto-only additions in Codex chunks noted as Qwen-splittable if needed; not blocking. §7 noted.
+- **INFO-2** — Dropped §7 note about Qwen-splittable proto chunks. CLAUDE.md routing table already governs this; no spec-level guidance needed.
+
+---
+
+**Pass-2:** 2 CRIT · 3 HIGH · 4 MED · 2 LOW applied inline.
+
+- **CRIT-A** — `bonds_accrued_interest` is a regular table; `add_retention_policy()` would fail (`"not a hypertable"`). Dropped retention policy from alembic 0053 entirely. §3.1 SQL block updated to remove the `SELECT add_retention_policy(...)` line; note added in alembic comment. §7 deferred item added. (Option 2: skip retention, operationally fine at ~50k rows/5yr.)
+- **CRIT-B** — `ALTER TYPE ... ADD VALUE` must run inside `op.get_context().autocommit_block()` in Python upgrade(). All three migrations (0053, 0054, 0055) now show the full Python `def upgrade()` with explicit `with op.get_context().autocommit_block():` wrapping the `ADD VALUE` calls, followed by normal-transaction seed INSERTs outside the block. §3.1, §4.1, §5.1 rewritten.
+- **HIGH-A** — `add_business_days` was using wrong positional args for `next_trading_days`. Fixed to use keyword arg `from_date=start`; precondition (start is a session day) documented; unit test cases added to §2 and Chunk B test plan. §2 updated.
+- **HIGH-B** — `_forex_session_block` refactor scope was unspecified. Added §5.5.0 explicit sub-task: extract lines 872–882 of `_check_forex_exposure`, re-run ~12 Phase 15a forex gate tests (zero changes expected), add 1 regression test for shared session-closed behavior. §5.5 restructured.
+- **HIGH-C** — 16c Chunk D was bundling admin country editor with CFD pages. Split into D1 (admin country editor, ships first) + D2 (CFD pages, ships after D1). Deploy order documented in §5.8. §5.8 updated.
+- **MED-A** — Equity-CFD session check now explicitly names `primary_exchange` (instruments.py:54) as the column to query; `underlying_conid` clarified as broker-native IBKR conid string (not internal BIGINT id); `cfd_underlying_resolution_failed_total` metric added to §5.6. §5.1 `CFDDetails.underlying_conid` field doc updated, §5.5 updated, §5.6 updated.
+- **MED-B** — `_check_fund_exposure` position SELECT changed to ORM pattern (consistent with `_check_position_concentration` at risk_service.py:308+). Raw `text()` legacy (in `_check_forex_exposure`) tracked as §7 follow-up cleanup. §4.5 updated.
+- **MED-C** — Search path now applies same strict cutoff_time parser as sweep: `time.fromisoformat()`, fallback `time(16, 0)`, emit `fund_cutoff_parse_failure_total{stage="search"}`. §4.2 updated, `fund_cutoff_parse_failure_total{stage}` added to §4.7.
+- **MED-D** — §7 INFO-2 Qwen-splittable note dropped. Routing is governed by CLAUDE.md routing table; no hedging language in spec. §7 updated.
+- **LOW-A** — `CouponFrequency` wire form documented: JSON integer (e.g. `2` not `"SEMI_ANNUAL"`). FE int→label map specified in `BondDetails` block and `BondDetailsSection`. §3.1, §3.8 updated.
+- **LOW-B** — `FundDetailsSection` defaults to integer input mode while `allows_fractional` is loading (prevents fractional-entry flicker). §4.8 updated.
