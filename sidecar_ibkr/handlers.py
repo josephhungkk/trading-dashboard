@@ -964,6 +964,83 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             status=str(parent_trade.orderStatus.status),
         )
 
+    async def GetSupportedComboStrategies(  # noqa: N802
+        self,
+        request: broker_pb2.GetSupportedComboStrategiesRequest,
+        context: object,
+    ) -> broker_pb2.GetSupportedComboStrategiesResponse:
+        del request, context
+        return broker_pb2.GetSupportedComboStrategiesResponse(
+            strategy_types=["VERTICAL", "CALENDAR", "DIAGONAL", "STRADDLE", "STRANGLE"]
+        )
+
+    async def PlaceCombo(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceComboRequest,
+        context: object,
+    ) -> broker_pb2.PlaceComboResponse:
+        from ib_async import ComboLeg, Contract, LimitOrder
+
+        if not request.legs:
+            await _abort_rpc(context, grpc.StatusCode.INVALID_ARGUMENT, "combo legs required")
+            return broker_pb2.PlaceComboResponse()
+
+        combo_legs: list[ComboLeg] = []
+        for leg in request.legs:
+            underlying = leg.symbol.raw_symbol or leg.symbol.canonical_id
+            contract = Contract(
+                secType="OPT",
+                symbol=underlying,
+                lastTradeDateOrContractMonth=leg.option_hint.expiry_iso,
+                strike=float(leg.option_hint.strike),
+                right=leg.option_hint.put_call,
+                exchange=leg.symbol.exchange,
+                currency=leg.symbol.currency,
+                multiplier="100",
+            )
+            details = await self.ib.reqContractDetailsAsync(contract)
+            if not details:
+                await _abort_rpc(
+                    context,
+                    grpc.StatusCode.NOT_FOUND,
+                    f"option contract not found: {underlying}",
+                )
+                return broker_pb2.PlaceComboResponse()
+            conid = details[0].contract.conId
+            action = "BUY" if leg.side == "buy" else "SELL"
+            combo_legs.append(
+                ComboLeg(conId=conid, ratio=leg.ratio, action=action, exchange="SMART")
+            )
+
+        first_leg = request.legs[0]
+        bag = Contract(
+            secType="BAG",
+            symbol=first_leg.symbol.raw_symbol or first_leg.symbol.canonical_id,
+            currency=first_leg.symbol.currency,
+            exchange="SMART",
+            comboLegs=combo_legs,
+        )
+        order = LimitOrder(
+            action="BUY",
+            totalQuantity=1,
+            lmtPrice=float(request.limit_price) if request.limit_price else 0,
+            tif=request.tif,
+            orderRef=request.client_combo_id,
+        )
+        trade = self.ib.placeOrder(bag, order)
+        leg_results = [
+            broker_pb2.ComboLegResult(
+                leg_idx=i,
+                broker_order_id="",
+                status="working",
+            )
+            for i in range(len(request.legs))
+        ]
+        return broker_pb2.PlaceComboResponse(
+            broker_combo_id=str(trade.order.orderId),
+            legs=leg_results,
+        )
+
     async def OrderEvent(  # noqa: N802
         self,
         request: broker_pb2.AccountRef,

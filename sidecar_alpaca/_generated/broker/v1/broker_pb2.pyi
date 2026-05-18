@@ -628,21 +628,35 @@ class StreamQuotesRequest(_message.Message):
     resync: StreamQuotesRequest.Resync
     def __init__(self, subscribe: _Optional[_Union[StreamQuotesRequest.Subscribe, _Mapping]] = ..., unsubscribe: _Optional[_Union[StreamQuotesRequest.Unsubscribe, _Mapping]] = ..., heartbeat: _Optional[_Union[StreamQuotesRequest.Heartbeat, _Mapping]] = ..., resync: _Optional[_Union[StreamQuotesRequest.Resync, _Mapping]] = ...) -> None: ...
 
+class OptionContractHint(_message.Message):
+    __slots__ = ("conid", "strike", "expiry_iso", "put_call", "multiplier")
+    CONID_FIELD_NUMBER: _ClassVar[int]
+    STRIKE_FIELD_NUMBER: _ClassVar[int]
+    EXPIRY_ISO_FIELD_NUMBER: _ClassVar[int]
+    PUT_CALL_FIELD_NUMBER: _ClassVar[int]
+    MULTIPLIER_FIELD_NUMBER: _ClassVar[int]
+    conid: str
+    strike: str
+    expiry_iso: str
+    put_call: str
+    multiplier: int
+    def __init__(self, conid: _Optional[str] = ..., strike: _Optional[str] = ..., expiry_iso: _Optional[str] = ..., put_call: _Optional[str] = ..., multiplier: _Optional[int] = ...) -> None: ...
+
 class SymbolRef(_message.Message):
-    __slots__ = ("canonical_id", "raw_symbol", "asset_class", "exchange", "currency", "source_meta")
+    __slots__ = ("canonical_id", "raw_symbol", "asset_class", "exchange", "currency", "option_hint")
     CANONICAL_ID_FIELD_NUMBER: _ClassVar[int]
     RAW_SYMBOL_FIELD_NUMBER: _ClassVar[int]
     ASSET_CLASS_FIELD_NUMBER: _ClassVar[int]
     EXCHANGE_FIELD_NUMBER: _ClassVar[int]
     CURRENCY_FIELD_NUMBER: _ClassVar[int]
-    SOURCE_META_FIELD_NUMBER: _ClassVar[int]
+    OPTION_HINT_FIELD_NUMBER: _ClassVar[int]
     canonical_id: str
     raw_symbol: str
     asset_class: AssetClass
     exchange: str
     currency: str
-    source_meta: bytes
-    def __init__(self, canonical_id: _Optional[str] = ..., raw_symbol: _Optional[str] = ..., asset_class: _Optional[_Union[AssetClass, str]] = ..., exchange: _Optional[str] = ..., currency: _Optional[str] = ..., source_meta: _Optional[bytes] = ...) -> None: ...
+    option_hint: OptionContractHint
+    def __init__(self, canonical_id: _Optional[str] = ..., raw_symbol: _Optional[str] = ..., asset_class: _Optional[_Union[AssetClass, str]] = ..., exchange: _Optional[str] = ..., currency: _Optional[str] = ..., option_hint: _Optional[_Union[OptionContractHint, _Mapping]] = ...) -> None: ...
 
 class QuoteMessage(_message.Message):
     __slots__ = ("canonical_id", "tick_time", "received_at", "source", "last", "bid", "ask", "volume", "day_high", "day_low", "open", "prev_close", "change_pct", "change", "is_delayed", "delay_seconds", "raw_payload")
@@ -697,3 +711,189 @@ class TokenRefreshResponse(_message.Message):
     refresh_token: str
     access_issued_at: _timestamp_pb2.Timestamp
     def __init__(self, access_token: _Optional[str] = ..., refresh_token: _Optional[str] = ..., access_issued_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class OptionChainRequest(_message.Message):
+    __slots__ = ("underlying_symbol", "expiry_date", "currency", "strike_count")
+    UNDERLYING_SYMBOL_FIELD_NUMBER: _ClassVar[int]
+    EXPIRY_DATE_FIELD_NUMBER: _ClassVar[int]
+    CURRENCY_FIELD_NUMBER: _ClassVar[int]
+    STRIKE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    underlying_symbol: str
+    expiry_date: str
+    currency: str
+    strike_count: int
+    def __init__(self, underlying_symbol: _Optional[str] = ..., expiry_date: _Optional[str] = ..., currency: _Optional[str] = ..., strike_count: _Optional[int] = ...) -> None: ...
+
+class OptionChainRow(_message.Message):
+    __slots__ = ("conid", "strike", "put_call", "bid", "ask", "iv", "delta", "gamma", "theta", "vega", "open_interest", "volume", "multiplier", "exchange", "style")
+    CONID_FIELD_NUMBER: _ClassVar[int]
+    STRIKE_FIELD_NUMBER: _ClassVar[int]
+    PUT_CALL_FIELD_NUMBER: _ClassVar[int]
+    BID_FIELD_NUMBER: _ClassVar[int]
+    ASK_FIELD_NUMBER: _ClassVar[int]
+    IV_FIELD_NUMBER: _ClassVar[int]
+    DELTA_FIELD_NUMBER: _ClassVar[int]
+    GAMMA_FIELD_NUMBER: _ClassVar[int]
+    THETA_FIELD_NUMBER: _ClassVar[int]
+    VEGA_FIELD_NUMBER: _ClassVar[int]
+    OPEN_INTEREST_FIELD_NUMBER: _ClassVar[int]
+    VOLUME_FIELD_NUMBER: _ClassVar[int]
+    MULTIPLIER_FIELD_NUMBER: _ClassVar[int]
+    EXCHANGE_FIELD_NUMBER: _ClassVar[int]
+    STYLE_FIELD_NUMBER: _ClassVar[int]
+    conid: str
+    strike: str
+    put_call: str
+    bid: str
+    ask: str
+    iv: float
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    open_interest: int
+    volume: int
+    multiplier: int
+    exchange: str
+    style: str
+    def __init__(self, conid: _Optional[str] = ..., strike: _Optional[str] = ..., put_call: _Optional[str] = ..., bid: _Optional[str] = ..., ask: _Optional[str] = ..., iv: _Optional[float] = ..., delta: _Optional[float] = ..., gamma: _Optional[float] = ..., theta: _Optional[float] = ..., vega: _Optional[float] = ..., open_interest: _Optional[int] = ..., volume: _Optional[int] = ..., multiplier: _Optional[int] = ..., exchange: _Optional[str] = ..., style: _Optional[str] = ...) -> None: ...
+
+class OptionChainResponse(_message.Message):
+    __slots__ = ("calls", "puts", "source", "fetched_at_ms")
+    CALLS_FIELD_NUMBER: _ClassVar[int]
+    PUTS_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_FIELD_NUMBER: _ClassVar[int]
+    FETCHED_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    calls: _containers.RepeatedCompositeFieldContainer[OptionChainRow]
+    puts: _containers.RepeatedCompositeFieldContainer[OptionChainRow]
+    source: str
+    fetched_at_ms: int
+    def __init__(self, calls: _Optional[_Iterable[_Union[OptionChainRow, _Mapping]]] = ..., puts: _Optional[_Iterable[_Union[OptionChainRow, _Mapping]]] = ..., source: _Optional[str] = ..., fetched_at_ms: _Optional[int] = ...) -> None: ...
+
+class OptionExpirationsRequest(_message.Message):
+    __slots__ = ("underlying_symbol", "currency")
+    UNDERLYING_SYMBOL_FIELD_NUMBER: _ClassVar[int]
+    CURRENCY_FIELD_NUMBER: _ClassVar[int]
+    underlying_symbol: str
+    currency: str
+    def __init__(self, underlying_symbol: _Optional[str] = ..., currency: _Optional[str] = ...) -> None: ...
+
+class OptionExpirationsResponse(_message.Message):
+    __slots__ = ("expiry_dates",)
+    EXPIRY_DATES_FIELD_NUMBER: _ClassVar[int]
+    expiry_dates: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, expiry_dates: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class OptionGreeksRequest(_message.Message):
+    __slots__ = ("conids", "account_id")
+    CONIDS_FIELD_NUMBER: _ClassVar[int]
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    conids: _containers.RepeatedScalarFieldContainer[str]
+    account_id: str
+    def __init__(self, conids: _Optional[_Iterable[str]] = ..., account_id: _Optional[str] = ...) -> None: ...
+
+class OptionGreeksResponse(_message.Message):
+    __slots__ = ("conid", "delta", "gamma", "theta", "vega", "rho", "iv", "iv_rank", "fetched_at_ms")
+    CONID_FIELD_NUMBER: _ClassVar[int]
+    DELTA_FIELD_NUMBER: _ClassVar[int]
+    GAMMA_FIELD_NUMBER: _ClassVar[int]
+    THETA_FIELD_NUMBER: _ClassVar[int]
+    VEGA_FIELD_NUMBER: _ClassVar[int]
+    RHO_FIELD_NUMBER: _ClassVar[int]
+    IV_FIELD_NUMBER: _ClassVar[int]
+    IV_RANK_FIELD_NUMBER: _ClassVar[int]
+    FETCHED_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    conid: str
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    rho: float
+    iv: float
+    iv_rank: float
+    fetched_at_ms: int
+    def __init__(self, conid: _Optional[str] = ..., delta: _Optional[float] = ..., gamma: _Optional[float] = ..., theta: _Optional[float] = ..., vega: _Optional[float] = ..., rho: _Optional[float] = ..., iv: _Optional[float] = ..., iv_rank: _Optional[float] = ..., fetched_at_ms: _Optional[int] = ...) -> None: ...
+
+class ExerciseOptionRequest(_message.Message):
+    __slots__ = ("account_id", "conid", "qty", "action", "idempotency_key")
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    CONID_FIELD_NUMBER: _ClassVar[int]
+    QTY_FIELD_NUMBER: _ClassVar[int]
+    ACTION_FIELD_NUMBER: _ClassVar[int]
+    IDEMPOTENCY_KEY_FIELD_NUMBER: _ClassVar[int]
+    account_id: str
+    conid: str
+    qty: int
+    action: str
+    idempotency_key: str
+    def __init__(self, account_id: _Optional[str] = ..., conid: _Optional[str] = ..., qty: _Optional[int] = ..., action: _Optional[str] = ..., idempotency_key: _Optional[str] = ...) -> None: ...
+
+class ExerciseOptionResponse(_message.Message):
+    __slots__ = ("success", "broker_ref", "message")
+    SUCCESS_FIELD_NUMBER: _ClassVar[int]
+    BROKER_REF_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    success: bool
+    broker_ref: str
+    message: str
+    def __init__(self, success: bool = ..., broker_ref: _Optional[str] = ..., message: _Optional[str] = ...) -> None: ...
+
+class ComboLegRequest(_message.Message):
+    __slots__ = ("symbol", "option_hint", "side", "ratio", "position_effect")
+    SYMBOL_FIELD_NUMBER: _ClassVar[int]
+    OPTION_HINT_FIELD_NUMBER: _ClassVar[int]
+    SIDE_FIELD_NUMBER: _ClassVar[int]
+    RATIO_FIELD_NUMBER: _ClassVar[int]
+    POSITION_EFFECT_FIELD_NUMBER: _ClassVar[int]
+    symbol: SymbolRef
+    option_hint: OptionContractHint
+    side: str
+    ratio: int
+    position_effect: str
+    def __init__(self, symbol: _Optional[_Union[SymbolRef, _Mapping]] = ..., option_hint: _Optional[_Union[OptionContractHint, _Mapping]] = ..., side: _Optional[str] = ..., ratio: _Optional[int] = ..., position_effect: _Optional[str] = ...) -> None: ...
+
+class PlaceComboRequest(_message.Message):
+    __slots__ = ("account_id", "strategy_type", "legs", "tif", "limit_price", "client_combo_id")
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    STRATEGY_TYPE_FIELD_NUMBER: _ClassVar[int]
+    LEGS_FIELD_NUMBER: _ClassVar[int]
+    TIF_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_PRICE_FIELD_NUMBER: _ClassVar[int]
+    CLIENT_COMBO_ID_FIELD_NUMBER: _ClassVar[int]
+    account_id: str
+    strategy_type: str
+    legs: _containers.RepeatedCompositeFieldContainer[ComboLegRequest]
+    tif: str
+    limit_price: str
+    client_combo_id: str
+    def __init__(self, account_id: _Optional[str] = ..., strategy_type: _Optional[str] = ..., legs: _Optional[_Iterable[_Union[ComboLegRequest, _Mapping]]] = ..., tif: _Optional[str] = ..., limit_price: _Optional[str] = ..., client_combo_id: _Optional[str] = ...) -> None: ...
+
+class ComboLegResult(_message.Message):
+    __slots__ = ("leg_idx", "broker_order_id", "status")
+    LEG_IDX_FIELD_NUMBER: _ClassVar[int]
+    BROKER_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    leg_idx: int
+    broker_order_id: str
+    status: str
+    def __init__(self, leg_idx: _Optional[int] = ..., broker_order_id: _Optional[str] = ..., status: _Optional[str] = ...) -> None: ...
+
+class PlaceComboResponse(_message.Message):
+    __slots__ = ("broker_combo_id", "legs")
+    BROKER_COMBO_ID_FIELD_NUMBER: _ClassVar[int]
+    LEGS_FIELD_NUMBER: _ClassVar[int]
+    broker_combo_id: str
+    legs: _containers.RepeatedCompositeFieldContainer[ComboLegResult]
+    def __init__(self, broker_combo_id: _Optional[str] = ..., legs: _Optional[_Iterable[_Union[ComboLegResult, _Mapping]]] = ...) -> None: ...
+
+class GetSupportedComboStrategiesRequest(_message.Message):
+    __slots__ = ("broker_id",)
+    BROKER_ID_FIELD_NUMBER: _ClassVar[int]
+    broker_id: str
+    def __init__(self, broker_id: _Optional[str] = ...) -> None: ...
+
+class GetSupportedComboStrategiesResponse(_message.Message):
+    __slots__ = ("strategy_types",)
+    STRATEGY_TYPES_FIELD_NUMBER: _ClassVar[int]
+    strategy_types: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, strategy_types: _Optional[_Iterable[str]] = ...) -> None: ...

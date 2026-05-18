@@ -114,6 +114,36 @@ class BrokerStub(object):
                 request_serializer=broker_dot_v1_dot_broker__pb2.PreviewOrderRequest.SerializeToString,
                 response_deserializer=broker_dot_v1_dot_broker__pb2.PreviewOrderResponse.FromString,
                 _registered_method=True)
+        self.GetOptionChain = channel.unary_unary(
+                '/broker.v1.Broker/GetOptionChain',
+                request_serializer=broker_dot_v1_dot_broker__pb2.OptionChainRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.OptionChainResponse.FromString,
+                _registered_method=True)
+        self.GetOptionExpirations = channel.unary_unary(
+                '/broker.v1.Broker/GetOptionExpirations',
+                request_serializer=broker_dot_v1_dot_broker__pb2.OptionExpirationsRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.OptionExpirationsResponse.FromString,
+                _registered_method=True)
+        self.StreamOptionGreeks = channel.unary_stream(
+                '/broker.v1.Broker/StreamOptionGreeks',
+                request_serializer=broker_dot_v1_dot_broker__pb2.OptionGreeksRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.OptionGreeksResponse.FromString,
+                _registered_method=True)
+        self.ExerciseOption = channel.unary_unary(
+                '/broker.v1.Broker/ExerciseOption',
+                request_serializer=broker_dot_v1_dot_broker__pb2.ExerciseOptionRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.ExerciseOptionResponse.FromString,
+                _registered_method=True)
+        self.PlaceCombo = channel.unary_unary(
+                '/broker.v1.Broker/PlaceCombo',
+                request_serializer=broker_dot_v1_dot_broker__pb2.PlaceComboRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.PlaceComboResponse.FromString,
+                _registered_method=True)
+        self.GetSupportedComboStrategies = channel.unary_unary(
+                '/broker.v1.Broker/GetSupportedComboStrategies',
+                request_serializer=broker_dot_v1_dot_broker__pb2.GetSupportedComboStrategiesRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.GetSupportedComboStrategiesResponse.FromString,
+                _registered_method=True)
 
 
 class BrokerServicer(object):
@@ -229,6 +259,44 @@ class BrokerServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetOptionChain(self, request, context):
+        """── Phase 12: Options ───────────────────────────────────────────────────
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetOptionExpirations(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def StreamOptionGreeks(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExerciseOption(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PlaceCombo(self, request, context):
+        """Phase 13: Multi-leg option combos
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetSupportedComboStrategies(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BrokerServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -311,6 +379,36 @@ def add_BrokerServicer_to_server(servicer, server):
                     servicer.PreviewOrder,
                     request_deserializer=broker_dot_v1_dot_broker__pb2.PreviewOrderRequest.FromString,
                     response_serializer=broker_dot_v1_dot_broker__pb2.PreviewOrderResponse.SerializeToString,
+            ),
+            'GetOptionChain': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetOptionChain,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.OptionChainRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.OptionChainResponse.SerializeToString,
+            ),
+            'GetOptionExpirations': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetOptionExpirations,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.OptionExpirationsRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.OptionExpirationsResponse.SerializeToString,
+            ),
+            'StreamOptionGreeks': grpc.unary_stream_rpc_method_handler(
+                    servicer.StreamOptionGreeks,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.OptionGreeksRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.OptionGreeksResponse.SerializeToString,
+            ),
+            'ExerciseOption': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExerciseOption,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.ExerciseOptionRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.ExerciseOptionResponse.SerializeToString,
+            ),
+            'PlaceCombo': grpc.unary_unary_rpc_method_handler(
+                    servicer.PlaceCombo,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.PlaceComboRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.PlaceComboResponse.SerializeToString,
+            ),
+            'GetSupportedComboStrategies': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSupportedComboStrategies,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.GetSupportedComboStrategiesRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.GetSupportedComboStrategiesResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -745,6 +843,168 @@ class Broker(object):
             '/broker.v1.Broker/PreviewOrder',
             broker_dot_v1_dot_broker__pb2.PreviewOrderRequest.SerializeToString,
             broker_dot_v1_dot_broker__pb2.PreviewOrderResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetOptionChain(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/GetOptionChain',
+            broker_dot_v1_dot_broker__pb2.OptionChainRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.OptionChainResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetOptionExpirations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/GetOptionExpirations',
+            broker_dot_v1_dot_broker__pb2.OptionExpirationsRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.OptionExpirationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StreamOptionGreeks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/broker.v1.Broker/StreamOptionGreeks',
+            broker_dot_v1_dot_broker__pb2.OptionGreeksRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.OptionGreeksResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExerciseOption(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/ExerciseOption',
+            broker_dot_v1_dot_broker__pb2.ExerciseOptionRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.ExerciseOptionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PlaceCombo(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/PlaceCombo',
+            broker_dot_v1_dot_broker__pb2.PlaceComboRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.PlaceComboResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSupportedComboStrategies(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/GetSupportedComboStrategies',
+            broker_dot_v1_dot_broker__pb2.GetSupportedComboStrategiesRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.GetSupportedComboStrategiesResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -704,6 +704,28 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         )
         return broker_pb2.PlaceBracketResponse()
 
+    async def GetSupportedComboStrategies(  # noqa: N802
+        self,
+        request: broker_pb2.GetSupportedComboStrategiesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.GetSupportedComboStrategiesResponse:
+        del request, context
+        return broker_pb2.GetSupportedComboStrategiesResponse(
+            strategy_types=["VERTICAL", "CALENDAR", "DIAGONAL", "STRADDLE", "STRANGLE"]
+        )
+
+    async def PlaceCombo(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceComboRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PlaceComboResponse:
+        del request
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "Schwab combo runtime-gated pending 401 resolution",
+        )
+        return broker_pb2.PlaceComboResponse()
+
     async def SearchContracts(  # noqa: N802
         self,
         request: broker_pb2.SearchContractsRequest,

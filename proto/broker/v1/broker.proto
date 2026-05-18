@@ -51,6 +51,9 @@ service Broker {
   rpc GetOptionExpirations(OptionExpirationsRequest) returns (OptionExpirationsResponse);
   rpc StreamOptionGreeks(OptionGreeksRequest) returns (stream OptionGreeksResponse);
   rpc ExerciseOption(ExerciseOptionRequest) returns (ExerciseOptionResponse);
+  // Phase 13: Multi-leg option combos
+  rpc PlaceCombo(PlaceComboRequest) returns (PlaceComboResponse);
+  rpc GetSupportedComboStrategies(GetSupportedComboStrategiesRequest) returns (GetSupportedComboStrategiesResponse);
 }
 
 // Phase 10a — PreviewOrder messages (spec §5).
@@ -600,4 +603,40 @@ message ExerciseOptionResponse {
   bool   success    = 1;
   string broker_ref = 2;
   string message    = 3;
+}
+
+message ComboLegRequest {
+  SymbolRef          symbol          = 1;
+  OptionContractHint option_hint     = 2;
+  string             side            = 3;
+  int32              ratio           = 4;
+  string             position_effect = 5;
+}
+
+message PlaceComboRequest {
+  string                   account_id      = 1;
+  string                   strategy_type   = 2;
+  repeated ComboLegRequest legs            = 3;
+  string                   tif             = 4;
+  string                   limit_price     = 5;
+  string                   client_combo_id = 6;
+}
+
+message ComboLegResult {
+  int32  leg_idx         = 1;
+  string broker_order_id = 2;
+  string status          = 3;
+}
+
+message PlaceComboResponse {
+  string                  broker_combo_id = 1;
+  repeated ComboLegResult legs            = 2;
+}
+
+message GetSupportedComboStrategiesRequest {
+  string broker_id = 1;
+}
+
+message GetSupportedComboStrategiesResponse {
+  repeated string strategy_types = 1;
 }

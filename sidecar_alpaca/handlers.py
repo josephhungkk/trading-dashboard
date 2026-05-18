@@ -353,6 +353,95 @@ class AlpacaServicer(broker_pb2_grpc.BrokerServicer):
         )
         return broker_pb2.PreviewOrderResponse()
 
+    async def GetSupportedComboStrategies(  # noqa: N802
+        self,
+        request: broker_pb2.GetSupportedComboStrategiesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.GetSupportedComboStrategiesResponse:
+        del request, context
+        return broker_pb2.GetSupportedComboStrategiesResponse(
+            strategy_types=["VERTICAL", "CALENDAR", "DIAGONAL", "STRADDLE", "STRANGLE"]
+        )
+
+    async def PlaceCombo(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceComboRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.PlaceComboResponse:
+        def _occ(underlying: str, hint: broker_pb2.OptionContractHint) -> str:
+            expiry = hint.expiry_iso.replace("-", "")[2:]
+            strike = int(float(hint.strike) * 1000)
+            return f"{underlying}{expiry}{hint.put_call}{strike:08d}"
+
+        if not request.legs:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "combo legs required")
+            return broker_pb2.PlaceComboResponse()
+
+        from alpaca.trading.enums import OrderClass, OrderSide, OrderType, TimeInForce
+        from alpaca.trading.requests import LimitOrderRequest
+
+        account_id = self._account_id(request.account_id)
+        try:
+            client = await self._configured_trading_client(account_id, context)
+        except _ConfiguredClientUnavailableError:
+            return broker_pb2.PlaceComboResponse()
+
+        tif = {"DAY": TimeInForce.DAY, "GTC": TimeInForce.GTC}.get(
+            request.tif,
+            TimeInForce.DAY,
+        )
+        legs: list[Any] = []
+        for leg in request.legs:
+            underlying = leg.symbol.raw_symbol or leg.symbol.canonical_id
+            try:
+                from alpaca.trading.requests import OptionLegRequest
+
+                legs.append(
+                    OptionLegRequest(
+                        symbol=_occ(underlying, leg.option_hint),
+                        side=OrderSide.BUY if leg.side == "buy" else OrderSide.SELL,
+                        ratio_qty=leg.ratio,
+                    )
+                )
+            except ImportError as exc:
+                log.warning("alpaca_option_leg_request_unavailable", exc_info=exc)
+                legs.append(
+                    {
+                        "symbol": _occ(underlying, leg.option_hint),
+                        "side": leg.side,
+                        "ratio_qty": leg.ratio,
+                    }
+                )
+
+        first_symbol = request.legs[0].symbol
+        req_obj = LimitOrderRequest(
+            symbol=first_symbol.raw_symbol or first_symbol.canonical_id,
+            qty=1,
+            type=OrderType.LIMIT,
+            time_in_force=tif,
+            limit_price=float(request.limit_price) if request.limit_price else None,
+            order_class=OrderClass.MLEG,
+            legs=legs,
+            client_order_id=request.client_combo_id,
+        )
+        try:
+            order = await asyncio.to_thread(client.submit_order, req_obj)
+        except Exception as exc:
+            await self._abort_internal(context, exc)
+            return broker_pb2.PlaceComboResponse()
+        leg_results = [
+            broker_pb2.ComboLegResult(
+                leg_idx=i,
+                broker_order_id="",
+                status="working",
+            )
+            for i in range(len(request.legs))
+        ]
+        return broker_pb2.PlaceComboResponse(
+            broker_combo_id=str(getattr(order, "id", "")),
+            legs=leg_results,
+        )
+
     async def GetHistoricalBars(  # noqa: N802
         self,
         request: broker_pb2.GetHistoricalBarsRequest,

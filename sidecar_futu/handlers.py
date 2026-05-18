@@ -368,6 +368,26 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             status="SUBMITTED",
         )
 
+    async def GetSupportedComboStrategies(  # noqa: N802
+        self,
+        request: broker_pb2.GetSupportedComboStrategiesRequest,
+        context: Any,
+    ) -> broker_pb2.GetSupportedComboStrategiesResponse:
+        del request, context
+        return broker_pb2.GetSupportedComboStrategiesResponse(strategy_types=[])
+
+    async def PlaceCombo(  # noqa: N802
+        self,
+        request: broker_pb2.PlaceComboRequest,
+        context: Any,
+    ) -> broker_pb2.PlaceComboResponse:
+        del request
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "Combo not supported for Futu — deferred to Phase 13c",
+        )
+        return broker_pb2.PlaceComboResponse()
+
     async def _get_or_init_futu_streamer(self) -> Any:
         lock = self.__dict__.setdefault("_streamer_lock", asyncio.Lock())
         async with lock:
