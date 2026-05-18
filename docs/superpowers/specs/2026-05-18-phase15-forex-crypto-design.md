@@ -205,7 +205,7 @@ rpc StreamFxRates(google.protobuf.Empty) returns (stream FxMidRate);
 | GET | `/api/forex/quotes` | JWT | — |
 | GET | `/api/forex/pairs` | JWT | — |
 
-`accept` endpoint: validates `X-Csrf-Nonce` header matches nonce minted at quote-request time (stored in `forex_rfq_quotes` or Redis with same TTL). Pattern mirrors futures roll confirm CSRF.
+`accept` endpoint: validates `X-Csrf-Nonce` header matches nonce stored in Redis key `forex:rfq:nonce:{broker_quote_id}` (TTL = quote `ttl_seconds`, set at `request_quote` time, consumed via GETDEL). Pattern mirrors futures roll confirm CSRF — two-key nonce scheme.
 
 ### 4.4 Risk Gate `_check_forex_exposure`
 
