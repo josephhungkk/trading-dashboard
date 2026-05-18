@@ -596,6 +596,9 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
                         status=str(ib_trade.orderStatus.status),
                     )
 
+            # Conid qualification resolves the concrete IBKR contract, including
+            # secType="FUT" for futures, so PlaceOrder does not need an asset
+            # class-specific branch here.
             contract: object = await self._resolve_contract(request.conid)
             ib_order: object = self._build_ib_order(request)
             ib_order.orderRef = request.client_order_id
@@ -1040,6 +1043,49 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             broker_combo_id=str(trade.order.orderId),
             legs=leg_results,
         )
+
+    async def GetFutureContracts(  # noqa: N802
+        self,
+        request: broker_pb2.GetFutureContractsRequest,
+        context: object,
+    ) -> broker_pb2.GetFutureContractsResponse:
+        from ib_async import Contract
+
+        del context
+        ib_contract = Contract(
+            secType="FUT",
+            symbol=request.root_symbol,
+            exchange="SMART",
+        )
+        details_list = await self.ib.reqContractDetailsAsync(ib_contract)
+        contracts: list[broker_pb2.FutureContractMonth] = []
+        for details in details_list[:6]:
+            c = details.contract
+            cd = details.contractDetails if hasattr(details, "contractDetails") else details
+            first_notice = getattr(cd, "firstNoticeDate", "") or ""
+            contracts.append(
+                broker_pb2.FutureContractMonth(
+                    conid=str(c.conId),
+                    contract_month=getattr(c, "lastTradeDateOrContractMonth", "")[:6],
+                    expiry_date=getattr(c, "lastTradeDateOrContractMonth", ""),
+                    first_notice=first_notice,
+                    exchange=c.exchange or "",
+                    tick_size=str(getattr(cd, "minTick", "0")),
+                    tick_value=str(getattr(cd, "minTick", "0")),
+                    multiplier=str(c.multiplier or "1"),
+                    settlement_type="CASH",
+                )
+            )
+        return broker_pb2.GetFutureContractsResponse(contracts=contracts)
+
+    async def StreamSettlementEvents(  # noqa: N802
+        self,
+        request: broker_pb2.StreamSettlementEventsRequest,
+        context: object,
+    ) -> None:
+        """Streams settlement events. Phase 14: backend settlement_listener handles event subscription directly via ib_async callbacks."""
+        del request, context
+        pass
 
     async def OrderEvent(  # noqa: N802
         self,

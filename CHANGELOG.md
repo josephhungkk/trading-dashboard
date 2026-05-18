@@ -7,6 +7,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 14 — Futures trading (v0.14.0)
+
+Phase 14 shipped across 9 chunks on 2026-05-18 at tag `v0.14.0`. 1645 BE tests green; 690 FE tests green. Adds CME/CBOT/NYMEX futures on IBKR + Schwab and HKFE (HSI/HHI) futures on Futu, with contract-month roll UI, settlement events, physical-delivery risk gate, Telegram roll commands, and 6 Prometheus metrics.
+
+**Backend**
+
+- `alembic/versions/0050_futures.py` (new): `futures_roll_rules` table (account_id FK, instrument_id, days_before 1–90, enabled, created_at/updated_at triggers); `futures_settlement_events` table (account_id, instrument_id, settlement_price, cash_delta NUMERIC, settlement_type CASH/PHYSICAL CHECK, broker_event_id, settled_at TIMESTAMPTZ); unique partial index on `(account_id, broker_event_id) WHERE broker_event_id IS NOT NULL`; `FUTURE` added to `instrument_asset_class` PG enum.
+- `app/models/instruments.py`: `FutureDetails` discriminated-union arm in `instruments.meta` JSONB; `FUTURE` added to Python `AssetClass` StrEnum.
+- `app/services/risk_service.py`: `EvaluationContext` widened with `multiplier: Decimal`, `tick_size: Decimal | None`, `first_notice_day: date | None`, `underlying_symbol: str | None`, `position_effect: str | None`; `_check_futures_exposure` — BLOCK when `today >= first_notice_day` AND `position_effect != "CLOSE"` (physical-delivery gate), WARN when `settlement_type == PHYSICAL` and `days_to_expiry <= 10`.
+- `app/services/futures/contract_resolver.py` (new): `FutureContractMonth` dataclass; `ContractResolver` with Redis singleflight (`GET`/`SETEX` with market-calendar-aware TTL: 5 min during trading hours, 60 min outside), `_fetch_from_sidecar()` using proto `response.contracts`, `m.expiry_date`, `m.first_notice`; cache-hit and fetch counters.
+- `app/services/futures/roll_service.py` (new): `RollService` with `_mint_nonce` (two-key scheme: `futures:roll:pending:{account_id}:{nonce}` + `futures:roll:instrument:{account_id}:{instrument_id}` with 24h TTL), `_consume_nonce` GETDEL with account-id payload guard, `execute_roll` stub (metrics + logging, order dispatch deferred), `check_and_notify_rolls` APScheduler stub.
+- `app/services/futures/settlement_listener.py` (new): `_record_settlement` helper (DB upsert with ON CONFLICT idempotency, `await db.rollback()` on insert failure, Redis pubsub publish, HTML-escaped Telegram notification); 3 broker listener stubs (`_ibkr_settlement_listener`, `_futu_settlement_poller`, `_schwab_settlement_poller`).
+- `app/api/futures.py` (new): 5 REST endpoints — `GET /api/futures/contracts/{root_symbol}`, `GET /api/futures/roll-rules`, `POST /api/futures/roll-rules`, `DELETE /api/futures/roll-rules/{instrument_id}`, `GET /api/futures/settlements`, `POST /api/futures/roll/preview`, `POST /api/futures/roll/confirm/{nonce}`; `require_admin_jwt` + `AdminIdentity` auth; `account_id: UUID` taken from query/body params; CSRF value-match check (`x_csrf_nonce != nonce`); date/Decimal serialization via `isoformat()` / `str()`.
+- `app/services/telegram/order_flow.py`: 4 roll handler functions — `handle_confirm_roll` (fetches account from `telegram_chat_id`, calls `roll_service.execute_roll`, safe KeyError → 404 reply), `handle_set_roll_rule` (root_symbol regex `[A-Z0-9]{1,10}`, UPSERT ON CONFLICT), `handle_delete_roll_rule` (instrument JOIN to resolve ID, HTML-escaped replies), `handle_roll_rules_list` (JOIN query, paginated display).
+- `app/services/telegram/commands.py`: 4 new command handlers registered with trade/write/read rate limits; `RollService` instantiated with `orders_service=None` stub.
+- `app/core/metrics.py`: 6 Phase 14 Prometheus metrics — `futures_roll_notifications_total{exchange}`, `futures_roll_confirms_total{outcome}`, `futures_roll_nonce_expired_total`, `futures_settlement_events_total{broker,settlement_type}`, `futures_contract_resolver_cache_hits_total{root_symbol}`, `futures_contract_resolver_fetch_total{root_symbol,outcome}`.
+- `app/main.py`: 2 APScheduler jobs — CME/CBOT/NYMEX roll checker at 09:00 US/Central, HKFE roll checker at 09:00 Asia/Hong_Kong.
+
+**Proto**
+
+- `proto/broker/v1/broker.proto`: `GetFutureContracts` RPC + `FutureContractMonth` message (`conid`, `root_symbol`, `contract_month`, `expiry_date`, `exchange`, `multiplier`, `tick_size`, `tick_value`, `settlement_type`, `first_notice`); `StreamSettlementEvents` RPC + `SettlementEvent` message.
+
+**Frontend**
+
+- `src/services/futures/types.ts` (new): `FutureContractMonth`, `FutureRollRule`, `FutureRollRuleRequest`, `FutureSettlementEvent`, `RollPreviewResponse` TypeScript interfaces.
+- `src/services/futures/api.ts` (new): `fetchContracts`, `fetchRollRules`, `createRollRule`, `deleteRollRule`, `fetchSettlements`, `fetchRollPreview`, `confirmRoll`; all with `credentials: 'include'`; `confirmRoll` sends `X-Csrf-Nonce` header.
+- `src/features/futures/FutureDetailsSection.tsx` (new): contract detail display (month, expiry, exchange, multiplier, tick_size, tick_value, settlement_type, first_notice_day, days_to_expiry); amber warning badge for PHYSICAL settlement.
+- `src/features/futures/FuturesPage.tsx` (new): two-tab page (Positions/Roll Rules + Settlements); roll-per-rule button triggers `fetchRollPreview` and opens `RollConfirmDialog`; `useQuery`/`useMutation` with TanStack Query.
+- `src/features/futures/RollConfirmDialog.tsx` (new): `role="dialog"` + `aria-modal="true"`; uses `mintCsrfNonce()` from `@/services/admin/api`; Escape key closes via `onKeyDown` on inner div.
+- `src/routes/futures.tsx` (new): TanStack Router file-based route `/futures`.
+- `src/features/orders/TradeTicketModal.tsx`: `FutureDetailsSection` injected for FUTURE asset class; `futureContract?: FutureContractMonth` added to `TradeTicketContract` type.
+
+**Deferred (stubs ship, full dispatch in a follow-up)**
+
+- Real broker sidecar dispatch for `GetFutureContracts` / `StreamSettlementEvents` (3 stubs).
+- `execute_roll` order placement (logs + metrics only; no order submission).
+- `check_and_notify_rolls` DB query + Telegram preview logic.
+- Put-spread break-even direction fix inherited from Phase 13.
+
+---
+
 ### Phase 13 — Multi-leg option combos (v0.13.0)
 
 Phase 13 shipped across 6 chunks (A–F) at tag `v0.13.0` on 2026-05-18. 31 combo-specific tests green; 690/690 FE tests green. Adds 5-strategy preview→confirm combo flow with CSRF, risk-gate envelope check, and Single/Multi-Leg toggle in TradeTicketModal.

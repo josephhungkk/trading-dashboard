@@ -259,6 +259,44 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             await context.abort(grpc.StatusCode.UNAVAILABLE, "gateway not connected")
             return broker_pb2.PlaceOrderResponse()
 
+        # FUT asset class
+        asset_class = getattr(request, "asset_class", "")
+        if asset_class == "FUT":
+            from futu import OrderType, RET_OK, SecurityType as FutuSecType, TrdSide
+
+            trade_ctx = getattr(self._client, "_trade_ctx", None)
+            if trade_ctx is None:
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "trade context not connected",
+                )
+                return broker_pb2.PlaceOrderResponse()
+            trd_env = self._client._accounts_trd_env.get(request.account_number, "REAL")
+            ret, data = trade_ctx.place_order(
+                price=float(request.limit_price) if request.limit_price else 0,
+                qty=int(float(request.qty)),
+                code=request.conid,
+                trd_side=TrdSide.BUY if request.side.upper() == "BUY" else TrdSide.SELL,
+                order_type=OrderType.NORMAL,
+                trd_env=trd_env,
+                acc_id=int(request.account_number),
+                security_type=FutuSecType.FUTURE,
+            )
+            if ret != RET_OK:
+                return broker_pb2.PlaceOrderResponse(
+                    broker_order_id="",
+                    status="REJECTED",
+                )
+            order_id = ""
+            if hasattr(data, "iloc") and not data.empty:
+                order_id = data.iloc[0].get("order_id", order_id)
+            elif isinstance(data, dict):
+                order_id = data.get("order_id", order_id)
+            return broker_pb2.PlaceOrderResponse(
+                broker_order_id=str(order_id),
+                status="PENDING",
+            )
+
         try:
             broker_order_id, status = await self._client.place_order(request)
         except (ConnectionError, TimeoutError, OSError) as exc:
@@ -387,6 +425,59 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
             "Combo not supported for Futu — deferred to Phase 13c",
         )
         return broker_pb2.PlaceComboResponse()
+
+    async def GetFutureContracts(  # noqa: N802
+        self,
+        request: broker_pb2.GetFutureContractsRequest,
+        context: object,
+    ) -> broker_pb2.GetFutureContractsResponse:
+        from futu import Market, SecurityType
+
+        del context
+        quote_ctx = await self._resolve_quote_context()
+        if quote_ctx is None:
+            log.warning("futu_get_future_basicinfo_failed", ret="quote_context_missing")
+            return broker_pb2.GetFutureContractsResponse(contracts=[])
+
+        ret, df, page_token = quote_ctx.get_future_basicinfo(
+            market=Market.HK, security_type=SecurityType.FUTURE
+        )
+        del page_token
+        if ret != 0:
+            log.warning("futu_get_future_basicinfo_failed", ret=ret)
+            return broker_pb2.GetFutureContractsResponse(contracts=[])
+
+        root = request.root_symbol.upper()
+        contracts: list[broker_pb2.FutureContractMonth] = []
+        for _, row in df.iterrows():
+            if root not in str(row.get("name", "")):
+                continue
+            contracts.append(
+                broker_pb2.FutureContractMonth(
+                    conid=str(row.get("code", "")),
+                    contract_month=str(row.get("last_trade_time", ""))[:6].replace(
+                        "-",
+                        "",
+                    ),
+                    expiry_date=str(row.get("last_trade_time", ""))[:10],
+                    first_notice="",
+                    exchange="HKFE",
+                    tick_size=str(row.get("price_spread", "1")),
+                    tick_value=str(row.get("lot_size", "50")),
+                    multiplier=str(row.get("lot_size", "50")),
+                    settlement_type="CASH",
+                )
+            )
+        return broker_pb2.GetFutureContractsResponse(contracts=contracts[:6])
+
+    async def StreamSettlementEvents(  # noqa: N802
+        self,
+        request: broker_pb2.StreamSettlementEventsRequest,
+        context: object,
+    ) -> None:
+        """Phase 14 stub. Futu settlement polling handled by backend settlement_listener."""
+        del request, context
+        pass
 
     async def _get_or_init_futu_streamer(self) -> Any:
         lock = self.__dict__.setdefault("_streamer_lock", asyncio.Lock())

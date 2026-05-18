@@ -807,9 +807,21 @@ Deferred: Schwab execution, Greeks in risk gate, IV rank, TicksSubscriber, Monac
 
 **Deferred to Phase 14:** real broker dispatch (PlaceComboOrder RPC called; broker_not_wired 503 until Phase 14 wires sidecar); put-spread break-even direction fix (currently only handles call-spread direction).
 
-## Phase 14 — Futures
+## Phase 14 — Futures  *(complete — v0.14.0 · 2026-05-18)*
 
-CME on IBKR + Schwab; HKFE (HSI/HHI) on Futu. Contract-month roll UI. Settlement events. Tick-size/multiplier per contract.
+CME/CBOT/NYMEX on IBKR + Schwab; HKFE (HSI/HHI) on Futu. Contract-month roll UI. Settlement events. Tick-size/multiplier per contract.
+
+- [x] Chunk 1 — Migration 0050: `futures_roll_rules` + `futures_settlement_events` tables; `FutureDetails` discriminated-union arm in `instruments.meta`; `FUTURE` enum added to `instrument_asset_class` PG enum + Python `AssetClass` StrEnum; `EvaluationContext` widened (`multiplier`, `tick_size`, `first_notice_day`, `underlying_symbol`, `position_effect`)
+- [x] Chunk 2 — Proto extension: `GetFutureContracts` RPC + `FutureContractMonth` message; `StreamSettlementEvents` RPC
+- [x] Chunk 3 — IBKR + Futu + Schwab sidecar stubs for `GetFutureContracts` / `StreamSettlementEvents` (UNIMPLEMENTED stubs for sidecar dispatch; service layer wires ContractResolver)
+- [x] Chunk 4 — `services/futures/` module: `FutureContractMonth` dataclass; `ContractResolver` (Redis singleflight, `_ttl()` market-calendar aware, `_fetch_from_sidecar()` using proto `response.contracts` + `m.expiry_date` + `m.first_notice`); `RollService` (`_mint_nonce` two-key scheme, `_consume_nonce` GETDEL, `execute_roll` stub, `check_and_notify_rolls` APScheduler stub); `_check_futures_exposure` risk gate (physical-delivery BLOCK past first_notice_day, CLOSE skips check)
+- [x] Chunk 5 — REST API (`/api/futures/contracts/{root_symbol}`, `/api/futures/roll-rules`, `/api/futures/roll/preview`, `/api/futures/roll/confirm/{nonce}`, `/api/futures/settlements`); settlement listener (`_record_settlement` helper with DB rollback on exception + html.escape in Telegram notifications; 3 broker stubs)
+- [x] Chunk 6 — Telegram roll commands: `handle_confirm_roll`, `handle_set_roll_rule`, `handle_delete_roll_rule`, `handle_roll_rules_list`; registered in `commands.py` with trade/write rate limits; HTML injection guards on all user-provided symbols
+- [x] Chunk 7 — Frontend: `services/futures/types.ts` + `services/futures/api.ts`; `FutureDetailsSection` (contract details + physical-delivery amber warning); `FuturesPage` (positions/settlements tabs, roll-per-rule button, RollConfirmDialog); `/futures` TanStack Router route; `FutureDetailsSection` injected into `TradeTicketModal` for FUTURE asset class; `mintCsrfNonce()` from admin service used in dialog
+- [x] Chunk 8 — 6 Prometheus metrics (`futures_roll_notifications_total`, `futures_roll_confirms_total`, `futures_roll_nonce_expired_total`, `futures_settlement_events_total`, `futures_contract_resolver_cache_hits_total`, `futures_contract_resolver_fetch_total`); APScheduler jobs (CME at 09:00 US/Central, HKFE at 09:00 Asia/Hong_Kong)
+- [x] Chunk 9 — Reviewer chain applied; CRIT+HIGH+MED fixes inline; 1645 BE tests green; 690 FE tests green; close-out
+
+**Deferred (stubs ship, full dispatch in a follow-up):** real broker sidecar dispatch for `GetFutureContracts` / `StreamSettlementEvents` (3 stubs); `execute_roll` places orders (logs+metrics but no order submission yet); `check_and_notify_rolls` queries DB roll rules and sends Telegram previews.
 
 ## Phase 15 — Forex + Crypto
 

@@ -54,6 +54,8 @@ service Broker {
   // Phase 13: Multi-leg option combos
   rpc PlaceCombo(PlaceComboRequest) returns (PlaceComboResponse);
   rpc GetSupportedComboStrategies(GetSupportedComboStrategiesRequest) returns (GetSupportedComboStrategiesResponse);
+  rpc GetFutureContracts(GetFutureContractsRequest) returns (GetFutureContractsResponse);
+  rpc StreamSettlementEvents(StreamSettlementEventsRequest) returns (stream SettlementEvent);
 }
 
 // Phase 10a — PreviewOrder messages (spec §5).
@@ -639,4 +641,39 @@ message GetSupportedComboStrategiesRequest {
 
 message GetSupportedComboStrategiesResponse {
   repeated string strategy_types = 1;
+}
+
+message GetFutureContractsRequest {
+  string root_symbol = 1;
+  string broker_id   = 2;
+}
+
+message FutureContractMonth {
+  string conid           = 1;
+  string contract_month  = 2;  // "202506"
+  string expiry_date     = 3;  // "2025-06-20"
+  string first_notice    = 4;  // "" if cash-settled; never omit
+  string exchange        = 5;
+  string tick_size       = 6;  // decimal string
+  string tick_value      = 7;  // decimal string
+  string multiplier      = 8;  // decimal string
+  string settlement_type = 9;  // "CASH" | "PHYSICAL"
+}
+
+message GetFutureContractsResponse {
+  repeated FutureContractMonth contracts = 1;
+}
+
+message StreamSettlementEventsRequest {
+  string account_number = 1;
+}
+
+message SettlementEvent {
+  string conid            = 1;
+  string symbol           = 2;
+  string settlement_price = 3;  // decimal string
+  string cash_delta       = 4;  // signed decimal string
+  string settlement_type  = 5;
+  string settled_at       = 6;  // ISO8601
+  string broker_event_id  = 7;  // IBKR execId / Futu deal_id / Schwab activityId; "" if unavailable
 }

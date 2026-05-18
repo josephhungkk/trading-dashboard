@@ -100,7 +100,10 @@ class EvaluationContext:
     # branch with "preview unavailable" instead of fail-CLOSED.
     symbol: str | None = None
     asset_class: str | None = None
-    multiplier: int = 1  # 1 for non-options; 100 for standard equity options
+    multiplier: Decimal = Decimal("1")  # 1 for non-options; 100 for standard equity options
+    tick_size: Decimal | None = None
+    first_notice_day: date | None = None
+    underlying_symbol: str | None = None
     position_effect: Literal["OPEN", "CLOSE"] | None = None
 
 
@@ -824,6 +827,34 @@ class RiskService:
                 pass
         return (expiry, exchange or None, option_type or None, strike_str or None)
 
+    async def _check_futures_exposure(self, ctx: EvaluationContext) -> CheckResult:
+        """Phase 14: Futures-specific risk checks (physical delivery WARN/BLOCK)."""
+        from datetime import date as date_cls
+
+        blockers: list[Any] = []
+        warnings: list[Any] = []
+        is_close = getattr(ctx, "position_effect", None) == "CLOSE"
+
+        if not is_close and ctx.first_notice_day is not None:
+            today = date_cls.today()
+            if today >= ctx.first_notice_day:
+                blockers.append(
+                    GateBlockerEntry(
+                        check="futures_physical_delivery",
+                        code="futures_physical_delivery_block",
+                        message=(
+                            f"Physical delivery block: first notice day was "
+                            f"{ctx.first_notice_day}. Close position via broker."
+                        ),
+                    )
+                )
+
+        if blockers:
+            return blockers[0], None
+        if warnings:
+            return None, warnings[0]
+        return None, None
+
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).
 
@@ -854,6 +885,18 @@ class RiskService:
                 )
             if opt_warning is not None:
                 pre_warnings = [opt_warning]
+        # Phase 14: futures physical delivery check
+        if ctx.asset_class == "FUTURE":
+            fut_blocker, fut_warning = (await self._check_futures_exposure(ctx)) or (None, None)
+            if fut_blocker is not None:
+                return GateVerdict(
+                    final_verdict="block",
+                    blockers=[fut_blocker],
+                    warnings=[],
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            if fut_warning is not None:
+                pre_warnings = [fut_warning]
         fast_check_names = (
             "account_kill_switch",
             "broker_kill_switch",

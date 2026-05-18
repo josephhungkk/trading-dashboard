@@ -306,6 +306,10 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
     ) -> broker_pb2.PlaceOrderResponse:
         import time as _time
 
+        if getattr(request, "asset_class", "") == "FUT":
+            log.info("schwab_futures_execution_stubbed", extra={"conid": request.conid})
+            return broker_pb2.PlaceOrderResponse(broker_order_id="", status="REJECTED")
+
         from sidecar_schwab.client import SchwabHTTPError
         from sidecar_schwab.metrics import SCHWAB_PLACE_ORDER_DURATION_MS
         from sidecar_schwab.normalize import (
@@ -392,6 +396,71 @@ class BrokerServicer(broker_pb2_grpc.BrokerServicer):
         if self._poller is not None:
             self._poller.activate_fast(account_number=request.account_number)
         return rsp
+
+    async def GetFutureContracts(  # noqa: N802
+        self,
+        request: broker_pb2.GetFutureContractsRequest,
+        context: object,
+    ) -> broker_pb2.GetFutureContractsResponse:
+        del context
+        root = request.root_symbol
+        if self._client is None:
+            log.warning(
+                "schwab_get_future_contracts_failed",
+                extra={"root": root, "error": "not configured"},
+            )
+            return broker_pb2.GetFutureContractsResponse(contracts=[])
+
+        try:
+            data = await self._client.search_instruments(
+                query=f"/{root}",
+                projection="fundamental",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "schwab_get_future_contracts_failed",
+                extra={"root": root, "error": str(exc)},
+            )
+            return broker_pb2.GetFutureContractsResponse(contracts=[])
+
+        contracts: list[broker_pb2.FutureContractMonth] = []
+        if isinstance(data, dict):
+            instruments = (
+                data.get("instruments", [data]) if "instruments" in data else [data]
+            )
+        else:
+            instruments = data if isinstance(data, list) else []
+
+        for inst in instruments[:6]:
+            future = inst.get("future", {}) if isinstance(inst, dict) else {}
+            contracts.append(
+                broker_pb2.FutureContractMonth(
+                    conid=str(inst.get("cusip", inst.get("symbol", root))),
+                    contract_month=str(future.get("expirationDate", ""))[:6].replace(
+                        "-",
+                        "",
+                    ),
+                    expiry_date=str(
+                        future.get("lastTradingDate", future.get("expirationDate", ""))
+                    ),
+                    first_notice=str(future.get("firstNoticeDate", "")) or "",
+                    exchange="CME",
+                    tick_size=str(future.get("tickSize", "0.25")),
+                    tick_value=str(future.get("tickValue", "12.50")),
+                    multiplier=str(future.get("multiplier", "50")),
+                    settlement_type="CASH",
+                )
+            )
+        return broker_pb2.GetFutureContractsResponse(contracts=contracts)
+
+    async def StreamSettlementEvents(  # noqa: N802
+        self,
+        request: broker_pb2.StreamSettlementEventsRequest,
+        context: object,
+    ) -> None:
+        """Phase 14 stub. Schwab settlement polling handled by backend settlement_listener."""
+        del request, context
+        pass
 
     async def _abort_for_http(  # noqa: N802
         self,

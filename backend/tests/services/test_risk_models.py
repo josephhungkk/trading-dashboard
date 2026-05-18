@@ -11,7 +11,8 @@ def test_risk_limit_columns() -> None:
     from app.models.risk import RiskLimit
 
     cols = {c.name for c in RiskLimit.__table__.columns}
-    assert cols == {
+    # Phase 13 added combo columns; Phase 10a original columns preserved.
+    assert {
         "id",
         "scope_type",
         "scope_id",
@@ -23,7 +24,7 @@ def test_risk_limit_columns() -> None:
         "created_at",
         "updated_at",
         "updated_by",
-    }
+    }.issubset(cols)
 
 
 def test_risk_decisions_columns() -> None:

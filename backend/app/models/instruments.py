@@ -47,6 +47,7 @@ class AssetClass(enum.StrEnum):
     FOREX = "FOREX"
     CRYPTO = "CRYPTO"
     OPTION = "OPTION"
+    FUTURE = "FUTURE"
 
 
 class Instrument(Base):

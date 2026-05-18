@@ -1028,3 +1028,45 @@ OPTION_CHAIN_SOURCES_INVALID_TOTAL = Counter(
     labelnames=["source"],
     registry=registry,
 )
+
+# Phase 14 — Futures
+FUTURES_ROLL_NOTIFICATIONS_TOTAL = Counter(
+    "futures_roll_notifications_total",
+    "Roll notifications sent per exchange.",
+    labelnames=["exchange"],
+    registry=registry,
+)
+
+FUTURES_ROLL_CONFIRMS_TOTAL = Counter(
+    "futures_roll_confirms_total",
+    "Roll confirmations by outcome.",
+    labelnames=["outcome"],
+    registry=registry,
+)
+
+FUTURES_ROLL_NONCE_EXPIRED_TOTAL = Counter(
+    "futures_roll_nonce_expired_total",
+    "Roll nonces consumed but expired (GETDEL returned None).",
+    registry=registry,
+)
+
+FUTURES_SETTLEMENT_EVENTS_TOTAL = Counter(
+    "futures_settlement_events_total",
+    "Settlement events recorded by broker and type.",
+    labelnames=["broker", "settlement_type"],
+    registry=registry,
+)
+
+FUTURES_CONTRACT_RESOLVER_CACHE_HITS_TOTAL = Counter(
+    "futures_contract_resolver_cache_hits_total",
+    "ContractResolver Redis singleflight cache hits by root symbol.",
+    labelnames=["root_symbol"],
+    registry=registry,
+)
+
+FUTURES_CONTRACT_RESOLVER_FETCH_TOTAL = Counter(
+    "futures_contract_resolver_fetch_total",
+    "ContractResolver broker fetches by root symbol and outcome.",
+    labelnames=["root_symbol", "outcome"],
+    registry=registry,
+)

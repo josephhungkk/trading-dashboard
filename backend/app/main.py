@@ -35,6 +35,7 @@ from app.api.capabilities import router as capabilities_router
 from app.api.chart_layouts import router as chart_layouts_router
 from app.api.combos import router as combos_router
 from app.api.contracts import router as contracts_router
+from app.api.futures import router as futures_router
 from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
 from app.api.options import admin_router as options_admin_router
@@ -406,6 +407,26 @@ async def lifespan(_app: FastAPI) -> Any:
     scheduler.add_job(_run_pre_warm, CronTrigger(hour=8, minute=35, timezone="UTC"))
     # FX rollover ~22:00 UTC
     scheduler.add_job(_run_pre_warm, CronTrigger(hour=22, minute=5, timezone="UTC"))
+
+    # ── Phase 14 — Futures roll checker ──────────────────────────────────
+    from app.services.futures.roll_service import check_and_notify_rolls
+
+    async def _run_cme_roll_check() -> None:
+        await check_and_notify_rolls(exchange_filter={"CME", "CBOT", "NYMEX"}, app=_app)
+
+    async def _run_hkfe_roll_check() -> None:
+        await check_and_notify_rolls(exchange_filter={"HKFE"}, app=_app)
+
+    # CME 09:00 US/Central daily
+    scheduler.add_job(
+        _run_cme_roll_check,
+        CronTrigger(hour=9, minute=0, timezone="US/Central"),
+    )
+    # HKFE 09:00 Asia/Hong_Kong daily
+    scheduler.add_job(
+        _run_hkfe_roll_check,
+        CronTrigger(hour=9, minute=0, timezone="Asia/Hong_Kong"),
+    )
     # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
     # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery
     # dispatcher + capability-flip pubsub listener + nightly retention sweep.
@@ -786,6 +807,7 @@ app.include_router(bars_router)  # Task 28: GET /api/bars cursor pagination
 app.include_router(bars_ws_router)  # Task 31: WS /ws/bars live-tail
 app.include_router(options_router)
 app.include_router(combos_router)
+app.include_router(futures_router)
 app.include_router(options_admin_router)
 app.include_router(ws_options_router)
 

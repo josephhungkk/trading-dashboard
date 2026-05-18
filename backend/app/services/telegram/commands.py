@@ -21,7 +21,11 @@ from app.services.telegram.order_flow import (
     handle_account_selection,
     handle_cancel_order,
     handle_confirm,
+    handle_confirm_roll,
+    handle_delete_roll_rule,
     handle_place_order,
+    handle_roll_rules_list,
+    handle_set_roll_rule,
 )
 
 log = structlog.get_logger(__name__)
@@ -368,6 +372,57 @@ def register_handlers(
             await msg.answer("Rate limit exceeded. Try again later.")
             return
         await handle_cancel_order(msg, entry=entry, redis=redis)
+
+    @dp.message(Command("roll_rules"))
+    async def _roll_rules(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_read(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        await handle_roll_rules_list(msg, entry=entry, redis=redis, db_factory=db_factory)
+
+    @dp.message(Command("set_roll_rule"))
+    async def _set_roll_rule(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_write(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        await handle_set_roll_rule(msg, entry=entry, redis=redis, db_factory=db_factory)
+
+    @dp.message(Command("delete_roll_rule"))
+    async def _delete_roll_rule(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_write(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        await handle_delete_roll_rule(msg, entry=entry, redis=redis, db_factory=db_factory)
+
+    @dp.message(Command("confirm_roll"))
+    async def _confirm_roll(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_write(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        if not await rate_limiter.check_trade(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            from app.core import metrics as _metrics
+
+            _metrics.TELEGRAM_RATE_LIMITER_TRADE_BLOCK_TOTAL.inc()
+            await msg.answer("Trade rate limit exceeded. Try again in a minute.")
+            return
+        from app.services.futures.roll_service import RollService
+
+        _roll_svc = RollService(redis=redis, config=None, orders_service=None, telegram=None)
+        await handle_confirm_roll(
+            msg, entry=entry, redis=redis, roll_service=_roll_svc, db_factory=db_factory
+        )
 
     # Account-selection numeric reply — MUST be before the AI chat catch-all
     @dp.message(F.text.regexp(r"^[0-9]+$"))

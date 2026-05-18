@@ -700,3 +700,216 @@ async def handle_cancel_order(
         metrics.TELEGRAM_ORDER_CANCELS_TOTAL.labels(stage="acct_select").inc()
 
     await msg.answer("Pending order cancelled.")
+
+
+# ---------------------------------------------------------------------------
+# Futures roll command handlers (Phase 14)
+# ---------------------------------------------------------------------------
+from app.services.futures.roll_service import RollService  # noqa: E402
+
+
+async def handle_confirm_roll(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    redis: Any,
+    roll_service: RollService,
+    db_factory: Any,
+) -> None:
+    parts = (msg.text or "").strip().split()
+    if len(parts) < 2:
+        await msg.answer("Usage: /confirm_roll <nonce>")
+        return
+    nonce = parts[1]
+    chat_id = msg.chat.id
+    async with db_factory() as db:
+        from sqlalchemy import text as sql_text
+
+        acct_row = (
+            await db.execute(
+                sql_text("SELECT id FROM broker_accounts WHERE telegram_chat_id = :cid LIMIT 1"),
+                {"cid": str(chat_id)},
+            )
+        ).first()
+        if acct_row is None:
+            await msg.answer("No account linked to this chat.")
+            return
+        account_id = str(acct_row[0])
+    try:
+        await roll_service.execute_roll(account_id, nonce)
+        await msg.answer("Roll confirmed and submitted.")
+    except KeyError:
+        await msg.answer("Roll nonce not found or already used.")
+    except Exception:
+        log.exception("telegram.confirm_roll_unexpected_error")
+        await msg.answer("Roll submission failed — check the web dashboard for status.")
+
+
+async def handle_set_roll_rule(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    redis: Any,
+    db_factory: Any,
+) -> None:
+    parts = (msg.text or "").strip().split()
+    if len(parts) < 3:
+        await msg.answer("Usage: /set_roll_rule <ROOT_SYMBOL> <days_before>")
+        return
+    root_symbol = parts[1].upper()
+    import re as _re
+
+    if not _re.fullmatch(r"[A-Z0-9]{1,10}", root_symbol):
+        await msg.answer("Invalid symbol. Use alphanumeric, max 10 chars (e.g. ES, NQ, HSI).")
+        return
+    try:
+        days_before = int(parts[2])
+    except ValueError:
+        await msg.answer("days_before must be an integer.")
+        return
+    if not (1 <= days_before <= 90):
+        await msg.answer("days_before must be between 1 and 90.")
+        return
+    chat_id = msg.chat.id
+    async with db_factory() as db:
+        from sqlalchemy import text as sql_text
+
+        acct_row = (
+            await db.execute(
+                sql_text("SELECT id FROM broker_accounts WHERE telegram_chat_id = :cid LIMIT 1"),
+                {"cid": str(chat_id)},
+            )
+        ).first()
+        if acct_row is None:
+            await msg.answer("No account linked to this chat.")
+            return
+        account_id = str(acct_row[0])
+        inst_row = (
+            await db.execute(
+                sql_text(
+                    "SELECT id FROM instruments WHERE asset_class = 'FUTURE'"
+                    " AND meta->>'underlying_symbol' = :sym ORDER BY id DESC LIMIT 1"
+                ),
+                {"sym": root_symbol},
+            )
+        ).first()
+        if inst_row is None:
+            await msg.answer(f"No futures instrument found for {html.escape(root_symbol)}.")
+            return
+        instrument_id = inst_row[0]
+        await db.execute(
+            sql_text(
+                "INSERT INTO futures_roll_rules (account_id, instrument_id, days_before)"
+                " VALUES (:aid, :iid, :days)"
+                " ON CONFLICT (account_id, instrument_id)"
+                " DO UPDATE SET days_before = EXCLUDED.days_before, updated_at = now()"
+            ),
+            {"aid": account_id, "iid": instrument_id, "days": days_before},
+        )
+        await db.commit()
+    await msg.answer(
+        f"Roll rule set: {html.escape(root_symbol)} — roll {days_before} days before expiry."
+    )
+
+
+async def handle_delete_roll_rule(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    redis: Any,
+    db_factory: Any,
+) -> None:
+    parts = (msg.text or "").strip().split()
+    if len(parts) < 2:
+        await msg.answer("Usage: /delete_roll_rule <ROOT_SYMBOL>")
+        return
+    sym = parts[1].upper()
+    import re as _re
+
+    if not _re.fullmatch(r"[A-Z0-9]{1,10}", sym):
+        await msg.answer("Invalid symbol. Use alphanumeric, max 10 chars.")
+        return
+    chat_id = msg.chat.id
+    async with db_factory() as db:
+        from sqlalchemy import text as sql_text
+
+        acct_row = (
+            await db.execute(
+                sql_text("SELECT id FROM broker_accounts WHERE telegram_chat_id = :cid LIMIT 1"),
+                {"cid": str(chat_id)},
+            )
+        ).first()
+        if acct_row is None:
+            await msg.answer("No account linked to this chat.")
+            return
+        account_id = str(acct_row[0])
+        rows = (
+            await db.execute(
+                sql_text(
+                    "SELECT r.instrument_id FROM futures_roll_rules r"
+                    " JOIN instruments i ON i.id = r.instrument_id"
+                    " WHERE r.account_id = :aid AND i.meta->>'underlying_symbol' = :sym"
+                ),
+                {"aid": account_id, "sym": sym},
+            )
+        ).fetchall()
+        if len(rows) == 0:
+            await msg.answer(f"No roll rule found for {html.escape(sym)}.")
+            return
+        if len(rows) > 1:
+            ids = ", ".join(str(r[0]) for r in rows)
+            await msg.answer(
+                f"Multiple rules found for {html.escape(sym)} (instrument IDs: {html.escape(ids)})."
+                f" Use /delete_roll_rule with a specific instrument ID."
+            )
+            return
+        instrument_id = rows[0][0]
+        await db.execute(
+            sql_text(
+                "DELETE FROM futures_roll_rules WHERE account_id = :aid AND instrument_id = :iid"
+            ),
+            {"aid": account_id, "iid": instrument_id},
+        )
+        await db.commit()
+    await msg.answer(f"Roll rule deleted for {html.escape(sym)}.")
+
+
+async def handle_roll_rules_list(
+    msg: Message,
+    *,
+    entry: AllowlistEntry,
+    redis: Any,
+    db_factory: Any,
+) -> None:
+    chat_id = msg.chat.id
+    async with db_factory() as db:
+        from sqlalchemy import text as sql_text
+
+        acct_row = (
+            await db.execute(
+                sql_text("SELECT id FROM broker_accounts WHERE telegram_chat_id = :cid LIMIT 1"),
+                {"cid": str(chat_id)},
+            )
+        ).first()
+        if acct_row is None:
+            await msg.answer("No account linked to this chat.")
+            return
+        account_id = str(acct_row[0])
+        rows = (
+            await db.execute(
+                sql_text(
+                    "SELECT i.symbol, r.days_before FROM futures_roll_rules r"
+                    " JOIN instruments i ON i.id = r.instrument_id"
+                    " WHERE r.account_id = :aid AND r.enabled = true"
+                    " ORDER BY i.symbol"
+                ),
+                {"aid": account_id},
+            )
+        ).fetchall()
+    if not rows:
+        await msg.answer("No roll rules configured.")
+        return
+    lines = ["<b>Your roll rules:</b>"]
+    for row in rows:
+        lines.append(f"• {html.escape(str(row[0]))}: roll {row[1]} days before expiry")
+    await msg.answer("\n".join(lines))

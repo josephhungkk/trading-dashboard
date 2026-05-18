@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -30,24 +31,58 @@ class OptionDetails(BaseModel):
     strike: Decimal
     expiry: date
     put_call: Literal["C", "P"]
-    multiplier: int  # required — no default; sidecar must populate
+    multiplier: Decimal  # required — no default; sidecar must populate
     style: Literal["A", "E"]  # "A" = American, "E" = European; required — no default
 
 
-# Extensible: FutureDetails, ForexDetails added in Phases 14/15
+class FutureDetails(BaseModel):
+    """Futures contract details stored in instruments.meta JSONB."""
+
+    asset_class: Literal["FUTURE"] = "FUTURE"
+    contract_month: str
+    tick_size: Decimal
+    tick_value: Decimal
+    multiplier: Decimal
+    first_notice_day: date | None
+    expiry: date
+    settlement_type: Literal["CASH", "PHYSICAL"]
+    exchange: str
+    underlying_symbol: str
+
+
+# Extensible: ForexDetails added in Phase 15
 InstrumentMeta = Annotated[
-    NonOptionDetails | OptionDetails,
+    NonOptionDetails | OptionDetails | FutureDetails,
     Field(discriminator="asset_class"),
 ]
 
 _adapter: TypeAdapter[InstrumentMeta] = TypeAdapter(InstrumentMeta)
 
 
-def parse_instrument_meta(raw: dict[str, Any]) -> NonOptionDetails | OptionDetails:
+def parse_instrument_meta(
+    raw: str | dict[str, Any],
+) -> NonOptionDetails | OptionDetails | FutureDetails:
     """Parse instruments.meta JSONB dict into a typed model. Raises ValidationError on bad shape."""
-    if "asset_class" not in raw:
-        raw = {**raw, "asset_class": ""}
-    return _adapter.validate_python(raw)
+    data: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else raw
+    if "asset_class" not in data:
+        data = {**data, "asset_class": ""}
+    if data.get("asset_class") == "OPTION":
+        data = _normalize_option_meta(data)
+    return _adapter.validate_python(data)
+
+
+def _normalize_option_meta(raw: dict[str, Any]) -> dict[str, Any]:
+    """Accept legacy sidecar option meta aliases while keeping OptionDetails strict."""
+    normalized = dict(raw)
+    if "expiry" not in normalized and "expiry_iso" in normalized:
+        normalized["expiry"] = normalized["expiry_iso"]
+    if normalized.get("put_call") == "CALL":
+        normalized["put_call"] = "C"
+    elif normalized.get("put_call") == "PUT":
+        normalized["put_call"] = "P"
+    normalized.setdefault("underlying_canonical_id", "")
+    normalized.setdefault("style", "A")
+    return normalized
 
 
 @dataclass(frozen=True)

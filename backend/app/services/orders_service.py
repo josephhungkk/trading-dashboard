@@ -441,7 +441,7 @@ async def _evaluate_risk_for_place_order(
 
     from app.services.options.types import OptionDetails, parse_instrument_meta
 
-    multiplier = 1
+    multiplier = Decimal("1")
     position_effect_value: Literal["OPEN", "CLOSE"] | None = None
     if instrument_id is not None and asset_class == "OPTION":
         try:
@@ -453,9 +453,9 @@ async def _evaluate_risk_for_place_order(
             if instr_row:
                 details = parse_instrument_meta(instr_row[0] or {})
                 if isinstance(details, OptionDetails):
-                    multiplier = details.multiplier
-        except Exception:
-            pass
+                    multiplier = Decimal(str(details.multiplier))
+        except Exception as exc:
+            log.debug("orders.risk.option_multiplier_unavailable", exc_info=exc)
     if hasattr(request, "position_effect"):
         position_effect_value = request.position_effect
     ctx = EvaluationContext(
@@ -1892,7 +1892,7 @@ async def _native_notional(
     contract: base.Contract,
     qty: Decimal,
     *,
-    multiplier: int = 1,
+    multiplier: Decimal = Decimal("1"),
     quote_engine: object | None = None,
 ) -> Decimal:
     if request.order_type == "LIMIT" and request.limit_price is not None:

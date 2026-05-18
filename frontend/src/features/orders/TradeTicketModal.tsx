@@ -19,6 +19,7 @@ import { TradeTicketAiSection } from '@/features/orders/TradeTicketAiSection';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 import { OptionDetailsSection } from '@/features/options/OptionDetailsSection';
 import { ComboBuilder } from '@/features/options/combo/ComboBuilder';
+import { FutureDetailsSection } from '@/features/futures/FutureDetailsSection';
 
 type Side = PreviewRequest['side'];
 type SubmittableOrderType = PreviewRequest['order_type'];
@@ -29,6 +30,7 @@ type TradeTicketContract = ContractSearchInputValue & {
   optionRow?: import('@/features/options/types').OptionChainRow;
   expiryIso?: string;
   positionEffect?: 'OPEN' | 'CLOSE';
+  futureContract?: import('@/services/futures/types').FutureContractMonth;
 };
 
 interface MaintenanceBanner {
@@ -611,6 +613,16 @@ function TradeTicketForm({
                 contract: { ...s.contract, positionEffect } as ContractSearchInputValue,
               }));
             }}
+          />
+        )}
+
+      {/* ── Phase 14 — Future details section ───────────────────────── */}
+      {(form.contract as TradeTicketContract).asset_class === 'FUTURE' &&
+        (form.contract as TradeTicketContract).futureContract != null && (
+          <FutureDetailsSection
+            contract={
+              (form.contract as TradeTicketContract).futureContract as NonNullable<TradeTicketContract['futureContract']>
+            }
           />
         )}
 
