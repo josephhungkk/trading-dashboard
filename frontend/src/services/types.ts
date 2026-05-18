@@ -122,6 +122,9 @@ export interface PreviewRequest {
   qty: DecimalString;
   limit_price?: DecimalString | null;
   stop_price?: DecimalString | null;
+  // Phase 17 — optional algo order fields; absent means standard order.
+  algo_strategy?: string;
+  algo_params?: Record<string, string>;
 }
 
 export interface PositionSanityResult {

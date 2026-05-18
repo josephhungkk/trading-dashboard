@@ -50,6 +50,8 @@ interface UiOrder {
   avgFillPrice: string | null;
   createdAt: string;
   lastEventAt: string | null;
+  // Phase 17 — algo strategy, null for standard orders (hidden by default).
+  algoStrategy: string | null;
 }
 
 interface OrdersPageStorySnapshot {
@@ -400,6 +402,15 @@ function createOrderColumns(onCancel: (order: UiOrder) => void, onModify: (order
       cell: (info) => <span className="text-fg-muted">{info.getValue<string>()}</span>,
     },
     {
+      // Phase 17 — algo strategy column; shows — for standard orders.
+      accessorKey: 'algoStrategy',
+      header: 'algo',
+      cell: (info) => {
+        const value = info.getValue<string | null>();
+        return <span className="font-mono text-xs text-fg-muted">{value ?? '—'}</span>;
+      },
+    },
+    {
       accessorKey: 'status',
       header: 'status',
       cell: (info) => {
@@ -471,6 +482,7 @@ function normalizeOrder(order: StoreOrderResponse): UiOrder {
     avgFillPrice: readNullableString(order, 'avg_fill_price') ?? readNullableString(order, 'avgFillPrice'),
     createdAt: readString(order, 'created_at', readString(order, 'createdAt', '')),
     lastEventAt: readNullableString(order, 'last_event_at') ?? readNullableString(order, 'updated_at'),
+    algoStrategy: readNullableString(order, 'algo_strategy'),
   };
 }
 

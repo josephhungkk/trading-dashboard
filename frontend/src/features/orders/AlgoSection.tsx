@@ -22,7 +22,7 @@ export function AlgoSection({ brokerId, assetClass, onAlgoChange }: Props): Reac
     getAlgoCapabilities(brokerId, assetClass)
       .then((res) => {
         if (!cancelled) {
-          setStrategies(res.strategies);
+          setStrategies(Array.isArray(res.strategies) ? res.strategies : []);
           setLoading(false);
         }
       })

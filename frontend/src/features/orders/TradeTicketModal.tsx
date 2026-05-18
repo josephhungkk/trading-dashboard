@@ -16,7 +16,10 @@ import { usePositionSizing } from '@/services/sizing/usePositionSizing';
 import { useSizingDefaults } from '@/services/sizing/useSizingDefaults';
 import { ContractSearchInput, type ContractSearchInputValue } from './ContractSearchInput';
 import { TradeTicketAiSection } from '@/features/orders/TradeTicketAiSection';
+import { AlgoSection } from './AlgoSection';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
+import type { AlgoOrderFields } from '@/services/algo/types';
+import { DISPLAY_ALGOS } from '@/services/algo/types';
 import { OptionDetailsSection } from '@/features/options/OptionDetailsSection';
 import { ComboBuilder } from '@/features/options/combo/ComboBuilder';
 import { FutureDetailsSection } from '@/features/futures/FutureDetailsSection';
@@ -152,6 +155,7 @@ function TradeTicketModalContent({
   // blockers in the same banner shape preview uses.
   const [placeOrderBlockers, setPlaceOrderBlockers] = React.useState<readonly RiskBlocker[]>([]);
   const [tradeMode, setTradeMode] = React.useState<'single' | 'combo'>('single');
+  const [algoFields, setAlgoFields] = React.useState<AlgoOrderFields | null>(null);
 
   React.useEffect(() => {
     if (effectiveBrokerId === null || capabilities.data === undefined || capabilities.isError) return undefined;
@@ -194,8 +198,8 @@ function TradeTicketModalContent({
 
   const request = React.useMemo(() => {
     if (accountId === null) return null;
-    return buildRequest(accountId, form);
-  }, [accountId, form]);
+    return buildRequest(accountId, form, algoFields);
+  }, [accountId, form, algoFields]);
 
   const previewDisabled = request === null;
   const confirmDisabled = inFlight
@@ -352,6 +356,7 @@ function TradeTicketModalContent({
               accountId={accountId}
               brokerId={effectiveBrokerId}
               capabilities={capabilities}
+              onAlgoChange={setAlgoFields}
               {...(activeBroker === 'ibkr' || activeBroker === 'futu'
                 ? { broker: activeBroker }
                 : {})}
@@ -385,6 +390,7 @@ function TradeTicketForm({
   broker,
   brokerId,
   capabilities,
+  onAlgoChange,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
@@ -394,6 +400,7 @@ function TradeTicketForm({
   broker?: 'ibkr' | 'futu';
   brokerId: string | null;
   capabilities: ReturnType<typeof useBrokerCapabilities>;
+  onAlgoChange: (fields: AlgoOrderFields | null) => void;
 }): React.JSX.Element {
   const capabilityLoading = brokerId !== null && capabilities.isLoading;
   const capabilityError = brokerId !== null && capabilities.isError;
@@ -610,6 +617,15 @@ function TradeTicketForm({
           }) : null}
         </select>
       </label>
+
+      {/* ── Phase 17 — Algo execution section ──────────────────────── */}
+      {brokerId !== null && (
+        <AlgoSection
+          brokerId={brokerId}
+          assetClass={(form.contract as TradeTicketContract).asset_class ?? 'STOCK'}
+          onAlgoChange={onAlgoChange}
+        />
+      )}
 
       {/* ── Phase 12 — Option details section ───────────────────────── */}
       {(form.contract as TradeTicketContract).asset_class === 'OPTION' &&
@@ -1016,22 +1032,30 @@ function isSubmittableOrderType(value: string): value is SubmittableOrderType {
   return value === 'MARKET' || value === 'LIMIT' || value === 'STOP' || value === 'STOP_LIMIT';
 }
 
-function buildRequest(accountId: string, form: FormState): PreviewRequest | null {
+function buildRequest(accountId: string, form: FormState, algoFields: AlgoOrderFields | null): PreviewRequest | null {
   const conid = form.contract.conid.trim() || form.contract.symbol.trim();
   const qty = form.qty.trim();
   if (conid === '' || !positiveInteger(qty)) return null;
-  if (!isSubmittableOrderType(form.orderType)) return null;
-  if ((form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT') && form.limitPrice.trim() === '') return null;
-  if ((form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT') && form.stopPrice.trim() === '') return null;
+  // When an algo is selected the order_type is coerced: display algos → LIMIT,
+  // execution algos → MARKET. If the coerced type doesn't match what buildRequest
+  // requires for limit_price / stop_price we adjust here.
+  let effectiveOrderType = form.orderType;
+  if (algoFields !== null) {
+    effectiveOrderType = DISPLAY_ALGOS.has(algoFields.algo_strategy) ? 'LIMIT' : 'MARKET';
+  }
+  if (!isSubmittableOrderType(effectiveOrderType)) return null;
+  if ((effectiveOrderType === 'LIMIT' || effectiveOrderType === 'STOP_LIMIT') && form.limitPrice.trim() === '') return null;
+  if ((effectiveOrderType === 'STOP' || effectiveOrderType === 'STOP_LIMIT') && form.stopPrice.trim() === '') return null;
   return {
     account_id: accountId,
     conid,
     side: form.side,
-    order_type: form.orderType,
+    order_type: effectiveOrderType,
     tif: form.tif,
     qty: qty as DecimalString,
-    limit_price: form.orderType === 'LIMIT' || form.orderType === 'STOP_LIMIT' ? form.limitPrice.trim() as DecimalString : null,
-    stop_price: form.orderType === 'STOP' || form.orderType === 'STOP_LIMIT' ? form.stopPrice.trim() as DecimalString : null,
+    limit_price: effectiveOrderType === 'LIMIT' || effectiveOrderType === 'STOP_LIMIT' ? form.limitPrice.trim() as DecimalString : null,
+    stop_price: effectiveOrderType === 'STOP' || effectiveOrderType === 'STOP_LIMIT' ? form.stopPrice.trim() as DecimalString : null,
+    ...(algoFields !== null ? { algo_strategy: algoFields.algo_strategy, algo_params: algoFields.algo_params } : {}),
   };
 }
 
