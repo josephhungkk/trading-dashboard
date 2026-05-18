@@ -297,7 +297,7 @@ describe('TradeTicketModal', () => {
     const close = await screen.findByRole('button', { name: 'Close trade ticket' });
     close.focus();
     await user.tab();
-    expect(screen.getByRole('button', { name: 'BUY' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Single' })).toHaveFocus();
     await user.tab({ shift: true });
     expect(close).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Outside' })).not.toHaveFocus();
@@ -310,7 +310,7 @@ describe('TradeTicketModal', () => {
 
   it('first_focusable_element_focused_on_open', async () => {
     renderOpen();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'BUY' })).toHaveFocus());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Single' })).toHaveFocus());
   });
 
   it('schwab_market_limit_supported_and_trail_disabled_with_tooltip', async () => {

@@ -18,6 +18,7 @@ import { ContractSearchInput, type ContractSearchInputValue } from './ContractSe
 import { TradeTicketAiSection } from '@/features/orders/TradeTicketAiSection';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
 import { OptionDetailsSection } from '@/features/options/OptionDetailsSection';
+import { ComboBuilder } from '@/features/options/combo/ComboBuilder';
 
 type Side = PreviewRequest['side'];
 type SubmittableOrderType = PreviewRequest['order_type'];
@@ -136,6 +137,7 @@ function TradeTicketModalContent({
   // flipped between preview and confirm). Surface those server-side
   // blockers in the same banner shape preview uses.
   const [placeOrderBlockers, setPlaceOrderBlockers] = React.useState<readonly RiskBlocker[]>([]);
+  const [tradeMode, setTradeMode] = React.useState<'single' | 'combo'>('single');
 
   React.useEffect(() => {
     if (effectiveBrokerId === null || capabilities.data === undefined || capabilities.isError) return undefined;
@@ -294,7 +296,30 @@ function TradeTicketModalContent({
           </Button>
         </header>
 
-        <div className="flex-1 overflow-auto">
+        <div className="mb-3 flex gap-2 border-b border-border pb-2">
+          <button
+            type="button"
+            onClick={() => setTradeMode('single')}
+            className={`rounded px-3 py-1 text-sm ${tradeMode === 'single' ? 'bg-panel-active font-semibold text-fg' : 'text-fg-muted'}`}
+          >
+            Single
+          </button>
+          <button
+            type="button"
+            onClick={() => setTradeMode('combo')}
+            className={`rounded px-3 py-1 text-sm ${tradeMode === 'combo' ? 'bg-panel-active font-semibold text-fg' : 'text-fg-muted'}`}
+          >
+            Multi-Leg
+          </button>
+        </div>
+
+        {tradeMode === 'combo' && accountId !== null ? (
+          <div className="flex-1 overflow-auto">
+            <ComboBuilder accountId={accountId} onClose={close} />
+          </div>
+        ) : null}
+
+        <div className={`flex-1 overflow-auto${tradeMode === 'combo' ? ' hidden' : ''}`}>
           {banner !== null ? <BlockingBannerView banner={banner} /> : null}
           {previewError !== null ? (
             <div className="mb-3 rounded-md border border-destructive/60 bg-destructive/10 p-3 text-sm text-destructive">
