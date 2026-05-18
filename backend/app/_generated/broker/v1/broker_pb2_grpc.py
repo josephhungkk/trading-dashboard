@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from app._generated.broker.v1 import broker_pb2 as broker_dot_v1_dot_broker__pb2
+from broker.v1 import broker_pb2 as broker_dot_v1_dot_broker__pb2
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
@@ -179,6 +179,26 @@ class BrokerStub(object):
                 '/broker.v1.Broker/ListCryptoAssets',
                 request_serializer=broker_dot_v1_dot_broker__pb2.ListCryptoAssetsRequest.SerializeToString,
                 response_deserializer=broker_dot_v1_dot_broker__pb2.ListCryptoAssetsResponse.FromString,
+                _registered_method=True)
+        self.SearchBonds = channel.unary_unary(
+                '/broker.v1.Broker/SearchBonds',
+                request_serializer=broker_dot_v1_dot_broker__pb2.SearchBondsRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.SearchBondsResponse.FromString,
+                _registered_method=True)
+        self.GetBondAccruedInterest = channel.unary_unary(
+                '/broker.v1.Broker/GetBondAccruedInterest',
+                request_serializer=broker_dot_v1_dot_broker__pb2.GetBondAccruedInterestRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.GetBondAccruedInterestResponse.FromString,
+                _registered_method=True)
+        self.SearchFunds = channel.unary_unary(
+                '/broker.v1.Broker/SearchFunds',
+                request_serializer=broker_dot_v1_dot_broker__pb2.SearchFundsRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.SearchFundsResponse.FromString,
+                _registered_method=True)
+        self.SearchCFDs = channel.unary_unary(
+                '/broker.v1.Broker/SearchCFDs',
+                request_serializer=broker_dot_v1_dot_broker__pb2.SearchCFDsRequest.SerializeToString,
+                response_deserializer=broker_dot_v1_dot_broker__pb2.SearchCFDsResponse.FromString,
                 _registered_method=True)
 
 
@@ -375,6 +395,33 @@ class BrokerServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SearchBonds(self, request, context):
+        """Phase 16a: Bonds
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetBondAccruedInterest(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SearchFunds(self, request, context):
+        """Phase 16b: Mutual Funds
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SearchCFDs(self, request, context):
+        """Phase 16c: CFDs
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BrokerServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -522,6 +569,26 @@ def add_BrokerServicer_to_server(servicer, server):
                     servicer.ListCryptoAssets,
                     request_deserializer=broker_dot_v1_dot_broker__pb2.ListCryptoAssetsRequest.FromString,
                     response_serializer=broker_dot_v1_dot_broker__pb2.ListCryptoAssetsResponse.SerializeToString,
+            ),
+            'SearchBonds': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchBonds,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.SearchBondsRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.SearchBondsResponse.SerializeToString,
+            ),
+            'GetBondAccruedInterest': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetBondAccruedInterest,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.GetBondAccruedInterestRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.GetBondAccruedInterestResponse.SerializeToString,
+            ),
+            'SearchFunds': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchFunds,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.SearchFundsRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.SearchFundsResponse.SerializeToString,
+            ),
+            'SearchCFDs': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchCFDs,
+                    request_deserializer=broker_dot_v1_dot_broker__pb2.SearchCFDsRequest.FromString,
+                    response_serializer=broker_dot_v1_dot_broker__pb2.SearchCFDsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1307,6 +1374,114 @@ class Broker(object):
             '/broker.v1.Broker/ListCryptoAssets',
             broker_dot_v1_dot_broker__pb2.ListCryptoAssetsRequest.SerializeToString,
             broker_dot_v1_dot_broker__pb2.ListCryptoAssetsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchBonds(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/SearchBonds',
+            broker_dot_v1_dot_broker__pb2.SearchBondsRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.SearchBondsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetBondAccruedInterest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/GetBondAccruedInterest',
+            broker_dot_v1_dot_broker__pb2.GetBondAccruedInterestRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.GetBondAccruedInterestResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchFunds(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/SearchFunds',
+            broker_dot_v1_dot_broker__pb2.SearchFundsRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.SearchFundsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchCFDs(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/broker.v1.Broker/SearchCFDs',
+            broker_dot_v1_dot_broker__pb2.SearchCFDsRequest.SerializeToString,
+            broker_dot_v1_dot_broker__pb2.SearchCFDsResponse.FromString,
             options,
             channel_credentials,
             insecure,

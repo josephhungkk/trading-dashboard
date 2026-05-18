@@ -332,6 +332,8 @@ message Order {
   string trail_offset_type = 22; // "AMOUNT" | "PERCENT"
   string trail_limit_offset = 23; // Decimal — TRAIL_LIMIT only
   string expiry_date = 24; // ISO "YYYY-MM-DD" — GTD only
+  optional string algo_strategy = 25;  // Phase 17: algo strategy name when order was placed via algo
+  reserved 26 to 35;  // algo + forward-extension
 }
 message OrdersResponse {
   repeated Order orders = 1;
@@ -354,12 +356,17 @@ message PlaceOrderRequest {
   string trail_limit_offset = 23; // Decimal — TRAIL_LIMIT only
   string expiry_date = 24; // ISO "YYYY-MM-DD" — GTD only
   string oco_group_id = 25; // optional OCA group identifier (≤32 chars) for OCO placement (Phase 8b T-O.8)
+  optional string     algo_strategy = 26;  // "ADAPTIVE"|"TWAP"|"VWAP"|"ARRIVAL_PRICE"|"ICEBERG"|"RESERVE"|"DARK_ICE"
+  map<string, string> algo_params   = 27;  // strategy param key→value (all values are strings)
   reserved 10 to 14, 16 to 20; // forward-extension reservations (R35)
+  reserved 28 to 35;  // algo forward-extension
 }
 
 message PlaceOrderResponse {
   string broker_order_id = 1; // ib_async permId, populated within ack window
   string status = 2; // initial status from ib_async (PendingSubmit etc.)
+  optional string algo_strategy = 3;  // echoed back from request when algo order
+  reserved 4 to 25;  // forward growth
 }
 
 message ModifyOrderRequest {
@@ -423,6 +430,8 @@ message OrderEventMessage {
   string raw_payload = 7; // jsonb-friendly debug blob (ib_async Trade snapshot)
   string exec_id = 8;
   string kind = 9;
+  optional string algo_strategy = 10;  // populated by sidecar when order has algoStrategy
+  reserved 11 to 20;
 }
 
 message SearchContractsRequest {
