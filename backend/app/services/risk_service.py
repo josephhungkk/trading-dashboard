@@ -960,21 +960,34 @@ class RiskService:
         from app.services.combos.types import ComboEnvelope
 
         env: ComboEnvelope = ctx.envelope
+        limits = getattr(self, "_limits", None)
+        if limits is None:
+            try:
+                acct_uuid = uuid.UUID(ctx.account_id)
+            except ValueError:
+                return None
+            limits = await self._resolve_limit(acct_uuid, "", "max_daily_loss_currency_base")
+
         if env.max_loss is None:
+            if not getattr(limits, "naked_margin_enabled", True):
+                return (
+                    GateBlockerEntry(
+                        check="combo_unbounded",
+                        message="Unbounded combo requires naked-margin account level",
+                        code="combo_unbounded_not_permitted",
+                    ),
+                    None,
+                )
             return None
-        limit_row = await self._resolve_limit(
-            uuid.UUID(ctx.account_id), "", "max_daily_loss_currency_base"
-        )
-        if limit_row is not None and limit_row.max_combo_loss_native is not None:
+
+        max_combo = getattr(limits, "max_combo_loss_native", None)
+        if max_combo is not None:
             effective_loss = env.max_loss * Decimal("100")
-            if effective_loss > limit_row.max_combo_loss_native:
+            if effective_loss > max_combo:
                 return (
                     GateBlockerEntry(
                         check="combo_max_loss",
-                        message=(
-                            f"Combo max loss {effective_loss} exceeds limit "
-                            f"{limit_row.max_combo_loss_native}"
-                        ),
+                        message=(f"Combo max loss {effective_loss} exceeds limit {max_combo}"),
                         code="combo_max_loss_exceeded",
                     ),
                     None,
