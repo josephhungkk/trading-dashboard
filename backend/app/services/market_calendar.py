@@ -208,3 +208,93 @@ async def account_day_boundary_utc(db: object, account_id: object) -> datetime:
     """
     now_utc = datetime.now(UTC)
     return now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+# Phase 15a: FX + Crypto session functions
+
+
+def is_forex_session_open(now: datetime | None = None) -> bool:
+    """IDEALPRO FX is 24/5: Sun 17:00 ET - Fri 17:00 ET, with a 17:00-17:15 ET daily gap."""
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    if now is None:
+        now = datetime.now(UTC)
+    now_et = now.astimezone(et)
+    weekday = now_et.weekday()  # 0=Mon ... 6=Sun
+    t = now_et.time()
+    close_time = time(17, 0)
+    gap_end = time(17, 15)
+    if weekday == 5:
+        return False
+    if weekday == 6:
+        return t >= close_time
+    if weekday == 4:
+        return t < close_time
+    if close_time <= t < gap_end:
+        return False
+    return True
+
+
+def next_forex_session_open(now: datetime | None = None) -> datetime:
+    """Return the next datetime when IDEALPRO FX opens (17:15 ET same day, or Sunday 17:00 ET)."""
+    et = ZoneInfo("America/New_York")
+    if now is None:
+        now = datetime.now(UTC)
+    now_et = now.astimezone(et)
+    weekday = now_et.weekday()
+    t = now_et.time()
+    close_time = time(17, 0)
+    gap_end = time(17, 15)
+    if weekday in (0, 1, 2, 3) and close_time <= t < gap_end:
+        same_day = now_et.replace(hour=17, minute=15, second=0, microsecond=0)
+        return same_day.astimezone(UTC)
+    days_until_sunday = (6 - weekday) % 7
+    if days_until_sunday == 0 and t >= close_time:
+        days_until_sunday = 7
+    target = now_et + timedelta(days=days_until_sunday)
+    target = target.replace(hour=17, minute=0, second=0, microsecond=0)
+    return target.astimezone(UTC)
+
+
+def is_crypto_session_open(
+    now: datetime | None = None, maintenance_windows: list[dict] | None = None
+) -> bool:
+    """Paxos crypto is 24/7 minus operator-configured blackout windows.
+
+    maintenance_windows: list of {start_utc: "HH:MM", duration_minutes: int, days: ["mon",...]}
+    """
+    if now is None:
+        now = datetime.now(UTC)
+    if not maintenance_windows:
+        return True
+    day_abbr = now.strftime("%a").lower()
+    for window in maintenance_windows:
+        if day_abbr not in window.get("days", []):
+            continue
+        h, m = (int(x) for x in window["start_utc"].split(":"))
+        window_start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        window_end = window_start + timedelta(minutes=window["duration_minutes"])
+        if window_start <= now < window_end:
+            return False
+    return True
+
+
+def next_crypto_session_open(
+    now: datetime | None = None, maintenance_windows: list[dict] | None = None
+) -> datetime:
+    """Return soonest datetime when crypto session opens (skips any active blackout)."""
+    if now is None:
+        now = datetime.now(UTC)
+    if not maintenance_windows:
+        return now
+    day_abbr = now.strftime("%a").lower()
+    for window in maintenance_windows:
+        if day_abbr not in window.get("days", []):
+            continue
+        h, m = (int(x) for x in window["start_utc"].split(":"))
+        window_start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        window_end = window_start + timedelta(minutes=window["duration_minutes"])
+        if window_start <= now < window_end:
+            return window_end
+    return now

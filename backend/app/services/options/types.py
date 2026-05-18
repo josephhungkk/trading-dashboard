@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter
 
 # "A" = American, "E" = European
-NonOptionAssetClass = Literal["", "STOCK", "ETF", "INDEX", "WARRANT", "CBBC", "CRYPTO", "FOREX"]
+NonOptionAssetClass = Literal["", "STOCK", "ETF", "INDEX", "WARRANT", "CBBC"]
 
 _CLAMP_MAX = Decimal("9999.999999")
 _CLAMP_MIN = Decimal("-9999.999999")
@@ -50,9 +50,30 @@ class FutureDetails(BaseModel):
     underlying_symbol: str
 
 
-# Extensible: ForexDetails added in Phase 15
+class ForexDetails(BaseModel):
+    """IDEALPRO spot FX pair details — Phase 15a."""
+
+    asset_class: Literal["FOREX"] = "FOREX"
+    base_currency: str
+    quote_currency: str
+    pip_size: Decimal
+    contract_size: Decimal | None = None  # None for spot (notional-based)
+    trading_hours: str  # human-readable e.g. "Sun 17:00 - Fri 17:00 ET"
+
+
+class CryptoDetails(BaseModel):
+    """Paxos crypto asset details — Phase 15b."""
+
+    asset_class: Literal["CRYPTO"] = "CRYPTO"
+    base_asset: str  # e.g. "BTC"
+    quote_asset: str  # e.g. "USD"
+    min_qty: Decimal
+    qty_step: Decimal
+    min_notional: Decimal | None = None  # e.g. 1.00 USD; None if not specified
+
+
 InstrumentMeta = Annotated[
-    NonOptionDetails | OptionDetails | FutureDetails,
+    NonOptionDetails | OptionDetails | FutureDetails | ForexDetails | CryptoDetails,
     Field(discriminator="asset_class"),
 ]
 
@@ -61,7 +82,7 @@ _adapter: TypeAdapter[InstrumentMeta] = TypeAdapter(InstrumentMeta)
 
 def parse_instrument_meta(
     raw: str | dict[str, Any],
-) -> NonOptionDetails | OptionDetails | FutureDetails:
+) -> NonOptionDetails | OptionDetails | FutureDetails | ForexDetails | CryptoDetails:
     """Parse instruments.meta JSONB dict into a typed model. Raises ValidationError on bad shape."""
     data: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else raw
     if "asset_class" not in data:

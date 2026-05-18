@@ -1070,3 +1070,10 @@ FUTURES_CONTRACT_RESOLVER_FETCH_TOTAL = Counter(
     labelnames=["root_symbol", "outcome"],
     registry=registry,
 )
+
+# Phase 15a: FX metrics
+forex_risk_check_failures_total = Counter(
+    "forex_risk_check_failures_total",
+    "FX risk gate infrastructure errors (fail-open)",
+    registry=registry,
+)

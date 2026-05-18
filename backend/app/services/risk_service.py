@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.models.risk import AccountKillSwitch, RiskLimit
 from app.schemas.risk import GateBlockerEntry, GateVerdict, GateWarningEntry
+from app.services.market_calendar import is_forex_session_open, next_forex_session_open
 from app.services.risk_inflight_counters import inflight_bp_committed, inflight_pdt_remaining
 
 if TYPE_CHECKING:
@@ -105,6 +106,8 @@ class EvaluationContext:
     first_notice_day: date | None = None
     underlying_symbol: str | None = None
     position_effect: Literal["OPEN", "CLOSE"] | None = None
+    account_nlv_base: Decimal | None = None
+    notional: Decimal | None = None
 
 
 class RiskService:
@@ -855,6 +858,47 @@ class RiskService:
             return None, warnings[0]
         return None, None
 
+    async def _check_forex_exposure(self, ctx: EvaluationContext) -> CheckResult:
+        """Phase 15a: IDEALPRO FX risk checks. Fail-OPEN on infrastructure errors."""
+        log = structlog.get_logger(__name__)
+        blockers: list[GateBlockerEntry] = []
+        warnings: list[GateWarningEntry] = []
+        try:
+            if not is_forex_session_open():
+                retry_at = next_forex_session_open().isoformat()
+                return (
+                    GateBlockerEntry(
+                        check="forex_session",
+                        code="session_closed",
+                        message=f"IDEALPRO FX session is closed. Next open: {retry_at}",
+                    ),
+                    None,
+                )
+            notional = getattr(ctx, "notional", None) or (ctx.qty * (ctx.price or Decimal("1")))
+            limit_row = await self._resolve_limit(
+                ctx.account_id, ctx.broker_id, "forex_max_notional_per_trade"
+            )
+            if limit_row is not None and notional > limit_row.limit_value:
+                blockers.append(
+                    GateBlockerEntry(
+                        check="forex_notional",
+                        code="forex_notional_exceeded",
+                        message=(
+                            f"Notional {notional} exceeds per-trade cap {limit_row.limit_value}."
+                        ),
+                    )
+                )
+                return blockers[0], None
+        except Exception:
+            metrics.forex_risk_check_failures_total.inc()
+            log.exception("forex_risk_check_infrastructure_error", account_id=str(ctx.account_id))
+            return None, None  # fail-OPEN
+        if blockers:
+            return blockers[0], None
+        if warnings:
+            return None, warnings[0]
+        return None, None
+
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).
 
@@ -897,6 +941,18 @@ class RiskService:
                 )
             if fut_warning is not None:
                 pre_warnings = [fut_warning]
+        # Phase 15a: FX checks
+        if ctx.asset_class == "FOREX":
+            fx_blocker, fx_warning = (await self._check_forex_exposure(ctx)) or (None, None)
+            if fx_blocker is not None:
+                return GateVerdict(
+                    final_verdict="block",
+                    blockers=[fx_blocker],
+                    warnings=[],
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                )
+            if fx_warning is not None:
+                pre_warnings = [fx_warning]
         fast_check_names = (
             "account_kill_switch",
             "broker_kill_switch",
