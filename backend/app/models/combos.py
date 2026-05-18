@@ -51,9 +51,7 @@ class ComboOrder(Base):
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    account_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("broker_accounts.id"), nullable=False
-    )
+    account_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     client_combo_id: Mapped[str] = mapped_column(Text, nullable=False)
     strategy_type: Mapped[str] = mapped_column(Text, nullable=False)
     underlying_symbol: Mapped[str] = mapped_column(Text, nullable=False)

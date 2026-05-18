@@ -501,6 +501,20 @@ class OrderEventConsumer:
                             avg_fill_price=avg_fill_price,
                             broker_event_at=broker_event_at,
                         )
+                    if order_id is not None and filled_qty and filled_qty > 0:
+                        from app.services.combos.combo_fill_listener import (
+                            handle_fill as _combo_fill,
+                        )
+
+                        try:
+                            await _combo_fill(
+                                session,
+                                order_id,
+                                filled_qty,
+                                avg_fill_price or Decimal("0"),
+                            )
+                        except Exception:
+                            log.exception("combo_fill_listener_error", order_id=str(order_id))
                     if event.exec_id and event.kind == "exec_details":
                         await self._record_fill(
                             session,

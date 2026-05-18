@@ -33,6 +33,7 @@ from app.api.brokers import router as brokers_router
 from app.api.brokers_admin import router as brokers_admin_router
 from app.api.capabilities import router as capabilities_router
 from app.api.chart_layouts import router as chart_layouts_router
+from app.api.combos import router as combos_router
 from app.api.contracts import router as contracts_router
 from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
@@ -784,6 +785,7 @@ app.include_router(chart_layouts_router)
 app.include_router(bars_router)  # Task 28: GET /api/bars cursor pagination
 app.include_router(bars_ws_router)  # Task 31: WS /ws/bars live-tail
 app.include_router(options_router)
+app.include_router(combos_router)
 app.include_router(options_admin_router)
 app.include_router(ws_options_router)
 
