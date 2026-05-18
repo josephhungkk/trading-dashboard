@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from app.services.combos.types import ComboContext
 
 CheckResult = tuple[GateBlockerEntry | None, GateWarningEntry | None] | None
+AlgoCapabilityService: type[Any] | None = None
 
 # Phase 10a.5 A3.1 (CRIT-2): 3x the 30s discoverer cycle (brokers.py:1036).
 _STALENESS_WARN_SECONDS = 90.0
@@ -112,6 +113,9 @@ class EvaluationContext:
     first_notice_day: date | None = None
     underlying_symbol: str | None = None
     position_effect: Literal["OPEN", "CLOSE"] | None = None
+    # Phase 17: algo orders
+    algo_strategy: str | None = None
+    algo_params: dict[str, str] | None = None
     account_nlv_base: Decimal | None = None
     notional: Decimal | None = None
 
@@ -660,6 +664,109 @@ class RiskService:
                 None,
             )
 
+        return None
+
+    async def _check_algo_capability(self, ctx: EvaluationContext) -> CheckResult:
+        """BLOCK if broker_algo_capability has no enabled row for this strategy."""
+        if ctx.algo_strategy is None:
+            return None
+        if ctx.asset_class is None:
+            return None
+        try:
+            global AlgoCapabilityService
+            if AlgoCapabilityService is None:
+                from app.services.algo.capability_service import (
+                    AlgoCapabilityService as _AlgoCapabilityService,
+                )
+
+                AlgoCapabilityService = _AlgoCapabilityService
+            svc = AlgoCapabilityService(redis=self._redis, db=self._db)
+            rows = await svc.get_strategies(ctx.broker_id, ctx.asset_class)
+            enabled = {r["algo_strategy"] for r in rows}
+            if ctx.algo_strategy not in enabled:
+                metrics.algo_risk_blocks_total.labels(
+                    check="algo_capability", strategy=ctx.algo_strategy
+                ).inc()
+                return (
+                    GateBlockerEntry(
+                        check="algo_capability",
+                        code="unsupported_algo_strategy",
+                        message=(
+                            f"algo strategy {ctx.algo_strategy!r} not supported for "
+                            f"{ctx.broker_id}/{ctx.asset_class}"
+                        ),
+                    ),
+                    None,
+                )
+        except Exception as exc:
+            log.warning("risk.algo_capability_check_failed", exc=str(exc))
+            # Fail-OPEN on DB error (matches preview_order fail-OPEN policy)
+            return None
+        return None
+
+    async def _check_iceberg_display_size(self, ctx: EvaluationContext) -> CheckResult:
+        """Validate display_size for ICEBERG/RESERVE/DARK_ICE orders."""
+        from app.services.algo.schemas import DISPLAY_ALGOS
+
+        if ctx.algo_strategy not in {str(s) for s in DISPLAY_ALGOS}:
+            return None
+
+        from decimal import InvalidOperation
+
+        display_size_str = (ctx.algo_params or {}).get("display_size")
+        if display_size_str is None:
+            return (
+                GateBlockerEntry(
+                    check="iceberg_display_size",
+                    code="display_size_required",
+                    message="display_size is required for ICEBERG/RESERVE/DARK_ICE",
+                ),
+                None,
+            )
+        try:
+            display_size = Decimal(display_size_str)
+        except InvalidOperation:
+            return (
+                GateBlockerEntry(
+                    check="iceberg_display_size",
+                    code="display_size_malformed",
+                    message="display_size must be a valid decimal string",
+                ),
+                None,
+            )
+        if display_size <= 0:
+            metrics.algo_risk_blocks_total.labels(
+                check="iceberg_display_size", strategy=ctx.algo_strategy or ""
+            ).inc()
+            return (
+                GateBlockerEntry(
+                    check="iceberg_display_size",
+                    code="display_size_nonpositive",
+                    message="display_size must be > 0",
+                ),
+                None,
+            )
+        if display_size >= ctx.qty:
+            metrics.algo_risk_blocks_total.labels(
+                check="iceberg_display_size", strategy=ctx.algo_strategy or ""
+            ).inc()
+            return (
+                GateBlockerEntry(
+                    check="iceberg_display_size",
+                    code="display_size_gte_qty",
+                    message="display_size must be less than order qty",
+                ),
+                None,
+            )
+        if display_size < Decimal("1"):
+            return (
+                None,
+                GateWarningEntry(
+                    check="iceberg_display_size",
+                    code="display_size_sub_lot",
+                    message="fractional display sizes may be rejected by some venues",
+                ),
+            )
         return None
 
     async def _check_options_exposure(self, ctx: EvaluationContext) -> CheckResult:
@@ -1326,6 +1433,8 @@ class RiskService:
             "pdt",
             "position_concentration",
             "buying_power",
+            "algo_capability",
+            "iceberg_display_size",
         )
         fast_results = await asyncio.gather(
             self._check_account_kill_switch(ctx),
@@ -1334,6 +1443,8 @@ class RiskService:
             self._check_pdt(ctx),
             self._check_position_concentration(ctx),
             self._check_buying_power(ctx),
+            self._check_algo_capability(ctx),
+            self._check_iceberg_display_size(ctx),
             return_exceptions=True,
         )
         try:

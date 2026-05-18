@@ -140,6 +140,7 @@ class GateWarningEntry(BaseModel):
 
     check: str
     message: str
+    code: str | None = None
     value: float | None = None
     threshold: float | None = None
 
