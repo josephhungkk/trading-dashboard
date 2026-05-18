@@ -71,7 +71,7 @@ def _apply_migrations(request: pytest.FixtureRequest) -> None:
     cfg = Config("alembic.ini")
     cfg.config_file_name = None
     cfg.set_main_option("script_location", "alembic")
-    cfg.set_main_option("sqlalchemy.url", settings.database_url.replace("+asyncpg", ""))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
     command.upgrade(cfg, "head")
 
 

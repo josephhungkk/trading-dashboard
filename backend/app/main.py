@@ -27,6 +27,7 @@ from app.api.admin_risk import router as admin_risk_router
 from app.api.admin_telegram import router as admin_telegram_router
 from app.api.ai import router as ai_router
 from app.api.alerts import router as alerts_router
+from app.api.algo import router as algo_router
 from app.api.bars import router as bars_router  # Task 28: GET /api/bars
 from app.api.bars import ws_router as bars_ws_router  # Task 31: WS /ws/bars
 from app.api.bonds import router as bonds_router
@@ -289,6 +290,15 @@ async def lifespan(_app: FastAPI) -> Any:
     capability_svc = OrderCapabilityService(redis=redis, db_factory=session_factory)  # type: ignore[arg-type]  # redis-py Redis structurally satisfies RedisLike Protocol
     _app.state.capability_svc = capability_svc
     listener_capability: asyncio.Task[None] = asyncio.create_task(capability_svc.run_listener())
+
+    # Phase 17: AlgoCapabilityService singleton — Redis-cached algo strategies.
+    from app.services.algo.capability_service import AlgoCapabilityService
+
+    algo_capability_svc = AlgoCapabilityService(redis=redis, db_factory=session_factory)  # type: ignore[arg-type]
+    _app.state.algo_capability_svc = algo_capability_svc
+    listener_algo_capability: asyncio.Task[None] = asyncio.create_task(
+        algo_capability_svc.run_listener()
+    )
 
     # Phase 10b.1 H2: VolatilityService singleton (Redis-cached realized-vol + ATR).
     from app.services.volatility_service import VolatilityService
@@ -788,8 +798,15 @@ async def lifespan(_app: FastAPI) -> Any:
         listener_config.cancel()
         listener_secrets.cancel()
         listener_capability.cancel()
+        listener_algo_capability.cancel()
         listener_ai_secrets.cancel()
-        for t in (listener_config, listener_secrets, listener_capability, listener_ai_secrets):
+        for t in (
+            listener_config,
+            listener_secrets,
+            listener_capability,
+            listener_algo_capability,
+            listener_ai_secrets,
+        ):
             try:
                 await t
             except asyncio.CancelledError:
@@ -864,6 +881,7 @@ app.include_router(cfd_router)
 app.include_router(ws_crypto_router)
 app.include_router(options_admin_router)
 app.include_router(ws_options_router)
+app.include_router(algo_router)
 
 
 @app.get("/health")

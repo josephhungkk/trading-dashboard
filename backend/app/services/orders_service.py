@@ -140,6 +140,8 @@ async def validate_pre_dispatch(
     order_type: str,
     tif: str,
     skip_operational_checks: bool = False,
+    algo_strategy: str | None = None,
+    is_bracket_leg: bool = False,
 ) -> None:
     """Validate order controls that must run before sidecar dispatch."""
     broker_id = capability_broker_id(broker_label)
@@ -160,6 +162,31 @@ async def validate_pre_dispatch(
             )
 
     if await capability.is_supported(broker_id, asset_class, order_type, tif):
+        # Phase 17: algo validation
+        if algo_strategy is not None:
+            if is_bracket_leg:
+                raise PreviewUnavailable(
+                    422,
+                    {
+                        "error": {
+                            "code": "algo_on_bracket_leg_unsupported",
+                            "detail": "Algo orders cannot be used on bracket SL/TP legs",
+                        }
+                    },
+                )
+            from app.services.algo.schemas import DISPLAY_ALGOS
+
+            if algo_strategy in {str(s) for s in DISPLAY_ALGOS}:
+                if order_type != "LIMIT":
+                    raise PreviewUnavailable(
+                        422,
+                        {
+                            "error": {
+                                "code": "algo_requires_limit",
+                                "detail": f"Strategy {algo_strategy!r} requires order_type=LIMIT",
+                            }
+                        },
+                    )
         return
 
     notes = await capability.get_notes(broker_id, asset_class, order_type, tif)
@@ -388,6 +415,8 @@ async def _evaluate_risk_for_preview(
         currency_base=account.currency_base,
         symbol=symbol,
         asset_class=asset_class,
+        algo_strategy=str(request.algo_strategy) if request.algo_strategy else None,
+        algo_params=request.algo_params,
     )
     verdict = await svc.evaluate(ctx, mode="preview")
     log.info(
@@ -473,6 +502,8 @@ async def _evaluate_risk_for_place_order(
         asset_class=asset_class,
         multiplier=multiplier,
         position_effect=position_effect_value,
+        algo_strategy=str(request.algo_strategy) if request.algo_strategy else None,
+        algo_params=request.algo_params,
     )
     verdict = await svc.evaluate(ctx, mode="place_order")
     log.info(
@@ -1107,6 +1138,14 @@ async def place_order(
     await _finalize_counters()
     # Phase 9.7 G2: success class — emit AFTER _mark_order_submitted commits.
     metrics.broker_order_place_total.labels(label=account.gateway_label, result="success").inc()
+    if getattr(request, "algo_strategy", None):
+        from app.core import metrics as _m
+
+        _m.algo_orders_submitted_total.labels(
+            strategy=str(request.algo_strategy),
+            broker_id=capability_broker_id(account.gateway_label),
+            asset_class=str(contract.asset_class) if contract.asset_class else "unknown",
+        ).inc()
 
     if await is_kill_switch_active(cfg):
         try:
@@ -1148,7 +1187,8 @@ async def modify_order(
                    filled_qty,
                    parent_order_id,
                    client_order_id,
-                   notional
+                   notional,
+                   algo_strategy
               FROM orders
              WHERE id = :id;
             """
@@ -1205,6 +1245,28 @@ async def modify_order(
         tif=request.tif,
         skip_operational_checks=True,
     )
+    # Phase 17 §5.3a: algo strategy immutable post-creation
+    stored_algo = row["algo_strategy"] if row["algo_strategy"] else None
+    req_algo = str(request.algo_strategy) if request.algo_strategy else None
+    if req_algo is not None or stored_algo is not None:
+        if req_algo != stored_algo:
+            from app.core import metrics as _m
+
+            _m.algo_orders_modify_rejected_total.labels(
+                strategy=stored_algo or req_algo or "unknown",
+                reason="strategy_change",
+            ).inc()
+            raise PreviewUnavailable(
+                422,
+                {
+                    "error": {
+                        "code": "algo_modify_strategy_change_unsupported",
+                        "detail": (
+                            "Cannot change algo strategy on a live order; cancel and re-place"
+                        ),
+                    }
+                },
+            )
     qty_text = canonicalize_qty(request.qty)
     existing_limit_price = str(row["limit_price"]) if row["limit_price"] is not None else None
     new_limit_price = request.limit_price or existing_limit_price
