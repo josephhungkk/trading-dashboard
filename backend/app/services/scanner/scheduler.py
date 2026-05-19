@@ -32,7 +32,7 @@ class ScannerScheduler:
         try:
             croniter(expr)
             return True
-        except Exception:
+        except ValueError:
             return False
 
     async def rebuild_from_db(self, db: Any) -> None:
@@ -75,6 +75,7 @@ class ScannerScheduler:
                 misfire_grace_time=60,
             )
             log.info("scanner.scheduler.scheduled", scan_id=str(scan_id), cron=cron_expr)
+            metrics.scanner_scheduler_jobs.set(len(self._scheduler.get_jobs()))
 
     async def remove_scan(self, scan_id: UUID) -> None:
         lock = self._locks.setdefault(str(scan_id), asyncio.Lock())
@@ -83,6 +84,8 @@ class ScannerScheduler:
                 self._scheduler.remove_job(str(scan_id))
             except JobLookupError:
                 pass
+        self._locks.pop(str(scan_id), None)
+        metrics.scanner_scheduler_jobs.set(len(self._scheduler.get_jobs()))
 
     async def _fire(self, scan_id: UUID, market_hours_gate: bool, exchange: str | None) -> None:
         if market_hours_gate and exchange:
@@ -95,8 +98,9 @@ class ScannerScheduler:
                     exchange=exchange,
                 )
                 return
-        metrics.scanner_scheduler_fires_total.labels(scan_id=str(scan_id)).inc()
         try:
             await self._svc.run_scan(scan_id=scan_id)
+            metrics.scanner_scheduler_fires_total.labels(scan_id=str(scan_id), status="ok").inc()
         except Exception:
             log.exception("scanner.scheduler.fire_error", scan_id=str(scan_id))
+            metrics.scanner_scheduler_fires_total.labels(scan_id=str(scan_id), status="error").inc()

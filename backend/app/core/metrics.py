@@ -1271,7 +1271,7 @@ scanner_llm_commentary_total = Counter(
 scanner_scheduler_fires_total = Counter(
     "scanner_scheduler_fires_total",
     "APScheduler scan fires",
-    ["scan_id"],
+    ["scan_id", "status"],
     registry=registry,
 )
 scanner_alert_fires_total = Counter(
@@ -1293,5 +1293,36 @@ scanner_eval_node_reject_total = Counter(
 scanner_eval_indicator_budget_exhausted_total = Counter(
     "scanner_eval_indicator_budget_exhausted_total",
     "Period-sum cap violations",
+    registry=registry,
+)
+scanner_run_duration_seconds = Histogram(
+    "scanner_run_duration_seconds",
+    "Wall-clock time for a complete scan run",
+    registry=registry,
+)
+scanner_llm_latency_seconds = Histogram(
+    "scanner_llm_latency_seconds",
+    "LLM commentary generation latency",
+    ["depth"],
+    registry=registry,
+)
+scanner_ws_connections = Gauge(
+    "scanner_ws_connections",
+    "Active scanner WebSocket connections",
+    registry=registry,
+)
+scanner_ws_frames_sent_total = Counter(
+    "scanner_ws_frames_sent_total",
+    "Scanner WS frames sent to clients",
+    registry=registry,
+)
+scanner_ws_heartbeat_total = Counter(
+    "scanner_ws_heartbeat_total",
+    "Scanner WS heartbeats sent",
+    registry=registry,
+)
+scanner_scheduler_jobs = Gauge(
+    "scanner_scheduler_jobs",
+    "Number of scheduled scanner jobs",
     registry=registry,
 )

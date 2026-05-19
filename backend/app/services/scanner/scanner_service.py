@@ -118,7 +118,7 @@ class ScannerService:
                     INSERT INTO scanner_runs
                         (scan_id, universe_snapshot, rule_expr, status)
                     VALUES (:sid, CAST(:snap AS jsonb), :rule, 'running')
-                    RETURNING id
+                    RETURNING id, started_at
                     """
                 ),
                 {
@@ -127,15 +127,19 @@ class ScannerService:
                     "rule": config.rule_expr,
                 },
             )
-            run_id: UUID = run_row.fetchone().id
+            fetched = run_row.fetchone()
+            run_id: UUID = fetched.id
+            run_started_at = fetched.started_at
             await db.commit()
 
+            mode = "saved" if scan_id else "adhoc"
             candidates: list[dict[str, Any]] = []
-            deadline = asyncio.get_event_loop().time() + _RUN_WALL_CLOCK_S
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + _RUN_WALL_CLOCK_S
 
             for canonical_id in canonical_ids:
-                if asyncio.get_event_loop().time() > deadline:
-                    await self._fail_run(db, run_id, "wall_clock_exceeded")
+                if loop.time() > deadline:
+                    await self._fail_run(db, run_id, "wall_clock_exceeded", mode=mode)
                     return run_id
 
                 try:
@@ -177,12 +181,14 @@ class ScannerService:
                     sa.text(
                         """
                         INSERT INTO scanner_candidates
-                            (run_id, instrument_id, canonical_id, indicator_snapshot, llm_depth)
-                        VALUES (:rid, :iid, :cid, CAST(:snap AS jsonb), :depth)
+                            (run_id, run_started_at, instrument_id, canonical_id,
+                             indicator_snapshot, llm_depth)
+                        VALUES (:rid, :rsat, :iid, :cid, CAST(:snap AS jsonb), :depth)
                         """
                     ),
                     {
                         "rid": run_id,
+                        "rsat": run_started_at,
                         "iid": c["instrument_id"],
                         "cid": c["canonical_id"],
                         "snap": json.dumps(c["indicator_snapshot"], default=str),
@@ -202,9 +208,7 @@ class ScannerService:
             )
             await db.commit()
 
-        metrics.scanner_runs_total.labels(
-            mode="saved" if scan_id else "adhoc", status="completed"
-        ).inc()
+        metrics.scanner_runs_total.labels(mode=mode, status="completed").inc()
         metrics.scanner_candidates_total.labels(scan_id=str(scan_id or "adhoc")).inc(
             len(candidates)
         )
@@ -239,25 +243,21 @@ class ScannerService:
         canonical_id: str,
         instrument_id: int | None,
     ) -> dict[str, Any]:
-        snapshot: dict[str, Any] = {}
-        all_inds = (
-            list(DAILY_INDICATORS)
-            + list(INTRADAY_SCALARS)
-            + [
-                "mcap",
-                "pe",
-                "eps_growth",
-            ]
-        )
+        all_inds = list(DAILY_INDICATORS) + list(INTRADAY_SCALARS) + ["mcap", "pe", "eps_growth"]
+        precomputed: dict[str, float | None] = {}
         for name in all_inds:
             val = await computer.compute(
                 name, {}, instrument_id=instrument_id, canonical_id=canonical_id
             )
-            snapshot[name] = val
+            precomputed[name] = val
+
+        snapshot: dict[str, Any] = dict(precomputed)
 
         def make_caller(ind_name: str) -> Any:
+            captured = precomputed[ind_name]
+
             def caller(*args: Any) -> Any:
-                return snapshot.get(ind_name)
+                return captured
 
             return caller
 
@@ -273,7 +273,7 @@ class ScannerService:
         r = row.fetchone()
         return r.id if r else None
 
-    async def _fail_run(self, db: Any, run_id: UUID, error: str) -> None:
+    async def _fail_run(self, db: Any, run_id: UUID, error: str, *, mode: str) -> None:
         await db.execute(
             sa.text(
                 """
@@ -285,7 +285,7 @@ class ScannerService:
             {"err": error, "rid": run_id},
         )
         await db.commit()
-        metrics.scanner_runs_total.labels(mode="saved", status="failed").inc()
+        metrics.scanner_runs_total.labels(mode=mode, status="failed").inc()
 
     async def _load_scan_config(self, db: Any, scan_id: UUID) -> ScanConfig:
         row = await db.execute(sa.text("SELECT * FROM saved_scans WHERE id = :id"), {"id": scan_id})
