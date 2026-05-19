@@ -1,11 +1,11 @@
 # Phase 21c — Advisor Perf-Attribution: "Was the Advisor Right?" (v0.21.3)
 
 **Date:** 2026-05-19
-**Status:** ARCHITECT-REVIEW applied (2 CRIT + 4 HIGH + 6 MED inline) — ready for /writing-plans
+**Status:** ARCHITECT-REVIEW Pass 2 applied (1 CRIT + 2 HIGH + 3 MED inline) — ready for /writing-plans
 **Builds on:** Phase 21a (LLM advisor, v0.21.0) · Phase 21a.1 (advisor polish, v0.21.1) · Phase 21b (LLM-in-loop, v0.21.2) · Phase 9 (bar aggregator + historical store)
 **Next phases:** Phase 22 (multi-bot orchestration)
 
-**ARCHITECT-REVIEW applied:** 2 CRIT + 4 HIGH + 6 MED inline. 3 LOWs noted below.
+**ARCHITECT-REVIEW applied:** Pass 1 (2 CRIT + 4 HIGH + 6 MED) + Pass 2 (1 CRIT + 2 HIGH + 3 MED) inline. 5 LOWs noted below.
 
 ---
 
@@ -20,8 +20,10 @@ Answer "was the advisor right?" for every `bot_advisor_decisions` row. For **vet
 ### In scope
 - Alembic 0068: outcome columns + `attribution_status` on `bot_advisor_decisions`; `advisor_decision_id` FK on `bot_orders`.
 - `app/services/advisor/attribution.py` — `AttributionService` (poll + summary + recompute).
+- `app/services/quotes/instrument_resolver.py` — new `find_by_canonical_id()` method (CRIT-3).
+- `app/services/market_calendar.py` — new `session_close_for_decision()` helper (HIGH-6).
 - APScheduler job wired in `main.py` with configurable poll interval.
-- 4 new Prometheus metrics (1 added vs brainstorm for instrument-unresolvable case).
+- 5 new Prometheus metrics (`decisions_processed`, `bars_unavailable`, `unresolvable`, `poll_latency`, `skipped`).
 - `BotContext.place_order` populates `bot_orders.advisor_decision_id` inline in the existing INSERT (MED-1).
 - REST: `GET /api/bots/{id}/advisor-attribution` + `POST /api/bots/{id}/advisor-attribution/recompute` + widen `AdvisorDecisionResponse` with outcome fields.
 - FE: `AdvisorScoreCard` on overview tab; `AdvisorDecisionsTable` outcome columns; single outcome line in `AdvisorDecisionDrawer`.
@@ -41,7 +43,8 @@ Answer "was the advisor right?" for every `bot_advisor_decisions` row. For **vet
 APScheduler (configurable interval, default 900s)
   └── AttributionService.poll(db)
         ├── SELECT FOR UPDATE SKIP LOCKED LIMIT 500 — concurrency-safe claim
-        ├── Resolve canonical_id → instrument_id via InstrumentResolver (Redis TTL cache)
+        ├── Resolve canonical_id → (instrument_id, multiplier, primary_exchange)
+        │     via InstrumentResolver.find_by_canonical_id() — new method, Redis TTL 3600s
         ├── For each matured window per decision:
         │   ├── VETO:    bars_1m WHERE instrument_id → next-bar-open entry, window close exit
         │   └── APPROVE: same price-lookback (FK is provenance only, not pricing)
@@ -109,7 +112,10 @@ CREATE INDEX bot_orders_advisor_decision_id_idx
 
 ```sql
 ALTER TABLE bot_advisor_decisions
-    ADD COLUMN attribution_windows TEXT[];
+    ADD COLUMN attribution_windows TEXT[]
+        CHECK (attribution_windows IS NULL
+               OR attribution_windows <@ ARRAY['15m','1h','4h','eod']::TEXT[]);
+-- MED-9: CHECK constraint ensures only known window values can be stored.
 -- Populated at first poll tick for this decision (snapshot of app_config windows at compute time).
 -- NULL on rows created before 0068 — treated as ["15m","1h","4h","eod"] for backcompat.
 ```
@@ -144,20 +150,41 @@ class AttributionService:
 | `"4h"` | 4 hours | — |
 | `"eod"` | computed (see below) | Decision day's session close |
 
-**EOD window definition (HIGH-4):**
+**EOD window definition (HIGH-4, HIGH-6):**
 - EOD = the close of the *trading session on the day the decision was made* (`created_at` date in the instrument's exchange timezone).
-- Computed via `MarketCalendar.session_close(exchange, date)`. Exchange read from `instruments.exchange` (resolved alongside `instrument_id`).
+- Computed via new helper `session_close_for_decision(exchange: str, created_at: datetime) -> datetime` added to `app/services/market_calendar.py` (HIGH-6). `primary_exchange` is read from `instruments.primary_exchange` (resolved alongside `instrument_id` — MED-7; column is `NOT NULL` so "unknown exchange" is a "should not happen" defensive path).
+  ```python
+  def session_close_for_decision(exchange: str, created_at: datetime) -> datetime:
+      """Return the EOD close for an attribution decision.
+      If created_at falls within a trading session, return that session's close.
+      If created_at is after-hours/weekend/holiday, return the NEXT session's close.
+      Raises ValueError when exchange is unrecognised by exchange_calendars.
+      """
+  ```
 - If `created_at` is **after the session close** (after-hours decision): EOD = the *next* session's close.
-- **`min_eod_buffer`:** if `session_close - created_at < app_config[advisor_attribution/min_eod_buffer_minutes]` (default 30 min), the EOD window is **skipped** for this decision — a 5-minute window carries no meaningful signal.
-- If exchange is unknown: `attribution_status='unresolvable'` (same as no instrument_id) — **no UTC fallback** (HIGH-4). Metric `advisor_attribution_unresolvable_total{reason="unknown_exchange"}`.
+- **`min_eod_buffer`:** if `session_close - created_at < app_config[advisor_attribution/min_eod_buffer_minutes]` (default 30 min), the EOD window is **skipped** for this decision — a 5-minute window carries no meaningful signal. Metric `advisor_attribution_skipped_total{reason="eod_buffer"}`.
+- If `session_close_for_decision` raises `ValueError` (unrecognised exchange — `primary_exchange NOT NULL` makes this rare): mark `attribution_status='unresolvable'`. Metric `advisor_attribution_unresolvable_total{reason="unknown_exchange"}`. **No UTC fallback** (HIGH-4).
 
 **Poll steps:**
 
 1. Read enabled windows from `app_config[advisor_attribution/windows]`. Parse per table above.
 2. `SELECT ... FROM bot_advisor_decisions WHERE attribution_status IN ('pending','partial') AND verdict IN ('approve','veto') AND created_at >= now() - interval '{max_lookback_days} days' FOR UPDATE SKIP LOCKED LIMIT 500` (HIGH-2 — prevents double-processing under concurrent pollers or restarts).
 3. For each decision:
-   a. **Resolve `canonical_id` → `instrument_id`** (CRIT-1): call `InstrumentResolver.find_by_canonical_id(canonical_id)` (existing service, Redis TTL 3600s — canonical_id→instrument_id mapping is effectively immutable). If no match → set `attribution_status='unresolvable'`, `attribution_computed_at=now()`, skip. Metric `advisor_attribution_unresolvable_total{reason="no_instrument"}`.
-   b. Look up `instruments.multiplier` (default `Decimal("1")` if NULL — handles stocks; options/futures will have real multiplier from Phase 12/14).
+   a. **Resolve `canonical_id` → `(instrument_id, multiplier, primary_exchange)`** (CRIT-1, CRIT-3, HIGH-5, MED-7): call `InstrumentResolver.find_by_canonical_id(canonical_id)` — **new method** added to `app/services/quotes/instrument_resolver.py` in Chunk B:
+      ```python
+      async def find_by_canonical_id(self, canonical_id: str) -> InstrumentAttribution | None:
+          """Read-only lookup. No upsert. Redis cache key attribution:instr:{canonical_id} TTL 3600s.
+          Returns None if canonical_id not in instruments table.
+          """
+      ```
+      where `InstrumentAttribution` is a small dataclass `(id: int, multiplier: Decimal, primary_exchange: str)`. The Redis cache (`attribution:instr:{canonical_id}`, TTL 3600s) is **new** — it does not exist today. The method executes:
+      ```sql
+      SELECT id, (meta->>'multiplier')::numeric AS multiplier, primary_exchange
+      FROM instruments WHERE canonical_id = :cid
+      ```
+      `multiplier` defaults to `Decimal("1")` if `meta->>'multiplier'` is NULL (stocks have no multiplier in meta; options/futures populated via Phase 12/14). `primary_exchange` is `NOT NULL` per schema. This is a single round-trip that fetches all three needed fields.
+      If `find_by_canonical_id` returns `None` → set `attribution_status='unresolvable'`, `attribution_computed_at=now()`, skip. Metric `advisor_attribution_unresolvable_total{reason="no_instrument"}`.
+   b. `instrument_id`, `multiplier`, `primary_exchange` are now in scope from step 3a — no additional lookup needed.
    c. Snapshot `attribution_windows` = current enabled windows (stored if this is the first compute tick for this row, i.e., `attribution_windows IS NULL`).
    d. Determine which windows have matured: `window_matured = (now() - created_at) >= window_duration`.
    e. For each matured window where the outcome column is NULL:
@@ -195,11 +222,14 @@ class AttributionSummary(BaseModel):
     approve_accuracy: float | None           # None if no complete approve decisions
     avg_avoided_loss_quote: Decimal | None   # mean |pnl| of correct vetoes (instrument-native currency)
     avg_missed_gain_quote: Decimal | None    # mean |pnl| of incorrect vetoes (instrument-native currency)
-    total_decisions: int
+    # Status counts — LOW-5: sum of all counts = total; no separate total_decisions field to avoid staleness.
+    # total = complete + partial + pending + bars_unavailable + unresolvable + skipped
     complete_count: int
+    partial_count: int
     pending_count: int
     bars_unavailable_count: int
     unresolvable_count: int
+    skipped_count: int                       # CLOSE-position decisions skipped
     generated_at: datetime
 ```
 
@@ -214,7 +244,9 @@ class AttributionSummary(BaseModel):
 
 Resets `attribution_status='pending'` and NULLs all outcome columns and `attribution_windows` for decisions on this bot created since `since` (TIMESTAMPTZ). This allows operators to re-run attribution after a multiplier fix, a window config change, or a bug patch.
 
-Exposed as `POST /api/bots/{id}/advisor-attribution/recompute` (admin JWT + CSRF nonce). Body: `{"since": "2026-05-01T00:00:00Z"}`. Max rows per call: 10,000 (prevents accidental full-table resets).
+Exposed as `POST /api/bots/{id}/advisor-attribution/recompute` (admin JWT + CSRF nonce). Body: `{"since": "<iso8601>"}`. Validation (MED-8):
+- `since` must be `>= now() - interval '6 months'` (matches `bars_1m` retention policy from alembic 0024). Older timestamps are rejected with 422 — resetting attribution for decisions whose bar data has rolled off would flip them all to `bars_unavailable`, silently corrupting historical accuracy stats.
+- Max rows per call: 10,000 (prevents accidental full-table resets).
 
 ### 5.4 `app_config` keys
 
@@ -333,13 +365,14 @@ export interface AttributionSummary {
   window: string;
   veto_accuracy: number | null;
   approve_accuracy: number | null;
-  avg_avoided_loss_quote: string | null;  // renamed from _usd (HIGH-3)
+  avg_avoided_loss_quote: string | null;
   avg_missed_gain_quote: string | null;
-  total_decisions: number;
   complete_count: number;
+  partial_count: number;
   pending_count: number;
   bars_unavailable_count: number;
   unresolvable_count: number;
+  skipped_count: number;
   generated_at: string;
 }
 
@@ -446,7 +479,7 @@ attribution_computed_at: string | null;
 | Chunk | Files | Route | Gate |
 |---|---|---|---|
 | **A — Schema** | Alembic 0068 (`bot_advisor_decisions` outcome cols + status + `attribution_windows`; `bot_orders.advisor_decision_id` FK), migration tests | Qwen | — |
-| **B — Attribution service** | `advisor/attribution.py`, `advisor/types.py` (new types), unit tests (instrument resolution, pnl formula, EOD, CLOSE skip) | Qwen | after A |
+| **B — Attribution service** | `advisor/attribution.py`, `advisor/types.py` (new types), `quotes/instrument_resolver.py` (`find_by_canonical_id` + `InstrumentAttribution` dataclass), `market_calendar.py` (`session_close_for_decision`), unit tests (instrument resolution, pnl formula, EOD, CLOSE skip) | Qwen | after A |
 | **C — APScheduler + metrics + FK write** | `main.py` APScheduler job wiring, `advisor/metrics.py` (4 new metrics + skipped counter), `bot/context.py` INSERT extension, integration tests | Codex | after B |
 | **D — REST API** | `api/bots.py` (attribution + recompute endpoints, widen `AdvisorDecisionResponse`), tests | Qwen | after B |
 | **E — Frontend** | `AdvisorScoreCard`, `AdvisorDecisionsTable` outcome column, drawer outcome line, `services/advisor/types.ts` + `api.ts` additions | Codex | after D |
@@ -487,6 +520,14 @@ attribution_computed_at: string | null;
 | LOW-1: test count low | Expanded to ~40 BE tests with parametrized matrix coverage. |
 | LOW-2: naming consistency | `AdvisorScoreCard` kept (user-approved); alias noted in §8.1. |
 | LOW-3: 60s stale time too tight | Changed to 300s (5 min) in §8.1. |
+| CRIT-3: `InstrumentResolver.find_by_canonical_id` doesn't exist | New read-only method added to `instrument_resolver.py` in Chunk B; returns `InstrumentAttribution(id, multiplier, primary_exchange)` in one SQL round-trip; new Redis cache `attribution:instr:{canonical_id}` TTL 3600s. |
+| HIGH-5: `instruments.multiplier` is in `meta` JSONB, not a column | §5.1 step 3a query uses `(meta->>'multiplier')::numeric`; default `Decimal("1")` if NULL. |
+| HIGH-6: `MarketCalendar.session_close` doesn't exist | New `session_close_for_decision(exchange, created_at)` function added to `market_calendar.py` in Chunk B; raises `ValueError` on unknown exchange (no UTC fallback). |
+| MED-7: `instruments.exchange` → `instruments.primary_exchange` | All occurrences corrected throughout §5.1 and §4. |
+| MED-8: `recompute(since)` can reset bars-expired decisions | `since >= now() - 6 months` validation added; 422 on older timestamps. |
+| MED-9: `attribution_windows` unconstrained TEXT[] | CHECK constraint `<@ ARRAY['15m','1h','4h','eod']` added to Alembic 0068 DDL. |
+| LOW-4: `unresolvable` set on transient resolver None | `find_by_canonical_id` wraps DB errors in exception; `None` return is authoritative "not found" only. |
+| LOW-5: status counts don't sum to total | `total_decisions` removed; explicit `partial_count` + `skipped_count` added; sum invariant documented. |
 
 ---
 
