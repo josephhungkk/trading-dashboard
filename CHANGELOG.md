@@ -7,6 +7,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 21a — LLM Advisor Gate (v0.21.0)
+
+Phase 21a shipped on 2026-05-19. 1985 BE tests green (excluding 12 pre-existing failures); 758 FE tests green. Per-bot LLM advisor intercepts order intents in OBSERVE (log-only) or VETO (block) mode before broker dispatch.
+
+**Migration (Alembic 0063)**
+
+- `0063_advisor.py`: `bot_advisor_decisions` hypertable (id BIGSERIAL, bot_id FK RESTRICT, bot_run_id BIGINT no-FK, account_id UUID, canonical_id, intent JSONB, context_summary JSONB, prompt_version SMALLINT, verdict CHECK, reasoning TEXT, confidence NUMERIC, advice_tags JSONB, provider/model/fallback_chain, latency_ms, ai_completion_ts/request_id, account_gate_outcome CHECK, account_gate_decision_id, effective_mode, created_at); `bots.advisor_config` JSONB NOT NULL DEFAULT; `bot_accounts.advisor_config_override` JSONB nullable; `bot_runs.stop_reason` CHECK widened to include `advisor_auto_pause`.
+
+**Backend (`app/services/advisor/`)**
+
+- `types.py`: `AdvisorMode` ('OFF'|'OBSERVE'|'VETO'), `AdvisorConfig`, `OrderIntent`, `ContextSummary`, `AdvisorVerdict`, `AdvisorDecision`, `AdvisorVetoedResult`.
+- `context_builder.py`: `ContextBuilder.build()` — reads recent bars, open positions, risk decisions, strategy params from DB; sanitises and wraps in context fences.
+- `prompts.py`: `SYSTEM_PROMPT`, `PROMPT_VERSION`, `ALLOWED_ADVICE_TAGS` allowlist.
+- `metrics.py`: 14 Prometheus metrics under `advisor_*` (decisions, vetoes, latency, budget, qps).
+- `service.py`: `AdvisorService` — `review()` (fail-OPEN contract; OFF mode passthrough; budget/QPS guards; LLM call; safety rules; persist; publish); `reload_config()` via Redis GETDEL.
+- `auto_pause.py`: `AutoPauseService.record_reject()` — sliding-window sorted-set, XADD PAUSE envelope when threshold breached.
+- `budget_reconcile.py`: 5-min reconcile loop correcting Redis optimistic budget counter vs DB.
+
+**Bot wiring**
+
+- `app/bot/context.py`: `BotContext.place_order` intercepts at station 5.5 (after risk caps, before facade); calls `advisor_service.review()`; fail-OPEN on errors; calls `on_advisor_reject` hook on veto.
+- `app/bot/supervisor.py`: handles `UPDATE_ADVISOR_CONFIG` command from xreadgroup stream; calls `advisor_service.reload_config()`.
+- `app/bot/base.py`: `BaseStrategy.on_advisor_reject` hook (no-op default).
+
+**REST API (`app/api/bots.py`) — 4 new endpoints**
+
+- `GET /api/bots/{bot_id}/advisor-config` — read current advisor config.
+- `PUT /api/bots/{bot_id}/advisor-config` — update config (CSRF nonce; xadd to `bot:control:{id}` stream).
+- `GET /api/bots/{bot_id}/advisor-decisions` — cursor-paginated list (limit ≤100, before cursor).
+- `GET /api/bots/{bot_id}/advisor-decisions/{id}` — single decision detail.
+
+**WebSocket (`app/api/ws_bots.py`) — 2 new endpoints**
+
+- `WS /ws/bots/{bot_id}/advisor` — per-bot decision stream (50-conn cap, accept-first auth pattern, `bot:advisor:decision:{bot_id}` pubsub channel).
+- `WS /ws/bots/advisor` — admin fan-out stream (psubscribes `bot:advisor:decision:*`).
+
+**Frontend**
+
+- `services/advisor/types.ts` + `api.ts`: full TypeScript types and API client (getAdvisorConfig, updateAdvisorConfig, getAdvisorDecisions, getAdvisorDecision, getAdvisorFeed).
+- `useAdvisorStream`: per-bot WS hook, per-symbol veto toast debounce, query invalidation, retry with cleanup.
+- `useAdvisorFeedStream`: admin fan-out hook, max-200 frame buffer.
+- `AdvisorConfigForm`: all config fields (mode, capability, local_only, timeout, budget, QPS, auto-pause threshold/window, min veto confidence); CSRF nonce; success/error states.
+- `AdvisorDecisionsTable`: infinite cursor pagination, verdict color badges, side/qty columns, keyboard-accessible rows.
+- `AdvisorDecisionDrawer`: slide-over, aria-modal, focus-on-open, Escape close.
+- `AdvisorFeedPage`: admin live feed with verdict filter and empty state.
+- `BotDetailPage`: advisor tab added (config form + decisions table).
+- Route `/admin/bots/advisor-feed`.
+
+**Deferred**
+
+- Telegram VETO notifications (Phase 21b).
+- Per-account `account_gate_outcome` update (Phase 21b).
+
+---
+
 ### Phase 20 — Backtesting Harness (v0.20.0)
 
 Phase 20 shipped on 2026-05-19. 1938 BE tests green; 723 FE tests green. Replay OHLCV bars through any `BaseStrategy` implementation; stream progress via WebSocket; compute Sharpe/MAR/drawdown/win-rate report.

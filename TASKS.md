@@ -885,9 +885,24 @@ Rule-based scanner (RSI / breakout / volume / mcap / fundamentals) + LLM comment
 
 Strategy plugin model (Python files). Bot lifecycle (create/start/stop/version). Per-bot risk caps. Paper-mode-by-default. Bot worker is a separate Docker service.
 
-## Phase 21 — Bot engine v2 (LLM-in-loop)
+## Phase 21a — LLM Advisor Gate ✅ (shipped v0.21.0 · 2026-05-19)
 
-LLM-as-analyst on bot decisions. Parameter-tuning loop with human approval. Shadow-mode strategy promotion. Per-bot perf-attribution.
+- [x] Alembic 0063: `bot_advisor_decisions` hypertable, `bots.advisor_config` JSONB, `bot_accounts.advisor_config_override`, `bot_runs.stop_reason` CHECK widened
+- [x] `app/services/advisor/`: types, context_builder, prompts, metrics (14), service (review/reload/budget/qps/persist/publish), auto_pause, budget_reconcile
+- [x] `BotContext.place_order` station 5.5 intercept (fail-OPEN); `BaseStrategy.on_advisor_reject` hook; `BotSupervisor` UPDATE_ADVISOR_CONFIG command
+- [x] REST: GET/PUT `/api/bots/{id}/advisor-config` (CSRF + xadd stream), GET `/advisor-decisions` (cursor paginated), GET `/advisor-decisions/{id}`
+- [x] WS: `/ws/bots/{bot_id}/advisor` (per-bot), `/ws/bots/advisor` (admin fan-out)
+- [x] FE: services/advisor types + API; useAdvisorStream (per-symbol veto debounce); useAdvisorFeedStream (max-200 buffer); AdvisorConfigForm (9 fields, CSRF); AdvisorDecisionsTable (cursor pagination, side/qty columns); AdvisorDecisionDrawer (aria-modal, focus-trap); AdvisorFeedPage; BotDetailPage advisor tab; /admin/bots/advisor-feed route
+- [x] 1985 BE tests; 758 FE tests green
+- [x] Tagged v0.21.0
+
+## Phase 21b — LLM Advisor: Param-Tuning + Shadow Promotion
+
+Parameter-tuning loop driven by advisor veto history. Shadow-mode strategy promotion. Telegram VETO notifications. Per-account `account_gate_outcome` update.
+
+## Phase 21c — LLM Advisor: Perf-Attribution
+
+Per-bot / per-strategy / per-advisor-verdict P&L attribution. Advisor decision quality metrics over time.
 
 ## Phase 22 — Bot engine v3 (autonomous, self-refining)
 
