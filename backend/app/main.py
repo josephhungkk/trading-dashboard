@@ -18,7 +18,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.api.telegram as _telegram_api_module
-from app.api import admin_instruments
+from app.api import admin_instruments, ws_bots
+from app.api import bots as bots_api
 from app.api import filings as filings_api
 from app.api import scanner as scanner_api
 from app.api import ws_scanner as ws_scanner_api
@@ -778,6 +779,18 @@ async def lifespan(_app: FastAPI) -> Any:
     except Exception:
         log.exception("coinbase_ws.lifespan_init_failed")
 
+    # Phase 19: BotFillRouter — routes order:fill events to bot:fill:{bot_id} pubsub
+    _bot_fill_task: asyncio.Task[None] | None = None
+    _bot_fill_session = SessionLocal()
+    try:
+        from app.bot.fill_router import BotFillRouter
+
+        _bot_fill_router = BotFillRouter(db=_bot_fill_session, redis=redis)
+        _bot_fill_task = asyncio.create_task(_bot_fill_router.run())
+        log.info("bot_fill_router.lifespan_started")
+    except Exception:
+        log.exception("bot_fill_router.lifespan_init_failed")
+
     log.info("startup_ok", env=settings.env)
     try:
         yield
@@ -897,6 +910,11 @@ async def lifespan(_app: FastAPI) -> Any:
             await _app.state.ollama_health_watcher.stop()
         except Exception:
             log.exception("ollama_health_watcher_stop_failed")
+        if _bot_fill_task is not None and not _bot_fill_task.done():
+            _bot_fill_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _bot_fill_task
+        await _bot_fill_session.aclose()
         try:
             await redis.aclose()
         except Exception:
@@ -960,6 +978,8 @@ app.include_router(filings_api.router)
 app.include_router(earnings_router)
 app.include_router(scanner_api.router)
 app.include_router(ws_scanner_api.router)
+app.include_router(bots_api.router)
+app.include_router(ws_bots.router)
 
 
 @app.get("/health")

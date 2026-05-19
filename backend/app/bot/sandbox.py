@@ -90,7 +90,8 @@ def extract_params_schema(
         raw = result.stdout.strip()
         if raw == "null" or not raw:
             return None
-        return json.loads(raw)
+        result_obj: dict[str, Any] | None = json.loads(raw)
+        return result_obj
     except subprocess.TimeoutExpired:
         logger.warning("params_schema_extraction_timeout", strategy_file=strategy_file)
         metrics.bot_params_extraction_oom_total.inc()
