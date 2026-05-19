@@ -35,7 +35,7 @@ Close the Phase 22 ROADMAP deliverable: **autonomous, self-refining bot engine**
 │  ├── PortfolioExposureGate  — pre-trade station 5.75            │
 │  │     Redis HASH portfolio:exposure:{account_id}               │
 │  │     Checks: total_notional, per-sector, per-instrument       │
-│  │     Marginal-variance-adjusted notional (§3.2)               │
+│  │     Raw notional in 22a; marginal-variance deferred to 22a.1 │
 │  │     Fail-CLOSED on Redis miss: PG fallback → BLOCK           │
 │  ├── CorrelationService  — daily update via bars_1d             │
 │  │     Pearson correlation matrix, N-day rolling window         │
@@ -135,12 +135,7 @@ CREATE INDEX portfolio_correlation_snapshots_account_computed_idx
 **Pre-trade check flow:**
 1. `HGETALL portfolio:exposure:{account_id}` — single Redis read.
 2. Compute order notional = `qty × price × multiplier × fx_rate`.
-3. **Marginal-variance-adjusted contribution (H1 fix):** Use proper marginal portfolio variance:
-   ```
-   Δσ²_p = 2·w_new·Σᵢ wᵢ·ρᵢ,new·σᵢ·σ_new + w²_new·σ²_new
-   adjusted_notional = notional × (Δσ_p / σ_new)
-   ```
-   where weights `wᵢ` are existing notional fractions, `σᵢ` are per-instrument volatilities from `bars_1d` (cached in correlation matrix snapshot), and `ρᵢ,new` are from the cached symmetric correlation matrix. Falls back to raw notional if matrix is stale (>48h) or missing — with metric `orchestrator_correlation_matrix_age_seconds`.
+3. **Raw notional check (H1: correlation adjustment deferred to 22a.1):** Use `qty × price × multiplier × fx_rate` as the notional contribution directly. The marginal-variance formula (Δσ²_p = 2·w_new·Σᵢ wᵢ·ρᵢ,new·σᵢ·σ_new + w²_new·σ²_new) is mathematically correct but complex enough that a wrong implementation would ship a subtly bad number rather than a safe conservative one. Raw notional is conservative (overstates correlated contribution) and never wrong in the dangerous direction. The correlation matrix is still computed by `CorrelationService` (for the FE heatmap and health digest), but not used in the gate calculation until 22a.1 provides a validated formula + backtest sanity check.
 4. Check against each enabled `portfolio_exposure_limits` row for this account.
 5. ALLOW / WARN / BLOCK — same three-outcome model as Phase 10 risk gate. Writes to `risk_audit_log` with `gate='portfolio_exposure'`.
 
@@ -423,7 +418,7 @@ Table: Rank | Bot | Sharpe (30d) | Drawdown | Win Rate | Advisor Accuracy | Expo
 Data: `GET /api/orchestrator/digest/latest`. Stale time: 300s.
 
 **Panel 2 — Portfolio exposure heatmap**
-Instrument × account matrix. Cell colour = exposure utilisation (0–100% of limit). Hover: current notional, limit, marginal-variance-adjusted contribution.
+Instrument × account matrix. Cell colour = exposure utilisation (0–100% of limit). Hover: current notional, limit, raw notional contribution.
 Data: `GET /api/orchestrator/exposure`. Stale time: 60s.
 
 **Panel 3 — Correlation matrix**
@@ -466,7 +461,7 @@ Data: `GET /api/strategy-gen`. Stale time: 60s.
 
 ### 22a Backend (~60 tests — L2: raised from 45 to reflect correlation math + Lua edge cases)
 
-- `PortfolioExposureGate`: allow/warn/block for total_notional/per_sector/per_instrument; marginal-variance-adjusted notional with known ρ matrix; **negative ρ** (ρ=−0.5 → adjusted < raw); NaN bars → raw fallback; Redis fail → PG fallback → correct totals; PG also down → fail-CLOSED + metric; kill switch; `risk_audit_log` row written
+- `PortfolioExposureGate`: allow/warn/block for total_notional/per_sector/per_instrument; raw notional used (correlation adjustment deferred to 22a.1); Redis fail → PG fallback → correct totals; PG also down → fail-CLOSED + metric; kill switch; `risk_audit_log` row written
 - Lua script atomicity: concurrent fill events don't race on exposure HASH; buy-then-partial-sell → correct net exposure; full close → zero balance
 - `CorrelationService`: Pearson matrix correct from `bars_1d`; full symmetric form (both {i:{j}} and {j:{i}}); Redis TTL 86400s; NaN bars handled; stale fallback
 - `AutoPromoteEvaluator`: all criteria pass → `promote()` called; any fail → skip; `auto_apply=false` → report only; master switch off → no-op; fire-once guard prevents double-promote of same shadow; `promoted_via='auto'` written; Telegram sent
@@ -523,7 +518,7 @@ Data: `GET /api/strategy-gen`. Stale time: 60s.
 | LLM re-evaluation of failed strategies ("why did it fail?") | Beyond Phase 22 |
 | Attribution for generated strategies (21c path) | Automatic — 21c's `AttributionService` covers all `bot_advisor_decisions` rows |
 | Telegram veto window for auto-promote (not just auto-approve) | Phase 22a.1 patch if needed |
-| Replace marginal-variance single-factor approximation with full covariance matrix | Phase 22a.1 if accuracy insufficient |
+| Marginal-variance-adjusted notional in PortfolioExposureGate (raw notional used in 22a) | Phase 22a.1 — requires validated formula + backtest sanity check |
 
 ---
 
