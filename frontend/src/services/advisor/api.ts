@@ -117,12 +117,12 @@ export async function getAdvisorAttribution(
   botId: string,
   window = '1h',
 ): Promise<AttributionSummary> {
-  const resp = await fetch(
-    `/api/bots/${botId}/advisor-attribution?window=${encodeURIComponent(window)}`,
-    { credentials: 'include' },
+  return json(
+    await fetch(
+      `${BASE}/${encodeURIComponent(botId)}/advisor-attribution?window=${encodeURIComponent(window)}`,
+      { credentials: 'include' },
+    ),
   );
-  if (!resp.ok) throw new Error(`advisor_attribution_fetch_failed: ${resp.status}`);
-  return resp.json() as Promise<AttributionSummary>;
 }
 
 export async function recomputeAttribution(

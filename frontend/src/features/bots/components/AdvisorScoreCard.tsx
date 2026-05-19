@@ -9,6 +9,7 @@ interface AdvisorScoreCardProps {
 }
 
 const WINDOWS = ['15m', '1h', '4h', 'eod'] as const;
+type Window = (typeof WINDOWS)[number];
 
 function AccuracyBar({ value }: { value: number | null }) {
   if (value === null) return <span className="text-sm text-muted-foreground">—</span>;
@@ -24,7 +25,7 @@ function AccuracyBar({ value }: { value: number | null }) {
 }
 
 export function AdvisorScoreCard({ botId, advisorMode }: AdvisorScoreCardProps) {
-  const [selectedWindow, setSelectedWindow] = useState<string>('1h');
+  const [selectedWindow, setSelectedWindow] = useState<Window>('1h');
 
   const { data } = useQuery<AttributionSummary>({
     queryKey: ['advisor-attribution', botId, selectedWindow],
@@ -50,7 +51,7 @@ export function AdvisorScoreCard({ botId, advisorMode }: AdvisorScoreCardProps) 
         <select
           className="rounded border px-2 py-1 text-sm"
           value={selectedWindow}
-          onChange={(e) => setSelectedWindow(e.target.value)}
+          onChange={(e) => setSelectedWindow(e.target.value as Window)}
           aria-label="Attribution window"
         >
           {WINDOWS.map((w) => (
