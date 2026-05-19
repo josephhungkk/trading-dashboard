@@ -87,3 +87,32 @@ def test_on_fill_noop() -> None:
     strat = _MinimalStrategy()
     result = strat.on_fill(_make_fill())
     assert result is None
+
+
+def test_on_advisor_reject_noop_does_not_raise() -> None:
+    """on_advisor_reject() default noop does not raise."""
+    strat = _MinimalStrategy()
+    strat.on_advisor_reject(None, None)  # type: ignore[arg-type]
+
+
+def test_on_advisor_reject_subclass_override_invoked() -> None:
+    """Subclass on_advisor_reject is called with the correct args."""
+    calls: list = []
+
+    class _Impl(_MinimalStrategy):
+        def on_advisor_reject(self, intent, decision) -> None:  # type: ignore[override]
+            calls.append((intent, decision))
+
+    s = _Impl()
+    s.on_advisor_reject("intent", "decision")
+    assert calls == [("intent", "decision")]
+
+
+def test_on_advisor_reject_weakref_does_not_cause_repr_recursion() -> None:
+    """weakref to a strategy should not cause repr recursion issues."""
+    import weakref
+
+    s = _MinimalStrategy()
+    ref = weakref.ref(s)
+    r = repr(ref)
+    assert "Traceback" not in r

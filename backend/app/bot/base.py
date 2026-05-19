@@ -11,6 +11,7 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from app.bot.context import BotContext
+    from app.services.advisor.types import AdvisorDecision, OrderIntent
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,3 +64,13 @@ class BaseStrategy(abc.ABC):
 
     def on_stop(self) -> None:  # noqa: B027
         """Called when the bot engine stops the strategy (noop by default)."""
+
+    def on_advisor_reject(  # noqa: B027
+        self,
+        intent: OrderIntent,
+        decision: AdvisorDecision,
+    ) -> None:
+        """Called when the advisor vetoes an order. Noop by default.
+
+        Sync hook — must not block the event loop.
+        """
