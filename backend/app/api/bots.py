@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.admin import consume_confirmation_nonce
 from app.api.ws_auth import require_jwt
 from app.bot.sandbox import extract_params_schema
-from app.core.deps import get_db, get_redis
+from app.core.cf_access import AdminIdentity
+from app.core.deps import get_db, get_redis, require_admin_jwt
 from app.services.advisor.metrics import (
     advisor_account_config_writes_total,
     advisor_overrides_total,
@@ -37,6 +38,7 @@ router = APIRouter(prefix="/api/bots", tags=["bots"])
 _STRATEGIES_DIR = Path(os.getenv("STRATEGIES_DIR", "/strategies"))
 
 JwtSubject = Annotated[str, Depends(require_jwt)]
+AdminDep = Annotated[AdminIdentity, Depends(require_admin_jwt)]
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 RedisDep = Annotated[Any, Depends(get_redis)]
 
@@ -655,6 +657,249 @@ async def put_account_advisor_config(
     except Exception:
         logger.warning("account_config_publish_failed", bot_id=str(bot_id))
     return {"bot_id": str(bot_id), "account_id": str(account_id), "action": action}
+
+
+# --- Param-tuner endpoints ---
+
+
+@router.post("/{bot_id}/param-suggestions", status_code=202)
+async def trigger_param_suggestion(
+    bot_id: UUID,
+    _admin: AdminDep,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+    db: DbDep,
+    request: Request,
+) -> dict[str, Any]:
+    from app.services.param_tuner.service import BacktestSubmitter, ParamTunerService
+    from app.services.param_tuner.types import (
+        TunerAlreadyActiveError,
+        TunerCostCeilingError,
+        TunerTrigger,
+    )
+
+    svc = ParamTunerService(
+        ai_client=request.app.state.ai_client,
+        redis=request.app.state.redis,
+        db_factory=request.app.state.db_factory,
+        backtest_submitter=BacktestSubmitter(request.app.state.db_factory),
+    )
+    try:
+        suggestion_id = await svc.trigger(bot_id, TunerTrigger.MANUAL, db)
+    except TunerAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail="suggestion_already_active") from exc
+    except TunerCostCeilingError as exc:
+        raise HTTPException(status_code=429, detail="cost_ceiling_exceeded") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"suggestion_id": str(suggestion_id)}
+
+
+@router.get("/{bot_id}/param-suggestions")
+async def list_param_suggestions(
+    bot_id: UUID,
+    user: JwtSubject,
+    db: DbDep,
+    before: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    query = (
+        "SELECT * FROM bot_param_suggestions WHERE bot_id=:bid"
+        + (" AND created_at < :before" if before else "")
+        + " ORDER BY created_at DESC LIMIT :lim"
+    )
+    params: dict[str, Any] = {"bid": str(bot_id), "lim": min(limit, 50)}
+    if before:
+        params["before"] = before
+    rows = (await db.execute(text(query), params)).all()
+    return {"items": [dict(r._mapping) for r in rows]}
+
+
+@router.get("/{bot_id}/param-suggestions/{suggestion_id}")
+async def get_param_suggestion(
+    bot_id: UUID,
+    suggestion_id: UUID,
+    user: JwtSubject,
+    db: DbDep,
+) -> dict[str, Any]:
+    row = (
+        await db.execute(
+            text("SELECT * FROM bot_param_suggestions WHERE id=:id AND bot_id=:bid"),
+            {"id": str(suggestion_id), "bid": str(bot_id)},
+        )
+    ).one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="suggestion_not_found")
+    return dict(row._mapping)
+
+
+@router.post("/{bot_id}/param-suggestions/{suggestion_id}/approve")
+async def approve_param_suggestion(
+    bot_id: UUID,
+    suggestion_id: UUID,
+    body: dict[str, Any],
+    _admin: AdminDep,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+    db: DbDep,
+    request: Request,
+) -> dict[str, Any]:
+    from app.services.param_tuner.service import BacktestSubmitter, ParamTunerService
+    from app.services.param_tuner.types import SupervisorRestartError
+
+    svc = ParamTunerService(
+        ai_client=request.app.state.ai_client,
+        redis=request.app.state.redis,
+        db_factory=request.app.state.db_factory,
+        backtest_submitter=BacktestSubmitter(request.app.state.db_factory),
+    )
+    candidate_index = body.get("candidate_index")
+    if candidate_index is None:
+        raise HTTPException(status_code=422, detail="candidate_index_required")
+    try:
+        await svc.approve(
+            suggestion_id,
+            int(candidate_index),
+            approved_by=_admin.email,
+            db=db,
+            supervisor=request.app.state.supervisor,
+        )
+    except SupervisorRestartError as exc:
+        raise HTTPException(
+            status_code=500 if exc.reason == "stop_timeout" else 409,
+            detail=exc.reason,
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post("/{bot_id}/param-suggestions/{suggestion_id}/reject")
+async def reject_param_suggestion(
+    bot_id: UUID,
+    suggestion_id: UUID,
+    _admin: AdminDep,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+    db: DbDep,
+) -> dict[str, Any]:
+    await db.execute(
+        text("UPDATE bot_param_suggestions SET status='rejected' WHERE id=:id AND bot_id=:bid"),
+        {"id": str(suggestion_id), "bid": str(bot_id)},
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+# --- Shadow-promoter endpoints ---
+
+
+@router.post("/{bot_id}/shadows", status_code=201)
+async def create_shadow(
+    bot_id: UUID,
+    body: dict[str, Any],
+    _admin: AdminDep,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+    db: DbDep,
+    request: Request,
+) -> dict[str, Any]:
+    from app.services.shadow_promoter.service import ShadowPromoterService
+
+    svc = ShadowPromoterService(
+        db_factory=request.app.state.db_factory,
+        supervisor=request.app.state.supervisor,
+        redis=request.app.state.redis,
+    )
+    try:
+        shadow_id = await svc.create_shadow(
+            live_bot_id=bot_id,
+            override_params=body.get("override_params", {}),
+            comparison_window_days=int(body.get("comparison_window_days", 14)),
+            created_by=_admin.email,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"shadow_bot_id": str(shadow_id)}
+
+
+@router.get("/{bot_id}/shadows/comparison")
+async def get_shadow_comparison(
+    bot_id: UUID,
+    user: JwtSubject,
+    db: DbDep,
+    request: Request,
+) -> dict[str, Any]:
+    from app.services.shadow_promoter.service import ShadowPromoterService
+
+    svc = ShadowPromoterService(
+        db_factory=request.app.state.db_factory,
+        supervisor=request.app.state.supervisor,
+        redis=request.app.state.redis,
+    )
+    report = await svc.get_comparison(bot_id, db)
+    return report.model_dump(mode="json")
+
+
+@router.post("/{bot_id}/shadows/{shadow_id}/promote")
+async def promote_shadow(
+    bot_id: UUID,
+    shadow_id: UUID,
+    _admin: AdminDep,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+    db: DbDep,
+    request: Request,
+) -> dict[str, Any]:
+    from app.services.shadow_promoter.service import ShadowPromoterService
+
+    svc = ShadowPromoterService(
+        db_factory=request.app.state.db_factory,
+        supervisor=request.app.state.supervisor,
+        redis=request.app.state.redis,
+    )
+    try:
+        await svc.promote(bot_id, shadow_id, promoted_by=_admin.email, db=db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.get("/{bot_id}/shadow-promotions")
+async def list_shadow_promotions(
+    bot_id: UUID,
+    user: JwtSubject,
+    db: DbDep,
+    before: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    query = (
+        "SELECT * FROM shadow_promotion_events WHERE live_bot_id=:lid"
+        + (" AND promoted_at < :before::timestamptz" if before else "")
+        + " ORDER BY promoted_at DESC LIMIT :lim"
+    )
+    params: dict[str, Any] = {"lid": str(bot_id), "lim": min(limit, 50)}
+    if before:
+        params["before"] = before
+    rows = (await db.execute(text(query), params)).all()
+    return {"items": [dict(r._mapping) for r in rows]}
+
+
+@router.get("/{bot_id}/backtests/{backtest_id}/advisor-decisions")
+async def list_backtest_advisor_decisions(
+    bot_id: UUID,
+    backtest_id: UUID,
+    user: JwtSubject,
+    db: DbDep,
+    after_id: int | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    query = (
+        "SELECT * FROM backtest_advisor_decisions WHERE backtest_id=:bid"
+        + (" AND id > :after" if after_id else "")
+        + " ORDER BY id ASC LIMIT :lim"
+    )
+    params: dict[str, Any] = {"bid": str(backtest_id), "lim": min(limit, 200)}
+    if after_id:
+        params["after"] = after_id
+    rows = (await db.execute(text(query), params)).all()
+    return {"items": [dict(r._mapping) for r in rows]}
 
 
 @router.post("/{bot_id}/start")

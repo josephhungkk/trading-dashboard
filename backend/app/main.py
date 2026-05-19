@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -170,6 +171,8 @@ async def lifespan(_app: FastAPI) -> Any:
     fernet = get_fernet(settings.secret_key, settings.secret_key_prev)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    _app.state.db_factory = session_factory
+    _app.state.supervisor = getattr(_app.state, "supervisor", None)
     svc = ConfigService(session_factory, config_cache, secrets_cache, fernet)
     set_config_service(svc)
     callback_server = await start_backend_callback_server(svc, session_factory)
@@ -290,6 +293,7 @@ async def lifespan(_app: FastAPI) -> Any:
         capability_map_provider=_capability_map_provider,
         available_providers_provider=_available_providers_provider,
     )
+    _app.state.ai_client = _app.state.ai_router
 
     listener_config = asyncio.create_task(config_cache.run_listener())
     listener_secrets = asyncio.create_task(secrets_cache.run_listener())
@@ -459,6 +463,72 @@ async def lifespan(_app: FastAPI) -> Any:
             await sweep_expired_quotes(sweep_db)
 
     scheduler.add_job(_run_forex_sweep, CronTrigger(minute="*/1"))
+
+    # Phase 21b: Param-tuner poll + shadow comparison
+    from app.services.param_tuner.service import BacktestSubmitter, ParamTunerService
+    from app.services.param_tuner.types import TunerTrigger
+    from app.services.shadow_promoter.service import ShadowPromoterService
+
+    async def _run_param_tuner_poll() -> None:
+        async with session_factory() as pt_db:
+            bots_result = await pt_db.execute(
+                text(
+                    "SELECT id FROM bots"
+                    " WHERE deleted_at IS NULL AND is_shadow=false"
+                    " AND status='running'"
+                    " AND (advisor_config->>'tuner_enabled')::boolean = true"
+                )
+            )
+            bot_ids = [row[0] for row in bots_result.all()]
+        for bid in bot_ids:
+            try:
+                async with session_factory() as pt_db2:
+                    svc = ParamTunerService(
+                        ai_client=_app.state.ai_client,
+                        redis=redis,
+                        db_factory=session_factory,
+                        backtest_submitter=BacktestSubmitter(session_factory),
+                    )
+                    await svc.trigger(bid, TunerTrigger.SCHEDULED, pt_db2)
+            except Exception:
+                log.exception("param_tuner_poll_failed", bot_id=str(bid))
+
+    async def _run_shadow_comparison_notify() -> None:
+        async with session_factory() as sh_db:
+            shadows_result = await sh_db.execute(
+                text(
+                    "SELECT DISTINCT shadow_of FROM bots"
+                    " WHERE is_shadow=true AND deleted_at IS NULL"
+                )
+            )
+            live_ids = [row[0] for row in shadows_result.all()]
+        for lid in live_ids:
+            try:
+                svc = ShadowPromoterService(
+                    db_factory=session_factory,
+                    supervisor=_app.state.supervisor,
+                    redis=redis,
+                )
+                async with session_factory() as sh_db2:
+                    report = await svc.get_comparison(lid, sh_db2)
+                    await redis.publish(
+                        f"bot:shadow:{lid}",
+                        json.dumps(
+                            {
+                                "v": 1,
+                                "type": "comparison",
+                                **report.model_dump(mode="json"),
+                            }
+                        ),
+                    )
+            except Exception:
+                log.exception("shadow_comparison_notify_failed", live_bot_id=str(lid))
+
+    scheduler.add_job(_run_param_tuner_poll, "interval", seconds=60, id="param_tuner_poll")
+    scheduler.add_job(
+        _run_shadow_comparison_notify,
+        CronTrigger(hour=8, minute=0),
+    )
 
     # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
     # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery
