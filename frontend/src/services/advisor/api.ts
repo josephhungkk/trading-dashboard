@@ -5,6 +5,7 @@ import type {
   AdvisorDecision,
   AdvisorDecisionOverride,
   AdvisorDecisionsPage,
+  AttributionSummary,
 } from './types';
 
 const BASE = '/api/bots';
@@ -110,4 +111,33 @@ export async function putAccountAdvisorConfig(
       },
     ),
   );
+}
+
+export async function getAdvisorAttribution(
+  botId: string,
+  window = '1h',
+): Promise<AttributionSummary> {
+  const resp = await fetch(
+    `/api/bots/${botId}/advisor-attribution?window=${encodeURIComponent(window)}`,
+    { credentials: 'include' },
+  );
+  if (!resp.ok) throw new Error(`advisor_attribution_fetch_failed: ${resp.status}`);
+  return resp.json() as Promise<AttributionSummary>;
+}
+
+export async function recomputeAttribution(
+  botId: string,
+  since: string,
+  csrfToken: string,
+): Promise<void> {
+  const resp = await fetch(`/api/bots/${botId}/advisor-attribution/recompute`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrfToken,
+    },
+    credentials: 'include',
+    body: JSON.stringify({ since }),
+  });
+  if (!resp.ok) throw new Error(`recompute_failed: ${resp.status}`);
 }

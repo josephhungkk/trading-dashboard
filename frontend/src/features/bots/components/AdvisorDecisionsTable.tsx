@@ -56,6 +56,7 @@ export function AdvisorDecisionsTable({ botId, isAdmin = false }: Props): React.
               <tr className="border-b text-left text-muted-foreground">
                 <th scope="col" className="py-2 pr-3 font-medium">Created</th>
                 <th scope="col" className="py-2 pr-3 font-medium">Verdict</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Outcome (1h)</th>
                 <th scope="col" className="py-2 pr-3 font-medium">Canonical ID</th>
                 <th scope="col" className="py-2 pr-3 font-medium">Side</th>
                 <th scope="col" className="py-2 pr-3 font-medium">Qty</th>
@@ -84,6 +85,17 @@ export function AdvisorDecisionsTable({ botId, isAdmin = false }: Props): React.
                       <span className="ml-2 rounded-sm bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700">
                         Overridden
                       </span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3">
+                    {decision.attribution_status === 'pending' ||
+                    decision.attribution_status === 'unresolvable' ||
+                    decision.outcome_1h_correct == null ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : decision.outcome_1h_correct ? (
+                      <span className="font-medium text-green-600">✓</span>
+                    ) : (
+                      <span className="font-medium text-red-500">✗</span>
                     )}
                   </td>
                   <td className="py-2 pr-3">{decision.canonical_id}</td>

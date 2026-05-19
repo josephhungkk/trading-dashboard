@@ -53,6 +53,7 @@ export function ParamCandidateCard({
   });
 
   const result = candidate.backtest_result;
+  const mutationError = approveMut.error ?? rejectMut.error;
 
   return (
     <article
@@ -122,7 +123,7 @@ export function ParamCandidateCard({
 
       {(approveMut.isError || rejectMut.isError) && (
         <p role="alert" className="text-xs text-destructive">
-          {(approveMut.error ?? rejectMut.error) instanceof Error ? (approveMut.error ?? rejectMut.error).message : String(approveMut.error ?? rejectMut.error)}
+          {mutationError instanceof Error ? mutationError.message : String(mutationError)}
         </p>
       )}
     </article>

@@ -112,6 +112,25 @@ export function AdvisorDecisionDrawer({ decision, isAdmin, onClose }: Props): Re
             <p className="whitespace-pre-wrap text-sm">{decision.reasoning}</p>
           </section>
 
+          {decision.attribution_status === 'complete' && (
+            <div className="border-t pt-4 text-sm">
+              <span className="text-muted-foreground">Outcome (1h): </span>
+              {decision.outcome_1h_correct === true ? (
+                <span className="text-green-600">✓ correct</span>
+              ) : decision.outcome_1h_correct === false ? (
+                <span className="text-red-500">✗ incorrect</span>
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
+              {decision.outcome_1h_pnl !== null && decision.outcome_1h_pnl !== undefined && (
+                <span className="ml-1 text-muted-foreground">
+                  ({Number(decision.outcome_1h_pnl) >= 0 ? '+' : ''}
+                  {Number(decision.outcome_1h_pnl).toFixed(2)} quote)
+                </span>
+              )}
+            </div>
+          )}
+
           <section>
             <h3 className="mb-2 text-sm font-semibold">Advice tags</h3>
             <div className="flex flex-wrap gap-2">

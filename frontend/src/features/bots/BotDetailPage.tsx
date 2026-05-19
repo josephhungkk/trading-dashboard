@@ -12,6 +12,7 @@ import { BotRunsTable } from './components/BotRunsTable';
 import { BotOrdersTable } from './components/BotOrdersTable';
 import { AdvisorConfigForm } from './components/AdvisorConfigForm';
 import { AdvisorDecisionsTable } from './components/AdvisorDecisionsTable';
+import { AdvisorScoreCard } from './components/AdvisorScoreCard';
 import { AccountAdvisorConfigForm } from './components/AccountAdvisorConfigForm';
 import { ParamTunerSection } from './components/ParamTunerSection';
 import { ShadowComparisonPanel } from './components/ShadowComparisonPanel';
@@ -28,7 +29,7 @@ interface BotWithAdvisorAccounts {
   bot_accounts?: BotAccountAdvisorConfig[];
   account_ids?: string[];
   account_advisor_config_overrides?: Record<string, Record<string, unknown> | null>;
-  advisor_config?: Record<string, unknown> | null;
+  advisor_config?: { mode?: 'OFF' | 'OBSERVE' | 'VETO' } | null;
 }
 
 export function BotDetailPage(): React.JSX.Element {
@@ -181,6 +182,10 @@ export function BotDetailPage(): React.JSX.Element {
             Created {new Date(bot.created_at).toLocaleString()} · Updated{' '}
             {new Date(bot.updated_at).toLocaleString()}
           </div>
+          <AdvisorScoreCard
+            botId={botId}
+            advisorMode={botAdvisorData.advisor_config?.mode ?? 'OFF'}
+          />
         </div>
       )}
 

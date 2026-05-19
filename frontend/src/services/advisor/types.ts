@@ -25,6 +25,22 @@ export interface ContextSummary {
   payload_token_estimate: number;
 }
 
+export interface AttributionSummary {
+  bot_id: string;
+  window: string;
+  veto_accuracy: number | null;
+  approve_accuracy: number | null;
+  avg_avoided_loss_quote: string | null;
+  avg_missed_gain_quote: string | null;
+  complete_count: number;
+  partial_count: number;
+  pending_count: number;
+  bars_unavailable_count: number;
+  unresolvable_count: number;
+  skipped_count: number;
+  generated_at: string;
+}
+
 export interface AdvisorDecision {
   id: number;
   bot_id: string;
@@ -51,6 +67,16 @@ export interface AdvisorDecision {
   override_action: 'approve' | 'veto' | null;
   override_reason: string | null;
   overridden_at: string | null;
+  attribution_status: 'pending' | 'partial' | 'complete' | 'bars_unavailable' | 'unresolvable';
+  outcome_15m_correct: boolean | null;
+  outcome_15m_pnl: string | null;
+  outcome_1h_correct: boolean | null;
+  outcome_1h_pnl: string | null;
+  outcome_4h_correct: boolean | null;
+  outcome_4h_pnl: string | null;
+  outcome_eod_correct: boolean | null;
+  outcome_eod_pnl: string | null;
+  attribution_computed_at: string | null;
   created_at: string;
 }
 

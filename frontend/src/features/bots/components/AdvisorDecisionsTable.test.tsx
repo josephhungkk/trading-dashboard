@@ -46,6 +46,16 @@ function decision(id: number, verdict: AdvisorVerdict): AdvisorDecision {
     override_action: null,
     override_reason: null,
     overridden_at: null,
+    attribution_status: 'pending',
+    outcome_15m_correct: null,
+    outcome_15m_pnl: null,
+    outcome_1h_correct: null,
+    outcome_1h_pnl: null,
+    outcome_4h_correct: null,
+    outcome_4h_pnl: null,
+    outcome_eod_correct: null,
+    outcome_eod_pnl: null,
+    attribution_computed_at: null,
     created_at: '2026-05-19T12:00:00Z',
   };
 }
