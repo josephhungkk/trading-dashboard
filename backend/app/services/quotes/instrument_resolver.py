@@ -321,6 +321,8 @@ class InstrumentResolver:
         """
         import json
 
+        from app.services.advisor.attribution_types import InstrumentAttribution
+
         cache_key = f"attribution:instr:{canonical_id}"
         raw = await redis.get(cache_key)
         if raw is not None:
