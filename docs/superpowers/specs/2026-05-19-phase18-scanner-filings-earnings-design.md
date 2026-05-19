@@ -1,7 +1,7 @@
 # Phase 18 — Universe Scanner + News/Filings + Earnings
 
 **Date:** 2026-05-19  
-**Status:** approved — architect-reviewed (Pass 1 applied inline)  
+**Status:** approved — architect-reviewed (Pass 1 + Pass 2 applied inline)  
 **Versions:** v0.18.0 (scanner) · v0.18.1 (filings) · v0.18.2 (earnings)
 
 ---
@@ -26,7 +26,7 @@ Each sub-phase ships its own Alembic migration, test suite, and FE route. Sub-ph
 
 A configurable universe scanner with a Lark-based DSL rule evaluator, saved + ad-hoc scan modes, background APScheduler scheduling with market-hours gating, DB-persisted run history, LLM commentary at configurable depth, and integration with the Phase 11b alerts engine.
 
-The `TicksSubscriber` lifespan wiring (deferred from Phase 11b) also lands here — scanner and alerts share the same synthetic-WS-id pubsub pattern (see TicksSubscriber section).
+The `TicksSubscriber` lifespan wiring (deferred from Phase 11b) also lands here — scanner and alerts share the same per-canonical-id pubsub subscription pattern (see TicksSubscriber section).
 
 ### Data model (Alembic 0058)
 
@@ -61,7 +61,7 @@ started_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 completed_at        TIMESTAMPTZ
 error               TEXT
 ```
-`scanner_runs` is a TimescaleDB hypertable partitioned on `started_at` with a 90-day drop policy (MED-7). Migration 0058 calls `create_hypertable` + `add_retention_policy`.
+`scanner_runs` is a TimescaleDB hypertable partitioned on `started_at` with `chunk_time_interval => INTERVAL '7 days'` and a 90-day drop policy (MED-7, MED-12). Migration 0058 calls `create_hypertable` + `add_retention_policy`.
 
 **`scanner_candidates`**
 ```sql
@@ -83,24 +83,25 @@ Index: `CREATE INDEX ON scanner_candidates (canonical_id)` for re-link queries.
 
 Phase 18 scope: read-only indicator expressions. No order submission, no state mutation (those extend the grammar in Phase 20). String literals, bitwise ops, ternary, and lambda are excluded — extend in Phase 20.
 
-Keywords are **lowercase only** (MED-11 fix — no `/i` regex; `and`, `or`, `not` only):
+Keywords are **lowercase only** (MED-11 fix — no `/i` regex; `and`, `or`, `not` only). Grammar uses precedence-ranked rules (NOT > AND > OR) to avoid LALR shift-reduce conflicts and ensure unambiguous parse of `not a and b or c` → `((not a) and b) or c` (HIGH-11 fix):
 
 ```lark
-rule: expr
+rule: or_expr
 
-expr: expr "and" expr          -> and_expr
-    | expr "or" expr           -> or_expr
-    | "not" expr               -> not_expr
-    | "(" expr ")"             -> paren_expr
-    | comparison
+or_expr:  and_expr ("or" and_expr)*    -> or_expr
+and_expr: not_expr ("and" not_expr)*   -> and_expr
+not_expr: "not" not_expr               -> not_expr
+        | atom
+atom: comparison
+    | "(" or_expr ")"
 
-comparison: term OP term       -> cmp_expr
+comparison: term OP term               -> cmp_expr
 
 term: func_call
-    | NUMBER                   -> number
-    | NAME                     -> name
+    | NUMBER                           -> number
+    | NAME                             -> name
 
-func_call: NAME "(" arglist? ")" -> call
+func_call: NAME "(" arglist? ")"       -> call
 
 arglist: term ("," term)*
 
@@ -156,25 +157,37 @@ Additional Prometheus metrics for evaluator safety:
 
 ### Indicator computation (`app/services/scanner/indicators.py`)
 
-- Daily indicators (`rsi`, `sma`, `ema`, `atr`, etc.) read from `bars_1d` CAGG (Phase 10b.1)
-- Intraday scalars (`volume`, `close`) read from `bars_1m`
+- Daily indicators (`rsi`, `sma`, `ema`, `atr`, etc.) read from `bars_1d` CAGG (Phase 10b.1; 2yr retention)
+- Intraday scalars (`volume`, `close`) read from `bars_1m` (6-month retention — MED-14)
 - Redis cache key: `scanner:ind:{instrument_id}:{indicator_name}:{params_hash}:{timeframe}` — 60s TTL intraday (`1m`), 5min daily (`1d`)
 - At lifespan start: warm Redis for all active-scan symbols from CAGGs (replaces dropped `scanner_indicator_cache` table)
 - `TicksSubscriber` feeds real-time `close`/`volume` into `scanner:tick:{canonical_id}:{field}` → invalidates intraday cache on tick
 
+**Data freshness — indicator data source table** (MED-14):
+
+| Indicator | Reads from | Retention | Freshness caveat |
+|---|---|---|---|
+| `rsi`, `sma`, `ema`, `macd`, `bb_pct`, `atr` (daily) | `bars_1d` CAGG | 2yr | Symbols added < 1d ago have no daily bar — returns `None`, evaluates false |
+| `volume_ratio`, `price_vs_high`, `price_vs_low` (intraday) | `bars_1m` | 6mo | Symbols added < N min ago return `None` for N-period indicators |
+| `close`, `open`, `high`, `low`, `volume` (scalar) | `bars_1m` latest | 6mo | Stale after 60s if TicksSubscriber not running |
+| `mcap`, `pe`, `eps_growth` | `instruments.meta` JSONB | On-demand | May be null if not seeded; evaluates false |
+
+Rules using intraday indicators fail gracefully (return `None` → evaluate false, not error) when data is unavailable.
+
 ### TicksSubscriber wiring (CRIT-4 fix — deferred from Phase 11b)
 
-The `SubscriptionRegistry` API (`add(ws, symbols)` / `remove(ws, symbols)`) is per-WS refcount only — no `register_internal_subscriber` exists. The correct pattern is:
+The `SubscriptionRegistry` API (`add(ws, symbols)` / `remove(ws, symbols)`) is per-WS refcount only — no `register_internal_subscriber` exists. `WSConnId = UUID` (confirmed: `registry.py:32`) — string identifiers do not typecheck. The correct pattern is:
 
-**Synthetic-WS-id + pubsub listener:**
+**Widened `WSConnId` + per-canonical-id pubsub subscriptions:**
 
-1. Scanner (and alerts engine) register a synthetic WS id: `WSConnId("__internal:scanner")`, `WSConnId("__internal:alerts")` — treated as regular subscribers in the refcount machinery.
-2. `SubscriptionRegistry` gains `cap_per_ws_override: dict[WSConnId, int]` — internal subscribers get `cap=3500` (70% of global 5000 cap); user WS connections share the remaining 1500 (30%). Cap policy: `cap_internal_pct: float = 0.7` in `app_config`.
-3. Scanner runs its own `asyncio.Task` doing `psubscribe quote:*` on Redis, filtering against the active-scan canonical_id set (built from enabled `saved_scans`). No engine-internal hooks.
+1. **`WSConnId` is widened to `UUID | str`** in this phase. Strings prefixed `__internal:` denote in-process consumers; they bypass the per-WS rate limiter (the rate bucket is keyed on `WSConnId` and internal consumers have no user-facing rate concept — the bulk lifespan-time subscribe of 3500 symbols must not hit the 60/min rate cap).
+2. `SubscriptionRegistry` gains `cap_per_ws_override: dict[str, int]` — internal string IDs get `cap=3500` (70% of global 5000 cap); user UUID WS connections share the remaining 1500 (30%). Cap policy: `cap_internal_pct: float = 0.7` in `app_config`.
+3. Scanner runs its own `asyncio.Task` subscribing to per-canonical-id patterns — mirroring the existing alerts `ticks_subscriber.py` pattern: `psubscribe quote.*.{canonical_id}` for each symbol in the active-scan set. The confirmed channel format (from `engine.py:328`) is `quote.{source}.{canonical_id}` (dot-separated). The scanner task parses `channel.split(".")` to extract `canonical_id` and filters against the active-scan set.
 4. On tick arrival: updates `scanner:tick:{canonical_id}:{field}` in Redis → invalidates intraday indicator cache for that symbol.
-5. Synthetic-WS subscriptions added at lifespan start; updated when saved scans are created/deleted/enabled/disabled.
+5. When saved scans are created/updated/deleted/enabled/disabled: recompute active-scan symbol set, issue `PSUBSCRIBE`/`PUNSUBSCRIBE` on the delta.
+6. Subscriptions added to registry with `WSConnId("__internal:scanner")` at lifespan start.
 
-This is the only way internal consumers subscribe to quotes — no other internal-subscriber pattern exists.
+This is the only way internal consumers subscribe to quotes — no other internal-subscriber pattern exists. LOW-7: Phase 11b `alerts/ticks_subscriber.py` already uses the correct `psubscribe quote.*.{canonical}` pattern; it should be migrated to register via `WSConnId("__internal:alerts")` as a follow-up in Phase 18.0 Chunk D to close the Phase 11b deferral.
 
 ### Service architecture (`app/services/scanner/`)
 
@@ -195,10 +208,10 @@ scanner/
 2. For each instrument: fetch indicator snapshot (Redis → recompute from CAGG on miss)
 3. Walk Lark AST against indicator symbol table → boolean match (per-instrument 250ms timeout)
 4. Insert `scanner_run` row (`status='running'`)
-5. Insert `scanner_candidates` rows for all matches
+5. Collect matches; if match count > `candidate_count_cap` (default 500), sort by a salience score (e.g. RSI distance from 50) and truncate to 500; emit `scanner_candidate_cap_hit_total` (MED-13). Insert `scanner_candidates` rows.
 6. Enqueue commentary job (async, non-blocking — candidates visible immediately)
 7. Update `scanner_run` → `status='completed'`
-8. Publish `scanner:run:{scan_id}` to Redis pubsub → WS gateway (v=1 frame envelope — MED-10)
+8. Publish `scanner:run:{scan_id}` to Redis pubsub → WS gateway. Frame schema: `{v: 1, type: "...", ts: <server_iso8601>, ...payload}` (MED-10, LOW-8 — `ts` field for FE latency measurement, consistent with portfolio rollup envelope)
 9. If `alert_id` set and `candidate_count > 0` → insert `alert_fires` row with `fire_context` JSONB carrying `{scanner_run_id, candidate_ids, indicator_snapshots}` — this is how scanner matches flow into the Phase 11b alert path (CRIT-2 fix)
 
 **Scheduling** (`scanner/scheduler.py`):
@@ -236,7 +249,7 @@ Provide a 3-5 sentence analysis combining the technical setup and fundamental co
 
 Commentary fires as a background asyncio task after run completes; patches `scanner_candidates.llm_commentary` in DB; publishes `commentary_ready` WS frame per candidate (v=1 envelope).
 
-### Prometheus metrics (11)
+### Prometheus metrics (12)
 
 | Metric | Labels |
 |---|---|
@@ -244,6 +257,7 @@ Commentary fires as a background asyncio task after run completes; patches `scan
 | `scanner_candidates_total` | `scan_id` |
 | `scanner_universe_size` | `scan_id` |
 | `scanner_universe_stale_total` | `scan_id` |
+| `scanner_candidate_cap_hit_total` | `scan_id` |
 | `scanner_indicator_cache_hits_total` | — |
 | `scanner_indicator_cache_misses_total` | — |
 | `scanner_llm_commentary_total` | `depth`, `status` |
@@ -281,7 +295,7 @@ Commentary fires as a background asyncio task after run completes; patches `scan
 - Frame schema: `{v: 1, type: "...", ...payload}` — versioned v=1 envelope on all frames (MED-10 fix)
 - Frame types: `run_started`, `candidate`, `run_completed`, `commentary_ready`
 - Ad-hoc runs: `/ws/scanner/runs/adhoc/{session_id}` (client-generated UUID)
-- 30s heartbeat, **20-connection cap per `jwt_subject`** (MED-6 fix — per-user, not global), 2s send timeout
+- 30s heartbeat, **cap per `(scan_id, jwt_subject)` = 5** (so multiple tabs on the same scan don't fan out unboundedly); **global per `jwt_subject` = 50** (accommodating sidebar + ad-hoc + multi-device usage) (HIGH-13, MED-6 fix), 2s send timeout
 - Bounded backoff reconnect on FE: `[500, 1500, 5000, 15000]`
 
 ### Frontend (`features/scanner/`)
@@ -356,10 +370,11 @@ filings/
   filings_service.py    -- FilingsService orchestrator
 ```
 
-**SEC EDGAR single client** (HIGH-6 fix) — `app/services/common/sec_edgar_client.py`:
+**SEC EDGAR single client** (HIGH-6, MED-15 fix) — `app/services/common/sec_edgar_client.py`:
 - All SEC EDGAR HTTP traffic routes through this single client
 - Global 10 req/s token bucket (`asyncio.Semaphore` + token-refill task) — shared across filing polls, ad-hoc fetches, and any future SEC consumers
 - Required `User-Agent` header: `"Trading Dashboard {contact_email}"` where `contact_email` read from `app_config[filings/sec_edgar/contact_email]`
+- **Startup check** (MED-15): at lifespan start, assert `app_config.get("filings/sec_edgar/contact_email")` is not None. If missing: log `logger.critical("SEC EDGAR contact_email not configured — SEC polling disabled")` + set `sec_edgar_disabled=True` flag; file poller no-ops. This prevents IP-ban from missing User-Agent. Emit `sec_edgar_no_contact_email_total` counter on each skipped poll tick.
 - 429 → exponential backoff + `sec_edgar_rate_limit_total` counter
 
 **Polling (APScheduler):**
@@ -374,11 +389,12 @@ filings/
 - `LOCAL_ONLY` for short filings ≤ 4KB
 - Patches `filings.llm_summary` + `llm_summary_at` on completion
 
-**Instrument linker + backfill** (HIGH-5 fix):
-- `instrument_linker.py` resolves CIK/ticker → `canonical_id` via `symbol_aliases`
+**Instrument linker + backfill** (HIGH-5, CRIT-2B fix):
+- `instrument_linker.py` resolves CIK/ticker → `canonical_id` via `symbol_aliases` joined to `instruments`
+- `symbol_aliases` schema: `(source, raw_symbol, instrument_id, meta JSONB, created_at)` — no `confidence` column (confirmed from models). Tiebreaker for dual-listed ADRs (1 CIK, multiple rows): join to `instruments` and prefer the row where `instruments.primary_exchange` matches the filing's home exchange (e.g. SEC filing → prefer `XNYS`/`XNAS`; HKEX filing → prefer `XHKG`). `instruments.primary_exchange` is confirmed to exist (models.py).
 - Failure modes:
   - New filer with no `symbol_aliases` row → insert with `instrument_id=NULL`
-  - Dual-listed ADR (1 CIK, multiple canonical_ids) → link to the primary-exchange row (highest `confidence` in `symbol_aliases`); document ambiguity in `filings.canonical_id` ARRAY if needed (defer multi-link to Phase 24)
+  - Dual-listed ADR with no clear primary-exchange match → insert with `instrument_id=NULL`; flag for human review via `filings_instrument_link_failures_total` counter
   - Delisted ticker → insert with `instrument_id=NULL`
 - **Backfill job** (`filings_relinker`): nightly APScheduler job scans `filings WHERE instrument_id IS NULL AND captured_at > now() - interval '30 days'` and re-runs `instrument_linker`; also triggered via Redis pubsub `symbol_aliases:insert` channel on any new alias upsert
 - Metric: `filings_relinked_total`
@@ -419,7 +435,7 @@ filings/
 
 ### Overview
 
-Earnings calendar sourced from Schwab (primary) and Nasdaq earnings API (free fallback), with per-position auto-flat and per-bot auto-pause hooks that fire N minutes before a scheduled announcement. Bot pause/resume is a stub in Phase 18 (no-op until Phase 20 ships the `bots` table).
+Earnings calendar sourced from Nasdaq earnings API (primary — free, no key required) and Finnhub free tier (fallback). Schwab's Developer API does not expose an earnings calendar endpoint (confirmed: `schwabdev` covers market-data + trade execution only; TD-Ameritrade-era earnings calendar was not migrated). Source enum reflects this (HIGH-9 fix). Per-position auto-flat and per-bot auto-pause hooks fire N minutes before a scheduled announcement. Bot pause/resume is a stub in Phase 18 (no-op until Phase 20 ships the `bots` table).
 
 ### Data model (Alembic 0060)
 
@@ -437,9 +453,11 @@ eps_estimate      NUMERIC(20, 8)
 eps_actual        NUMERIC(20, 8)     -- filled post-announcement
 revenue_estimate  NUMERIC(20, 8)
 revenue_actual    NUMERIC(20, 8)
-source            TEXT NOT NULL CHECK (source IN ('schwab', 'nasdaq_api', 'manual'))
+source            TEXT NOT NULL CHECK (source IN ('nasdaq_api', 'finnhub_api', 'manual'))
 source_priority   INT NOT NULL DEFAULT 0
-  -- higher = preferred: schwab=2, nasdaq_api=1, manual=0 (MED-8 fix)
+  -- higher = preferred: nasdaq_api=2, finnhub_api=1, manual=0 (MED-8, HIGH-9 fix)
+  -- same-priority tie: last-writer-wins via `WHERE EXCLUDED.source_priority >= source_priority`
+  -- (>= is intentional: same-priority updates to refresh estimates/actuals)
 confirmed         BOOLEAN NOT NULL DEFAULT false  -- false = estimated date
 captured_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -470,16 +488,17 @@ created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 ```
 earnings/
   schemas.py            -- EarningsEvent, EarningsHook Pydantic models
-  schwab_calendar.py    -- Schwab earnings calendar poller
-  nasdaq_calendar.py    -- Nasdaq earnings API fallback (free)
+  nasdaq_calendar.py    -- Nasdaq earnings API primary poller (free, no key)
+  finnhub_calendar.py   -- Finnhub free-tier fallback poller
   earnings_service.py   -- EarningsService orchestrator
   hook_executor.py      -- HookExecutor: auto_flat + auto_pause_bot
 ```
 
 **Polling (APScheduler):**
-- Schwab earnings calendar: daily at 06:00 US/Eastern; pulls next 7 days
-- Nasdaq API fallback: same cadence; fills gaps where Schwab has no data
-- Hook evaluation: every 1 min during market hours; APScheduler `coalesce=True, misfire_grace_time=30` (MED-9 fix)
+- Nasdaq earnings API (primary): daily at 06:00 US/Eastern; pulls next 7 days
+- Finnhub free tier (fallback): same cadence; fills gaps where Nasdaq has no data
+- Hook evaluation: every 1 min during market hours
+- All `add_job` calls in `earnings/hook_executor.py` and `scanner/scheduler.py` use `coalesce=True, misfire_grace_time=60` at the job level (MED-18 fix — per-job, not scheduler-level `job_defaults`)
 - Idempotency: `SET earnings:hook_fired:{hook_id}:{event_id} 1 NX EX 604800` (HIGH-7 fix — 7-day TTL, atomic NX); hook fires only when `SET NX` returns `1`. Additionally, a `hook_audit` table row is inserted in Postgres for cross-restart durability (Redis-only dedup is lost on flush):
 
 **`hook_audit`** (part of Alembic 0060):
@@ -493,22 +512,28 @@ order_id    UUID    -- FK to orders.id if placed
 UNIQUE (hook_id, event_id)  -- Postgres-level idempotency guard
 ```
 
-### `auto_flat` flow (CRIT-1 fix)
+### `auto_flat` flow (CRIT-1, HIGH-10, HIGH-12 fix)
 
-The executor calls `orders_service.place_order_internal` — a new internal entry point that takes a fully-resolved request and skips the HTTP-request-context nonce check (same pattern as Phase 11d Telegram bot, which mints a web nonce with `issuer="telegram"` tag):
+The executor calls `orders_service.place_order_internal` — a new internal entry point that takes a fully-resolved request and skips the HTTP-request-context nonce check (same pattern as Phase 11d Telegram bot). The function signature accepts `issuer: Literal["telegram", "earnings_hook"]` — a typed enum, not a free string, to make accidental new callers visible in code review (MED-16). `place_order_internal` is never exposed via any HTTP/WS surface.
 
-1. Resolve open position for `(instrument_id, account_id)` from `positions`
-2. If `qty == 0` → insert `hook_audit(outcome='skipped_no_position')`, done
-3. Check `hook_audit` table: if `UNIQUE (hook_id, event_id)` already exists → skip (Postgres-level guard)
-4. **Double-read race guard** (HIGH-4 fix): read `qty_at_read = positions.qty`; place order; after 5s monitor fill; if `positions.qty` has moved more than `qty_at_read × 0.1` (10% tolerance) before fill → emit `auto_flat_race_detected` + Telegram alert + retry once. If broker supports position-close semantics (IBKR `closePosition=True`, Schwab `closePosition` flag) — use that instead of qty-based order to avoid the race entirely
-5. Call `orders_service.place_order_internal(jwt_subject=hook.jwt_subject, issuer="earnings_hook", client_order_id=f"earnings-hook-{hook.id}-{event.id}", account_id=hook.account_id, instrument_id=hook.instrument_id, side='sell' if qty > 0 else 'buy', qty=abs(qty), order_type='MARKET', position_effect='CLOSE')`
-6. `place_order_internal` routes through all 5 validation stations including risk gate, with `position_effect='CLOSE'` and `issuer` recorded in `risk_decisions.attempt_kind='earnings_hook_flat'` (HIGH-8 fix); PDT check bypassed for CLOSE orders (`bypass_pdt_when_closing=True` on the call — risk gate respects this for hook-originated flatten orders; documented as an ADR in this spec)
-7. Kill-switch check: **not bypassed** — if account kill-switch is ON, auto_flat fails-CLOSED with Telegram alert: `"Auto-flat BLOCKED — kill-switch active for {account_alias}"`
-8. Telegram notification on success: `"Auto-flat triggered for {symbol} ({account_alias}) — earnings in {N} min"`
-9. Insert `hook_audit(outcome='placed', order_id=...)` 
-10. Mark Redis dedup key: `SET earnings:hook_fired:{hook_id}:{event_id} 1 NX EX 604800`
+**Broker-native position-close semantics are not used** — IBKR and Schwab both handle closing implicitly from order sign. For **options**, the closing side differs: `SELL_TO_CLOSE` if long, `BUY_TO_CLOSE` if short (HIGH-10 fix). Race protection relies on the double-read guard below.
 
-**PDT bypass ADR:** auto_flat sets `position_effect='CLOSE'`. The risk gate's `_check_pdt` must learn `bypass_pdt_when_closing: bool` flag: when `True` and `position_effect == 'CLOSE'`, skip PDT counter increment and PDT BLOCK. Rationale: flattening before earnings is risk-reducing; PDT blocking the flatten would increase risk. Kill-switch is NOT bypassed — it represents an explicit operator override.
+Step ordering (HIGH-12 fix — dedup claim before broker dispatch to prevent double-flat on crash):
+
+1. Resolve open position for `(instrument_id, account_id)` from `positions`. If `qty == 0` → done.
+2. Check `hook_audit` table: if `UNIQUE (hook_id, event_id)` row already exists → skip (Postgres-level durable guard, cross-restart safe).
+3. Try `SET earnings:hook_fired:{hook_id}:{event_id} 1 NX EX 604800` on Redis. If key exists (concurrent evaluator beat us) → skip.
+4. **Claim the audit row**: insert `hook_audit(hook_id, event_id, outcome='placed', order_id=NULL)` inside a transaction. The UNIQUE constraint catches any concurrent race that slipped past steps 2–3.
+5. Determine side: if `instrument.asset_class == AssetClass.OPTION`: `side = 'sell_to_close' if qty > 0 else 'buy_to_close'`; else: `side = 'sell' if qty > 0 else 'buy'`.
+6. Call `orders_service.place_order_internal(jwt_subject=hook.jwt_subject, issuer="earnings_hook", client_order_id=f"earnings-hook-{hook.id}-{event.id}", account_id=hook.account_id, instrument_id=hook.instrument_id, side=side, qty=abs(qty), order_type='MARKET', position_effect='CLOSE')`.
+7. `place_order_internal` routes through all 5 validation stations including risk gate, with `position_effect='CLOSE'` and `issuer` recorded in `risk_decisions.attempt_kind='earnings_hook_flat'` (HIGH-8 fix); PDT check bypassed for CLOSE orders (`bypass_pdt_when_closing=True`).
+8. Kill-switch check: **not bypassed** — if account kill-switch is ON, auto_flat fails-CLOSED; update `hook_audit(outcome='failed_kill_switch')`; Telegram alert: `"Auto-flat BLOCKED — kill-switch active for {account_alias}"`.
+9. On broker success: update `hook_audit(order_id=placed_order.id)`.
+10. On broker failure: update `hook_audit(outcome='failed')`. Hook will NOT re-fire (UNIQUE row remains); operator must manually clear `hook_audit` row to retry.
+11. **Double-read race guard** (HIGH-4 fix): read `qty_at_read`; after 5s monitor fill; if `positions.qty` delta > `qty_at_read × 0.1` → emit `auto_flat_race_detected` + Telegram alert + retry once.
+12. Telegram notification on success: `"Auto-flat triggered for {symbol} ({account_alias}) — earnings in {N} min"`.
+
+**PDT bypass ADR:** `position_effect='CLOSE'` + `bypass_pdt_when_closing=True`. Risk gate's `_check_pdt` skips PDT counter increment and PDT BLOCK when both are set. Rationale: flattening before earnings is risk-reducing; PDT blocking the flatten would increase risk. Kill-switch is NOT bypassed.
 
 **`auto_pause_bot` flow:**
 1. No-op stub in Phase 18: log `"auto_pause_bot: bots table not yet available"` + skip
@@ -574,6 +599,7 @@ Note (LOW-4): `EarningsHookDrawer` mints CSRF nonce on drawer open (more secure 
 | Admin UI for `filing_feed_cursors` reset | Phase 24 |
 | TWS string casing verification for scanner-triggered orders | Phase 17 deferred — Phase 24 |
 | Scanner scheduler leader-election (multi-worker) | Phase 24 |
+| Migration of `alerts/ticks_subscriber.py` to synthetic-WS-id registry pattern | Phase 18.0 Chunk D follow-up (LOW-7) |
 
 ---
 
@@ -584,10 +610,13 @@ Note (LOW-4): `EarningsHookDrawer` mints CSRF nonce on drawer open (more secure 
 3. `auto_flat` is money-moving: fail-CLOSED on broker unreachable (503 → skip + Telegram alert); kill-switch is NOT bypassed
 4. All Prometheus counters use verbatim label values from this spec
 5. **Lark grammar is read-only in Phase 18** — indicator namespace contains no `place_order`, no state mutation, no I/O. Phase 20 extends the grammar; do not add mutation to Phase 18 evaluator
-6. **Synthetic-WS-id + pubsub is the only internal quote subscription pattern** — no `register_internal_subscriber` API exists; internal consumers use `WSConnId("__internal:{name}")` with `cap_per_ws_override`
-7. **Scanner DSL enforces hard wall-clock + node-count caps** at save time (AST) and run time (per-instrument 250ms, per-run 60s)
-8. **Scanner scheduler is single-replica today** — multi-worker scheduling deferred to Phase 24; optional leader-election via `SET NX EX 60` on `scanner:scheduler:leader`
-9. **Hook-fired orders use `client_order_id = "earnings-hook-{hook_id}-{event_id}"`** and carry `issuer="earnings_hook"` in `risk_decisions.attempt_kind`; this defines the audit taxonomy
-10. **`attempt_kind` is an enum-by-CHECK-constraint** (not a PG enum) — every new gate caller widens the CHECK in its phase's migration. Phase 18 adds `"earnings_hook_flat"` in Alembic 0060
-11. All Prometheus metrics include the three additional evaluator-safety metrics: `scanner_eval_timeout_total`, `scanner_eval_node_reject_total`, `scanner_eval_indicator_budget_exhausted_total`
-12. **`auto_flat` bypasses PDT for CLOSE orders** (`bypass_pdt_when_closing=True` on `place_order_internal` call); kill-switch is never bypassed
+6. **`WSConnId` widened to `UUID | str`** in Phase 18.0. Strings prefixed `__internal:` bypass the per-WS rate limiter. All internal consumers use `cap_per_ws_override`. No `register_internal_subscriber` API.
+7. **Scanner tick subscriptions use per-canonical-id `psubscribe quote.*.{canonical_id}` patterns** (dot-separated, matching confirmed `engine.py:328` channel format `quote.{source}.{canonical_id}`). No wildcard `quote.*.*` fan-out.
+8. **Scanner DSL enforces hard wall-clock + node-count caps** at save time (AST) and run time (per-instrument 250ms, per-run 60s)
+9. **Scanner scheduler is single-replica today** — multi-worker scheduling deferred to Phase 24; optional leader-election via `SET NX EX 60` on `scanner:scheduler:leader`
+10. **Hook-fired orders use `client_order_id = "earnings-hook-{hook_id}-{event_id}"`** and carry `issuer: Literal["telegram", "earnings_hook"]` in `risk_decisions.attempt_kind`; `place_order_internal` is never exposed via HTTP/WS
+11. **`attempt_kind` is an enum-by-CHECK-constraint** (not a PG enum) — every new gate caller widens the CHECK in its phase's migration. Phase 18 adds `"earnings_hook_flat"` in Alembic 0060
+12. **`auto_flat` dedup claim (Postgres `hook_audit` + Redis `SET NX`) precedes broker dispatch** — prevents double-flat on crash; missed flatten is recoverable manually; duplicate flatten requires unwinding
+13. **`auto_flat` bypasses PDT for CLOSE orders** (`bypass_pdt_when_closing=True`); kill-switch is NOT bypassed
+14. **SEC EDGAR client is the single global gateway** for all SEC traffic — shared 10 req/s token bucket, required User-Agent contact email, startup-disabled if `app_config[filings/sec_edgar/contact_email]` is missing
+15. **Schwab does not provide an earnings calendar endpoint** — Nasdaq API (primary) + Finnhub (fallback) are the sole calendar sources in Phase 18.2
