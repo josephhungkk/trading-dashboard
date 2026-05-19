@@ -13,8 +13,10 @@ import { BotOrdersTable } from './components/BotOrdersTable';
 import { AdvisorConfigForm } from './components/AdvisorConfigForm';
 import { AdvisorDecisionsTable } from './components/AdvisorDecisionsTable';
 import { AccountAdvisorConfigForm } from './components/AccountAdvisorConfigForm';
+import { ParamTunerSection } from './components/ParamTunerSection';
+import { ShadowComparisonPanel } from './components/ShadowComparisonPanel';
 
-type Tab = 'overview' | 'runs' | 'orders' | 'risk' | 'advisor';
+type Tab = 'overview' | 'runs' | 'orders' | 'risk' | 'advisor' | 'shadows';
 
 interface BotAccountAdvisorConfig {
   account_id: string;
@@ -36,6 +38,7 @@ export function BotDetailPage(): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>('overview');
   const [editParams, setEditParams] = React.useState(false);
   const [pendingParams, setPendingParams] = React.useState<Record<string, unknown> | null>(null);
+  const isAdmin = true;
 
   const { data: bot, isLoading, error, refetch: refetchBot } = useQuery({
     queryKey: ['bot', botId],
@@ -62,6 +65,7 @@ export function BotDetailPage(): React.JSX.Element {
     { id: 'orders', label: 'Orders' },
     { id: 'risk', label: 'Risk caps' },
     { id: 'advisor', label: 'Advisor' },
+    { id: 'shadows', label: 'Shadows' },
   ];
   const botAdvisorData = bot as typeof bot & BotWithAdvisorAccounts;
   const botAccounts =
@@ -186,7 +190,8 @@ export function BotDetailPage(): React.JSX.Element {
       {tab === 'advisor' && (
         <div className="space-y-6">
           <AdvisorConfigForm botId={botId} />
-          <AdvisorDecisionsTable botId={botId} isAdmin />
+          <AdvisorDecisionsTable botId={botId} isAdmin={isAdmin} />
+          <ParamTunerSection botId={botId} isAdmin={isAdmin} />
           {botAccounts.map((account) => (
             <section key={account.account_id} className="space-y-2">
               <h4 className="text-sm font-semibold">
@@ -204,6 +209,7 @@ export function BotDetailPage(): React.JSX.Element {
           ))}
         </div>
       )}
+      {tab === 'shadows' && <ShadowComparisonPanel botId={botId} isAdmin={isAdmin} />}
     </main>
   );
 }

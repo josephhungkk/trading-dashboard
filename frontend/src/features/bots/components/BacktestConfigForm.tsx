@@ -2,9 +2,18 @@ import { useState } from 'react';
 import type { BacktestSubmitConfig } from '../../../services/backtests/types';
 import { uploadBars } from '../../../services/backtests/api';
 
+interface AdvisorBacktestConfig {
+  mode: string;
+  veto_injections: { inject_at_bar: number; symbol: string }[];
+}
+
+type BacktestConfig = BacktestSubmitConfig & {
+  advisor_config: AdvisorBacktestConfig | null;
+};
+
 interface Props {
   botId: string;
-  onSubmit: (config: BacktestSubmitConfig) => void;
+  onSubmit: (config: BacktestConfig) => void;
 }
 
 export function BacktestConfigForm({ botId, onSubmit }: Props) {
@@ -16,6 +25,9 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
   const [slippageMode, setSlippageMode] = useState<'bps' | 'atr'>('bps');
   const [slippageBps, setSlippageBps] = useState('5');
   const [slippageAtr, setSlippageAtr] = useState('0.1');
+  const [advisorEnabled, setAdvisorEnabled] = useState(false);
+  const [advisorMode, setAdvisorMode] = useState<'OBSERVE' | 'VETO'>('OBSERVE');
+  const [vetoInjections, setVetoInjections] = useState('');
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadDone, setUploadDone] = useState(false);
 
@@ -39,6 +51,18 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
     }
   }
 
+  function parseVetoInjections(): AdvisorBacktestConfig['veto_injections'] {
+    return vetoInjections
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const [bar, symbol] = line.split(',').map((part) => part.trim());
+        return { inject_at_bar: Number(bar), symbol: symbol ?? '' };
+      })
+      .filter((item) => Number.isFinite(item.inject_at_bar) && item.symbol.length > 0);
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const bps = parseFloat(slippageBps);
@@ -53,6 +77,9 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
       slippage_bps: slippageMode === 'bps' ? bps : null,
       slippage_atr_pct: slippageMode === 'atr' ? atr : null,
       bars_source: barsSource,
+      advisor_config: advisorEnabled
+        ? { mode: advisorMode, veto_injections: parseVetoInjections() }
+        : null,
     });
   }
 
@@ -168,6 +195,39 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
             step="0.01"
           />
         </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Advisor</legend>
+        <label>
+          <input
+            type="checkbox"
+            checked={advisorEnabled}
+            onChange={(e) => setAdvisorEnabled(e.target.checked)}
+          />
+          Enable Advisor
+        </label>
+        {advisorEnabled && (
+          <div>
+            <label htmlFor="advisor_mode">Advisor mode</label>
+            <select
+              id="advisor_mode"
+              value={advisorMode}
+              onChange={(e) => setAdvisorMode(e.target.value as 'OBSERVE' | 'VETO')}
+            >
+              <option value="OBSERVE">OBSERVE</option>
+              <option value="VETO">VETO</option>
+            </select>
+
+            <label htmlFor="veto_injections">Veto injections</label>
+            <textarea
+              id="veto_injections"
+              value={vetoInjections}
+              onChange={(e) => setVetoInjections(e.target.value)}
+              placeholder={'5,AAPL\n10,TSLA'}
+            />
+          </div>
+        )}
       </fieldset>
 
       <button type="submit" disabled={submitDisabled}>
