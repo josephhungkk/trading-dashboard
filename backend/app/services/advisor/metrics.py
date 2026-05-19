@@ -122,3 +122,32 @@ advisor_account_config_writes_total = Counter(
     "Per-account advisor config writes (action=set|clear)",
     ["action"],
 )
+
+advisor_attribution_decisions_processed_total = Counter(
+    "advisor_attribution_decisions_processed_total",
+    "Attribution outcomes computed by verdict",
+    ["verdict"],
+)
+
+advisor_attribution_bars_unavailable_total = Counter(
+    "advisor_attribution_bars_unavailable_total",
+    "Decisions where all windows lacked bar data",
+)
+
+advisor_attribution_unresolvable_total = Counter(
+    "advisor_attribution_unresolvable_total",
+    "Decisions that could not be resolved to an instrument",
+    ["reason"],
+)
+
+advisor_attribution_poll_latency_seconds = Histogram(
+    "advisor_attribution_poll_latency_seconds",
+    "Wall-clock time for one attribution poll batch",
+    buckets=[0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0],
+)
+
+advisor_attribution_skipped_total = Counter(
+    "advisor_attribution_skipped_total",
+    "Decisions skipped during attribution",
+    ["reason"],
+)

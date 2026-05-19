@@ -143,6 +143,8 @@ class BotContext:
             db=self._db,
         )
 
+        decision_id: int | None = None
+        verdict: AdvisorVerdict | None = None
         if self._advisor is not None:
             effective_config = self._resolve_effective_advisor_config(account_id)
             intent = OrderIntent(
@@ -206,10 +208,18 @@ class BotContext:
 
         await self._db.execute(
             text(
-                "INSERT INTO bot_orders (order_id, bot_id, account_id, placed_at)"
-                " VALUES (:oid, :bid, :aid, now())"
+                "INSERT INTO bot_orders"
+                " (order_id, bot_id, account_id, placed_at, advisor_decision_id)"
+                " VALUES (:oid, :bid, :aid, now(), :adv_id)"
             ),
-            {"oid": result.order_id, "bid": self.bot_id, "aid": account_id},
+            {
+                "oid": result.order_id,
+                "bid": self.bot_id,
+                "aid": account_id,
+                "adv_id": decision_id
+                if self._advisor is not None and verdict is not None and verdict.action == "approve"
+                else None,
+            },
         )
         await self._db.commit()
         return result

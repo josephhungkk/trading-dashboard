@@ -525,6 +525,25 @@ async def lifespan(_app: FastAPI) -> Any:
                 log.exception("shadow_comparison_notify_failed", live_bot_id=str(lid))
 
     scheduler.add_job(_run_param_tuner_poll, "interval", seconds=60, id="param_tuner_poll")
+
+    # ── Phase 21c — Advisor attribution poll ─────────────────────────────────
+    from app.services.advisor.attribution import AttributionService as _AttributionService
+
+    _attribution_svc = _AttributionService(db_factory=session_factory, redis=redis)
+
+    async def _run_attribution_poll() -> None:
+        async with session_factory() as _attr_db:
+            await _attribution_svc.poll(_attr_db)
+
+    scheduler.add_job(
+        _run_attribution_poll,
+        "interval",
+        seconds=900,
+        id="advisor_attribution_poll",
+        replace_existing=True,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
     scheduler.add_job(
         _run_shadow_comparison_notify,
         CronTrigger(hour=8, minute=0),
