@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 _DEFAULTS: dict[str, dict[str, Any]] = {
@@ -21,7 +21,7 @@ class CommissionSchedule:
             for k, v in sched.items():
                 try:
                     parsed[k] = Decimal(str(v))
-                except Exception:
+                except ValueError, TypeError, InvalidOperation:
                     pass  # skip non-numeric fields like "tier"
             self._schedules[broker] = parsed
         for broker, defaults in _DEFAULTS.items():

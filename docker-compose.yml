@@ -94,6 +94,21 @@ services:
       redis: { condition: service_healthy }
     restart: unless-stopped
 
+  backtest_worker:
+    build:
+      context: ./backend
+      target: dev
+    entrypoint: ["python", "-m", "app.backtest.worker_main"]
+    env_file: .env
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      - BACKTEST_WORKER_CONCURRENCY=2
+    volumes:
+      - ./strategies:/strategies:ro
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

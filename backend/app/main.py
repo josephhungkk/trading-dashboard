@@ -19,9 +19,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.api.telegram as _telegram_api_module
 from app.api import admin_instruments, ws_bots
+from app.api import backtests as backtests_api
 from app.api import bots as bots_api
 from app.api import filings as filings_api
 from app.api import scanner as scanner_api
+from app.api import ws_backtests as ws_backtests_api
 from app.api import ws_scanner as ws_scanner_api
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
@@ -980,6 +982,8 @@ app.include_router(scanner_api.router)
 app.include_router(ws_scanner_api.router)
 app.include_router(bots_api.router)
 app.include_router(ws_bots.router)
+app.include_router(backtests_api.router)
+app.include_router(ws_backtests_api.router)
 
 
 @app.get("/health")

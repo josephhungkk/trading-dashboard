@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.base import BarEvent
 
 logger = structlog.get_logger(__name__)
-UTC = UTC
 
 _TF_TO_TABLE = {
     "1m": "bars_1m",

@@ -94,7 +94,11 @@ class MetricsComputer:
             start = bar_ts[0]
             end = bar_ts[-1]
             sessions = cal.sessions_in_range(start.date(), end.date())
-        except Exception:
+        except ValueError:
+            return None
+        except KeyError:
+            return None
+        except AttributeError:
             return None
 
         pnl_by_ts = dict(pnl_curve)
