@@ -29,7 +29,7 @@ from uuid import UUID
 from app.core.metrics import QUOTE_SUBSCRIPTION_CAP_REJECTED_TOTAL
 from app.services.quotes.base import CanonicalId, SourceId
 
-WSConnId = UUID
+WSConnId = UUID | str
 
 RATE_WINDOW_SECONDS: float = 60.0
 
@@ -88,10 +88,12 @@ class SubscriptionRegistry:
         cap_per_ws: int,
         cap_global: int,
         sub_rate_limit_per_minute: int,
+        cap_per_ws_override: dict[str, int] | None = None,
     ) -> None:
         self._cap_per_ws = cap_per_ws
         self._cap_global = cap_global
         self._rate_limit_per_minute = sub_rate_limit_per_minute
+        self._cap_per_ws_override: dict[str, int] = cap_per_ws_override or {}
 
         # Plain dicts — defaultdict's read-creates-entry leaks phantom entries
         # on rejected/empty batches (MED fix: _global_refs now plain dict).
@@ -134,6 +136,12 @@ class SubscriptionRegistry:
 
             rate_bucket = self._rate_buckets.get(ws)
             rate_bucket_view: deque[float] = rate_bucket if rate_bucket is not None else deque()
+            is_internal_ws = isinstance(ws, str) and ws.startswith("__internal:")
+            cap_per_ws = (
+                self._cap_per_ws_override.get(ws, self._cap_per_ws)  # type: ignore[arg-type]
+                if is_internal_ws
+                else self._cap_per_ws
+            )
 
             for sym in symbol_list:
                 if sym in ws_set_view:
@@ -141,9 +149,10 @@ class SubscriptionRegistry:
 
                 # Count every attempt against the rate window — flood
                 # protection must include rejected attempts.
-                rate_bucket_view.append(now)
+                if not is_internal_ws:
+                    rate_bucket_view.append(now)
 
-                if len(rate_bucket_view) > self._rate_limit_per_minute:
+                if not is_internal_ws and len(rate_bucket_view) > self._rate_limit_per_minute:
                     diff.rejected.add(sym)
                     diff.rejected_rate_limit.add(sym)
                     diff.rejected_reason = diff.rejected_reason or "rate_limit"
@@ -154,7 +163,7 @@ class SubscriptionRegistry:
                     ).inc()
                     continue
 
-                if len(ws_set_view) >= self._cap_per_ws:
+                if len(ws_set_view) >= cap_per_ws:
                     diff.rejected.add(sym)
                     diff.rejected_per_ws.add(sym)
                     diff.rejected_reason = diff.rejected_reason or "per_ws"
