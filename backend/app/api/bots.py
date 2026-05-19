@@ -9,16 +9,18 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.admin import consume_confirmation_nonce
 from app.api.ws_auth import require_jwt
 from app.bot.sandbox import extract_params_schema
 from app.core.deps import get_db, get_redis
-from app.services.advisor.types import AdvisorConfig
+from app.services.advisor.types import AdvisorConfig, AdvisorMode
+from app.services.ai.capabilities import AICapability
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/bots", tags=["bots"])
@@ -54,8 +56,8 @@ class RiskCapsUpdate(BaseModel):
 
 
 class AdvisorConfigUpdate(BaseModel):
-    mode: str = "OFF"
-    capability: str = "REASONING"
+    mode: AdvisorMode = AdvisorMode.OFF
+    capability: AICapability = AICapability.REASONING
     local_only: bool = False
     timeout_ms: int = 3000
     daily_budget_usd: str = "5.00"
@@ -434,15 +436,11 @@ async def get_advisor_config(
 async def update_advisor_config(
     bot_id: UUID,
     body: AdvisorConfigUpdate,
-    request: Request,
     db: DbDep,
     redis: RedisDep,
     _user: JwtSubject,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
 ) -> dict[str, Any]:
-    nonce = request.headers.get("x-csrf-nonce")
-    if not nonce:
-        raise HTTPException(status_code=403, detail="missing_csrf")
-
     row = await db.execute(
         text("SELECT id FROM bots WHERE id=:id AND deleted_at IS NULL"),
         {"id": bot_id},
@@ -461,7 +459,14 @@ async def update_advisor_config(
         {"cfg": json.dumps(cfg), "id": bot_id},
     )
     await db.commit()
-    await redis.publish(f"bot:advisor:config_changed:{bot_id}", json.dumps(cfg))
+    # Forward new config to any running child via control stream
+    cmd_payload = json.dumps(
+        {"id": str(uuid.uuid4()), "cmd": "UPDATE_ADVISOR_CONFIG", "config": cfg}
+    )
+    try:
+        await redis.xadd(f"bot:control:{bot_id}", {"data": cmd_payload})
+    except Exception:
+        logger.warning("advisor_config_xadd_failed", bot_id=str(bot_id))
     return {"bot_id": str(bot_id), "config": cfg}
 
 
@@ -470,7 +475,7 @@ async def list_advisor_decisions(
     bot_id: UUID,
     db: DbDep,
     _user: JwtSubject,
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=50, ge=1, le=100),
     before: datetime | None = None,
 ) -> dict[str, Any]:
     await _assert_bot_exists(bot_id, db)

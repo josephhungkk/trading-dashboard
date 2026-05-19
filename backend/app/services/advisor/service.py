@@ -367,7 +367,7 @@ class AdvisorService:
         }
         try:
             await self._redis.publish(
-                f"bot:advisor:{bot_id}", json.dumps(payload, default=_json_default)
+                f"bot:advisor:decision:{bot_id}", json.dumps(payload, default=_json_default)
             )
         except Exception as exc:
             advisor_publish_failures_total.inc()

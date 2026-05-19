@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.admin import consume_confirmation_nonce
 from app.api.ws_auth import require_jwt
 from app.core.deps import get_redis
 from app.main import app
@@ -26,10 +27,12 @@ def auth_headers() -> dict[str, str]:
 @pytest_asyncio.fixture
 async def _bots_auth_override() -> AsyncIterator[None]:
     app.dependency_overrides[require_jwt] = lambda: "bots-advisor-test@example.com"
+    app.dependency_overrides[consume_confirmation_nonce] = lambda: None
     try:
         yield
     finally:
         app.dependency_overrides.pop(require_jwt, None)
+        app.dependency_overrides.pop(consume_confirmation_nonce, None)
 
 
 @pytest_asyncio.fixture
@@ -173,12 +176,16 @@ async def test_put_advisor_config_requires_csrf(
     auth_headers: dict[str, str],
 ) -> None:
     bot_id = await _create_bot(bots_client, auth_headers)
-
-    resp = await bots_client.put(
-        f"/api/bots/{bot_id}/advisor-config",
-        json=_valid_config(),
-        headers=auth_headers,
-    )
+    # Remove the CSRF bypass so the real dependency runs
+    app.dependency_overrides.pop(consume_confirmation_nonce, None)
+    try:
+        resp = await bots_client.put(
+            f"/api/bots/{bot_id}/advisor-config",
+            json=_valid_config(),
+            headers=auth_headers,
+        )
+    finally:
+        app.dependency_overrides[consume_confirmation_nonce] = lambda: None
 
     assert resp.status_code == 403
 
@@ -296,7 +303,7 @@ async def test_get_advisor_decision_wrong_bot_returns_404(
 
 
 @pytest.mark.asyncio
-async def test_put_advisor_config_publishes_to_redis(
+async def test_put_advisor_config_xadds_to_control_stream(
     bots_client: AsyncClient,
     auth_headers: dict[str, str],
 ) -> None:
@@ -307,16 +314,18 @@ async def test_put_advisor_config_publishes_to_redis(
         resp = await bots_client.put(
             f"/api/bots/{bot_id}/advisor-config",
             json=_valid_config(mode="VETO"),
-            headers={**auth_headers, "x-csrf-nonce": "nonce"},
+            headers=auth_headers,
         )
     finally:
         app.dependency_overrides.pop(get_redis, None)
 
     assert resp.status_code == 200
-    redis.publish.assert_awaited_once()
-    channel, payload = redis.publish.await_args.args
-    assert channel == f"bot:advisor:config_changed:{bot_id}"
-    assert json.loads(payload)["mode"] == "VETO"
+    redis.xadd.assert_awaited_once()
+    stream_key, fields = redis.xadd.await_args.args
+    assert stream_key == f"bot:control:{bot_id}"
+    cmd = json.loads(fields["data"])
+    assert cmd["cmd"] == "UPDATE_ADVISOR_CONFIG"
+    assert cmd["config"]["mode"] == "VETO"
 
 
 @pytest.mark.asyncio

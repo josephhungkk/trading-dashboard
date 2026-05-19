@@ -78,8 +78,13 @@ async def ws_bot_advisor(websocket: WebSocket, bot_id: str) -> None:
         return
 
     await websocket.accept()
+    try:
+        await require_admin_jwt_ws(websocket)
+    except Exception:
+        return
+
     _active.add(websocket)
-    channel = f"bot:advisor:{bot_id}"
+    channel = f"bot:advisor:decision:{bot_id}"
     logger.info("ws_bot_advisor_connected", bot_id=bot_id, total=len(_active))
 
     redis = websocket.app.state.redis
@@ -89,6 +94,8 @@ async def ws_bot_advisor(websocket: WebSocket, bot_id: str) -> None:
     try:
         await _forward_pubsub_json(pubsub, websocket)
     except WebSocketDisconnect:
+        pass
+    except Exception:
         pass
     finally:
         _active.discard(websocket)
@@ -103,14 +110,14 @@ async def ws_bots_advisor_admin(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
+    await websocket.accept()
     try:
         await require_admin_jwt_ws(websocket)
     except Exception:
         return
 
-    await websocket.accept()
     _active.add(websocket)
-    pattern = "bot:advisor:*"
+    pattern = "bot:advisor:decision:*"
     logger.info("ws_bots_advisor_admin_connected", total=len(_active))
 
     redis = websocket.app.state.redis
@@ -120,6 +127,8 @@ async def ws_bots_advisor_admin(websocket: WebSocket) -> None:
     try:
         await _forward_pubsub_json(pubsub, websocket)
     except WebSocketDisconnect:
+        pass
+    except Exception:
         pass
     finally:
         _active.discard(websocket)
@@ -139,4 +148,9 @@ async def _forward_pubsub_json(pubsub: Any, websocket: WebSocket) -> None:
             payload = json.loads(raw)
         except Exception:
             continue
-        await asyncio.wait_for(websocket.send_json(payload), timeout=2.0)
+        try:
+            await asyncio.wait_for(websocket.send_json(payload), timeout=2.0)
+        except TimeoutError:
+            return
+        except Exception:
+            return
