@@ -26,7 +26,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.services.advisor.attribution_types import InstrumentAttribution
 
 import structlog
 from sqlalchemy import select
@@ -306,6 +309,68 @@ class InstrumentResolver:
         )
         row = result.first()
         return int(row[0]) if row is not None else None
+
+    async def find_by_canonical_id(
+        self, canonical_id: str, redis: Any
+    ) -> InstrumentAttribution | None:
+        """Read-only lookup: canonical_id → (id, multiplier, primary_exchange).
+
+        Redis cache key: attribution:instr:{canonical_id}, TTL 3600s.
+        Returns None when canonical_id not in instruments table.
+        Raises on DB/Redis errors — caller treats as transient.
+        """
+        import json
+
+        cache_key = f"attribution:instr:{canonical_id}"
+        raw = await redis.get(cache_key)
+        if raw is not None:
+            data = json.loads(raw)
+            return InstrumentAttribution(
+                id=int(data["id"]),
+                multiplier=Decimal(data["multiplier"]),
+                primary_exchange=str(data["primary_exchange"]),
+            )
+
+        from sqlalchemy import text as _text
+
+        row = (
+            (
+                await self._session.execute(
+                    _text(
+                        "SELECT id, (meta->>'multiplier')::numeric AS multiplier,"
+                        " primary_exchange"
+                        " FROM instruments WHERE canonical_id = :cid"
+                    ),
+                    {"cid": canonical_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+
+        if row is None:
+            return None
+
+        multiplier = (
+            Decimal(str(row["multiplier"])) if row["multiplier"] is not None else Decimal("1")
+        )
+        instr = InstrumentAttribution(
+            id=int(row["id"]),
+            multiplier=multiplier,
+            primary_exchange=str(row["primary_exchange"]),
+        )
+        await redis.set(
+            cache_key,
+            json.dumps(
+                {
+                    "id": instr.id,
+                    "multiplier": str(instr.multiplier),
+                    "primary_exchange": instr.primary_exchange,
+                }
+            ),
+            ex=3600,
+        )
+        return instr
 
     async def from_legacy(
         self,

@@ -298,3 +298,25 @@ def next_crypto_session_open(
         if window_start <= now < window_end:
             return window_end
     return now
+
+
+def session_close_for_decision(exchange: str, created_at: datetime) -> datetime:
+    """Return the EOD session close for an attribution decision.
+
+    If created_at falls within a trading session, returns that session's close.
+    If created_at is after-hours/weekend/holiday, returns the NEXT session's close.
+    Raises ValueError when exchange is unrecognised by exchange_calendars.
+    No UTC fallback — unknown exchange is an error.
+    """
+    cal = _calendar(exchange)  # raises ValueError on unknown exchange
+
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    created_utc = created_at.astimezone(UTC)
+
+    try:
+        session_dt = cal.minute_to_session(created_utc, direction="next")
+        close_ts = cal.session_close(session_dt)
+        return close_ts.to_pydatetime().astimezone(UTC)
+    except Exception as exc:
+        raise ValueError(f"session_close_for_decision failed for {exchange}: {exc}") from exc
