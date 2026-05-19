@@ -501,7 +501,12 @@ async def list_advisor_decisions(
             f"""
             SELECT id, verdict, reasoning, confidence, advice_tags, canonical_id,
                    effective_mode, latency_ms, ai_completion_ts, created_at,
-                   overridden_at, overridden_by, override_action, override_reason
+                   overridden_at, overridden_by, override_action, override_reason,
+                   attribution_status, attribution_windows, attribution_computed_at,
+                   outcome_15m_correct, outcome_15m_pnl,
+                   outcome_1h_correct, outcome_1h_pnl,
+                   outcome_4h_correct, outcome_4h_pnl,
+                   outcome_eod_correct, outcome_eod_pnl
             FROM bot_advisor_decisions
             WHERE bot_id = :bid {before_sql}
             ORDER BY created_at DESC
@@ -611,6 +616,48 @@ async def override_advisor_decision(
         "overridden_by": _user,
         "overridden_at": now_ts.isoformat(),
     }
+
+
+class _RecomputeRequest(BaseModel):
+    since: datetime
+
+
+@router.get("/{bot_id}/advisor-attribution")
+async def get_advisor_attribution(
+    bot_id: UUID,
+    db: DbDep,
+    redis: RedisDep,
+    _user: JwtSubject,
+    window: str = Query(default="1h"),
+) -> dict[str, Any]:
+    await _assert_bot_exists(bot_id, db)
+    if window not in {"15m", "1h", "4h", "eod"}:
+        raise HTTPException(status_code=422, detail="invalid_window")
+    from app.services.advisor.attribution import AttributionService
+
+    svc = AttributionService(db_factory=None, redis=redis)  # type: ignore[arg-type]
+    summary = await svc.get_summary(bot_id=bot_id, window=window, db=db)
+    return jsonable_encoder(summary.model_dump())
+
+
+@router.post("/{bot_id}/advisor-attribution/recompute")
+async def recompute_advisor_attribution(
+    bot_id: UUID,
+    body: _RecomputeRequest,
+    db: DbDep,
+    redis: RedisDep,
+    _user: JwtSubject,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+) -> dict[str, Any]:
+    await _assert_bot_exists(bot_id, db)
+    from app.services.advisor.attribution import AttributionService
+
+    svc = AttributionService(db_factory=None, redis=redis)  # type: ignore[arg-type]
+    try:
+        count = await svc.recompute(bot_id=bot_id, since=body.since, db=db)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"reset_count": count}
 
 
 @router.put("/{bot_id}/accounts/{account_id}/advisor-config")
