@@ -28,7 +28,7 @@ export function EarningsBadge({ instrumentId, onClick }: EarningsBadgeProps) {
     staleTime: 5 * 60 * 1000,
   })
 
-  const upcoming = (data ?? [])
+  const upcoming = (data?.items ?? [])
     .filter((event) => {
       const days = daysUntil(event.announced_date)
       return days >= 0 && days <= 7
