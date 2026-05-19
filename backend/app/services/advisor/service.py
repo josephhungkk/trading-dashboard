@@ -111,7 +111,7 @@ class AdvisorService:
                 ).observe(latency_ms / 1000)
 
                 try:
-                    verdict = AdvisorVerdict.model_validate_json(result.text)
+                    verdict = AdvisorVerdict.model_validate(json.loads(result.text))
                 except (json.JSONDecodeError, ValidationError, ValueError) as exc:
                     return await self._fail_open(
                         bot_id=bot_id,

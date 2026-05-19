@@ -9,14 +9,16 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ws_auth import require_jwt
 from app.bot.sandbox import extract_params_schema
 from app.core.deps import get_db, get_redis
+from app.services.advisor.types import AdvisorConfig
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/bots", tags=["bots"])
@@ -49,6 +51,18 @@ class RiskCapsUpdate(BaseModel):
     max_open_orders: int | None = None
     max_order_size: float | None = None
     allowed_asset_classes: list[str] | None = None
+
+
+class AdvisorConfigUpdate(BaseModel):
+    mode: str = "OFF"
+    capability: str = "REASONING"
+    local_only: bool = False
+    timeout_ms: int = 3000
+    daily_budget_usd: str = "5.00"
+    max_qps: float = 2.0
+    auto_pause_threshold: int = 0
+    auto_pause_window_seconds: int = 300
+    min_veto_confidence: float = 0.0
 
 
 @router.get("/strategies")
@@ -377,6 +391,130 @@ async def upsert_risk_caps(
     return {"bot_id": str(bot_id)}
 
 
+@router.get("/{bot_id}/advisor-config")
+async def get_advisor_config(
+    bot_id: UUID,
+    db: DbDep,
+    _user: JwtSubject,
+) -> dict[str, Any]:
+    bot_row = await db.execute(
+        text("SELECT advisor_config FROM bots WHERE id=:id AND deleted_at IS NULL"),
+        {"id": bot_id},
+    )
+    raw_config = bot_row.scalar_one_or_none()
+    if raw_config is None:
+        raise HTTPException(status_code=404, detail="bot_not_found")
+
+    override_rows = await db.execute(
+        text(
+            """
+            SELECT account_id, advisor_config_override
+            FROM bot_accounts
+            WHERE bot_id = :id AND advisor_config_override IS NOT NULL
+            """
+        ),
+        {"id": bot_id},
+    )
+    account_overrides = {
+        str(row.account_id): AdvisorConfig.from_jsonb_dict(
+            row.advisor_config_override
+        ).to_jsonb_dict()
+        for row in override_rows
+        if row.advisor_config_override is not None
+    }
+
+    return {
+        "bot_id": str(bot_id),
+        "config": AdvisorConfig.from_jsonb_dict(raw_config).to_jsonb_dict(),
+        "account_overrides": account_overrides,
+    }
+
+
+@router.put("/{bot_id}/advisor-config")
+async def update_advisor_config(
+    bot_id: UUID,
+    body: AdvisorConfigUpdate,
+    request: Request,
+    db: DbDep,
+    redis: RedisDep,
+    _user: JwtSubject,
+) -> dict[str, Any]:
+    nonce = request.headers.get("x-csrf-nonce")
+    if not nonce:
+        raise HTTPException(status_code=403, detail="missing_csrf")
+
+    row = await db.execute(
+        text("SELECT id FROM bots WHERE id=:id AND deleted_at IS NULL"),
+        {"id": bot_id},
+    )
+    if row.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="bot_not_found")
+
+    try:
+        config = AdvisorConfig.from_jsonb_dict(body.model_dump())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors())) from exc
+
+    cfg = config.to_jsonb_dict()
+    await db.execute(
+        text("UPDATE bots SET advisor_config = CAST(:cfg AS jsonb) WHERE id = :id"),
+        {"cfg": json.dumps(cfg), "id": bot_id},
+    )
+    await db.commit()
+    await redis.publish(f"bot:advisor:config_changed:{bot_id}", json.dumps(cfg))
+    return {"bot_id": str(bot_id), "config": cfg}
+
+
+@router.get("/{bot_id}/advisor-decisions")
+async def list_advisor_decisions(
+    bot_id: UUID,
+    db: DbDep,
+    _user: JwtSubject,
+    limit: int = Query(default=50, ge=1, le=200),
+    before: datetime | None = None,
+) -> dict[str, Any]:
+    await _assert_bot_exists(bot_id, db)
+    params: dict[str, Any] = {"bid": bot_id, "limit": limit}
+    before_sql = ""
+    if before is not None:
+        before_sql = "AND created_at < :before"
+        params["before"] = before
+
+    rows = await db.execute(
+        text(
+            f"""
+            SELECT id, verdict, reasoning, confidence, advice_tags, canonical_id,
+                   effective_mode, latency_ms, ai_completion_ts, created_at
+            FROM bot_advisor_decisions
+            WHERE bot_id = :bid {before_sql}
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        params,
+    )
+    items = [jsonable_encoder(dict(r._mapping)) for r in rows.fetchall()]
+    next_before = items[-1]["created_at"] if len(items) == limit and items else None
+    return {"items": items, "next_before": next_before}
+
+
+@router.get("/{bot_id}/advisor-decisions/{decision_id}")
+async def get_advisor_decision(
+    bot_id: UUID,
+    decision_id: int,
+    db: DbDep,
+    _user: JwtSubject,
+) -> dict[str, Any]:
+    row = await db.execute(
+        text("SELECT * FROM bot_advisor_decisions WHERE id = :did AND bot_id = :bid"),
+        {"did": decision_id, "bid": bot_id},
+    )
+    decision = row.mappings().first()
+    if decision is None:
+        raise HTTPException(status_code=404, detail="advisor_decision_not_found")
+    return jsonable_encoder(dict(decision))
+
+
 @router.post("/{bot_id}/start")
 async def start_bot(
     bot_id: UUID,
@@ -460,6 +598,15 @@ async def deploy_bot(
     cmd_id = str(uuid.uuid4())
     await redis.xadd(f"bot:control:{bot_id}", {"data": json.dumps({"id": cmd_id, "cmd": "DEPLOY"})})
     return {"bot_id": str(bot_id), "version": new_version}
+
+
+async def _assert_bot_exists(bot_id: UUID, db: AsyncSession) -> None:
+    row = await db.execute(
+        text("SELECT id FROM bots WHERE id=:id AND deleted_at IS NULL"),
+        {"id": bot_id},
+    )
+    if row.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="bot_not_found")
 
 
 async def _assert_stopped(bot_id: UUID, db: AsyncSession) -> None:

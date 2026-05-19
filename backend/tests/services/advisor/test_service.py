@@ -261,8 +261,7 @@ async def test_review_schema_parse_error_calls_fail_open(monkeypatch):
     await service.review(**_review_kwargs())
 
     service._fail_open.assert_awaited_once()
-    reason = service._fail_open.await_args.kwargs["reason"]
-    assert reason.startswith("schema_error:")
+    assert service._fail_open.await_args.kwargs["reason"] == "schema_error:JSONDecodeError"
 
 
 @pytest.mark.asyncio

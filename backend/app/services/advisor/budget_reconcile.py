@@ -30,7 +30,7 @@ async def reconcile_budget_for_bot(bot_id: UUID, redis, db: AsyncSession) -> Non
     key = f"advisor:spend_estimate_cents:{bot_id}:{date.today().isoformat()}"
     optimistic_raw = await redis.get(key)
     optimistic_cents = int(optimistic_raw or 0)
-    delta_usd = Decimal(optimistic_cents - actual_cents) / Decimal("100")
+    delta_usd = Decimal(actual_cents - optimistic_cents) / Decimal("100")
 
     await redis.set(key, actual_cents, ex=172800)
     advisor_budget_reconcile_delta_usd.set(float(delta_usd))
