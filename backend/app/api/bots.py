@@ -20,6 +20,7 @@ from app.api.ws_auth import require_jwt
 from app.bot.sandbox import extract_params_schema
 from app.core.cf_access import AdminIdentity
 from app.core.deps import get_db, get_redis, require_admin_jwt
+from app.services.advisor.attribution import AttributionService
 from app.services.advisor.metrics import (
     advisor_account_config_writes_total,
     advisor_overrides_total,
@@ -631,12 +632,11 @@ async def get_advisor_attribution(
     window: str = Query(default="1h"),
 ) -> dict[str, Any]:
     await _assert_bot_exists(bot_id, db)
-    if window not in {"15m", "1h", "4h", "eod"}:
-        raise HTTPException(status_code=422, detail="invalid_window")
-    from app.services.advisor.attribution import AttributionService
-
     svc = AttributionService(db_factory=None, redis=redis)  # type: ignore[arg-type]
-    summary = await svc.get_summary(bot_id=bot_id, window=window, db=db)
+    try:
+        summary = await svc.get_summary(bot_id=bot_id, window=window, db=db)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return jsonable_encoder(summary.model_dump())
 
 
@@ -650,8 +650,6 @@ async def recompute_advisor_attribution(
     _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
 ) -> dict[str, Any]:
     await _assert_bot_exists(bot_id, db)
-    from app.services.advisor.attribution import AttributionService
-
     svc = AttributionService(db_factory=None, redis=redis)  # type: ignore[arg-type]
     try:
         count = await svc.recompute(bot_id=bot_id, since=body.since, db=db)
