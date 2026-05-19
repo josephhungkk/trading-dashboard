@@ -1416,3 +1416,129 @@ earnings_dedup_skips_total = Counter(
     ["source"],
     registry=registry,
 )
+
+# ---------------------------------------------------------------------------
+# Phase 19 — Bot engine metrics
+# ---------------------------------------------------------------------------
+
+bot_starts_total = Counter(
+    "bot_starts_total",
+    "Bot engine start events",
+    ["bot_id", "mode"],
+    registry=registry,
+)
+bot_stops_total = Counter(
+    "bot_stops_total",
+    "Bot engine stop events",
+    ["bot_id", "stop_reason"],
+    registry=registry,
+)
+bot_orders_total = Counter(
+    "bot_orders_total",
+    "Orders placed by bots",
+    ["bot_id", "mode", "verdict"],
+    registry=registry,
+)
+bot_daily_loss_cap_hits_total = Counter(
+    "bot_daily_loss_cap_hits_total",
+    "Daily loss cap triggered",
+    ["bot_id"],
+    registry=registry,
+)
+bot_heartbeat_failures_total = Counter(
+    "bot_heartbeat_failures_total",
+    "Bot heartbeat failures",
+    ["bot_id"],
+    registry=registry,
+)
+bot_respawn_total = Counter(
+    "bot_respawn_total",
+    "Bot respawn events",
+    ["bot_id"],
+    registry=registry,
+)
+bot_unexpected_exit_total = Counter(
+    "bot_unexpected_exit_total",
+    "Unexpected bot exits",
+    ["bot_id"],
+    registry=registry,
+)
+bot_bars_processed_total = Counter(
+    "bot_bars_processed_total",
+    "Bars processed by bot",
+    ["bot_id", "timeframe"],
+    registry=registry,
+)
+bot_on_bar_latency_seconds = Histogram(
+    "bot_on_bar_latency_seconds",
+    "on_bar() execution latency",
+    ["bot_id"],
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+    registry=registry,
+)
+bot_bar_events_dropped_total = Counter(
+    "bot_bar_events_dropped_total",
+    "Bar events dropped due to queue full",
+    ["bot_id"],
+    registry=registry,
+)
+bot_ticks_dropped_late_total = Counter(
+    "bot_ticks_dropped_late_total",
+    "Ticks dropped as late",
+    ["bot_id"],
+    registry=registry,
+)
+bot_partial_bars_skipped_total = Counter(
+    "bot_partial_bars_skipped_total",
+    "Partial bars skipped",
+    ["bot_id"],
+    registry=registry,
+)
+bot_bars_aggregator_unhealthy_total = Counter(
+    "bot_bars_aggregator_unhealthy_total",
+    "Bar aggregator unhealthy events",
+    ["bot_id"],
+    registry=registry,
+)
+bot_active_count = Gauge(
+    "bot_active_count",
+    "Currently active bots",
+    ["mode"],
+    registry=registry,
+)
+bot_fill_events_total = Counter(
+    "bot_fill_events_total",
+    "Fill events received by bots",
+    ["bot_id", "side"],
+    registry=registry,
+)
+bot_context_errors_total = Counter(
+    "bot_context_errors_total",
+    "BotContext errors",
+    ["bot_id", "error_type"],
+    registry=registry,
+)
+bot_forbidden_import_total = Counter(
+    "bot_forbidden_import_total",
+    "Forbidden module import attempts in strategy",
+    ["bot_id", "module"],
+    registry=registry,
+)
+bot_control_command_timeouts_total = Counter(
+    "bot_control_command_timeouts_total",
+    "Control command timeouts",
+    ["action"],
+    registry=registry,
+)
+bot_params_validation_failures_total = Counter(
+    "bot_params_validation_failures_total",
+    "Parameter validation failures",
+    [],
+    registry=registry,
+)
+bot_params_extraction_oom_total = Counter(
+    "bot_params_extraction_oom_total",
+    "Params extraction OOM events",
+    [],
+    registry=registry,
+)
