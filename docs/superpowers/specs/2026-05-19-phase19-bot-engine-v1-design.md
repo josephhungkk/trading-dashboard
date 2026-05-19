@@ -56,7 +56,7 @@ class BaseStrategy(ABC):
 ```
 python -c "import json, importlib.util; spec = importlib.util.spec_from_file_location('s', '<path>'); m = spec.loader.load_module(); cls = next(c for c in vars(m).values() if isinstance(c, type) and issubclass(c, BaseStrategy) and c is not BaseStrategy); print(json.dumps(cls.params_schema))"
 ```
-with a 5s timeout and the MetaPathFinder denylist active. Result is cached in `bots.params_schema_json` (see §3.1). If `params_schema` is non-null, `params_json` is validated against it; mismatch → 400 with field-level errors. Counter: `bot_params_validation_failures_total`.
+with a **5s timeout**, **RLIMIT_AS 256 MB**, **RLIMIT_CPU 3s**, and the MetaPathFinder denylist active — prevents a malicious `params_schema = [0]*10**9` OOM. Result is cached in `bots.params_schema_json` (see §3.1). If `params_schema` is non-null, `params_json` is validated against it; mismatch → 400 with field-level errors. Counters: `bot_params_validation_failures_total`, `bot_params_extraction_oom_total`.
 
 ### 2.2 BarEvent and FillEvent
 
@@ -97,7 +97,9 @@ All side-effects must go through `BotContext`.
 
 **Boundary computation:**
 - `1m`, `5m`, `15m`, `30m`, `1h` → UTC-boundary modulo timeframe (standard OHLCV convention).
-- `1d`, `1w` → market session-close boundary via `MarketCalendar` (Phase 5b surface). Uses the primary exchange of the instrument to select the right calendar.
+- `1d`, `1w` → market session-close boundary via `MarketCalendar` (Phase 5b surface). Uses `instruments.primary_exchange` → `_EXCHANGE_MAP` dict in `market_calendar.py` to select the right calendar (e.g. `NASDAQ → XNAS`, `HKEX → XHKG`).
+
+**Late-tick policy:** Ticks arriving more than 2s past their bar boundary (re-emitted on reconnect) are **dropped** — retroactive bar updates would invalidate already-delivered `on_bar` events. Metric: `bot_ticks_dropped_late_total{bot_id}`.
 
 **Startup:** `BarAggregator` starts **before** `on_start()` is called, but bar delivery to the strategy queue is **paused** until `on_start()` returns. Ticks arriving during warm-up are accumulated in the running bar; no bar-complete events are emitted into the queue during pause. Partial bars at startup (bars whose open tick was missed) are skipped once delivery unpauses. Metric: `bot_partial_bars_skipped_total{bot_id}`.
 
@@ -167,7 +169,7 @@ CREATE TABLE bot_risk_caps (
 
 ### 3.4 `bot_runs` (TimescaleDB hypertable)
 
-`order_count` and `fill_count` are **removed** — computed on-demand via `bot_orders` count queries (avoids the run_id linkage problem after 90-day retention drops rows).
+`order_count`, `fill_count`, and `bar_count` are **removed** — `order_count`/`fill_count` are computed on-demand via `bot_orders` count queries; `bar_count` is read from the `bot_bars_processed_total{bot_id}` Prometheus counter rate (no DB write-amplification on every bar).
 
 ```sql
 CREATE TABLE bot_runs (
@@ -177,7 +179,6 @@ CREATE TABLE bot_runs (
     started_at      TIMESTAMPTZ NOT NULL,   -- partition key
     stopped_at      TIMESTAMPTZ,
     stop_reason     TEXT CHECK (stop_reason IN ('manual','error','daily_loss_cap','kill_switch')),
-    bar_count       INT NOT NULL DEFAULT 0,
     PRIMARY KEY (id, started_at)
 );
 SELECT create_hypertable('bot_runs', 'started_at', chunk_time_interval => INTERVAL '7 days');
@@ -305,11 +306,11 @@ Child process lifecycle:
 
 ### 4.4 BotFillRouter
 
-`app/bot/fill_router.py` — asyncio task running in **backend**, co-located with `OrderFillProcessor`.
+`app/bot/fill_router.py` — asyncio task running in **backend**, subscribed to the same Redis pubsub channels as `OrderEventConsumer` (`orders:events:fleet` and `orders:events:account:{account_id}` — the real channels published at `order_event_consumer.py:936`). `BotFillRouter` is a *listener*, not a replacement for `OrderEventConsumer`.
 
-When a fill arrives whose `order_id` exists in `bot_orders`:
-1. Publish `bot:fill:{bot_id}` Redis pubsub (child subscribes; triggers `on_fill()`)
-2. `INCRBYFLOAT bot:daily_loss:{bot_id}:{account_id}:{tz_date}` by fill's realised PnL (per-account key — see §5.2)
+When an `order:fill` event arrives whose `order_id` exists in `bot_orders`:
+1. Publish `bot:fill:{bot_id}` Redis pubsub (child's asyncio loop subscribes; triggers `on_fill()`)
+2. Update per-account daily-loss **via `v_account_intraday_pnl`** (the same view `_check_max_daily_loss` in `risk_service.py:207` already uses) — query `SELECT unrealised_pnl + realised_pnl FROM v_account_intraday_pnl WHERE account_id = :account_id` filtered to bot-placed orders only, cache result in `bot:daily_loss:{bot_id}:{account_id}:{tz_date}` Redis key. No custom lot-tracker needed; realised-PnL computation is deferred to Phase 22 (UK CGT).
 3. Increment `bot_fill_events_total{bot_id, side}`
 
 Fills do **not** come from `BotContext.place_order()`. `BotFillRouter` is the sole fill-routing path.
@@ -336,9 +337,18 @@ Caps cached 60s in Redis. Invalidation: `PUT /api/bots/{id}/risk-caps` publishes
 
 ### 5.2 Daily Loss Tracking (per account)
 
-Redis key: `bot:daily_loss:{bot_id}:{account_id}:{tz_date}` where `tz_date` is computed from the **account's primary market calendar timezone** (derived via `MarketCalendar` from `broker_accounts.primary_exchange`; e.g. `US/Eastern` for NYSE accounts, `Asia/Hong_Kong` for HKEX). TTL = seconds until midnight in that timezone.
+Redis key: `bot:daily_loss:{bot_id}:{account_id}:{tz_date}` where `tz_date` is computed from a **broker_id → timezone table** (v1 approximation; `broker_accounts.primary_exchange` does not exist and `account_day_boundary_utc` is a UTC-only stub):
 
-Written by `BotFillRouter` (§4.4). Read by `BotRiskCapService` — sums across all of the bot's accounts to get total daily PnL before comparing to `max_daily_loss`.
+| broker_id | timezone |
+|---|---|
+| `ibkr` | `US/Eastern` |
+| `schwab` | `US/Eastern` |
+| `alpaca` | `US/Eastern` |
+| `futu` | `Asia/Hong_Kong` |
+
+TTL = seconds until midnight in that timezone. Written by `BotFillRouter` (§4.4).
+
+**Cap semantics are per-account:** `max_daily_loss` in `bot_risk_caps` is compared independently against each account's daily-loss key — not summed across accounts. Cross-TZ aggregation is incoherent (US/Eastern "today" ≠ Asia/Hong_Kong "today"). A bot trading both US and HK accounts enforces the cap independently on each side.
 
 ---
 
@@ -375,7 +385,23 @@ class BotOrdersFacade:
         ...
 ```
 
-**`place_order_internal` wiring:**  `issuer` Literal is widened to include `"bot"`. `attempt_kind` is derived as `"bot_place_order"` when `issuer == "bot"`. The internal path skips Redis nonce validation and uses `InstrumentResolver` for conid lookup, so both new and existing positions are handled.
+**Order placement — `place_order_for_bot` helper (new function in `orders_service.py`):**
+
+Rather than widening `place_order_internal` (which is auto-flat-shaped: no `limit_price`/`stop_price`/`tif`/`algo_strategy`, and whose `issuer` Literal would require a mypy sweep of all callers), Phase 19 adds a new helper `place_order_for_bot` that:
+- Accepts the full order schema (`side`, `qty`, `order_type`, `limit_price`, `stop_price`, `tif`, `algo_strategy`, `position_effect`, `conid`)
+- Fabricates its own nonce (`f"bot:{bot_id}:{client_order_id}"`) — no Redis preview-mint required
+- Passes `attempt_kind='bot_place_order'` directly through the existing `_evaluate_risk_for_place_order` / risk-audit path
+- Goes through full broker sidecar dispatch (same as operator `place_order`)
+
+**Conid resolution — `BotConidResolver` (`app/bot/conid_resolver.py`):**
+
+`InstrumentResolver` has no `canonical_id → conid` path. Resolution chain:
+1. `canonical_id` → `instrument_id` via `symbol_aliases` lookup
+2. If `(instrument_id, broker_id)` in `positions` → use existing `conid` (already-held position)
+3. Else → call broker sidecar `GetContract` RPC → cache `(broker_id, instrument_id) → conid` in Redis 24h TTL
+4. Sidecar unreachable → `BotConidUnresolvedError` → BLOCK + `bot_context_errors_total{error_type='conid_unresolved'}`
+
+`BotConidResolver` is called by `BotOrdersFacade.place_order` before dispatching to `place_order_for_bot`. Strategies pass `canonical_id`; `BotContext` resolves conid transparently.
 
 **`BotContext`** — the strategy-facing surface:
 
@@ -424,6 +450,8 @@ class BotContext:
 | `GET` | `/api/bots` | List bots. Filters: `status`, `mode`. Cursor pagination on `created_at`. |
 | `GET` | `/api/bots/{id}` | Detail + on-demand run stats (order/fill counts computed from `bot_orders`). |
 | `PUT` | `/api/bots/{id}` | Update `name`, `params_json`, `bar_timeframe`. Only when `status='stopped'`. |
+| `POST` | `/api/bots/{id}/accounts` | Add an account to this bot (`bot_accounts` INSERT). Only when `status='stopped'`. |
+| `DELETE` | `/api/bots/{id}/accounts/{aid}` | Remove an account from this bot. Only when `status='stopped'`. Required before deleting a `broker_accounts` row (RESTRICT FK). |
 | `DELETE` | `/api/bots/{id}` | Soft-delete. Only when `status='stopped'`. |
 | `GET` | `/api/bots/{id}/runs` | List `bot_runs`. Cursor pagination on `started_at`. |
 | `GET` | `/api/bots/{id}/orders` | List `bot_orders` joined to `orders`. Cursor pagination on `placed_at`. |
@@ -478,7 +506,7 @@ TanStack Query + WS push hybrid (same as `/portfolio/rollup`). WS events call `q
 
 ## 9. Prometheus Metrics
 
-17 metrics under `bot_*` prefix. `bot_on_bar_latency_seconds` has no `bot_id` label (cardinality: 30+ bots × histogram buckets).
+20 metrics under `bot_*` prefix. `bot_on_bar_latency_seconds` has no `bot_id` label (cardinality: 30+ bots × histogram buckets).
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -492,6 +520,7 @@ TanStack Query + WS push hybrid (same as `/portfolio/rollup`). WS events call `q
 | `bot_bars_processed_total` | Counter | `bot_id`, `timeframe` |
 | `bot_on_bar_latency_seconds` | Histogram | *(no bot_id)* |
 | `bot_bar_events_dropped_total` | Counter | `bot_id` |
+| `bot_ticks_dropped_late_total` | Counter | `bot_id` |
 | `bot_partial_bars_skipped_total` | Counter | `bot_id` |
 | `bot_bars_aggregator_unhealthy_total` | Counter | `bot_id` |
 | `bot_active_count` | Gauge | `mode` |
@@ -500,6 +529,7 @@ TanStack Query + WS push hybrid (same as `/portfolio/rollup`). WS events call `q
 | `bot_forbidden_import_total` | Counter | `bot_id`, `module` |
 | `bot_control_command_timeouts_total` | Counter | `action` |
 | `bot_params_validation_failures_total` | Counter | — |
+| `bot_params_extraction_oom_total` | Counter | — |
 
 ---
 
