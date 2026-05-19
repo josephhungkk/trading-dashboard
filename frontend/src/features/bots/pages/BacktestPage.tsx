@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { getRouteApi } from '@tanstack/react-router';
 import { BacktestConfigForm } from '../components/BacktestConfigForm';
 import { BacktestProgressBar } from '../components/BacktestProgressBar';
@@ -20,19 +20,26 @@ export function BacktestPage() {
   const [report, setReport] = useState<BacktestReport | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const onProgress = useCallback((pct: number, tradesSoFar: number, currentBarTs: string) => {
+    setProgress({ pct, tradesSoFar, currentBarTs });
+  }, []);
+
+  const onDone = useCallback((r: BacktestReport) => {
+    setReport(r);
+    setState('done');
+  }, []);
+
+  const onFailed = useCallback((msg: string) => {
+    setErrorMsg(msg);
+    setState('failed');
+  }, []);
+
   useBacktestStream({
     botId,
     jobId: state === 'running' && jobId ? jobId : null,
-    onProgress: (pct, tradesSoFar, currentBarTs) =>
-      setProgress({ pct, tradesSoFar, currentBarTs }),
-    onDone: (r) => {
-      setReport(r);
-      setState('done');
-    },
-    onFailed: (msg) => {
-      setErrorMsg(msg);
-      setState('failed');
-    },
+    onProgress,
+    onDone,
+    onFailed,
   });
 
   async function handleSubmit(config: BacktestSubmitConfig) {

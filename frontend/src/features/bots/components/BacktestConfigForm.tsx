@@ -29,6 +29,7 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadError(null);
+    setUploadDone(false);
     try {
       await uploadBars(botId, file, canonicalId, timeframe);
       setUploadDone(true);
@@ -40,13 +41,17 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const bps = parseFloat(slippageBps);
+    const atr = parseFloat(slippageAtr);
+    if (slippageMode === 'bps' && isNaN(bps)) return;
+    if (slippageMode === 'atr' && isNaN(atr)) return;
     onSubmit({
       canonical_id: canonicalId,
       timeframe,
       start_date: startDate,
       end_date: endDate,
-      slippage_bps: slippageMode === 'bps' ? parseFloat(slippageBps) : null,
-      slippage_atr_pct: slippageMode === 'atr' ? parseFloat(slippageAtr) : null,
+      slippage_bps: slippageMode === 'bps' ? bps : null,
+      slippage_atr_pct: slippageMode === 'atr' ? atr : null,
       bars_source: barsSource,
     });
   }

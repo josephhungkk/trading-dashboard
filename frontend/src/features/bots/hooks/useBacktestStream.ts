@@ -37,7 +37,9 @@ export function useBacktestStream({
       ws.onmessage = (evt) => {
         if (!mountedRef.current) return;
         try {
-          const frame = JSON.parse(evt.data as string) as BacktestProgressFrame;
+          const raw: unknown = JSON.parse(evt.data as string);
+          if (typeof raw !== 'object' || raw === null || !('type' in raw)) return;
+          const frame = raw as BacktestProgressFrame;
           if (frame.type === 'progress') {
             onProgress(frame.pct, frame.trades_so_far, frame.current_bar_ts);
             retryRef.current = 0;

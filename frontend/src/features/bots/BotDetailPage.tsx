@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { getRouteApi } from '@tanstack/react-router';
+import { getRouteApi, Link } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 
 const routeApi = getRouteApi('/bots/$botId');
@@ -56,7 +56,16 @@ export function BotDetailPage(): React.JSX.Element {
             {bot.strategy_file} · v{bot.version} · {bot.mode} · {bot.bar_timeframe}
           </p>
         </div>
-        <BotControlBar bot={bot} />
+        <div className="flex items-center gap-2">
+          <Link
+            to="/bots/$botId/backtest"
+            params={{ botId }}
+            className="text-sm underline"
+          >
+            Run Backtest
+          </Link>
+          <BotControlBar bot={bot} />
+        </div>
       </div>
 
       {bot.error_msg != null && (
