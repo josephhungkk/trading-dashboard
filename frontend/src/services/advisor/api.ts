@@ -37,17 +37,12 @@ export async function getAdvisorDecisions(
   botId: string,
   params?: { limit?: number; before?: string },
 ): Promise<AdvisorDecisionsPage> {
-  const q = params
-    ? new URLSearchParams(
-        Object.fromEntries(
-          Object.entries(params)
-            .filter(([, value]) => value !== undefined)
-            .map(([key, value]) => [key, String(value)]),
-        ),
-      ).toString()
-    : '';
+  const q = new URLSearchParams();
+  if (params?.limit !== undefined) q.set('limit', String(params.limit));
+  if (params?.before) q.set('before', params.before);
+  const qs = q.toString();
   return json(
-    await fetch(`${BASE}/${encodeURIComponent(botId)}/advisor-decisions${q ? `?${q}` : ''}`),
+    await fetch(`${BASE}/${encodeURIComponent(botId)}/advisor-decisions${qs ? `?${qs}` : ''}`),
   );
 }
 
@@ -60,4 +55,15 @@ export async function getAdvisorDecision(
       `${BASE}/${encodeURIComponent(botId)}/advisor-decisions/${encodeURIComponent(decisionId)}`,
     ),
   );
+}
+
+export async function getAdvisorFeed(filters?: {
+  bot_id?: string;
+  verdict?: string;
+}): Promise<AdvisorDecision[]> {
+  const q = new URLSearchParams();
+  if (filters?.bot_id) q.set('bot_id', filters.bot_id);
+  if (filters?.verdict) q.set('verdict', filters.verdict);
+  const qs = q.toString();
+  return json(await fetch(`${BASE}/advisor-feed${qs ? `?${qs}` : ''}`));
 }

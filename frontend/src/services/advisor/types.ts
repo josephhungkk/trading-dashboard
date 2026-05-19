@@ -52,7 +52,7 @@ export interface AdvisorDecision {
 
 export interface AdvisorDecisionsPage {
   items: AdvisorDecision[];
-  next_before: string | null;
+  next_cursor: string | null;
 }
 
 export interface AdvisorConfigResponse {
@@ -63,7 +63,7 @@ export interface AdvisorConfigResponse {
 
 export interface AdvisorWsFrame {
   v: 1;
-  type?: 'decision';
+  type?: 'decision' | 'heartbeat';
   decision_id: number;
   bot_id: string;
   account_id?: string;

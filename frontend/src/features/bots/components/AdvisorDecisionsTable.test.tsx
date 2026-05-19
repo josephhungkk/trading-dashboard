@@ -46,8 +46,8 @@ function decision(id: number, verdict: AdvisorVerdict): AdvisorDecision {
   };
 }
 
-function page(items: AdvisorDecision[], nextBefore: string | null = null): AdvisorDecisionsPage {
-  return { items, next_before: nextBefore };
+function page(items: AdvisorDecision[], nextCursor: string | null = null): AdvisorDecisionsPage {
+  return { items, next_cursor: nextCursor };
 }
 
 describe('AdvisorDecisionsTable', () => {

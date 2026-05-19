@@ -11,26 +11,41 @@ function formatJson(value: unknown): string {
 }
 
 export function AdvisorDecisionDrawer({ decision, onClose }: Props): React.JSX.Element | null {
+  const sectionRef = React.useRef<HTMLDivElement>(null);
+  const onCloseRef = React.useRef(onClose);
+  React.useEffect(() => { onCloseRef.current = onClose; });
+
   React.useEffect(() => {
     if (decision == null) return undefined;
 
+    sectionRef.current?.focus();
+
     function handleKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') onCloseRef.current();
     }
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [decision, onClose]);
+  }, [decision]);
 
   if (decision == null) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
-      <section
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- decorative backdrop; keyboard dismiss handled via Escape on the dialog
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/30"
+      onClick={onClose}
+    >
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- role=dialog is interactive; stopPropagation prevents backdrop close on inner click */}
+      <div
+        ref={sectionRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="advisor-decision-title"
-        className="h-full w-full max-w-xl overflow-y-auto border-l border-border bg-background p-4 shadow-xl"
+        className="h-full w-full max-w-xl overflow-y-auto border-l border-border bg-background p-4 shadow-xl outline-none"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
@@ -39,7 +54,12 @@ export function AdvisorDecisionDrawer({ decision, onClose }: Props): React.JSX.E
             </h2>
             <p className="text-sm text-muted-foreground">{decision.canonical_id}</p>
           </div>
-          <button type="button" onClick={onClose} className="btn-secondary text-xs">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close advisor decision"
+            className="btn-secondary text-xs"
+          >
             Close
           </button>
         </div>
@@ -106,7 +126,7 @@ export function AdvisorDecisionDrawer({ decision, onClose }: Props): React.JSX.E
             </pre>
           </section>
         </div>
-      </section>
+      </div>
     </div>
   );
 }

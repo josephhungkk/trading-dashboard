@@ -16,6 +16,7 @@ export function useAdvisorFeedStream(): {
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,11 +33,12 @@ export function useAdvisorFeedStream(): {
       };
 
       ws.onmessage = (evt) => {
+        if (cancelled) return;
         try {
           const raw: unknown = JSON.parse(evt.data as string);
           if (!isAdvisorWsFrame(raw)) return;
+          if (raw.type !== 'decision') return;
           setFrames((current) => [raw, ...current].slice(0, MAX_FRAMES));
-          retryRef.current = 0;
         } catch {
           // ignore malformed frames
         }
@@ -47,13 +49,14 @@ export function useAdvisorFeedStream(): {
         setIsConnected(false);
         const delay = RETRY_DELAYS[Math.min(retryRef.current, RETRY_DELAYS.length - 1)];
         retryRef.current++;
-        setTimeout(connect, delay);
+        retryTimerRef.current = setTimeout(connect, delay);
       };
     }
 
     connect();
     return () => {
       cancelled = true;
+      if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
       setIsConnected(false);
       wsRef.current?.close();
     };

@@ -12,6 +12,7 @@ class MockWebSocket {
 
   onclose: (() => void) | null = null;
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onopen: (() => void) | null = null;
   close = vi.fn();
 
   constructor(public readonly url: string) {
@@ -22,6 +23,7 @@ class MockWebSocket {
 function makeFrame(overrides: Partial<AdvisorWsFrame> = {}): AdvisorWsFrame {
   return {
     v: 1,
+    type: 'decision',
     bot_id: 'bot-1',
     account_id: 'acct-1',
     canonical_id: 'intent-1',

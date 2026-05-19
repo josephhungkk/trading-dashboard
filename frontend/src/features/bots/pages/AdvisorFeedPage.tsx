@@ -18,7 +18,12 @@ function reasoningPreview(frame: AdvisorWsFrame): string {
 export function AdvisorFeedPage(): React.JSX.Element {
   const { frames, isConnected } = useAdvisorFeedStream();
   const [filter, setFilter] = React.useState<VerdictFilter>('all');
-  const visibleFrames = filter === 'all' ? frames : frames.filter((frame) => frame.verdict === filter);
+  const visibleFrames =
+    filter === 'all' ? frames : frames.filter((frame) => frame.verdict === filter);
+
+  function handleFilterChange(value: string): void {
+    if ((FILTERS as string[]).includes(value)) setFilter(value as VerdictFilter);
+  }
 
   return (
     <main className="p-4">
@@ -41,7 +46,7 @@ export function AdvisorFeedPage(): React.JSX.Element {
         <select
           id="advisor-feed-filter"
           value={filter}
-          onChange={(event) => setFilter(event.target.value as VerdictFilter)}
+          onChange={(event) => handleFilterChange(event.target.value)}
           className="rounded border border-border bg-background px-3 py-2 text-sm"
         >
           {FILTERS.map((item) => (
@@ -54,23 +59,31 @@ export function AdvisorFeedPage(): React.JSX.Element {
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="border-b text-left text-muted-foreground">
-              <th className="py-2 pr-3 font-medium">Bot</th>
-              <th className="py-2 pr-3 font-medium">Canonical ID</th>
-              <th className="py-2 pr-3 font-medium">Verdict</th>
-              <th className="py-2 pr-3 font-medium">Reasoning</th>
-              <th className="py-2 pr-3 font-medium">Created</th>
+              <th scope="col" className="py-2 pr-3 font-medium">Bot</th>
+              <th scope="col" className="py-2 pr-3 font-medium">Canonical ID</th>
+              <th scope="col" className="py-2 pr-3 font-medium">Verdict</th>
+              <th scope="col" className="py-2 pr-3 font-medium">Reasoning</th>
+              <th scope="col" className="py-2 pr-3 font-medium">Created</th>
             </tr>
           </thead>
           <tbody>
-            {visibleFrames.map((frame) => (
-              <tr key={`${frame.bot_id}-${frame.decision_id}`} className="border-b">
-                <td className="py-2 pr-3">{frame.bot_id}</td>
-                <td className="py-2 pr-3">{frame.canonical_id}</td>
-                <td className="py-2 pr-3">{frame.verdict}</td>
-                <td className="py-2 pr-3">{reasoningPreview(frame)}</td>
-                <td className="py-2 pr-3">{createdAt(frame)}</td>
+            {visibleFrames.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="py-4 text-center text-sm text-muted-foreground">
+                  {filter === 'all' ? 'No decisions yet.' : 'No decisions match this filter.'}
+                </td>
               </tr>
-            ))}
+            ) : (
+              visibleFrames.map((frame) => (
+                <tr key={String(frame.decision_id)} className="border-b">
+                  <td className="py-2 pr-3">{frame.bot_id}</td>
+                  <td className="py-2 pr-3">{frame.canonical_id}</td>
+                  <td className="py-2 pr-3">{frame.verdict}</td>
+                  <td className="py-2 pr-3">{reasoningPreview(frame)}</td>
+                  <td className="py-2 pr-3">{createdAt(frame)}</td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

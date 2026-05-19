@@ -25,10 +25,19 @@ export function AdvisorDecisionsTable({ botId }: Props): React.JSX.Element {
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       getAdvisorDecisions(botId, pageParam === undefined ? undefined : { before: pageParam }),
-    getNextPageParam: (lastPage) => lastPage.next_before ?? undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
   });
 
   const decisions = query.data?.pages.flatMap((page) => page.items) ?? [];
+
+  if (query.isError && decisions.length === 0) {
+    return (
+      <section className="mt-6 space-y-3">
+        <h2 className="text-sm font-semibold">Advisor decisions</h2>
+        <p role="alert" className="text-xs text-destructive">Failed to load advisor decisions.</p>
+      </section>
+    );
+  }
 
   return (
     <section className="mt-6 space-y-3">
@@ -44,19 +53,25 @@ export function AdvisorDecisionsTable({ botId }: Props): React.JSX.Element {
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr className="border-b text-left text-muted-foreground">
-                <th className="py-2 pr-3 font-medium">Created</th>
-                <th className="py-2 pr-3 font-medium">Verdict</th>
-                <th className="py-2 pr-3 font-medium">Canonical ID</th>
-                <th className="py-2 pr-3 font-medium">Confidence</th>
-                <th className="py-2 pr-3 font-medium">Latency</th>
-                <th className="py-2 pr-3 font-medium">Mode</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Created</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Verdict</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Canonical ID</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Side</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Qty</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Confidence</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Latency</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Mode</th>
               </tr>
             </thead>
             <tbody>
               {decisions.map((decision) => (
                 <tr
                   key={decision.id}
+                  tabIndex={0}
                   onClick={() => setSelected(decision)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') setSelected(decision);
+                  }}
                   className="cursor-pointer border-b hover:bg-muted/50"
                 >
                   <td className="py-2 pr-3">{new Date(decision.created_at).toLocaleString()}</td>
@@ -66,6 +81,12 @@ export function AdvisorDecisionsTable({ botId }: Props): React.JSX.Element {
                     </span>
                   </td>
                   <td className="py-2 pr-3">{decision.canonical_id}</td>
+                  <td className="py-2 pr-3">
+                    {(decision.intent as Record<string, unknown>)?.side as string ?? '—'}
+                  </td>
+                  <td className="py-2 pr-3">
+                    {(decision.intent as Record<string, unknown>)?.qty as string ?? '—'}
+                  </td>
                   <td className="py-2 pr-3">{formatConfidence(decision.confidence)}</td>
                   <td className="py-2 pr-3">{decision.latency_ms} ms</td>
                   <td className="py-2 pr-3">{decision.effective_mode}</td>
@@ -87,7 +108,7 @@ export function AdvisorDecisionsTable({ botId }: Props): React.JSX.Element {
         </button>
       )}
 
-      {query.isError && (
+      {query.isError && decisions.length > 0 && (
         <p role="alert" className="text-xs text-destructive">Failed to load advisor decisions.</p>
       )}
 

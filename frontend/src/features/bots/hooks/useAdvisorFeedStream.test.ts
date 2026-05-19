@@ -19,6 +19,7 @@ class MockWebSocket {
 function makeFrame(overrides: Partial<AdvisorWsFrame> = {}): AdvisorWsFrame {
   return {
     v: 1,
+    type: 'decision',
     bot_id: 'bot-1',
     account_id: 'acct-1',
     canonical_id: 'intent-1',

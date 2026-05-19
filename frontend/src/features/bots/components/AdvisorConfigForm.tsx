@@ -2,13 +2,15 @@ import * as React from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { mintCsrfNonce } from '../../../services/admin/api';
 import { getAdvisorConfig, updateAdvisorConfig } from '../../../services/advisor/api';
+import { ADVISOR_MODES } from '../../../services/advisor/types';
 import type { AdvisorConfig, AdvisorMode } from '../../../services/advisor/types';
+
+const CAPABILITIES = ['reasoning', 'structured_output', 'local_only'] as const;
+type Capability = (typeof CAPABILITIES)[number];
 
 interface Props {
   botId: string;
 }
-
-const MODES: AdvisorMode[] = ['OFF', 'OBSERVE', 'VETO'];
 
 function defaultConfig(): AdvisorConfig {
   return {
@@ -34,6 +36,13 @@ function AdvisorConfigFormInner({ botId, initialConfig }: FormProps): React.JSX.
   const [config, setConfig] = React.useState<AdvisorConfig>(initialConfig);
   const [saved, setSaved] = React.useState(false);
   const [validationError, setValidationError] = React.useState<string | null>(null);
+  const savedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
+    };
+  }, []);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -48,7 +57,8 @@ function AdvisorConfigFormInner({ botId, initialConfig }: FormProps): React.JSX.
       setValidationError(null);
       setConfig(response.config);
       void queryClient.invalidateQueries({ queryKey: ['bot', botId, 'advisor-config'] });
-      window.setTimeout(() => setSaved(false), 2000);
+      if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = setTimeout(() => setSaved(false), 2000);
     },
     onError: (error) => {
       setValidationError(error instanceof Error ? error.message : 'Failed to save advisor config.');
@@ -56,11 +66,19 @@ function AdvisorConfigFormInner({ botId, initialConfig }: FormProps): React.JSX.
   });
 
   function setNumber<K extends keyof AdvisorConfig>(key: K, value: string): void {
-    const parsed = Number(value);
-    setConfig((current) => ({
-      ...current,
-      [key]: Number.isFinite(parsed) ? parsed : 0,
-    }));
+    const parsed = value === '' ? 0 : Number(value);
+    if (!Number.isFinite(parsed)) return;
+    setConfig((current) => ({ ...current, [key]: parsed }));
+  }
+
+  function handleModeChange(value: string): void {
+    if (!(ADVISOR_MODES as readonly string[]).includes(value)) return;
+    setConfig((current) => ({ ...current, mode: value as AdvisorMode }));
+  }
+
+  function handleCapabilityChange(value: string): void {
+    if (!(CAPABILITIES as readonly string[]).includes(value)) return;
+    setConfig((current) => ({ ...current, capability: value as Capability }));
   }
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>): void {
@@ -82,15 +100,40 @@ function AdvisorConfigFormInner({ botId, initialConfig }: FormProps): React.JSX.
         <select
           id="advisor-mode"
           value={config.mode}
-          onChange={(event) =>
-            setConfig((current) => ({ ...current, mode: event.target.value as AdvisorMode }))
-          }
+          onChange={(event) => handleModeChange(event.target.value)}
           className="rounded border border-border bg-background px-3 py-2 text-sm"
         >
-          {MODES.map((mode) => (
+          {ADVISOR_MODES.map((mode) => (
             <option key={mode} value={mode}>{mode}</option>
           ))}
         </select>
+      </label>
+
+      <label className="flex flex-col gap-1 text-sm" htmlFor="advisor-capability">
+        <span className="text-muted-foreground">Capability</span>
+        <select
+          id="advisor-capability"
+          value={config.capability}
+          onChange={(event) => handleCapabilityChange(event.target.value)}
+          className="rounded border border-border bg-background px-3 py-2 text-sm"
+        >
+          {CAPABILITIES.map((cap) => (
+            <option key={cap} value={cap}>{cap}</option>
+          ))}
+        </select>
+      </label>
+
+      <label className="flex items-center gap-2 text-sm" htmlFor="advisor-local-only">
+        <input
+          id="advisor-local-only"
+          type="checkbox"
+          checked={config.local_only}
+          onChange={(event) =>
+            setConfig((current) => ({ ...current, local_only: event.target.checked }))
+          }
+          className="rounded border-border"
+        />
+        <span className="text-muted-foreground">Local only</span>
       </label>
 
       <label className="flex flex-col gap-1 text-sm" htmlFor="advisor-timeout">
@@ -119,6 +162,19 @@ function AdvisorConfigFormInner({ botId, initialConfig }: FormProps): React.JSX.
         />
       </label>
 
+      <label className="flex flex-col gap-1 text-sm" htmlFor="advisor-max-qps">
+        <span className="text-muted-foreground">Max QPS</span>
+        <input
+          id="advisor-max-qps"
+          type="number"
+          min="0.1"
+          step="0.1"
+          value={config.max_qps}
+          onChange={(event) => setNumber('max_qps', event.target.value)}
+          className="rounded border border-border bg-background px-3 py-2 text-sm"
+        />
+      </label>
+
       <label className="flex flex-col gap-1 text-sm" htmlFor="advisor-auto-pause">
         <span className="text-muted-foreground">Auto pause threshold</span>
         <input
@@ -127,6 +183,18 @@ function AdvisorConfigFormInner({ botId, initialConfig }: FormProps): React.JSX.
           min="0"
           value={config.auto_pause_threshold}
           onChange={(event) => setNumber('auto_pause_threshold', event.target.value)}
+          className="rounded border border-border bg-background px-3 py-2 text-sm"
+        />
+      </label>
+
+      <label className="flex flex-col gap-1 text-sm" htmlFor="advisor-auto-pause-window">
+        <span className="text-muted-foreground">Auto pause window (s)</span>
+        <input
+          id="advisor-auto-pause-window"
+          type="number"
+          min="60"
+          value={config.auto_pause_window_seconds}
+          onChange={(event) => setNumber('auto_pause_window_seconds', event.target.value)}
           className="rounded border border-border bg-background px-3 py-2 text-sm"
         />
       </label>
