@@ -12,7 +12,7 @@ repos:
     rev: v1.20.1
     hooks:
       - id: mypy
-        additional_dependencies: [pydantic, sqlalchemy, pydantic-settings]
+        additional_dependencies: [pydantic, sqlalchemy, pydantic-settings, types-croniter]
         files: ^backend/app/
         exclude: ^backend/app/_generated/
   - repo: https://github.com/gitleaks/gitleaks

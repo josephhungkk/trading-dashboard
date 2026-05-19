@@ -11,6 +11,7 @@ dependencies = [
     "cryptography>=46.0.7",
     "exchange-calendars>=4.5",
     "fastapi>=0.136.0",
+    "croniter>=6.0.0",
     "grpcio>=1.66.0",
     "grpcio-tools>=1.66.0",
     "httpx>=0.28.1",
@@ -47,6 +48,7 @@ dev = [
     "ruff>=0.15.11",
     "schwabdev==3.0.3",
     "syrupy>=5.1.0",
+    "types-croniter>=6.2.2.20260518",
     "types-jsonschema>=4.26.0.20260508",
 ]
 # Phase 11a CI-debt (2026-05-12): added alpaca-py + schwabdev to dev deps so

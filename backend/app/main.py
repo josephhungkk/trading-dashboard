@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.api.telegram as _telegram_api_module
 from app.api import admin_instruments
+from app.api import scanner as scanner_api
+from app.api import ws_scanner as ws_scanner_api
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.admin_alerts import router as admin_alerts_router
@@ -667,6 +669,25 @@ async def lifespan(_app: FastAPI) -> Any:
     scheduler.start()
     _app.state.scheduler = scheduler
 
+    from app.services.scanner.scanner_service import ScannerService
+    from app.services.scanner.scheduler import ScannerScheduler
+
+    _app.state.scanner_service = ScannerService(
+        db_factory=session_factory,
+        redis=redis,
+        cfg=config_cache,
+    )
+    _scanner_scheduler = ScannerScheduler(
+        scheduler=scheduler,
+        scanner_service=_app.state.scanner_service,
+    )
+    _app.state.scanner_scheduler = _scanner_scheduler
+    try:
+        async with session_factory() as _scan_db:
+            await _scanner_scheduler.rebuild_from_db(db=_scan_db)
+    except Exception:
+        log.exception("scanner.lifespan.rebuild_failed")
+
     # Run once immediately on startup (non-blocking).
     pre_warm_task: asyncio.Task[None] = asyncio.create_task(_run_pre_warm())
 
@@ -882,6 +903,8 @@ app.include_router(ws_crypto_router)
 app.include_router(options_admin_router)
 app.include_router(ws_options_router)
 app.include_router(algo_router)
+app.include_router(scanner_api.router)
+app.include_router(ws_scanner_api.router)
 
 
 @app.get("/health")

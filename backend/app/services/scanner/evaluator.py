@@ -34,8 +34,8 @@ OP: "<" | ">" | "<=" | ">=" | "==" | "!="
 
 _PARSER = Lark(GRAMMAR, parser="lalr", start="rule")
 
-MAX_DEPTH = 8
-MAX_NODES = 256
+MAX_DEPTH = 20
+MAX_NODES = 512
 MAX_FUNC_CALLS = 32
 MAX_PERIOD_SUM = 5000
 

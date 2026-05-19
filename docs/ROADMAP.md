@@ -55,8 +55,8 @@ See `memory/feedback_sub_phase_versioning.md` for the case-by-case decision rule
 | 16 | 0.16.0 | Bonds + Mutual Funds + CFD | CUSIP search, accrued-interest, T+2 settlement. Mutual-fund EOD NAV ordering. CFD on IBKR (ex-US jurisdictions only). |
 | 17 | 0.17.0 | IBKR algos | Adaptive, TWAP, VWAP, Arrival, Iceberg / Hidden / Reserve. Algo parameter UI. |
 | 18 | 0.18.0 | **Universe scanner + News/filings + Earnings-event handling** | Rule-based scanner (RSI, breakout, volume, mcap, fundamentals) + LLM commentary on candidates. Schwab `SCREENER_EQUITY` feed. SEC EDGAR (US) + RNS (HK) filings ingest. Earnings calendar with auto-flat / auto-pause hooks for bots. |
-| 19 | 0.19.0 | Backtesting harness | Replay historical bars through strategy code, PnL/drawdown/Sharpe/MAR report, walk-forward, Monte Carlo. |
-| 20 | 0.20.0 | Bot engine v1 — rule-based | Strategy plugin model (Python files), bot lifecycle (create/start/stop/version), per-bot risk caps, paper-mode-by-default. Bot worker is a separate Docker service. |
+| 19 | 0.19.0 | Bot engine v1 — rule-based | Strategy plugin model (Python files), bot lifecycle (create/start/stop/version), per-bot risk caps, paper-mode-by-default. Bot worker is a separate Docker service. |
+| 20 | 0.20.0 | Backtesting harness | Replay historical bars through strategy code, PnL/drawdown/Sharpe/MAR report, walk-forward, Monte Carlo. |
 | 21 | 0.21.0 | Bot engine v2 — LLM-in-loop | LLM-as-analyst on bot decisions, parameter-tuning loop with human approval, shadow-mode strategy promotion, perf-attribution per bot. |
 | 22 | 0.22.0 | Bot engine v3 — autonomous, self-refining | Multi-bot orchestration, nightly retrain, LLM-driven strategy generation with guardrails, auto-promotion rules. **No raw RL.** |
 | **23** | 0.23.0 | **UK CGT awareness + per-bot attribution + cgt-calc handoff** | Real-time Section 104 pool tracker (mirrors `fills`), same-day + 30-day b&b matcher, pre-trade gate "would trigger b&b" warning, live £3k allowance gauge, "Tax" page (Section 104 positions + per-bot/per-strategy/per-asset PnL), year-end RAW-CSV export consumable by [`KapJI/capital-gains-calculator`](https://github.com/KapJI/capital-gains-calculator), optional admin-page subprocess invocation of `cgt-calc` for in-place PDF. **Contingency:** if cgt-calc proves unfit at Phase 23 start (current bug investigation pending; tracked as a side task), scope expands to include an in-house Section 104 calculation engine. |
@@ -76,7 +76,7 @@ Larger phases that may split during their own brainstorm: 8 (broker × order-typ
 2. **`instruments` + `symbol_aliases(source, symbol)` schema.** Single canonical id per security; per-source name resolution. **Phase 7a.**
 3. **OrderType + TimeInForce are DB-driven enums + per-broker capability map**, not Python `Literal`. **Phase 8.**
 4. **Polymorphic contract via JSONB `contract_details`.** Option strike/expiry, future contract_month, forex pair, etc. **Phase 12.**
-5. **Bot worker is a separate Docker service** with its own connection pool. Communicates via Redis pub/sub + Postgres. Bot crash ≠ API crash; enables multi-worker uvicorn later. **Phase 20.**
+5. **Bot worker is a separate Docker service** with its own connection pool. Communicates via Redis pub/sub + Postgres. Bot crash ≠ API crash; enables multi-worker uvicorn later. **Phase 19.**
 6. **AI router is `services/ai/`**, decoupled from bots. Anyone (alerts, scanner, bots, trade ticket) can request completion. **Phase 11.**
 7. **Bar aggregator + historical store land in Phase 9, not 7.** Schwab CHART_EQUITY gives free 1m US bars; the aggregator handles non-Schwab sources + sub-1m bars.
 8. **Risk engine before bots.** Phase 10 ships before Phase 20. Bots cannot bypass the pre-trade gate.
