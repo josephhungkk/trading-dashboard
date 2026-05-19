@@ -18,6 +18,8 @@ Phase 20 supports **STOCK, ETF, FUTURE, OPTION (single-leg), CRYPTO** — any in
 
 FOREX (IDEALPRO RFQ, no canonical bars), BOND, MUTUAL_FUND, CFD, and multi-leg COMBOS are out of scope. The submit endpoint returns `422 asset_class_not_backtestable` when the resolved instrument's `asset_class` is unsupported. This matches the OHLCV-only fill model (§5.5).
 
+**Known limitation — corporate actions:** Phase 20 does NOT adjust for splits or dividend events. `bars_1m` stores raw OHLCV from broker feeds and is not split-adjusted. Backtests spanning corporate actions (stock splits, special dividends) will produce misleading results — the simulator treats a post-split price halving as a genuine -50% move. Users must either choose date ranges that avoid corporate actions, or upload split-adjusted CSV bars via the `upload-bars` endpoint. The FE shows an amber warning on the config form when the selected date range exceeds 6 months for STOCK/ETF asset classes. Phase 21 may add adjustment factors.
+
 ---
 
 ## 2. Decisions
@@ -63,16 +65,18 @@ CREATE TABLE backtests (
     params_snapshot    JSONB NOT NULL,         -- strategy params frozen at submit time
     bars_source        TEXT NOT NULL CHECK (bars_source IN ('db','backfill','csv')),
     parent_backtest_id UUID REFERENCES backtests(id) ON DELETE CASCADE,  -- for Phase 21 walk-forward groups
+    params_schema_hash TEXT,                   -- SHA-256 of params_schema at submit; worker re-checks at pickup (MED-4)
     progress_pct       SMALLINT NOT NULL DEFAULT 0,
     error_msg          TEXT,
     report             JSONB,                  -- written atomically on completion
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at         TIMESTAMPTZ,            -- set when worker picks up job; NULL while queued (HIGH-1')
     completed_at       TIMESTAMPTZ
 );
 
-CREATE INDEX ix_backtests_bot_id    ON backtests(bot_id);
--- Note: no partial status index — worker finds queued jobs via Redis queue (§5.1), not DB scan
-CREATE INDEX ix_backtests_parent_id ON backtests(parent_backtest_id) WHERE parent_backtest_id IS NOT NULL;
+CREATE INDEX ix_backtests_bot_id_created ON backtests(bot_id, created_at DESC);  -- covers LIST cursor-paginated query (LOW-2)
+CREATE INDEX ix_backtests_parent_id      ON backtests(parent_backtest_id) WHERE parent_backtest_id IS NOT NULL;
+CREATE INDEX ix_backtests_running_stale  ON backtests(started_at) WHERE status = 'running';  -- orphan sweep (HIGH-1')
 
 -- CSV upload metadata; actual bar rows live in backtest_bars (CRIT-2)
 CREATE TABLE backtest_bar_uploads (
@@ -94,7 +98,7 @@ CREATE TABLE backtest_bars (
     high           NUMERIC(20,8) NOT NULL,
     low            NUMERIC(20,8) NOT NULL,
     close          NUMERIC(20,8) NOT NULL,
-    volume         NUMERIC(20,8) NOT NULL,
+    volume         NUMERIC(20,8),              -- nullable: CSV rows missing volume are accepted; bars_1m.volume is also nullable (LOW-1)
     PRIMARY KEY (upload_id, instrument_id, bucket_start)
 );
 CREATE INDEX ix_backtest_bars_instrument ON backtest_bars(instrument_id, bucket_start);
@@ -111,7 +115,7 @@ CREATE INDEX ix_backtest_bars_instrument ON backtest_bars(instrument_id, bucket_
   "total_trades":         47,
   "win_rate":             0.61,    // closed winning trades / total closed trades
   "avg_trade_pnl":        142.30,  // net of commission + slippage (both fills)
-  "forced_close_pnl":     -18.50,  // aggregate PnL from forced end-of-range closes (may be 0)
+  "forced_close_pnl":     -18.50,  // aggregate PnL from forced end-of-range closes; account base currency, net of slippage+commission, signed (positive=profit, negative=loss); 0 when no forced closes
   "pnl_curve":   [[iso_ts, cumulative_pnl_base], ...],  // one point per bar
   "drawdown_curve": [[iso_ts, drawdown_pct], ...],       // non-negative; one point per bar
   "trades": [
@@ -157,10 +161,10 @@ Mounted at `/api/bots/{bot_id}/backtests`. All endpoints require JWT.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/bots/{bot_id}/backtests` | Submit job — validate params, INSERT status=queued, LPUSH `backtest:queue`, return `{job_id}` 202 |
+| `POST` | `/api/bots/{bot_id}/backtests` | Submit job — validate params, INSERT status=queued, RPUSH `backtest:queue`, return `{job_id}` 202 |
 | `GET` | `/api/bots/{bot_id}/backtests` | List backtests (id, status, timeframe, canonical_id, start_date, end_date, progress_pct, created_at, completed_at) — cursor paginated by created_at DESC |
 | `GET` | `/api/bots/{bot_id}/backtests/{job_id}` | Fetch single backtest including full `report` when done; 404 if not owned |
-| `DELETE` | `/api/bots/{bot_id}/backtests/{job_id}` | Cancel queued/running (LPUSH cancel signal to `backtest:cancel:{job_id}`); hard-delete done/failed rows |
+| `DELETE` | `/api/bots/{bot_id}/backtests/{job_id}` | Cancel queued/running (SET `backtest:cancel:{job_id}` EX 3600; worker polls this key each cadence cycle — see §5.3); hard-delete done/failed rows. If row has children (`parent_backtest_id` FK), returns 409 with `{"children": N}` — caller must pass `?cascade=true` to confirm deletion of child rows (MED-1) |
 | `POST` | `/api/bots/{bot_id}/backtests/upload-bars` | CSV upload — multipart/form-data; `canonical_id` + `timeframe` query params; inserts into `backtest_bars`; returns `{upload_id, canonical_id, bar_count}` |
 
 **Submit request body (`BacktestSubmitRequest`):**
@@ -182,7 +186,8 @@ Mounted at `/api/bots/{bot_id}/backtests`. All endpoints require JWT.
 - `slippage_bps` / `slippage_atr_pct` mutually exclusive; at least one non-null (0.0 = zero slippage, valid)
 - `bars_source=csv` requires a `backtest_bar_uploads` row for matching `canonical_id` + `timeframe` with `uploaded_at >= now() - 24h`; otherwise 422
 - `bot_id` must exist and be owned by `jwt_subject` (404 otherwise)
-- Validate `params_snapshot` (current bot params) against current strategy `params_schema` via `sandbox.py` at submit time; return 422 with field-level errors if missing required keys — fail fast before queuing (MED-4)
+- Validate `params_snapshot` (current bot params) against current strategy `params_schema` via `sandbox.py` at submit time; return 422 with field-level errors if missing required keys — fail fast before queuing
+- Compute `params_schema_hash = SHA-256(json.dumps(params_schema, sort_keys=True))` at submit; store in `backtests.params_schema_hash`; worker re-extracts schema at pickup and compares — mismatch fails with `error_code=params_schema_drift` (MED-4)
 - Commission snapshot captured at submit: read all keys from `app_config[backtest/commission]` + derive `active_broker_id` from `bot_accounts`; store as `commission_cfg` (schema in §5.7)
 
 ### 4.2 WS endpoint: `app/api/ws_backtests.py`
@@ -193,7 +198,7 @@ WS /ws/bots/{bot_id}/backtest/{job_id}
 
 - Authenticates via JWT (same CSWSH origin check as existing WS endpoints)
 - **404 not 403** if job not owned by `jwt_subject` (close with 1008 policy violation — indistinguishable from "not found")
-- **Per-`jwt_subject` cap: 10 concurrent connections**; global ceiling: 100. Redis counter `backtest:ws:count:{jwt_subject}` incremented on accept, decremented on disconnect
+- **Per-`jwt_subject` cap: 10 concurrent connections**; global ceiling: 100. Two Redis counters: `backtest:ws:count:{jwt_subject}` (per-user) and `backtest:ws:count:global` (global). Both incremented on accept, decremented on disconnect. Caps are approximate under concurrent accepts (no Lua script); `backtest_ws_cap_rejections_total{scope=jwt|global}` metric counts rejections (MED-2)
 - Subscribes to `backtest:progress:{job_id}` Redis psubscribe
 - Worker publishes progress frames every `max(1, total_bars // 200)` bars (MED-3):
   ```jsonc
@@ -227,8 +232,8 @@ New service `backtest_worker` in `docker-compose.yml` — same pattern as `bot_w
 - Own Redis connection
 - Shares `strategies/` volume read-only
 - Entrypoint: `python -m app.backtest.worker_main`
-- **Job discovery:** `BLPOP backtest:queue 0` (blocking pop, at-least-once delivery). On pop, move job id to `backtest:pending:{worker_id}` (BRPOPLPUSH semantics for visibility). On completion, remove from pending set.
-- **Orphan sweep:** on startup and every 60s, scan `backtest:pending:*` keys; any job in `status=running` with `started_at < now() - 5min` is re-queued via `LPUSH backtest:queue` and its pending key deleted. Mirrors `orphan_sweeper.py` from Phase 11a.
+- **Job discovery (atomic, at-least-once):** Submit endpoint uses `RPUSH backtest:queue` (push to tail — FIFO). Worker uses `BLMOVE backtest:queue backtest:pending:{worker_id} LEFT RIGHT 0` — atomically pops from the head of the main queue and pushes to the tail of the worker's pending list in one Redis round-trip (no race window between pop and visibility). On completion, worker does `LREM backtest:pending:{worker_id} 1 {job_id}`. Orphan sweep re-queues via `RPUSH backtest:queue` (retries go to tail, same as new submits) (HIGH-2').
+- **Orphan sweep:** on startup and every 60s, query `backtests WHERE status='running' AND started_at < now() - interval '5 minutes'` using `ix_backtests_running_stale`; re-queue each via `RPUSH backtest:queue`, UPDATE status=queued, started_at=NULL. Increment `backtest_orphans_recovered_total`. Mirrors `orphan_sweeper.py` from Phase 11a.
 - **Concurrency:** `MAX_CONCURRENT_BACKTESTS=2` controlled by `asyncio.Semaphore`. Env var `BACKTEST_WORKER_CONCURRENCY` overrides. Prometheus gauge `backtest_workers_active` tracks in-flight count.
 
 ### 5.2 Module layout: `app/backtest/`
@@ -253,12 +258,18 @@ The entire pipeline runs under `asyncio.run(self._replay(backtest_id))`. `on_bar
 ```
 1.  Load backtests row from DB; UPDATE status=running, started_at=now()
 2.  Validate strategy module via sandbox.py DenylistFinder (same check as bot-create)
+    Re-extract params_schema; SHA-256 hash it; compare with backtests.params_schema_hash
+    → mismatch: fail with error_msg='params_schema_drift'; publish failed frame; return
 3.  BarFeed.load(canonical_id, timeframe, start_date, end_date, bars_source)
       → query bars_1m / CAGG for date range
       → if bars_source=backfill: trigger bar_service backfill for missing ranges
       → if bars_source=csv: load matching backtest_bars rows by canonical_id+timeframe
-        (resolved to instrument_id); merge + deduplicate with DB bars in-memory
-        (backtest_bars wins on collision — user-supplied data preferred)
+        (resolved to instrument_id). Merge semantics:
+          1. `backtest_bars` upload must match the requested `timeframe` exactly;
+             mismatched timeframe raises `BarFeedError` caught at submit-time validation.
+          2. Per `(instrument_id, bucket_start)`, `backtest_bars` row replaces the DB row.
+          3. DB buckets not in `backtest_bars` are kept as-is (CSV may be partial).
+          4. `backtest_bars` rows outside `[start_date, end_date]` are ignored.
       → return sorted []BarEvent slice
 4.  CommissionSchedule.init(commission_cfg)  — use snapshot from backtests row
 5.  FillSimulator.init(slippage_bps, slippage_atr_pct, commission_schedule)
@@ -275,8 +286,10 @@ The entire pipeline runs under `asyncio.run(self._replay(backtest_id))`. `on_bar
            — updates in-memory position tracker
       b. await strategy.on_bar(bar)  (or call if not coroutine)
       c. if i % cadence == 0: ProgressPublisher.publish(i, total, trades_so_far)
+      d. if EXISTS backtest:cancel:{backtest_id}: abort loop → status=failed, error_msg='cancelled by user'; publish failed frame; return
 9.  await strategy.on_stop()  (or call if not coroutine)
 10. FillSimulator.force_close_open_positions(final_bar)
+      — applies only to OPEN POSITIONS (filled trades); unfilled pending orders are silently discarded (not reported as trades)
       — close price = final_bar.close ± slippage (same adverse direction rule)
       — mark these trades as forced_close=True in the trade list
 11. MetricsComputer.compute(filled_trades, bar_timestamps) → report dict
@@ -309,7 +322,7 @@ No DB writes, no Redis pubsub, no broker sidecar calls during replay.
 - Maintains `_pending: list[PendingOrder]` queue
 - **TIF semantics:**
   - `DAY` — order cancelled at the next session-close bar (from `MarketCalendar`); if not filled by then, removed from queue
-  - `GTC` — persists across session boundaries until filled or explicitly cancelled
+  - `GTC` — persists across session boundaries until filled or explicitly cancelled, up to `GTC_MAX_DAYS=90` calendar days from placement; beyond this the order is cancelled with reason `gtc_expired` and excluded from the trade list (not-filled, not forced-close)
   - `IOC` / `FOK` — fill-or-cancel on the very next bar; if bar open matches, fill; otherwise cancel immediately
   - Other TIF values → raise `NotImplementedError` (loud failure, not silent skip)
 - On each `process_pending_orders(bar)`:
@@ -390,6 +403,7 @@ All under `backtest_*`:
 | `backtest_progress_publishes_total` | Counter | — |
 | `backtest_workers_active` | Gauge | — |
 | `backtest_orphans_recovered_total` | Counter | — |
+| `backtest_ws_cap_rejections_total` | Counter | `scope` (jwt\|global) |
 
 ---
 
@@ -427,6 +441,7 @@ Form fields:
 - CSV upload (shown only when bars_source=csv; multipart POST to `upload-bars`; inline error shown on 4xx — Submit disabled until a successful upload exists for the chosen `canonical_id` + `timeframe`)
 - Slippage (radio toggle: Fixed bps input OR % of ATR input)
 - Commission (read-only display from `app_config` — "auto from broker schedule")
+- Corporate action warning (amber, shown when asset class is STOCK/ETF AND date range > 6 months): "This range may span splits or dividends. Results will be misleading unless you upload split-adjusted bars."
 
 Submit → POST `/api/bots/{bot_id}/backtests` → transition to State 2.
 
@@ -446,7 +461,7 @@ Submit → POST `/api/bots/{bot_id}/backtests` → transition to State 2.
 - Drawdown chart (SVG, shaded area — drawdown % over time, non-negative y-axis, shaded downward)
 - Trade list (`DataTable` with columns: symbol, side, qty, entry, exit, entry slippage, exit slippage, commission, PnL, forced, opened, closed)
 - "New Backtest" button → reset to State 1
-- Collapsible "Previous backtests" list at bottom (fetched via GET list endpoint) — id, canonical_id, date range, Sharpe, status; clicking loads that result into State 3
+- Collapsible "Previous backtests" list at bottom (fetched via GET list endpoint) — id, canonical_id, date range, Sharpe, status; clicking loads that result into State 3. Delete button on each row: if the row has children (walk-forward group from Phase 21), shows confirmation dialog "Delete this backtest and N child runs?" before sending `DELETE ?cascade=true`
 
 **State 4 — Failed**
 
