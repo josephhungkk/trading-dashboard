@@ -7,6 +7,10 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function checkOk(res: Response): Promise<void> {
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+}
+
 export async function listBots(params?: {
   status?: string;
   mode?: string;
@@ -50,7 +54,7 @@ export async function updateBot(
 }
 
 export async function deleteBot(id: string): Promise<void> {
-  await fetch(`${BASE}/${id}`, { method: 'DELETE' });
+  await checkOk(await fetch(`${BASE}/${id}`, { method: 'DELETE' }));
 }
 
 export async function startBot(id: string): Promise<{ status: string }> {
@@ -62,11 +66,11 @@ export async function stopBot(id: string): Promise<{ status: string }> {
 }
 
 export async function pauseBot(id: string): Promise<void> {
-  await fetch(`${BASE}/${id}/pause`, { method: 'POST' });
+  await checkOk(await fetch(`${BASE}/${id}/pause`, { method: 'POST' }));
 }
 
 export async function resumeBot(id: string): Promise<void> {
-  await fetch(`${BASE}/${id}/resume`, { method: 'POST' });
+  await checkOk(await fetch(`${BASE}/${id}/resume`, { method: 'POST' }));
 }
 
 export async function deployBot(id: string): Promise<{ version: number }> {
@@ -74,11 +78,13 @@ export async function deployBot(id: string): Promise<{ version: number }> {
 }
 
 export async function upsertRiskCaps(id: string, caps: RiskCaps): Promise<void> {
-  await fetch(`${BASE}/${id}/risk-caps`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(caps),
-  });
+  await checkOk(
+    await fetch(`${BASE}/${id}/risk-caps`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(caps),
+    }),
+  );
 }
 
 export async function listRuns(

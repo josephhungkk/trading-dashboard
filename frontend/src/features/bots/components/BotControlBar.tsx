@@ -17,10 +17,10 @@ export function BotControlBar({ bot }: Props): React.JSX.Element {
   const qc = useQueryClient();
   const [confirmLive, setConfirmLive] = React.useState(false);
 
-  const invalidate = () => {
+  const invalidate = React.useCallback(() => {
     void qc.invalidateQueries({ queryKey: ['bots'] });
     void qc.invalidateQueries({ queryKey: ['bot', bot.id] });
-  };
+  }, [qc, bot.id]);
 
   const startMut = useMutation({ mutationFn: () => startBot(bot.id), onSuccess: invalidate });
   const stopMut = useMutation({ mutationFn: () => stopBot(bot.id), onSuccess: invalidate });

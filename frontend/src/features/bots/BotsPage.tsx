@@ -1,10 +1,12 @@
 import * as React from 'react';
-import { Link } from '@tanstack/react-router';
+import { Link, getRouteApi } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { listBots, deleteBot } from '../../services/bots/api';
 import { useBotStatus } from './hooks/useBotStatus';
 import { BotControlBar } from './components/BotControlBar';
 import type { BotStatus } from '../../services/bots/types';
+
+const routeApi = getRouteApi('/bots');
 
 const statusBadge: Record<BotStatus, string> = {
   stopped: 'bg-muted text-muted-foreground',
@@ -18,7 +20,8 @@ const statusBadge: Record<BotStatus, string> = {
 export function BotsPage(): React.JSX.Element {
   useBotStatus();
   const qc = useQueryClient();
-  const [statusFilter, setStatusFilter] = React.useState('');
+  const { status: searchStatus } = routeApi.useSearch();
+  const [statusFilter, setStatusFilter] = React.useState(searchStatus ?? '');
 
   const { data, isLoading } = useQuery({
     queryKey: ['bots', statusFilter || undefined],

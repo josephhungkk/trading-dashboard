@@ -1,6 +1,8 @@
 import * as React from 'react';
-import { useParams } from '@tanstack/react-router';
+import { getRouteApi } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+
+const routeApi = getRouteApi('/bots/$botId');
 import { getBot, updateBot } from '../../services/bots/api';
 import { useBotStatus } from './hooks/useBotStatus';
 import { BotControlBar } from './components/BotControlBar';
@@ -13,7 +15,7 @@ type Tab = 'overview' | 'runs' | 'orders' | 'risk';
 
 export function BotDetailPage(): React.JSX.Element {
   useBotStatus();
-  const { botId } = useParams({ strict: false }) as { botId: string };
+  const { botId } = routeApi.useParams();
   const qc = useQueryClient();
   const [tab, setTab] = React.useState<Tab>('overview');
   const [editParams, setEditParams] = React.useState(false);

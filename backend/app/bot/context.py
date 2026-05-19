@@ -128,8 +128,11 @@ class BotContext:
         )
 
         await self._db.execute(
-            text("INSERT INTO bot_orders (order_id, bot_id, placed_at) VALUES (:oid, :bid, now())"),
-            {"oid": result.order_id, "bid": self.bot_id},
+            text(
+                "INSERT INTO bot_orders (order_id, bot_id, account_id, placed_at)"
+                " VALUES (:oid, :bid, :aid, now())"
+            ),
+            {"oid": result.order_id, "bid": self.bot_id, "aid": account_id},
         )
         await self._db.commit()
         return result

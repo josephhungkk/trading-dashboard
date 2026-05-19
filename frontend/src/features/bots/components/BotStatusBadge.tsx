@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Link } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { listBots } from '../../../services/bots/api';
 import type { Bot } from '../../../services/bots/types';
@@ -21,9 +22,9 @@ export function BotStatusBadge(): React.JSX.Element | null {
     <span className="text-xs text-muted-foreground">
       {running} running ·{' '}
       {errors > 0 ? (
-        <a href="/bots?status=error" className="text-destructive">
+        <Link to="/bots" search={{ status: 'error' }} className="text-destructive">
           {errors} errors
-        </a>
+        </Link>
       ) : (
         '0 errors'
       )}{' '}
