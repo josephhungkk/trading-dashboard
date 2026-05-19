@@ -71,6 +71,7 @@ services:
       # Phase 11a CI-debt: mount deploy/prometheus so test_metrics_orders
       # tests find alerts.yml at /deploy/prometheus/alerts.yml.
       - ./deploy/prometheus:/deploy/prometheus
+      - ./strategies:/strategies:ro
     environment:
       # Real Redis pubsub fidelity test — uses the dev redis service (no fakeredis).
       CI_USE_REAL_REDIS: "1"
@@ -79,6 +80,19 @@ services:
       E2E_BACKEND_URL: "http://backend:8000"
       E2E_JWT: "test-bypass"
     command: ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  bot_worker:
+    build:
+      context: ./backend
+      target: dev
+    entrypoint: ["python", "-m", "app.bot.supervisor"]
+    env_file: .env
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./strategies:/strategies:ro
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
 
   frontend:
     build:

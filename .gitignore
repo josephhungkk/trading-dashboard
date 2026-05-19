@@ -49,3 +49,7 @@ scripts/empirical/artifacts/*
 
 # Phase 9 empirical history JSONL artifacts -- per-script timestamped runs.
 tmp/empirical/
+
+# Phase 19: bot strategy files (contain user trading logic)
+strategies/*.py
+!strategies/README.md

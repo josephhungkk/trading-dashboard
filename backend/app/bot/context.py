@@ -92,17 +92,13 @@ class BotContext:
             raise BotAccountError(f"account_id {account_id} is not in bot.accounts")
         await self._verify_account_mode(account_id)
 
-        alias_row = await self._db.execute(
-            text("SELECT instrument_id FROM symbol_aliases WHERE canonical_id = :cid LIMIT 1"),
+        instr_row = await self._db.execute(
+            text("SELECT id, asset_class FROM instruments WHERE canonical_id = :cid LIMIT 1"),
             {"cid": canonical_id},
         )
-        instrument_id = alias_row.scalar_one_or_none() or 0
-
-        asset_row = await self._db.execute(
-            text("SELECT asset_class FROM instruments WHERE id = :iid"),
-            {"iid": instrument_id},
-        )
-        asset_class = asset_row.scalar_one_or_none() or "STOCK"
+        instr = instr_row.first()
+        instrument_id = instr[0] if instr is not None else 0
+        asset_class = instr[1] if instr is not None else "STOCK"
 
         price = limit_price or Decimal("0")
         await self._risk_cap_svc.check(

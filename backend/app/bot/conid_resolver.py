@@ -39,14 +39,12 @@ class BotConidResolver:
         account_id: UUID,
     ) -> int:
         alias_row = await self._db.execute(
-            text("SELECT instrument_id FROM symbol_aliases WHERE canonical_id = :cid LIMIT 1"),
+            text("SELECT id FROM instruments WHERE canonical_id = :cid LIMIT 1"),
             {"cid": canonical_id},
         )
         instrument_id = alias_row.scalar_one_or_none()
         if instrument_id is None:
-            raise BotConidUnresolvedError(
-                f"canonical_id {canonical_id!r} not found in symbol_aliases"
-            )
+            raise BotConidUnresolvedError(f"canonical_id {canonical_id!r} not found in instruments")
 
         pos_row = await self._db.execute(
             text(
