@@ -7,6 +7,58 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 18 — Scanner + Filings + Earnings (v0.18.0)
+
+Phase 18 shipped on 2026-05-19. 1806 BE tests green; 715 FE tests green. Three sub-phases: Universe Scanner (18.0), SEC/HKEX Filings Ingest (18.1), and Earnings Calendar + Auto-flat Hooks (18.2).
+
+**Migration (Alembic 0058a, 0059, 0060)**
+
+- `0058a_scanner.py`: `scan_runs` table (UUID PK, expression TEXT, DSL compiled snapshot, status CHECK, started_at/finished_at), `scan_results` table (instrument FK, scan_run FK, composite PK), `scan_alerts` table (UNIQUE alert_id, channel, fired_at), `symbol_aliases` table (instrument FK, source, raw_symbol, confidence, UNIQUE instrument+source+symbol), `scanner_metrics` hypertable (scan_run FK, metric_name, value, captured_at); `WSConnId` UUID type widened from string.
+- `0059_filings.py`: `filings` table (UUID PK, instrument FK nullable SET NULL, canonical_id nullable, source CHECK 'sec_edgar'|'hkex_rns', form_type, filing_date, url UNIQUE, llm_summary nullable, CHECK(instrument_id IS NOT NULL OR canonical_id IS NOT NULL)), `filing_feed_cursors` (source PK, last_cursor, updated_at).
+- `0060_earnings.py`: `earnings_events` (UNIQUE instrument+date, source CHECK 'nasdaq_api'|'finnhub_api'|'manual', source_priority, time_of_day CHECK, confirmed), `earnings_hooks` (instrument+account FKs, hook_type CHECK, minutes_before >= 10, jwt_subject scoping), `hook_audit` (UNIQUE hook+event, outcome CHECK, order_id); widens risk_decisions attempt_kind CHECK to include 'earnings_hook_flat'.
+
+**Phase 18.0 — Universe Scanner**
+
+- Lark DSL evaluator: precedence-ranked grammar, MAX_DEPTH=20, MAX_NODES=512 safety limits.
+- `IndicatorComputer`: RSI, SMA, EMA, ATR, MACD, BB%B, volume_ratio, fundamentals (Redis cache 24h TTL).
+- `UniverseResolver`: tickers/watchlist/instruments/schwab_screener sources, configurable.
+- `ScannerService` + APScheduler, DB-persisted scan runs + alerting.
+- REST+WS API: JWT auth, per-(scan_id, jwt_subject) WS connection cap (50), 13 Prometheus counters/gauges.
+- FE: `ScannerPage` + `useScannerWs` hook.
+
+**Phase 18.1 — Filings Ingest**
+
+- `SecEdgarClient`: 10 req/s token bucket (sleep outside lock for concurrency safety), required User-Agent header; raises `SecEdgarClientDisabledError` when contact email unconfigured.
+- `SecEdgarPoller`: EFTS full-text search → form fetching → `IntegrityError` dedup (not generic Exception).
+- `HkexRnsPoller`: RSS XML parser, URL-hash dedup key, cursor-based incremental polling.
+- `InstrumentLinker`: DB lookup by ticker/CIK → `(instrument_id, canonical_id)` tuple.
+- `FilingsService`: `poll_all()` orchestrator; APScheduler interval=15min job `filings_poll_all`.
+- `summariser.py`: LLM summarisation accepting `source:str` param for correct metric labels (not capability).
+- REST API: `GET /api/filings`, `GET /api/filings/{id}`, `POST /api/filings/poll` (admin-only + concurrency cap _MAX_CONCURRENT_POLLS=1).
+- 8 Prometheus metrics (source-labeled): filings_ingested_total, filings_instrument_link_failures_total, filings_relinked_total, filings_summarisation_total, filings_poll_errors_total, filings_dedup_skips_total, sec_edgar_rate_limit_total, filings_llm_latency_seconds.
+- FE: `FilingsPage`, `FilingsPanel`, `/filings` route.
+- SEC contact email startup check (configurable via app_config filings/sec_edgar_contact_email).
+
+**Phase 18.2 — Earnings Calendar + Auto-flat Hooks**
+
+- `NasdaqCalendarPoller`: GET api.nasdaq.com/api/calendar/earnings, source_priority=2.
+- `FinnhubCalendarPoller`: GET finnhub.io/api/v1/calendar/earnings, source_priority=1, disabled without API key.
+- `EarningsService`: db_factory pattern, source-priority-gated COALESCE upsert, symbol_aliases instrument resolution.
+- `HookExecutor`: db_factory (independent session per concurrent task), Redis SETNX + Postgres UNIQUE double-dedup, minutes_before-aware SQL window, auto_pause_bot stub.
+- `place_order_internal`: raises ValueError on missing conid (no fallback to instrument_id); position_effect wired through risk gate via `PreviewRequest.position_effect` field.
+- REST API: 7 endpoints (JWT+CSRF); update_hook uses field allowlist (_UPDATABLE_HOOK_FIELDS); all list endpoints return {"items": [...]}.
+- 7 Prometheus metrics (all registry=registry).
+- APScheduler: earnings_nasdaq_poll + earnings_finnhub_poll (cron 06:00 ET); scheduler test 9→11.
+- FE: `EarningsPage`, `EarningsBadge`, `EarningsPanel`, `EarningsHookDrawer`, `/earnings` route.
+
+**Deferred**
+
+- Scanner: Schwab screener live data, advanced alert delivery channels.
+- Filings: HKEX full-text fetch, real LLM summarisation (LiteLLM wired), backfill mode.
+- Earnings: updateEarningsHook FE function, bot_id wiring to auto_pause_bot, bypass_pdt_when_closing PDT path (Phase 19), Schwab earnings endpoint (no public API).
+
+---
+
 ### Phase 17 — IBKR Algo Orders (v0.17.0)
 
 Phase 17 shipped on 2026-05-19. 1754 BE tests green; 709 FE tests green. Adds IBKR algo order support for all 7 strategies across applicable asset classes.

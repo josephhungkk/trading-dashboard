@@ -861,9 +861,13 @@ All 7 strategies across IBKR STOCK/ETF/OPTION/FUTURE/FOREX. Dynamic AlgoSection
 in TradeTicketModal. Telegram syntax. Risk gate checks. 8 Prometheus counters.
 Deferred: real broker TWS string casing verification; admin CRUD for capability table.
 
-## Phase 18 — Universe scanner + News/filings + Earnings-event handling
+## Phase 18 — Universe scanner + News/filings + Earnings-event handling ✅ shipped v0.18.0 (2026-05-19)
 
 Rule-based scanner (RSI / breakout / volume / mcap / fundamentals) + LLM commentary. Schwab `SCREENER_EQUITY` feed. SEC EDGAR (US) + RNS (HK) filings ingest. Earnings calendar with auto-flat / auto-pause hooks.
+
+- [x] 18.0: Lark DSL evaluator (MAX_DEPTH=20, MAX_NODES=512), IndicatorComputer (RSI/SMA/EMA/ATR/MACD/BB%B/volume_ratio/fundamentals), UniverseResolver, ScannerService+APScheduler, REST+WS API (50 conn cap, JWT), 13 metrics, FE ScannerPage
+- [x] 18.1: SecEdgarClient (10 req/s token bucket), SecEdgarPoller, HkexRnsPoller, InstrumentLinker, FilingsService, LLM summariser (source-labeled), REST API (admin-only /poll), 8 metrics, FE FilingsPage+FilingsPanel
+- [x] 18.2: NasdaqCalendarPoller+FinnhubCalendarPoller, EarningsService (db_factory, source-priority upsert), HookExecutor (db_factory concurrency, Redis+PG double-dedup, minutes_before SQL), place_order_internal (conid ValueError, position_effect wired), REST API 7 endpoints (CSRF+allowlist), 7 metrics, APScheduler 2 jobs, FE EarningsPage+EarningsBadge+EarningsPanel+EarningsHookDrawer
 
 ## Phase 19 — Backtesting harness
 
