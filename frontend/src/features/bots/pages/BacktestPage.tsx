@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { getRouteApi } from '@tanstack/react-router';
 import { BacktestConfigForm } from '../components/BacktestConfigForm';
 import { BacktestProgressBar } from '../components/BacktestProgressBar';
@@ -6,8 +6,7 @@ import { BacktestReportKpis } from '../components/BacktestReportKpis';
 import { BacktestTradeTable } from '../components/BacktestTradeTable';
 import { useBacktestStream } from '../hooks/useBacktestStream';
 import { submitBacktest, cancelBacktest } from '../../../services/backtests/api';
-import type { BacktestReport } from '../../../services/backtests/types';
-import type { BacktestSubmitConfig } from '../../../services/backtests/types';
+import type { BacktestReport, BacktestSubmitConfig } from '../../../services/backtests/types';
 
 type PageState = 'configure' | 'running' | 'done' | 'failed';
 
@@ -20,7 +19,6 @@ export function BacktestPage() {
   const [progress, setProgress] = useState({ pct: 0, tradesSoFar: 0, currentBarTs: '' });
   const [report, setReport] = useState<BacktestReport | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const jobIdRef = useRef<string | null>(null);
 
   useBacktestStream({
     botId,
@@ -40,8 +38,7 @@ export function BacktestPage() {
   async function handleSubmit(config: BacktestSubmitConfig) {
     try {
       const job = await submitBacktest(botId, config);
-      jobIdRef.current = job.id;
-      setJobId(job.id);
+      setJobId(job.job_id);
       setProgress({ pct: 0, tradesSoFar: 0, currentBarTs: '' });
       setState('running');
     } catch (err) {
@@ -59,13 +56,11 @@ export function BacktestPage() {
       }
     }
     setJobId(null);
-    jobIdRef.current = null;
     setState('configure');
   }
 
   function handleNewBacktest() {
     setJobId(null);
-    jobIdRef.current = null;
     setReport(null);
     setErrorMsg(null);
     setState('configure');
