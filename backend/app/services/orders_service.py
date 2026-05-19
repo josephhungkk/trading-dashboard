@@ -1231,6 +1231,63 @@ async def place_order_internal(
     )
 
 
+async def place_order_for_bot(
+    *,
+    cfg: ConfigService,
+    db: AsyncSession,
+    redis: RedisLike,
+    registry: BrokerRegistry,
+    capability: OrderCapabilityService,
+    bot_id: UUID,
+    account_id: UUID,
+    conid: int,
+    side: str,
+    qty: Decimal,
+    order_type: str,
+    limit_price: Decimal | None,
+    stop_price: Decimal | None,
+    tif: str = "DAY",
+    algo_strategy: str | None = None,
+    position_effect: str = "OPEN",
+) -> OrderResponse:
+    """Place an order on behalf of a bot.
+
+    Fabricates its own nonce (no Redis preview-mint).
+    Uses attempt_kind='bot_place_order' for risk audit.
+    """
+    client_order_id = uuid4()
+    nonce = f"bot:{bot_id}:{client_order_id}"
+
+    request_data: dict[str, Any] = {
+        "account_id": str(account_id),
+        "conid": str(conid),
+        "side": side.upper(),
+        "order_type": order_type.upper(),
+        "tif": tif,
+        "qty": str(qty),
+        "client_order_id": str(client_order_id),
+        "nonce": nonce,
+        "position_effect": position_effect,
+    }
+    if limit_price is not None:
+        request_data["limit_price"] = str(limit_price)
+    if stop_price is not None:
+        request_data["stop_price"] = str(stop_price)
+    if algo_strategy is not None:
+        request_data["algo_strategy"] = algo_strategy
+
+    return await place_order(
+        cfg=cfg,
+        db=db,
+        redis=redis,
+        registry=registry,
+        capability=capability,
+        request_data=request_data,
+        attempt_kind="bot_place_order",
+        _skip_csrf=True,
+    )
+
+
 async def modify_order(
     db: AsyncSession,
     redis: RedisLike,
