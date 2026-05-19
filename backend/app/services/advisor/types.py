@@ -22,16 +22,16 @@ class AdvisorConfig(BaseModel):
     mode: AdvisorMode = AdvisorMode.OFF
     capability: AICapability = AICapability.REASONING
     local_only: bool = False
-    timeout_ms: int = Field(3000, ge=100, le=10_000)
-    daily_budget_usd: Decimal = Field(Decimal("5.00"), ge=0)
-    max_qps: float = Field(2.0, gt=0)
-    auto_pause_threshold: int = Field(0, ge=0)
-    auto_pause_window_seconds: int = Field(300, gt=0)
-    min_veto_confidence: float = Field(0.0, ge=0.0, le=1.0)
+    timeout_ms: int = Field(default=3000, ge=100, le=10_000)
+    daily_budget_usd: Decimal = Field(default=Decimal("5.00"), ge=0)
+    max_qps: float = Field(default=2.0, gt=0)
+    auto_pause_threshold: int = Field(default=0, ge=0)
+    auto_pause_window_seconds: int = Field(default=300, gt=0)
+    min_veto_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
     model_config = {"populate_by_name": True}
 
-    def to_jsonb_dict(self) -> dict:
+    def to_jsonb_dict(self) -> dict[str, object]:
         """Serialize for JSONB storage: Decimal and enums as strings."""
         d = self.model_dump()
         d["daily_budget_usd"] = str(d["daily_budget_usd"])
@@ -40,7 +40,7 @@ class AdvisorConfig(BaseModel):
         return d
 
     @classmethod
-    def from_jsonb_dict(cls, data: dict) -> AdvisorConfig:
+    def from_jsonb_dict(cls, data: dict[str, object]) -> AdvisorConfig:
         """Deserialize from JSONB; daily_budget_usd stored as string."""
         d = dict(data)
         if "daily_budget_usd" in d and isinstance(d["daily_budget_usd"], str):
@@ -90,7 +90,7 @@ class AdvisorDecision(BaseModel):
     bot_run_id: UUID | None
     account_id: UUID
     canonical_id: str
-    intent: dict
+    intent: dict[str, object]
     context_summary: ContextSummary
     prompt_version: int
     verdict: str
@@ -113,6 +113,6 @@ class AdvisorDecision(BaseModel):
 class AdvisorVetoedResult:
     """Returned from BotContext.place_order when advisor vetoes."""
 
-    decision_id: int
+    decision_id: int | None
     reasoning: str
     advice_tags: list[str]

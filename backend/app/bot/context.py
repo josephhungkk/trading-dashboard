@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
@@ -10,6 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.orders_facade import BotOrdersFacade
 from app.bot.risk_caps import BotRiskCapService
+from app.services.advisor.auto_pause import AutoPauseService
+from app.services.advisor.service import AdvisorService
+from app.services.advisor.types import (
+    AdvisorConfig,
+    AdvisorVerdict,
+    AdvisorVetoedResult,
+    OrderIntent,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -38,6 +47,9 @@ class BotContext:
         risk_cap_svc: BotRiskCapService,
         db: AsyncSession,
         redis: Any,
+        advisor: AdvisorService | None = None,
+        advisor_config: dict[str, Any] | None = None,
+        account_overrides: dict[str, dict[str, Any]] | None = None,
         bar_aggregator: Any = None,
     ) -> None:
         self.bot_id = bot_id
@@ -48,7 +60,26 @@ class BotContext:
         self._risk_cap_svc = risk_cap_svc
         self._db = db
         self._redis = redis
+        self._advisor = advisor
+        self._advisor_config = (
+            AdvisorConfig.from_jsonb_dict(advisor_config) if advisor_config else AdvisorConfig()
+        )
+        self._account_overrides: dict[str, dict[str, Any]] = account_overrides or {}
+        self._strategy_ref: Any = None
+        self._strategy_params: dict[str, Any] = {}
         self._bar_aggregator = bar_aggregator
+
+    def set_strategy_ref(self, strategy: Any) -> None:
+        self._strategy_ref = weakref.ref(strategy)
+
+    def set_strategy_params(self, params: dict[str, Any]) -> None:
+        self._strategy_params = params
+
+    def _resolve_effective_advisor_config(self, account_id: UUID) -> AdvisorConfig:
+        override_raw: dict[str, Any] | None = self._account_overrides.get(str(account_id))
+        if override_raw is not None:
+            return AdvisorConfig.from_jsonb_dict(override_raw)
+        return self._advisor_config
 
     async def subscribe(self, canonical_id: str) -> None:
         if self._bar_aggregator is not None:
@@ -111,6 +142,47 @@ class BotContext:
             instrument_id=instrument_id,
             db=self._db,
         )
+
+        if self._advisor is not None:
+            effective_config = self._resolve_effective_advisor_config(account_id)
+            intent = OrderIntent(
+                canonical_id=canonical_id,
+                side=side,
+                qty=str(qty),
+                order_type=order_type,
+                limit_price=str(limit_price) if limit_price is not None else None,
+                stop_price=str(stop_price) if stop_price is not None else None,
+                tif=tif,
+                algo_strategy=algo_strategy,
+                position_effect=position_effect,
+                broker_id=broker_id,
+                account_id=account_id,
+            )
+            review_result: tuple[AdvisorVerdict, int | None] = await self._advisor.review(
+                bot_id=self.bot_id,
+                run_id=self.run_id,
+                account_id=account_id,
+                intent=intent,
+                strategy_params=self._strategy_params,
+                effective_config=effective_config,
+                db=self._db,
+            )
+            verdict, decision_id = review_result
+            if verdict.action == "veto":
+                strategy = self._strategy_ref() if self._strategy_ref is not None else None
+                if strategy is not None:
+                    try:
+                        strategy.on_advisor_reject(intent, verdict)
+                    except Exception:
+                        logger.warning("on_advisor_reject_hook_error", bot_id=str(self.bot_id))
+                await AutoPauseService(self._redis).record_reject(
+                    bot_id=self.bot_id, config=effective_config
+                )
+                return AdvisorVetoedResult(
+                    decision_id=decision_id,
+                    reasoning=verdict.reasoning,
+                    advice_tags=verdict.advice_tags,
+                )
 
         result = await self._facade.place_order(
             account_id=account_id,

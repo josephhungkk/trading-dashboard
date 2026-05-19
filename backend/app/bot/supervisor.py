@@ -4,6 +4,7 @@ import asyncio
 import json
 import multiprocessing
 from typing import Any
+from uuid import UUID
 
 import structlog
 from sqlalchemy import text
@@ -18,6 +19,18 @@ _HEARTBEAT_TTL = 10
 _RESPAWN_DELAYS = [10, 30, 60]
 _COMMAND_DONE_TTL = 3600
 _STREAM_GROUP = "supervisor"
+
+
+async def _handle_pause_cmd(
+    bot_id: UUID | str,
+    reason: str,
+    redis: Any,
+    db: Any,
+) -> None:
+    import json
+
+    payload = json.dumps({"bot_id": str(bot_id), "status": "paused", "reason": reason})
+    await redis.publish(f"bot:status:{bot_id}", payload)
 
 
 class BotSupervisor:
@@ -47,9 +60,17 @@ class BotSupervisor:
         elif cmd == "STOP":
             self._send_to_child(bot_id, {"cmd": "STOP"})
         elif cmd == "PAUSE":
-            self._send_to_child(bot_id, {"cmd": "PAUSE"})
+            reason = payload.get("reason", "manual")
+            pause_bot_id = bot_id if isinstance(bot_id, UUID) else UUID(str(bot_id))
+            await _handle_pause_cmd(pause_bot_id, reason, self._redis, self._db)
+            self._send_to_child(bot_id, {"cmd": "PAUSE", "reason": reason})
         elif cmd == "RESUME":
             self._send_to_child(bot_id, {"cmd": "RESUME"})
+        elif cmd == "UPDATE_ADVISOR_CONFIG":
+            self._send_to_child(
+                bot_id,
+                {"cmd": "UPDATE_ADVISOR_CONFIG", "config": payload.get("config", {})},
+            )
         elif cmd == "DEPLOY":
             self._send_to_child(bot_id, {"cmd": "STOP"})
             await asyncio.sleep(2)
