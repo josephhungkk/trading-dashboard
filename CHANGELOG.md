@@ -7,6 +7,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 21b — LLM-in-Loop (v0.21.2)
+
+Phase 21b shipped on 2026-05-19. Delivers param-tuning via LLM + auto-backtest fan-out, shadow-bot promotion pipeline, advisor-in-backtest stub, Telegram VETO notifications, and filings/earnings injection into advisor context.
+
+**Migrations (Alembic 0065–0067)**
+
+- `0065_param_tuner_shadow.py`: `bot_param_suggestions` table; `bots.is_shadow/shadow_of/shadow_comparison_window_days/shadow_promoted_at/strategy_schema`; widens `risk_decisions.attempt_kind` CHECK to include `shadow_place_order`
+- `0066_shadow_promotion_events.py`: `shadow_promotion_events` table
+- `0067_backtest_advisor.py`: `backtests.advisor_config` JSONB; `backtest_advisor_decisions` table
+
+**Backend**
+
+- `ParamTunerService`: LLM proposes N candidate param sets → fan-out to Phase 20 backtest harness → rank by Sharpe+MAR → human approves one → `BotSupervisor.restart()` atomically restarts bot. Redis INCRBYFLOAT cost reservation (fail-OPEN).
+- `ShadowPromoterService`: clones running bot into paper-mode shadow; compares KPIs after window_days; promote swaps strategy_params + soft-deletes shadow. `_insert_mapping` table allowlist (SQL injection prevention).
+- `BotSupervisor.restart()`: atomic stop → pubsub-poll → start with 10s timeout; raises `SupervisorRestartError` on timeout.
+- `AdvisorStub`: deterministic in-backtest veto injection via bar_index map; no real AI calls during replay.
+- `AdvisorTelegramNotifier`: psubscribes `bot:advisor:*`, filters VETO frames, pushes to Telegram chat_ids from app_config.
+- `advisor/context_builder.py`: injects `recent_filings` and `upcoming_earnings` into LLM context.
+- 10 new REST endpoints: param-suggestions (trigger/list/get/approve/reject), shadows (create/compare/promote), shadow-promotions list, backtest advisor decisions.
+- 2 new WS endpoints: `/ws/bots/{id}/tuner` + `/ws/bots/{id}/shadow` (per-bot cap 50, global 100, v=1 filter).
+- APScheduler: `param_tuner_poll` (60s), `shadow_comparison_notify` (08:00 daily).
+- 16 new Prometheus metrics: `param_tuner_*` (10) + `shadow_promoter_*` (5).
+
+**Frontend**
+
+- `services/param_tuner/` + `services/shadow_promoter/`: TypeScript types + API clients.
+- `useParamTunerStream` + `useShadowStream`: WS hooks with bounded retry.
+- `ParamTunerSection`, `ParamCandidateCard`: trigger, backtesting state, ranked candidates, approve/reject.
+- `ShadowComparisonPanel`, `ShadowMetricsTable`: create form, comparison table, promote with confirmation.
+- `BotDetailPage`: ParamTunerSection in advisor tab + new Shadows tab.
+- `BacktestConfigForm`: advisor_enabled toggle + mode select + veto_injections textarea.
+- `BacktestReportKpis`: advisor veto rate row when advisor_veto_count > 0.
+
+**Deferred**
+
+- Auto-promote logic (comparison_ready→auto-promote path)
+- Staged allocation (shadow gets small % of live allocation)
+- Real AI calls during backtest replay (AdvisorStub is intentionally deterministic)
+- Per-account `account_gate_outcome` update
+
+---
+
 ### Phase 21a.1 — Advisor Polish (v0.21.1)
 
 Phase 21a.1 shipped on 2026-05-19. Delivers 4 deferred items from Phase 21a: SHADOW mode, async-parallel semaphore (replaces Lock), human veto override endpoint, and per-account advisor config FE form.

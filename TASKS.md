@@ -909,9 +909,21 @@ Strategy plugin model (Python files). Bot lifecycle (create/start/stop/version).
 - [x] 1985 BE tests; 758 FE tests green
 - [x] Tagged v0.21.0
 
-## Phase 21b — LLM Advisor: Param-Tuning + Shadow Promotion
+## Phase 21b — LLM Advisor: Param-Tuning + Shadow Promotion ✅ v0.21.2 (2026-05-19)
 
-Parameter-tuning loop driven by advisor veto history. Shadow-mode strategy promotion. Telegram VETO notifications. Per-account `account_gate_outcome` update.
+- [x] Alembic 0065/0066/0067 (bot_param_suggestions, shadow_promotion_events, backtest_advisor_decisions)
+- [x] ParamTunerService: LLM fan-out → backtest → rank → approve → BotSupervisor.restart()
+- [x] ShadowPromoterService: create/compare/promote shadow bots (paper-only, 3-layer enforcement)
+- [x] BotSupervisor.restart(): atomic stop→poll→start
+- [x] AdvisorStub: deterministic in-backtest veto injection
+- [x] AdvisorTelegramNotifier: VETO push to Telegram
+- [x] advisor/context_builder.py: filings + earnings injection
+- [x] 10 REST + 2 WS endpoints (param-tuner + shadow)
+- [x] APScheduler: param_tuner_poll (60s) + shadow_comparison_notify (08:00)
+- [x] FE: ParamTunerSection, ShadowComparisonPanel, BacktestConfigForm advisor toggle
+- [x] 16 Prometheus metrics; 2035 BE tests; 775 FE tests
+- [ ] Auto-promote logic — deferred to 21c
+- [ ] Per-account account_gate_outcome update — deferred to 21c
 
 ## Phase 21c — LLM Advisor: Perf-Attribution
 
