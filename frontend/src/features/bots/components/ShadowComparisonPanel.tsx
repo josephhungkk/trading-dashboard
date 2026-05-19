@@ -52,7 +52,7 @@ export function ShadowComparisonPanel({ botId, isAdmin }: Props) {
       void queryClient.invalidateQueries({ queryKey });
     },
     onError: (err) => {
-      setFormError((err as Error).message);
+      setFormError(err instanceof Error ? err.message : String(err));
     },
   });
 
@@ -120,7 +120,7 @@ export function ShadowComparisonPanel({ botId, isAdmin }: Props) {
       {isLoading && <p className="text-sm text-muted-foreground">Loading shadows...</p>}
       {isError && (
         <p role="alert" className="text-sm text-destructive">
-          {(error as Error).message}
+          {error instanceof Error ? error.message : String(error)}
         </p>
       )}
 
@@ -163,7 +163,7 @@ export function ShadowComparisonPanel({ botId, isAdmin }: Props) {
 
       {promoteMut.isError && (
         <p role="alert" className="text-sm text-destructive">
-          {(promoteMut.error as Error).message}
+          {promoteMut.error instanceof Error ? promoteMut.error.message : String(promoteMut.error)}
         </p>
       )}
     </section>

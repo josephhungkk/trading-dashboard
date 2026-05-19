@@ -121,7 +121,7 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
       />
 
       {showCorporateWarning && (
-        <p role="alert" style={{ color: 'orange' }}>
+        <p role="alert" className="text-amber-600">
           This range may span splits or dividends. Results will be misleading unless you upload
           split-adjusted bars.
         </p>
@@ -151,7 +151,7 @@ export function BacktestConfigForm({ botId, onSubmit }: Props) {
           <label htmlFor="csv_upload">Upload OHLCV CSV</label>
           <input id="csv_upload" type="file" accept=".csv" onChange={handleUpload} />
           {uploadError && (
-            <p role="alert" style={{ color: 'red' }}>
+            <p role="alert" className="text-red-600">
               {uploadError}
             </p>
           )}

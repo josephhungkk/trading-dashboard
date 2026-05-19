@@ -83,12 +83,12 @@ export function ParamTunerSection({ botId, isAdmin }: Props) {
       {isLoading && <p className="text-sm text-muted-foreground">Loading suggestions...</p>}
       {isError && (
         <p role="alert" className="text-sm text-destructive">
-          {(error as Error).message}
+          {error instanceof Error ? error.message : String(error)}
         </p>
       )}
       {triggerMut.isError && (
         <p role="alert" className="text-sm text-destructive">
-          {(triggerMut.error as Error).message}
+          {triggerMut.error instanceof Error ? triggerMut.error.message : String(triggerMut.error)}
         </p>
       )}
 

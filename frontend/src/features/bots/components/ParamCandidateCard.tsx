@@ -122,7 +122,7 @@ export function ParamCandidateCard({
 
       {(approveMut.isError || rejectMut.isError) && (
         <p role="alert" className="text-xs text-destructive">
-          {((approveMut.error ?? rejectMut.error) as Error).message}
+          {(approveMut.error ?? rejectMut.error) instanceof Error ? (approveMut.error ?? rejectMut.error).message : String(approveMut.error ?? rejectMut.error)}
         </p>
       )}
     </article>

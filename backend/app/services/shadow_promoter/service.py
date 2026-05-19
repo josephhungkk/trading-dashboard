@@ -287,8 +287,12 @@ class ShadowPromoterService:
             return parsed
         return dict(value)
 
+    _ALLOWED_COPY_TABLES: frozenset[str] = frozenset({"bot_risk_caps", "bot_accounts"})
+
     @staticmethod
     async def _insert_mapping(db: AsyncSession, table_name: str, values: dict[str, Any]) -> None:
+        if table_name not in ShadowPromoterService._ALLOWED_COPY_TABLES:
+            raise ValueError(f"table_name not in allowlist: {table_name!r}")
         columns = ", ".join(values.keys())
         placeholders = ", ".join(f":{key}" for key in values)
         await db.execute(
