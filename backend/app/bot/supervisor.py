@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
+from app.services.param_tuner.types import SupervisorRestartError
 
 logger = structlog.get_logger(__name__)
 
@@ -73,6 +74,40 @@ class BotSupervisor:
             self._send_to_child(bot_id, {"cmd": "STOP"})
             await asyncio.sleep(2)
             await self._start_bot(bot_id)
+
+    async def start_bot(self, bot_id: UUID) -> None:
+        await self._start_bot(str(bot_id))
+
+    async def stop_bot(self, bot_id: UUID) -> None:
+        self._send_to_child(str(bot_id), {"cmd": "STOP"})
+
+    async def restart(self, bot_id: UUID) -> None:
+        try:
+            result = await self._db.execute(
+                text("SELECT status FROM bots WHERE id=:id AND deleted_at IS NULL"),
+                {"id": bot_id},
+            )
+            status = result.scalar_one_or_none()
+            if status not in ("running", "paused", "error"):
+                raise SupervisorRestartError("bot_not_active")
+
+            await self.stop_bot(bot_id)
+            deadline = asyncio.get_running_loop().time() + 10
+            while asyncio.get_running_loop().time() < deadline:
+                result = await self._db.execute(
+                    text("SELECT status FROM bots WHERE id=:id AND deleted_at IS NULL"),
+                    {"id": bot_id},
+                )
+                status = result.scalar_one_or_none()
+                if status in ("stopped", "error"):
+                    break
+                await asyncio.sleep(0.5)
+
+            await self.start_bot(bot_id)
+        except SupervisorRestartError:
+            raise
+        except Exception as exc:
+            raise SupervisorRestartError(str(exc)) from exc
 
     def _send_to_child(self, bot_id: str, msg: dict[str, Any]) -> None:
         q = self._child_queues.get(bot_id)

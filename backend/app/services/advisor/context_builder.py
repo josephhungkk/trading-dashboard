@@ -116,6 +116,35 @@ class ContextBuilder:
         )
         kill_switches = [dict(r._mapping) for r in ks_result]
 
+        filings_result = await db.execute(
+            text(
+                "SELECT title, source, filing_type, published_at, llm_summary "
+                "FROM filings WHERE canonical_id = :cid "
+                "ORDER BY published_at DESC LIMIT 5"
+            ),
+            {"cid": canonical_id},
+        )
+        filings = []
+        for r in filings_result:
+            row = dict(r._mapping)
+            if "title" in row and isinstance(row["title"], str):
+                row["title"] = _sanitise_text(row["title"])
+            if "llm_summary" in row and isinstance(row["llm_summary"], str):
+                row["llm_summary"] = _sanitise_text(row["llm_summary"])
+            filings.append(row)
+
+        earnings_result = await db.execute(
+            text(
+                "SELECT canonical_id, event_date, eps_estimate, revenue_estimate, fiscal_quarter "
+                "FROM earnings_events WHERE canonical_id = :cid "
+                "AND event_date >= CURRENT_DATE "
+                "AND event_date <= CURRENT_DATE + interval '30 days' "
+                "ORDER BY event_date ASC LIMIT 2"
+            ),
+            {"cid": canonical_id},
+        )
+        upcoming_earnings = [dict(r._mapping) for r in earnings_result]
+
         payload = {
             "intent": intent.model_dump(mode="json"),
             "bars": bars[:_MAX_BARS],
@@ -126,6 +155,8 @@ class ContextBuilder:
             "risk_limits": risk_limits,
             "pnl_intraday": pnl_intraday,
             "kill_switches": kill_switches,
+            "recent_filings": filings,
+            "upcoming_earnings": upcoming_earnings,
         }
         payload_str = json.dumps(payload, default=str)
 
