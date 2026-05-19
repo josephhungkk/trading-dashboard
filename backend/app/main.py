@@ -532,8 +532,11 @@ async def lifespan(_app: FastAPI) -> Any:
     _attribution_svc = _AttributionService(db_factory=session_factory, redis=redis)
 
     async def _run_attribution_poll() -> None:
-        async with session_factory() as _attr_db:
-            await _attribution_svc.poll(_attr_db)
+        try:
+            async with session_factory() as _attr_db:
+                await _attribution_svc.poll(_attr_db)
+        except Exception:
+            log.exception("attribution_poll_failed")
 
     scheduler.add_job(
         _run_attribution_poll,
