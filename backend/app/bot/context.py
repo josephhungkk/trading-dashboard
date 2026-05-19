@@ -65,7 +65,7 @@ class BotContext:
             AdvisorConfig.from_jsonb_dict(advisor_config) if advisor_config else AdvisorConfig()
         )
         self._account_overrides: dict[str, dict[str, Any]] = account_overrides or {}
-        self._strategy_ref: Any = None
+        self._strategy_ref: weakref.ref[Any] | None = None
         self._strategy_params: dict[str, Any] = {}
         self._bar_aggregator = bar_aggregator
 
@@ -174,7 +174,12 @@ class BotContext:
                     try:
                         strategy.on_advisor_reject(intent, verdict)
                     except Exception:
-                        logger.warning("on_advisor_reject_hook_error", bot_id=str(self.bot_id))
+                        logger.warning(
+                            "on_advisor_reject_hook_error",
+                            bot_id=str(self.bot_id),
+                            strategy_class=type(strategy).__name__,
+                            exc_info=True,
+                        )
                 await AutoPauseService(self._redis).record_reject(
                     bot_id=self.bot_id, config=effective_config
                 )

@@ -27,8 +27,6 @@ async def _handle_pause_cmd(
     redis: Any,
     db: Any,
 ) -> None:
-    import json
-
     payload = json.dumps({"bot_id": str(bot_id), "status": "paused", "reason": reason})
     await redis.publish(f"bot:status:{bot_id}", payload)
 
