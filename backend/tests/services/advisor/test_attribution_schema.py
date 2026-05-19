@@ -69,7 +69,39 @@ async def test_0068_attribution_status_check_constraint(db_session: AsyncSession
         text(
             "SELECT conname FROM pg_constraint"
             " WHERE conrelid='bot_advisor_decisions'::regclass"
-            "   AND contype='c' AND conname LIKE '%attribution_status%'"
+            "   AND contype='c'"
+            "   AND conname LIKE '%attribution_status%'"
         )
     )
     assert result.scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+async def test_0068_pending_partial_index_exists(db_session: AsyncSession) -> None:
+    """bot_advisor_decisions_pending_partial_idx partial index exists."""
+    result = await db_session.execute(
+        text(
+            "SELECT indexname FROM pg_indexes"
+            " WHERE tablename='bot_advisor_decisions'"
+            "   AND indexname='bot_advisor_decisions_pending_partial_idx'"
+        )
+    )
+    assert result.scalar_one_or_none() == "bot_advisor_decisions_pending_partial_idx"
+
+
+@pytest.mark.asyncio
+async def test_0068_attribution_windows_check_has_cardinality_guard(
+    db_session: AsyncSession,
+) -> None:
+    """attribution_windows CHECK constraint includes cardinality > 0 guard."""
+    result = await db_session.execute(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+            " WHERE conrelid='bot_advisor_decisions'::regclass"
+            "   AND contype='c'"
+            "   AND conname LIKE '%attribution_windows%'"
+        )
+    )
+    consrc = result.scalar_one_or_none()
+    assert consrc is not None
+    assert "cardinality" in consrc

@@ -21,7 +21,12 @@ def upgrade() -> None:
             ADD COLUMN attribution_status TEXT NOT NULL DEFAULT 'pending'
                 CHECK (attribution_status IN ('pending','partial','complete','bars_unavailable','unresolvable')),
             ADD COLUMN attribution_windows TEXT[]
-                CHECK (attribution_windows IS NULL OR attribution_windows <@ ARRAY['15m','1h','4h','eod']::TEXT[]),
+                CHECK (
+                    attribution_windows IS NULL OR (
+                        cardinality(attribution_windows) > 0
+                        AND attribution_windows <@ ARRAY['15m','1h','4h','eod']::TEXT[]
+                    )
+                ),
             ADD COLUMN outcome_15m_correct BOOL,
             ADD COLUMN outcome_15m_pnl NUMERIC(20,8),
             ADD COLUMN outcome_1h_correct BOOL,
@@ -33,26 +38,33 @@ def upgrade() -> None:
             ADD COLUMN attribution_computed_at TIMESTAMPTZ
     """))
     op.execute(text(
-        "CREATE INDEX bot_advisor_decisions_attribution_status_created_at_idx"
-        " ON bot_advisor_decisions (attribution_status, created_at DESC)"
-        " WHERE attribution_status IN ('pending', 'partial')"
-    ))
-    op.execute(text(
         "ALTER TABLE bot_orders"
         " ADD COLUMN advisor_decision_id BIGINT"
         " REFERENCES bot_advisor_decisions(id) ON DELETE SET NULL"
     ))
-    op.execute(text(
-        "CREATE INDEX bot_orders_advisor_decision_id_idx"
-        " ON bot_orders (advisor_decision_id)"
-        " WHERE advisor_decision_id IS NOT NULL"
-    ))
+    # Index builds outside the transaction to avoid ShareLock stalling DML on live tables
+    # (matches 0064 pattern with autocommit_block + CONCURRENTLY).
+    # Renamed to _pending_partial_idx to signal the partial scope explicitly (MED-2).
+    with op.get_context().autocommit_block():
+        op.execute(text(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS"
+            " bot_advisor_decisions_pending_partial_idx"
+            " ON bot_advisor_decisions (attribution_status, bot_id, created_at DESC)"
+            " WHERE attribution_status IN ('pending', 'partial')"
+        ))
+        op.execute(text(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS"
+            " bot_orders_advisor_decision_id_idx"
+            " ON bot_orders (advisor_decision_id)"
+            " WHERE advisor_decision_id IS NOT NULL"
+        ))
 
 
 def downgrade() -> None:
-    op.execute(text("DROP INDEX IF EXISTS bot_orders_advisor_decision_id_idx"))
+    with op.get_context().autocommit_block():
+        op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS bot_orders_advisor_decision_id_idx"))
+        op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS bot_advisor_decisions_pending_partial_idx"))
     op.execute(text("ALTER TABLE bot_orders DROP COLUMN IF EXISTS advisor_decision_id"))
-    op.execute(text("DROP INDEX IF EXISTS bot_advisor_decisions_attribution_status_created_at_idx"))
     op.execute(text("""
         ALTER TABLE bot_advisor_decisions
             DROP COLUMN IF EXISTS attribution_status,
