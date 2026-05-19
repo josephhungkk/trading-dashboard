@@ -1220,3 +1220,78 @@ algo_capability_invalidate_malformed_total = Counter(
     "Malformed broker_algo_capability:invalidate pubsub payloads rejected",
     registry=registry,
 )
+
+# ── Phase 18a scanner ─────────────────────────────────────────────────────────
+scanner_runs_total = Counter(
+    "scanner_runs_total",
+    "Scanner run attempts",
+    ["mode", "status"],
+    registry=registry,
+)
+scanner_candidates_total = Counter(
+    "scanner_candidates_total",
+    "Scanner candidates found",
+    ["scan_id"],
+    registry=registry,
+)
+scanner_universe_size = Gauge(
+    "scanner_universe_size",
+    "Universe size per scan run",
+    ["scan_id"],
+    registry=registry,
+)
+scanner_universe_stale_total = Counter(
+    "scanner_universe_stale_total",
+    "Stale universe fallbacks",
+    ["scan_id"],
+    registry=registry,
+)
+scanner_candidate_cap_hit_total = Counter(
+    "scanner_candidate_cap_hit_total",
+    "Candidate cap truncations",
+    ["scan_id"],
+    registry=registry,
+)
+scanner_indicator_cache_hits_total = Counter(
+    "scanner_indicator_cache_hits_total",
+    "Indicator Redis cache hits",
+    registry=registry,
+)
+scanner_indicator_cache_misses_total = Counter(
+    "scanner_indicator_cache_misses_total",
+    "Indicator Redis cache misses",
+    registry=registry,
+)
+scanner_llm_commentary_total = Counter(
+    "scanner_llm_commentary_total",
+    "LLM commentary requests",
+    ["depth", "status"],
+    registry=registry,
+)
+scanner_scheduler_fires_total = Counter(
+    "scanner_scheduler_fires_total",
+    "APScheduler scan fires",
+    ["scan_id"],
+    registry=registry,
+)
+scanner_alert_fires_total = Counter(
+    "scanner_alert_fires_total",
+    "Alert fires from scanner matches",
+    ["scan_id"],
+    registry=registry,
+)
+scanner_eval_timeout_total = Counter(
+    "scanner_eval_timeout_total",
+    "Per-instrument evaluator timeouts",
+    registry=registry,
+)
+scanner_eval_node_reject_total = Counter(
+    "scanner_eval_node_reject_total",
+    "Save-time AST node cap violations",
+    registry=registry,
+)
+scanner_eval_indicator_budget_exhausted_total = Counter(
+    "scanner_eval_indicator_budget_exhausted_total",
+    "Period-sum cap violations",
+    registry=registry,
+)
