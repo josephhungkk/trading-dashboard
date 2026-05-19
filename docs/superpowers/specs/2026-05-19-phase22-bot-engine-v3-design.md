@@ -1,7 +1,7 @@
 # Phase 22 — Bot Engine v3: Autonomous, Self-Refining (v0.22.x)
 
 **Date:** 2026-05-19
-**Status:** ARCHITECT-REVIEW applied (3 CRIT + 5 HIGH + 6 MED inline; 4 LOW noted) — ready for /writing-plans
+**Status:** ARCHITECT-REVIEW Pass 3 applied (4 CRIT + 7 HIGH + 6 MED inline; 4 LOW noted) — ready for /writing-plans
 **Builds on:** Phase 19 (Bot engine v1) · Phase 20 (Backtesting) · Phase 21a/21a.1 (LLM Advisor) · Phase 21b (LLM-in-loop: ParamTuner + ShadowPromoter) · Phase 21c (Advisor attribution)
 **Next phases:** Phase 23 (UK CGT)
 
@@ -10,7 +10,7 @@
 - **22b** — StrategyGenerator + child-process sandbox + Bot worker integration → v0.22.1
 - **22c** — HealthDigestService + FE OrchestrationPage → v0.22.2
 
-**ARCHITECT-REVIEW applied:** C1–C3 + H1–H5 + M1–M6 inline. L1–L4 noted in §8 / §9.
+**ARCHITECT-REVIEW applied:** Pass 1+2 (C1–C3 + H1–H5 + M1–M6) + Pass 3 (C4 + H6 + H7) inline. L1–L4 noted in §8 / §9.
 
 ---
 
@@ -18,7 +18,7 @@
 
 Close the Phase 22 ROADMAP deliverable: **autonomous, self-refining bot engine**. Four pillars:
 
-1. **Multi-bot orchestration** — portfolio-level exposure gate (station 5.75), marginal-variance-adjusted notional, cross-bot kill switch.
+1. **Multi-bot orchestration** — portfolio-level exposure gate (station 5.75), raw-notional checks (total + per-instrument), cross-bot kill switch. Sector-level limits deferred to 22a.1 (no `instruments.sector` column exists). Marginal-variance-adjusted notional deferred to 22a.1.
 2. **Auto-promotion rules** — replace the always-False Phase 21b stub with real configurable criteria (Sharpe/drawdown/win-rate); starts gated, config flag enables autonomy.
 3. **Nightly retrain** — scheduled parallel trigger of Phase 21b `ParamTunerService` across all active bots; consolidated Telegram report.
 4. **LLM-driven strategy generation** — LLM generates new `BaseStrategy` Python subclasses; child-process sandbox (spawn + setrlimit + seccomp) validates; gated human approval (auto-approve config flag for future autonomy); loads in isolated child process per bot.
@@ -34,7 +34,7 @@ Close the Phase 22 ROADMAP deliverable: **autonomous, self-refining bot engine**
 │  BotOrchestrator  (app/services/orchestrator/)           [22a]  │
 │  ├── PortfolioExposureGate  — pre-trade station 5.75            │
 │  │     Redis HASH portfolio:exposure:{account_id}               │
-│  │     Checks: total_notional, per-sector, per-instrument       │
+│  │     Checks: total_notional, per-instrument                   │
 │  │     Raw notional in 22a; marginal-variance deferred to 22a.1 │
 │  │     Fail-CLOSED on Redis miss: PG fallback → BLOCK           │
 │  ├── CorrelationService  — daily update via bars_1d             │
@@ -78,16 +78,18 @@ Close the Phase 22 ROADMAP deliverable: **autonomous, self-refining bot engine**
 
 **C1 note:** `instruments.id` is `BIGINT` (verified: alembic 0009). `bots.id` is `UUID` (verified: alembic 0061). All FK columns below use the correct types.
 
+**C4 note:** `instruments` table has no `sector` column and no sector ingestion pipeline exists in the codebase. `per_sector` limit type is dropped from 22a entirely. Deferred to 22a.1 which will spec the ingestion pipeline (Schwab `securitiesAccount` + IBKR `reqContractDetails` → `instruments.sector`).
+
 ```sql
 -- Portfolio-level exposure limits (extends existing risk_limits pattern)
+-- C4: per_sector dropped — instruments has no sector column
 CREATE TABLE portfolio_exposure_limits (
     id              BIGSERIAL PRIMARY KEY,
     account_id      UUID REFERENCES broker_accounts(id) ON DELETE CASCADE,
     limit_type      TEXT NOT NULL
-        CHECK (limit_type IN ('total_notional','per_sector','per_instrument')),
-    sector          TEXT,           -- NULL for total_notional + per_instrument rows
+        CHECK (limit_type IN ('total_notional','per_instrument')),
     instrument_id   BIGINT REFERENCES instruments(id) ON DELETE CASCADE,
-                                    -- NULL for total_notional + per_sector rows
+                                    -- NULL for total_notional rows
     max_notional    NUMERIC(20,8) NOT NULL,
     currency        TEXT NOT NULL DEFAULT 'USD',
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
@@ -99,9 +101,6 @@ CREATE TABLE portfolio_exposure_limits (
 CREATE UNIQUE INDEX uq_portfolio_exposure_total
     ON portfolio_exposure_limits(account_id)
     WHERE limit_type = 'total_notional';
-CREATE UNIQUE INDEX uq_portfolio_exposure_sector
-    ON portfolio_exposure_limits(account_id, sector)
-    WHERE limit_type = 'per_sector';
 CREATE UNIQUE INDEX uq_portfolio_exposure_instr
     ON portfolio_exposure_limits(account_id, instrument_id)
     WHERE limit_type = 'per_instrument';
@@ -142,10 +141,25 @@ CREATE INDEX portfolio_correlation_snapshots_account_computed_idx
 **Fill update — Lua script (H2 fix):** Writer is `order_event_consumer` consuming `OrderFillEvent`. Lua signature:
 ```
 HINCRBYFLOAT portfolio:exposure:{account_id} total <signed_delta_usd>
-HINCRBYFLOAT portfolio:exposure:{account_id} sector:{sector} <signed_delta_usd>
 HINCRBYFLOAT portfolio:exposure:{account_id} instr:{instrument_id} <signed_delta_usd>
 ```
-where `signed_delta_usd = side_sign × qty × fill_price × multiplier × fx_rate`. `side_sign = +1` for buys, `−1` for sells. Partial sells and full closes both use negative delta — no separate "close" event needed. Sector is resolved from a Redis-cached `instr→sector` map (TTL 3600s, populated from `instruments.sector`). Test: buy-then-partial-sell flow produces correct net exposure.
+`signed_delta_usd = side_sign × fill_qty × fill_price × multiplier × fx_rate`.
+
+| `side` | `position_effect` | `side_sign` |
+|--------|-------------------|-------------|
+| buy    | OPEN              | +1          |
+| sell   | OPEN (short)      | −1          |
+| sell   | CLOSE             | −1          |
+| buy    | CLOSE (cover)     | +1          |
+
+Note: both OPEN and CLOSE result in the same sign rule — the direction of the order determines exposure delta; there is no separate "close" event. Partial sells and full closes both emit negative delta.
+
+**H7 fix — FX rate:** `signed_delta_usd` requires `fx_rate` to convert non-USD instruments. `_fx_rate` in `orders_service` is prefix-private and already imported by `position_sizing_service`. In 22a Chunk B, promote to `app/services/fx.py` as `get_fx_rate(currency: str, redis: Any) -> Decimal` with explicit contract:
+- Redis key `fx:rate:{currency}:USD` (TTL 3600s, populated by existing FX poller).
+- Returns `Decimal("1.0")` for USD or on cache miss (fail-safe, not fail-CLOSED — a wrong notional is better than blocking all orders).
+- `orders_service` and `position_sizing_service` updated to import from `app.services.fx`.
+
+Test: buy-then-partial-sell flow produces correct net exposure; sector key absent (C4 deferred).
 
 **C3 fix — Fail-CLOSED on Redis miss (two-tier degrade):**
 - Redis read miss → recompute exposure from `bot_orders` + `positions` in PG (~10–50ms, acceptable occasionally). Cache result back to Redis.
@@ -176,7 +190,15 @@ class AutoPromoteCriteria(BaseModel):
 ```
 Unknown keys rejected with 422.
 
-**H4 fix — fire-once-per-shadow guard:** Before evaluating, check `shadow_promotion_events` for any non-failed row with `(live_bot_id, shadow_bot_id)` — if found, skip (already promoted or in progress). The `promoted_via TEXT` column (values `'manual'` / `'auto'`) is added to `shadow_promotion_events` in Alembic 0069.
+**H4 fix — fire-once-per-shadow guard (idempotency):** The `promoted_via TEXT` column (values `'manual'` / `'auto'`) is added to `shadow_promotion_events` in Alembic 0069, along with a partial unique index:
+```sql
+ALTER TABLE shadow_promotion_events
+    ADD COLUMN promoted_via TEXT CHECK (promoted_via IN ('manual','auto'));
+CREATE UNIQUE INDEX uq_shadow_promotion_success
+    ON shadow_promotion_events(live_bot_id, shadow_bot_id)
+    WHERE status = 'success';
+```
+Before evaluating, `AutoPromoteEvaluator` checks for any `status='success'` row for `(live_bot_id, shadow_bot_id)` — if found, skip (DB-enforced idempotency; second promote attempt raises `UniqueViolation`, caught and logged as metric, not error).
 
 Criteria evaluation: all of `min_sharpe`, `max_drawdown`, `min_win_rate`, `min_comparison_days` must pass. `app_config[orchestrator/auto_promote_enabled]` (default `false`) is the master switch — evaluator no-ops if `false` regardless of per-bot `auto_apply`. On pass + `auto_apply: true` + master switch on: calls existing `ShadowPromoterService.promote()` + sends Telegram notification.
 
@@ -204,7 +226,7 @@ Steps:
 
 | Metric | Type | Labels |
 |---|---|---|
-| `orchestrator_exposure_checks_total` | Counter | `outcome` (allow/warn/block) |
+| `orchestrator_exposure_checks_total` | Counter | `outcome` (allow/warn/block), `limit_type` (total_notional/per_instrument) |
 | `orchestrator_exposure_gate_latency_seconds` | Histogram | — |
 | `orchestrator_exposure_gate_pg_fallback_total` | Counter | `outcome` (used/block) |
 | `orchestrator_correlation_matrix_age_seconds` | Gauge | `account_id` |
@@ -219,7 +241,7 @@ All auto-promote routes under `/api/orchestrator/` prefix for consistency (L3 fi
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/api/orchestrator/exposure` | JWT | Portfolio exposure state per account |
-| `GET` | `/api/orchestrator/exposure-limits` | JWT | List `portfolio_exposure_limits` |
+| `GET` | `/api/orchestrator/exposure-limits` | JWT | List `portfolio_exposure_limits` (`total_notional` / `per_instrument` only — C4) |
 | `POST` | `/api/orchestrator/exposure-limits` | admin JWT | Create limit |
 | `PUT` | `/api/orchestrator/exposure-limits/{id}` | admin JWT | Update limit |
 | `DELETE` | `/api/orchestrator/exposure-limits/{id}` | admin JWT | Delete limit |
@@ -232,7 +254,7 @@ All auto-promote routes under `/api/orchestrator/` prefix for consistency (L3 fi
 | Chunk | Files | Route | Gate |
 |---|---|---|---|
 | **A — Schema** | Alembic 0069 (+ `shadow_promotion_events.promoted_via` column) + migration tests | Qwen | — |
-| **B — ExposureGate + Lua** | `orchestrator/exposure_gate.py`, Redis Lua script, PG fallback, unit tests (incl. buy-then-partial-sell, fail-CLOSED) | Codex | after A |
+| **B — ExposureGate + Lua + fx module** | `orchestrator/exposure_gate.py`, `services/fx.py` (promote `_fx_rate`; update `orders_service` + `position_sizing_service` imports), Redis Lua script, PG fallback, unit tests (incl. buy-then-partial-sell, fail-CLOSED, fx-rate fallback) | Codex | after A |
 | **C — CorrelationService** | `orchestrator/correlation.py`, marginal-variance calculation, tests (incl. negative ρ, NaN bars) | Qwen | after A |
 | **D — AutoPromoteEvaluator** | `orchestrator/auto_promote.py`, `AutoPromoteCriteria` Pydantic model, fire-once guard, tests | Qwen | after A |
 | **E — NightlyRetrain + metrics** | `orchestrator/retrain.py`, `orchestrator/metrics.py`, `main.py` APScheduler wiring, tests (parallel fan-out, timeout, overlap collapse) | Codex | after B/C/D |
@@ -271,11 +293,17 @@ CREATE INDEX generated_strategies_sandbox_status_idx
 CREATE INDEX generated_strategies_prompt_hash_idx
     ON generated_strategies (prompt_hash);      -- L4: dedupe lookup
 
+-- C1 fix: UUID. 1:N design — full lineage preserved when a bot is
+-- re-pointed at a new generated strategy (no DELETE+INSERT required).
 CREATE TABLE bot_strategy_provenance (
-    bot_id          UUID REFERENCES bots(id) ON DELETE CASCADE PRIMARY KEY,  -- C1 fix: UUID
+    id              BIGSERIAL PRIMARY KEY,
+    bot_id          UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     strategy_id     BIGINT REFERENCES generated_strategies(id) ON DELETE SET NULL,
-    generated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    generated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    replaced_at     TIMESTAMPTZ                         -- NULL = currently active
 );
+CREATE INDEX bot_strategy_provenance_bot_id_idx
+    ON bot_strategy_provenance (bot_id, generated_at DESC);
 ```
 
 ### 4.2 StrategyGenerator Service (`app/services/strategy_gen/`)
@@ -285,6 +313,27 @@ CREATE TABLE bot_strategy_provenance (
 - Context: last 30-day market commentary from `AdvisorService` + Phase 18 scanner signals
 - **H5 fix:** Phase 21c attribution signal (underperforming strategies) is **excluded** from the generation prompt. Short-window attribution data (≤30d) is too noisy and biases new strategies toward inverting recent losers — a backtest-overfitting amplifier. Attribution context is only included if the attribution window is ≥90 days AND `app_config[strategy_gen/include_attribution_context]` is explicitly `true` (default `false`). When included, bot_id and strategy names are redacted from the prompt (replaced with `bot_A`, `bot_B`).
 - User: `"Generate a new trading strategy for {asset_class} instruments. Recent market context: {context}. Interface contract: {contract}. Be creative but respect the contract."`
+
+**H6 fix — RestrictedPython dependency:** `RestrictedPython` is not currently in `backend/pyproject.toml`. Add in 22b Chunk A:
+```toml
+# backend/pyproject.toml [project.dependencies]
+"RestrictedPython>=7.0,<8"
+```
+Run `uv lock` after adding. Add a startup assert in `app/services/strategy_gen/sandbox.py`:
+```python
+try:
+    from RestrictedPython import compile_restricted  # noqa: F401
+except ImportError as e:
+    raise RuntimeError("RestrictedPython not installed — run `uv sync`") from e
+```
+Note: RestrictedPython restricts builtins and AST but does not isolate the process — it is a first-pass filter, not a sandbox. Process isolation (C2 fix below) is the actual security boundary.
+
+**BaseStrategy interface contract (per `backend/app/bot/base.py`):** Generated strategies must implement:
+- `on_start(self, ctx: BotContext) -> None` — called once when bot starts
+- `on_bar(self, ctx: BotContext, bar: Bar) -> None` — called on every bar; call `ctx.place_order(...)` to emit orders
+- `on_advisor_reject(self, intent: OrderIntent, verdict: AdvisorVerdict) -> None` — optional hook, default no-op
+
+The generation prompt system section must include these three signatures verbatim.
 
 **C2 fix — Child-process sandbox (Option A):** Generated strategies run in a `multiprocessing.Process(start_method='spawn')` child with:
 - `resource.setrlimit(RLIMIT_AS, soft=512MB)` + `resource.setrlimit(RLIMIT_CPU, soft=30s)` — resource caps.
@@ -362,8 +411,8 @@ Unknown or unvalidated ID → structured log error + bot fails to start; `sandbo
 
 | Chunk | Files | Route | Gate |
 |---|---|---|---|
-| **A — Schema** | Alembic 0070 + migration tests | Qwen | — |
-| **B — StrategyGenerator + sandbox** | `strategy_gen/generator.py`, `strategy_gen/sandbox.py` (AST + RestrictedPython), unit tests (incl. H5 prompt test, reflection-chain rejection) | Codex | after A |
+| **A — Schema + dependency** | Alembic 0070 + migration tests; add `RestrictedPython>=7.0,<8` to `pyproject.toml` + `uv lock` (H6) | Qwen | — |
+| **B — StrategyGenerator + sandbox** | `strategy_gen/generator.py`, `strategy_gen/sandbox.py` (AST + RestrictedPython + startup assert), unit tests (incl. H5 prompt test, BaseStrategy interface contract in prompt, reflection-chain rejection) | Codex | after A |
 | **C — Bot worker integration** | `bot/supervisor.py` extension, `bot/strategy_loader.py` (child-process spawn + IPC + re-hash), `bot/strategy_worker.py` (child entry point), tests | Codex | after B |
 | **D — REST API** | `api/strategy_gen.py`, tests (incl. CSRF gate, paper_pending flow) | Qwen | after B |
 | **E — FE strategy-gen feed** | `OrchestrationPage` panel 4, `strategy_gen/api.ts` + `types.ts` | Codex | after D |
@@ -418,7 +467,7 @@ Table: Rank | Bot | Sharpe (30d) | Drawdown | Win Rate | Advisor Accuracy | Expo
 Data: `GET /api/orchestrator/digest/latest`. Stale time: 300s.
 
 **Panel 2 — Portfolio exposure heatmap**
-Instrument × account matrix. Cell colour = exposure utilisation (0–100% of limit). Hover: current notional, limit, raw notional contribution.
+Instrument × account matrix (no sector dimension — C4 deferred). Cell colour = exposure utilisation (0–100% of `per_instrument` limit; total_notional shown as a single summary bar above the matrix). Hover: current notional, limit, % utilised.
 Data: `GET /api/orchestrator/exposure`. Stale time: 60s.
 
 **Panel 3 — Correlation matrix**
@@ -519,6 +568,7 @@ Data: `GET /api/strategy-gen`. Stale time: 60s.
 | Attribution for generated strategies (21c path) | Automatic — 21c's `AttributionService` covers all `bot_advisor_decisions` rows |
 | Telegram veto window for auto-promote (not just auto-approve) | Phase 22a.1 patch if needed |
 | Marginal-variance-adjusted notional in PortfolioExposureGate (raw notional used in 22a) | Phase 22a.1 — requires validated formula + backtest sanity check |
+| `per_sector` exposure limits (C4: `instruments` has no sector column) | Phase 22a.1 — requires sector-ingestion pipeline (Schwab + IBKR contract-details → `instruments.sector`) |
 
 ---
 
