@@ -324,7 +324,10 @@ class InstrumentResolver:
         from app.services.advisor.attribution_types import InstrumentAttribution
 
         cache_key = f"attribution:instr:{canonical_id}"
-        raw = await redis.get(cache_key)
+        try:
+            raw = await redis.get(cache_key)
+        except Exception:
+            raw = None
         if raw is not None:
             data = json.loads(raw)
             return InstrumentAttribution(
@@ -361,17 +364,20 @@ class InstrumentResolver:
             multiplier=multiplier,
             primary_exchange=str(row["primary_exchange"]),
         )
-        await redis.set(
-            cache_key,
-            json.dumps(
-                {
-                    "id": instr.id,
-                    "multiplier": str(instr.multiplier),
-                    "primary_exchange": instr.primary_exchange,
-                }
-            ),
-            ex=3600,
-        )
+        try:
+            await redis.set(
+                cache_key,
+                json.dumps(
+                    {
+                        "id": instr.id,
+                        "multiplier": str(instr.multiplier),
+                        "primary_exchange": instr.primary_exchange,
+                    }
+                ),
+                ex=3600,
+            )
+        except Exception:
+            pass
         return instr
 
     async def from_legacy(

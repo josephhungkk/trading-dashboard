@@ -87,7 +87,7 @@ class AttributionService:
             (
                 await db.execute(
                     text(
-                        f"""
+                        """
                     SELECT id, verdict, canonical_id, created_at,
                            attribution_status, attribution_windows,
                            intent,
@@ -98,12 +98,13 @@ class AttributionService:
                     FROM bot_advisor_decisions
                     WHERE attribution_status IN ('pending','partial')
                       AND verdict IN ('approve','veto')
-                      AND created_at >= now() - interval '{max_lookback_days} days'
+                      AND created_at >= now() - (:lookback_days || ' days')::interval
                     ORDER BY created_at ASC
                     FOR UPDATE SKIP LOCKED
-                    LIMIT {_POLL_BATCH_SIZE}
+                    LIMIT :batch_size
                     """
-                    )
+                    ),
+                    {"lookback_days": max_lookback_days, "batch_size": _POLL_BATCH_SIZE},
                 )
             )
             .mappings()
@@ -206,8 +207,8 @@ class AttributionService:
 
         for window in snapshotted_windows:
             # Carry over already-computed windows
-            col_c = f"outcome_{window.replace('h', 'h')}_correct"
-            col_p = f"outcome_{window.replace('h', 'h')}_pnl"
+            col_c = f"outcome_{window}_correct"
+            col_p = f"outcome_{window}_pnl"
             existing_c = row.get(col_c)
             if existing_c is not None:
                 outcomes[window] = (existing_c, row.get(col_p))
