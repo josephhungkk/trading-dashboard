@@ -1326,3 +1326,51 @@ scanner_scheduler_jobs = Gauge(
     "Number of scheduled scanner jobs",
     registry=registry,
 )
+
+# Filings metrics
+filings_ingested_total = Counter(
+    "filings_ingested_total",
+    "Number of filings ingested",
+    ["source", "form_type"],
+    registry=registry,
+)
+filings_instrument_link_failures_total = Counter(
+    "filings_instrument_link_failures_total",
+    "Filings where instrument_id could not be resolved",
+    ["source"],
+    registry=registry,
+)
+filings_relinked_total = Counter(
+    "filings_relinked_total",
+    "Filings successfully re-linked to an instrument",
+    registry=registry,
+)
+filings_summarisation_total = Counter(
+    "filings_summarisation_total",
+    "LLM summarisation attempts",
+    ["source", "status"],
+    registry=registry,
+)
+filings_poll_errors_total = Counter(
+    "filings_poll_errors_total",
+    "Polling errors per source",
+    ["source"],
+    registry=registry,
+)
+filings_dedup_skips_total = Counter(
+    "filings_dedup_skips_total",
+    "Duplicate URLs skipped during ingestion",
+    ["source"],
+    registry=registry,
+)
+sec_edgar_rate_limit_total = Counter(
+    "sec_edgar_rate_limit_total",
+    "SEC EDGAR 429 rate-limit responses encountered",
+    registry=registry,
+)
+filings_llm_latency_seconds = Histogram(
+    "filings_llm_latency_seconds",
+    "LLM summarisation latency",
+    ["source"],
+    registry=registry,
+)

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import app.api.telegram as _telegram_api_module
 from app.api import admin_instruments
+from app.api import filings as filings_api
 from app.api import scanner as scanner_api
 from app.api import ws_scanner as ws_scanner_api
 from app.api.accounts import router as accounts_router
@@ -688,6 +689,28 @@ async def lifespan(_app: FastAPI) -> Any:
     except Exception:
         log.exception("scanner.lifespan.rebuild_failed")
 
+    from app.services.common.sec_edgar_client import SecEdgarClient
+    from app.services.filings.filings_service import FilingsService
+
+    sec_edgar_contact = await svc.get("filings", "sec_edgar_contact_email", None)
+    if sec_edgar_contact is None:
+        sec_edgar_contact = await svc.get("app_config", "sec_edgar_contact_email", None)
+    edgar_client = SecEdgarClient(contact_email=sec_edgar_contact)
+    filings_service = FilingsService(
+        db_factory=session_factory,
+        edgar_client=edgar_client,
+        ai_client=getattr(_app.state, "ai_client", getattr(_app.state, "ai_router", None)),
+    )
+    _app.state.filings_service = filings_service
+    scheduler.add_job(
+        filings_service.poll_all,
+        "interval",
+        minutes=15,
+        id="filings_poll_all",
+        coalesce=True,
+        misfire_grace_time=60,
+    )
+
     # Run once immediately on startup (non-blocking).
     pre_warm_task: asyncio.Task[None] = asyncio.create_task(_run_pre_warm())
 
@@ -903,6 +926,7 @@ app.include_router(ws_crypto_router)
 app.include_router(options_admin_router)
 app.include_router(ws_options_router)
 app.include_router(algo_router)
+app.include_router(filings_api.router)
 app.include_router(scanner_api.router)
 app.include_router(ws_scanner_api.router)
 
