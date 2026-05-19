@@ -925,9 +925,20 @@ Strategy plugin model (Python files). Bot lifecycle (create/start/stop/version).
 - [ ] Auto-promote logic — deferred to 21c
 - [ ] Per-account account_gate_outcome update — deferred to 21c
 
-## Phase 21c — LLM Advisor: Perf-Attribution
+## Phase 21c — LLM Advisor: Perf-Attribution ✅ (shipped v0.21.3 · 2026-05-19)
 
 Per-bot / per-strategy / per-advisor-verdict P&L attribution. Advisor decision quality metrics over time.
+
+- [x] Alembic 0068 — attribution columns on `bot_advisor_decisions`; CONCURRENTLY indexes
+- [x] `AttributionService` — poll() FOR UPDATE SKIP LOCKED, 4-window (15m/1h/4h/EOD) PnL; fail-OPEN per decision; window snapshotting; `get_summary()` + `recompute()`
+- [x] `InstrumentResolver.find_by_canonical_id()` — Redis-cached (TTL 3600s), fallback to DB
+- [x] `session_close_for_decision()` — market-calendar EOD price point; raises on unknown exchange
+- [x] APScheduler job — 900s interval; try/except → `log.exception("attribution_poll_failed")`
+- [x] REST: `GET /{bot_id}/advisor-attribution?window=` + `POST /{bot_id}/advisor-attribution/recompute`
+- [x] FE `AdvisorScoreCard` — window selector, veto/approve accuracy bars, avg avoided loss/missed gain
+- [x] FE `AdvisorDecisionsTable` + `AdvisorDecisionDrawer` — outcome_1h column + complete-decision outcome section
+- [x] FE `BotDetailPage` — AdvisorScoreCard rendered on overview tab
+- [x] 24 BE unit tests + 4 API tests; 778 FE tests green; 2103 BE tests green
 
 ## Phase 22 — Bot engine v3 (autonomous, self-refining)
 

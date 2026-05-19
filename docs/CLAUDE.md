@@ -62,6 +62,7 @@ Per-phase deep detail in memory files — read before changing those surfaces. P
 
 | Phase | v | What shipped |
 |---|---|---|
+| 21c — Advisor Perf-Attribution | 0.21.3 | AttributionService (FOR UPDATE SKIP LOCKED, 4-window PnL); InstrumentResolver.find_by_canonical_id (Redis-cached); session_close_for_decision; alembic 0068; 2 REST + APScheduler 900s; FE AdvisorScoreCard + outcome columns |
 | 21b — LLM-in-Loop | 0.21.2 | ParamTunerService, ShadowPromoterService, AdvisorStub, AdvisorTelegramNotifier, BotSupervisor.restart(); alembic 0065–0067; 10 REST + 2 WS; FE param-tuner + shadow components |
 | 21a.1 — Advisor Polish | 0.21.1 | SHADOW mode, semaphore (max_concurrent 1–4), override endpoints, per-account advisor config; alembic 0064 |
 | 21a — LLM Advisor Gate | 0.21.0 | AdvisorService.review() fail-OPEN; OFF/OBSERVE/VETO/SHADOW; bot wiring station 5.5; alembic 0063 |

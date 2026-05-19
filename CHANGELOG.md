@@ -7,6 +7,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 21c — Advisor Perf-Attribution (v0.21.3)
+
+Phase 21c shipped on 2026-05-19. Closes the attribution loop: for every `bot_advisor_decisions` row the system now computes a simulated P&L outcome across four windows (15 m / 1 h / 4 h / EOD) and marks each verdict correct or incorrect. The AdvisorScoreCard surfaces veto accuracy, approve accuracy, and average avoided/missed value directly on the bot detail page.
+
+**Migrations (Alembic 0068)**
+
+- `0068_advisor_attribution.py`: adds `attribution_status` (`pending`/`computing`/`complete`/`skipped`/`error`), `attribution_windows` JSONB snapshot, `attribution_computed_at`, `outcome_{15m,1h,4h,eod}_{correct,pnl_quote}` to `bot_advisor_decisions`; CONCURRENTLY indexes on `(attribution_status, created_at)` and `(bot_id, created_at DESC)`.
+
+**Backend**
+
+- `AttributionService` (`app/services/advisor/attribution.py`): `poll()` with `FOR UPDATE SKIP LOCKED` batch (default 50 rows); per-decision fail-OPEN; window snapshotting on first compute, carry on retry; `(exit_price - entry_price) × qty × multiplier × side_sign` PnL formula; veto correct when pnl < 0, approve correct when pnl > 0; CLOSE `position_effect` skipped; EOD 30-min buffer guard.
+- `InstrumentResolver.find_by_canonical_id()`: Redis-cached read-only lookup (`attribution:instr:{canonical_id}` TTL 3600 s); try/except on both `redis.get` and `redis.set` so Redis failure falls through to DB.
+- `session_close_for_decision()` in `market_calendar.py`: maps `created_at` to the next market session close; raises `ValueError` on unknown exchange (no silent UTC fallback).
+- APScheduler: `attribution_poll` job every 900 s; wrapped in try/except → `log.exception("attribution_poll_failed")`.
+- 2 new REST endpoints: `GET /{bot_id}/advisor-attribution?window=` (returns `AttributionSummary`); `POST /{bot_id}/advisor-attribution/recompute` (resets rows since a given ISO timestamp, max 6 months).
+- `list_advisor_decisions` SELECT widened to include all attribution columns.
+
+**Frontend**
+
+- `AdvisorScoreCard` component: window selector (15m / 1h / 4h / EOD), `AccuracyBar` for veto + approve accuracy, avg avoided loss and avg missed gain, counts footer. `useQuery` with `staleTime: 300_000`; hidden when `advisorMode === 'OFF'`.
+- `AdvisorDecisionsTable`: `outcome_1h` column (correct ✓ / incorrect ✗ / pending —).
+- `AdvisorDecisionDrawer`: outcome section for complete decisions (P&L and verdict across all 4 windows).
+- `BotDetailPage`: `AdvisorScoreCard` rendered on overview tab below decisions list.
+- `services/advisor/types.ts`: `AttributionSummary` interface; `AdvisorDecision` extended with attribution fields.
+- `services/advisor/api.ts`: `getAdvisorAttribution` + `recomputeAttribution`.
+
+**Tests**
+
+- 24 BE unit tests (`test_attribution.py`): find_by_canonical_id (4), session_close_for_decision (4), PnL formula (4), EOD buffer (2), get_summary (2), recompute guard (1), poll disabled (1), +6 additional.
+- 4 BE API tests (`test_advisor_attribution_api.py`): 200 summary, 422 invalid window, 404 bot not found, attribution fields on decisions response.
+- FE: 3 AdvisorScoreCard unit tests; 778 FE tests total green.
+- BE: 2103 tests passing (21 pre-existing failures in test_api_algo/test_migration, unrelated to Phase 21c).
+
+**Deferred**
+
+- Auto-promote logic (comparison_ready → auto-promote path) — already tracked in Phase 21b deferred list
+- Per-account `account_gate_outcome` update
+
+---
+
 ### Phase 21b — LLM-in-Loop (v0.21.2)
 
 Phase 21b shipped on 2026-05-19. Delivers param-tuning via LLM + auto-backtest fan-out, shadow-bot promotion pipeline, advisor-in-backtest stub, Telegram VETO notifications, and filings/earnings injection into advisor context.
