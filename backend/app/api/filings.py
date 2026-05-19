@@ -10,13 +10,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ws_auth import require_jwt
-from app.core.deps import get_db
+from app.core.cf_access import AdminIdentity
+from app.core.deps import get_db, require_admin_jwt
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/api/filings", tags=["filings"])
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 JwtSubject = Annotated[str, Depends(require_jwt)]
+AdminDep = Annotated[AdminIdentity, Depends(require_admin_jwt)]
 
 
 @router.get("")
@@ -62,10 +64,13 @@ async def get_filing(filing_id: UUID, db: DbDep, _: JwtSubject) -> dict[str, Any
 
 
 _poll_tasks: set[asyncio.Task[None]] = set()
+_MAX_CONCURRENT_POLLS = 1
 
 
 @router.post("/poll", status_code=202)
-async def trigger_poll(request: Request, _: JwtSubject) -> dict[str, str]:
+async def trigger_poll(request: Request, _: AdminDep) -> dict[str, str]:
+    if len(_poll_tasks) >= _MAX_CONCURRENT_POLLS:
+        return {"status": "already_running"}
     svc = request.app.state.filings_service
     task = asyncio.create_task(svc.poll_all())
     _poll_tasks.add(task)

@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 import httpx
 import sqlalchemy as sa
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from app.core import metrics
 from app.services.filings.instrument_linker import InstrumentLinker
@@ -117,8 +118,11 @@ class HkexRnsPoller:
                         },
                     )
                     metrics.filings_ingested_total.labels(source="hkex_rns", form_type="RNS").inc()
-                except Exception:
+                except IntegrityError:
                     metrics.filings_dedup_skips_total.labels(source="hkex_rns").inc()
+                except Exception:
+                    log.exception("hkex_rns.insert_error", url=url)
+                    metrics.filings_poll_errors_total.labels(source="hkex_rns").inc()
 
             if newest_url:
                 await db.execute(

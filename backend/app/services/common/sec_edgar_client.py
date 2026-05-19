@@ -40,10 +40,12 @@ class SecEdgarClient:
             self._last_refill = now
             if self._tokens < 1.0:
                 wait = (1.0 - self._tokens) / _RATE_LIMIT_RPS
-                await asyncio.sleep(wait)
                 self._tokens = 0.0
             else:
+                wait = 0.0
                 self._tokens -= 1.0
+        if wait > 0.0:
+            await asyncio.sleep(wait)
 
     async def get(self, url: str, **kwargs: Any) -> httpx.Response:
         if self._disabled:

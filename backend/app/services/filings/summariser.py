@@ -40,6 +40,6 @@ async def summarise_filing(
         content = getattr(result, "content", None)
         return str(content) if content is not None else None
     except Exception:
-        log.warning("filings.summariser.error", title=title, source=source)
+        log.exception("filings.summariser.error", title=title, source=source)
         metrics.filings_summarisation_total.labels(source=source, status="error").inc()
         return None

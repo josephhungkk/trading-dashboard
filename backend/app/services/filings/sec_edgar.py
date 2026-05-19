@@ -6,6 +6,7 @@ from typing import Any
 
 import sqlalchemy as sa
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from app.core import metrics
 from app.services.filings.instrument_linker import InstrumentLinker
@@ -123,8 +124,11 @@ class SecEdgarPoller:
                     metrics.filings_ingested_total.labels(
                         source="sec_edgar", form_type=form_type
                     ).inc()
-                except Exception:
+                except IntegrityError:
                     metrics.filings_dedup_skips_total.labels(source="sec_edgar").inc()
+                except Exception:
+                    log.exception("sec_edgar.insert_error", url=filing_url)
+                    metrics.filings_poll_errors_total.labels(source="sec_edgar").inc()
 
             if new_cursor:
                 await db.execute(
