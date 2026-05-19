@@ -1,11 +1,11 @@
 # Phase 21b — LLM-in-Loop: Param-Tuning + Shadow-Promotion (v0.21.2)
 
 **Date:** 2026-05-19  
-**Status:** ARCHITECT-REVIEW Pass 1 + Pass 2 applied — ready for /writing-plans  
+**Status:** ARCHITECT-REVIEW Pass 1 + Pass 2 + Pass 3 applied — ready for /writing-plans  
 **Builds on:** Phase 21a (LLM advisor, v0.21.0) · Phase 21a.1 (advisor polish, v0.21.1) · Phase 20 (backtesting harness, v0.20.0) · Phase 18 (scanner/filings/earnings, v0.18.0) · Phase 11c (Telegram bot, v0.11.2.0)  
 **Next phases:** 21c (perf-attribution — "was the advisor right?")
 
-**ARCHITECT-REVIEW applied:** Pass 1 (8 HIGH + 9 MED + 5 LOW) + Pass 2 (0 CRIT, 4 HIGH, 7 MED, 4 LOW). All HIGH + MED inline. LOWs noted.
+**ARCHITECT-REVIEW applied:** Pass 1 (8 HIGH + 9 MED + 5 LOW) + Pass 2 (0 CRIT, 4 HIGH, 7 MED, 4 LOW) + Pass 3 (0 CRIT, 1 HIGH, 1 MED, 2 LOW). All HIGH + MED inline. LOWs noted.
 
 ---
 
@@ -104,7 +104,10 @@ CREATE TABLE bot_param_suggestions (
     triggered_by                TEXT NOT NULL CHECK (triggered_by IN ('scheduled','manual')),
     status                      TEXT NOT NULL CHECK (status IN (
                                     'pending','backtesting','ranked',
-                                    'approved','rejected','applied')),
+                                    'approved','rejected','applied','failed')),
+                                    -- M3-new-1: 'failed' added for terminal trigger failures
+                                    -- (no_valid_candidates, queue_full). Distinct from 'pending'
+                                    -- (in-progress) so trigger guard and FE treat them differently.
     strategy_params_current     JSONB NOT NULL,
     ai_reasoning                TEXT,
     candidates                  JSONB NOT NULL DEFAULT '[]'
@@ -257,6 +260,7 @@ class SuggestionStatus(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     APPLIED = "applied"
+    FAILED = "failed"   # M3-new-1: terminal trigger failure (no_valid_candidates, queue_full)
 
 class BacktestResultSnapshot(BaseModel):
     sharpe: float | None
@@ -345,7 +349,7 @@ In production it wraps `BacktestService.submit()` with the following sourced par
 **Kill switch (H5):** Read `app_config[param_tuner/scheduled_enabled]`. If `False` and `triggered_by='scheduled'` → no-op, return early. Manual triggers are NOT gated by this flag (operator explicitly requested).
 
 1. Read bot row. Assert `is_shadow=False`, `status != 'deleted'`, `strategy_schema IS NOT NULL` (strategy has `params_schema`; pre-0065 bots without `strategy_schema` → 422 with hint to run backfill-schema endpoint).
-2. Assert no suggestion in `status IN ('pending','backtesting','ranked')` already exists for this bot — one active suggestion per bot at a time. If exists → raise `TunerAlreadyActiveError` (409 from REST handler).
+2. Assert no suggestion in `status IN ('pending','backtesting','ranked')` already exists for this bot — one active suggestion per bot at a time. (`failed`, `rejected`, `approved`, `applied` rows are terminal and do not block.) If exists → raise `TunerAlreadyActiveError` (409 from REST handler). (M3-new-1: explicit status list ensures `failed` rows do not block re-triggering.)
 3. **Daily cost ceiling check (H1, H-new-3 — TOCTOU-safe):** Two concurrent `trigger()` calls (manual + scheduled, or two manuals) both reading the `ai_completions` SUM before either AI call completes can both pass the check and together spend ≈2× the ceiling. Fix: use a Redis reservation counter as a soft atomic guard.
    - Read `ai_completions WHERE caller LIKE 'param_tuner:bot:%' AND ts >= now() - interval '1 day'`, sum `cost_usd`. Call this `committed_cost`.
    - **Reserve estimated cost atomically:** `INCRBYFLOAT param_tuner:cost_pending:{utc_date} {estimated_cost_usd} EX 86400`. `estimated_cost_usd` = `0.10` (conservative estimate per trigger; actual cost recorded after AI call). The key expires at UTC midnight + 24h. Read the post-increment value back.
@@ -362,8 +366,8 @@ In production it wraps `BacktestService.submit()` with the following sourced par
    - `response_format = CandidateListResponse.model_json_schema()`
    - `timeout = 30s`
 7. Parse `CandidateListResponse`. Hard-cap: `len(candidates) = min(len(candidates), MAX_CANDIDATES_PER_SUGGESTION)` where `MAX_CANDIDATES_PER_SUGGESTION = 5` (H1). Validate each remaining candidate dict against `strategy_schema` (type check via Pydantic). Then validate against `params_bounds_schema` (semantic bounds — per-field min/max; H2). Drop invalid candidates; metric `param_tuner_invalid_candidates_total{reason}` per drop (reasons: `schema_type`, `out_of_bounds`).
-8. If `len(valid_candidates) < 1` → persist row with `status='pending'`, `candidates=[]`, publish failure frame `{type:"failed", reason:"no_valid_candidates"}`, metric `param_tuner_trigger_failures_total{reason="no_valid_candidates"}`. Return suggestion_id (202).
-9. **Queue depth check (H7):** call `backtest_submitter.queue_depth()`. If depth ≥ `app_config[param_tuner/max_backtest_queue_depth]` (default `20`; moved from magic constant to config for parity with other tuner knobs — L-new-1) → persist row with `status='pending'`, publish `{type:"failed", reason:"queue_full"}`, metric `param_tuner_trigger_failures_total{reason="queue_full"}`. Return suggestion_id (202 — operator can retry once queue drains). Metric `param_tuner_backtest_queue_depth` (gauge, updated here).
+8. If `len(valid_candidates) < 1` → persist row with `status='failed'`, `candidates=[]`, publish failure frame `{type:"failed", reason:"no_valid_candidates"}`, metric `param_tuner_trigger_failures_total{reason="no_valid_candidates"}`. Return suggestion_id (202). (M3-new-1: `failed` is a distinct terminal state — trigger guard in step 2 counts only `pending|backtesting|ranked` as "active"; a `failed` row does not block re-triggering. FE `ParamTunerSection` shows a "Dismiss" affordance on `failed` rows that calls `DELETE /reject`.)
+9. **Queue depth check (H7):** call `backtest_submitter.queue_depth()`. If depth ≥ `app_config[param_tuner/max_backtest_queue_depth]` (default `20`; moved from magic constant to config for parity with other tuner knobs — L-new-1) → persist row with `status='failed'`, publish `{type:"failed", reason:"queue_full"}`, metric `param_tuner_trigger_failures_total{reason="queue_full"}`. Return suggestion_id (202 — operator can retry once queue drains). Metric `param_tuner_backtest_queue_depth` (gauge, updated here). (M3-new-1: same `failed` terminal state; does not block re-triggering.)
 10. Persist `bot_param_suggestions` row: `status='backtesting'`, `candidates` array with `params` only, `ai_reasoning`, `ai_completion_id`, `ai_model`, `ai_prompt_hash` (H3).
 11. Fan-out: for each valid candidate, call `backtest_submitter.submit(bot_id, candidate.params)` → store `backtest_job_id` per candidate. Update `candidates` JSONB in-place. Metric `param_tuner_backtest_fan_out_total`.
 12. Publish `bot:tuner:{bot_id}` frame `{v:1, type:"backtesting", suggestion_id, candidate_count: N}`.
@@ -534,11 +538,12 @@ class ShadowPromoterService:
    - All strategy fields copied from live bot.
    - `strategy_params = {**live.strategy_params, **override_params}`.
    - `is_shadow = True`, `shadow_of = live_bot_id`.
+   - **`mode = 'paper'`** — explicitly set regardless of live bot's mode. This is the authoritative paper-mode field. (H3-new-1: `bot_accounts` has no `mode` column — `bots.mode` is the single source of truth per Alembic 0061. A shadow must NEVER be created in `mode='live'` even if the live bot is live.)
    - `name = f"{live_bot.name} [shadow]"`.
    - `status = 'stopped'` (not auto-started — operator starts via existing `POST /api/bots/{id}/start`).
    - `advisor_config` copied from live bot (shadow participates in advisor if live bot does).
 3. Copy `bot_risk_caps` row to shadow bot (identical caps — shadow must respect same risk limits).
-4. Copy `bot_accounts` rows — shadow trades **same accounts in paper mode** regardless of live bot mode. `bot_accounts.mode` set to `'paper'` on all shadow rows.
+4. Copy `bot_accounts` rows — same account associations as live bot. No per-account mode field exists on `bot_accounts`; paper-mode enforcement is entirely via `bots.mode='paper'` set in step 2. (H3-new-1: the previous "set `bot_accounts.mode='paper'`" wording was a schema-vs-spec error; that column does not exist.)
 5. Return shadow `bot_id`.
 6. Metric `shadow_promoter_created_total`.
 
@@ -993,6 +998,8 @@ Every Phase 11a AI router consumer must re-apply these conventions — they are 
 | L-new-2 (Pass 2): `candidates` CHECK missing NOT NULL | `CHECK (candidates IS NOT NULL AND jsonb_array_length(candidates) <= 5)` — paranoia-documented |
 | L-new-3 (Pass 2): `ai_prompt_hash` unbounded TEXT | Documented in §4 DDL comment: CHAR(16) semantics, stored as unbounded TEXT |
 | L-new-4 (Pass 2): `failed` frame missing v:1 example | Full v:1-versioned frame shapes for all 4 frame types added to §10 |
+| H3-new-1 (Pass 3): `bot_accounts.mode` does not exist; shadow `bots.mode` not set explicitly | §6.2 `create_shadow` step 2 now explicitly sets `bots.mode='paper'`; step 4 reworded to remove erroneous `bot_accounts.mode` reference. `bots.mode` is the single source of truth per Alembic 0061. |
+| M3-new-1 (Pass 3): `status='pending'` overloaded for in-progress and terminal-failure | `failed` added to `bot_param_suggestions.status` CHECK in Alembic 0065; `SuggestionStatus.FAILED` added to types; steps 8/9 set `status='failed'`; step 2 trigger guard counts only `pending\|backtesting\|ranked` as active; FE `ParamTunerSection` shows "Dismiss" on `failed` rows |
 
 ---
 
