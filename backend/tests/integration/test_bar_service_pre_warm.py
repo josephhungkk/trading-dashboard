@@ -498,7 +498,7 @@ async def test_lifespan_starts_scheduler() -> None:
             # Phase 14 added 2 futures roll checker jobs (CME + HKFE)
             # Phase 15a added 1 forex RFQ TTL sweep job
             # Phase 18.1 added 1 filings poll_all job
-            assert len(jobs) == 9, f"Expected 9 scheduled jobs, got {len(jobs)}"
+            assert len(jobs) == 11, f"Expected 11 scheduled jobs, got {len(jobs)}"
 
 
 async def test_lifespan_runs_initial_pre_warm() -> None:

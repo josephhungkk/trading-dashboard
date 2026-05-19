@@ -68,6 +68,7 @@ class PreviewRequest(BaseModel):
     expiry_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     algo_strategy: AlgoStrategy | None = None
     algo_params: dict[str, str] | None = None
+    position_effect: str | None = None
 
     @field_validator(
         "qty",

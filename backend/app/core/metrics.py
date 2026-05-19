@@ -1374,3 +1374,45 @@ filings_llm_latency_seconds = Histogram(
     ["source"],
     registry=registry,
 )
+
+# Earnings metrics
+earnings_events_ingested_total = Counter(
+    "earnings_events_ingested_total",
+    "Earnings events ingested",
+    ["source"],
+    registry=registry,
+)
+earnings_hooks_fired_total = Counter(
+    "earnings_hooks_fired_total",
+    "Earnings hooks that fired",
+    ["hook_type"],
+    registry=registry,
+)
+earnings_hooks_failed_total = Counter(
+    "earnings_hooks_failed_total",
+    "Earnings hooks that failed",
+    ["hook_type"],
+    registry=registry,
+)
+earnings_autoflat_qty_total = Counter(
+    "earnings_autoflat_qty_total",
+    "Total quantity flattened by auto_flat hooks",
+    registry=registry,
+)
+earnings_autoflat_race_detected_total = Counter(
+    "earnings_autoflat_race_detected_total",
+    "Auto-flat double-read race conditions detected",
+    registry=registry,
+)
+earnings_poll_errors_total = Counter(
+    "earnings_poll_errors_total",
+    "Earnings calendar polling errors",
+    ["source"],
+    registry=registry,
+)
+earnings_dedup_skips_total = Counter(
+    "earnings_dedup_skips_total",
+    "Earnings events skipped as duplicates",
+    ["source"],
+    registry=registry,
+)

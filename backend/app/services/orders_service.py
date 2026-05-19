@@ -486,8 +486,8 @@ async def _evaluate_risk_for_place_order(
                     multiplier = Decimal(str(details.multiplier))
         except Exception as exc:
             log.debug("orders.risk.option_multiplier_unavailable", exc_info=exc)
-    if hasattr(request, "position_effect"):
-        position_effect_value = request.position_effect
+    if hasattr(request, "position_effect") and request.position_effect is not None:
+        position_effect_value = cast(Literal["OPEN", "CLOSE"], request.position_effect.upper())
     ctx = EvaluationContext(
         account_id=request.account_id,
         broker_id=capability_broker_id(account.gateway_label),
@@ -908,6 +908,8 @@ async def place_order(
     registry: BrokerRegistry,
     capability: OrderCapabilityService,
     request_data: dict[str, Any],
+    attempt_kind: str = "place_order",
+    _skip_csrf: bool = False,
 ) -> OrderResponse:
     await _check_kill_switch(cfg)
 
@@ -987,7 +989,7 @@ async def place_order(
         qty=qty,
         verdict=risk_verdict,
         request_id=risk_request_id,
-        attempt_kind="place_order",
+        attempt_kind=attempt_kind,
         order_id=None,
         instrument_id=instrument_id,
     )
@@ -1007,21 +1009,22 @@ async def place_order(
     if cap_status(filled_today + notional, policy.daily_notional_cap) == "exceeded":
         raise PreviewUnavailable(422, {"error": "daily_notional_exceeded"})
 
-    nonce_key = f"nonce:order:{request.account_id}:{request.nonce}"
-    current_nonce_value = await redis.get(nonce_key)
-    if current_nonce_value is None:
-        raise PreviewUnavailable(422, {"error": "unknown_nonce"})
-    current_nonce_payload = _decode_nonce_payload(current_nonce_value)
-    rth_at_mint = current_nonce_payload.get("rth_at_mint")
-    if rth_at_mint is not None and bool(rth_at_mint) != _is_regular_trading_hours(now):
-        raise PreviewUnavailable(422, {"error": "rth_changed", "detail": "re-preview required"})
+    if not _skip_csrf:
+        nonce_key = f"nonce:order:{request.account_id}:{request.nonce}"
+        current_nonce_value = await redis.get(nonce_key)
+        if current_nonce_value is None:
+            raise PreviewUnavailable(422, {"error": "unknown_nonce"})
+        current_nonce_payload = _decode_nonce_payload(current_nonce_value)
+        rth_at_mint = current_nonce_payload.get("rth_at_mint")
+        if rth_at_mint is not None and bool(rth_at_mint) != _is_regular_trading_hours(now):
+            raise PreviewUnavailable(422, {"error": "rth_changed", "detail": "re-preview required"})
 
-    consumed_nonce_value = await redis.execute_command("GETDEL", nonce_key)
-    if consumed_nonce_value is None:
-        raise PreviewUnavailable(422, {"error": "unknown_nonce"})
-    consumed_nonce_payload = _decode_nonce_payload(consumed_nonce_value)
-    if consumed_nonce_payload["payload_hash"] != _nonce_and_payload_hash(request)[1]:
-        raise PreviewUnavailable(422, {"error": "payload_mismatch"})
+        consumed_nonce_value = await redis.execute_command("GETDEL", nonce_key)
+        if consumed_nonce_value is None:
+            raise PreviewUnavailable(422, {"error": "unknown_nonce"})
+        consumed_nonce_payload = _decode_nonce_payload(consumed_nonce_value)
+        if consumed_nonce_payload["payload_hash"] != _nonce_and_payload_hash(request)[1]:
+            raise PreviewUnavailable(422, {"error": "payload_mismatch"})
 
     row = await _insert_order(db, request=request, contract=contract, notional=notional)
     if row is None:
@@ -1156,6 +1159,76 @@ async def place_order(
             pass
 
     return _order_response_from_mapping(submitted or row, submission_state="submitted")
+
+
+async def place_order_internal(
+    *,
+    cfg: ConfigService,
+    db: AsyncSession,
+    redis: RedisLike,
+    registry: BrokerRegistry,
+    capability: OrderCapabilityService,
+    jwt_subject: str,
+    issuer: Literal["telegram", "earnings_hook"],
+    account_id: UUID,
+    instrument_id: int,
+    side: str,
+    qty: str,
+    order_type: str,
+    position_effect: str,
+    bypass_pdt_when_closing: bool,
+    client_order_id: UUID,
+) -> OrderResponse:
+    # bypass_pdt_when_closing: PDT bypass for closing orders is not yet wired
+    # through place_order's PDT decrement path — deferred to Phase 19.
+    del jwt_subject, bypass_pdt_when_closing
+
+    conid_result = await db.execute(
+        text(
+            """
+            SELECT conid
+              FROM positions
+             WHERE account_id = :account_id
+               AND instrument_id = :instrument_id
+             ORDER BY updated_at DESC
+             LIMIT 1
+            """
+        ),
+        {"account_id": account_id, "instrument_id": instrument_id},
+    )
+    conid = conid_result.scalar_one_or_none()
+    if conid is None:
+        raise ValueError(
+            f"no conid found for instrument_id={instrument_id} account_id={account_id}; "
+            "position must be synced from broker before auto-flat can execute"
+        )
+    normalized_side = side.upper()
+    if normalized_side in {"SELL_TO_CLOSE", "SELL"}:
+        normalized_side = "SELL"
+    elif normalized_side in {"BUY_TO_CLOSE", "BUY"}:
+        normalized_side = "BUY"
+    request = PlaceOrderRequest(
+        account_id=account_id,
+        conid=str(conid),
+        side=cast(Literal["BUY", "SELL"], normalized_side),
+        order_type=cast(Any, order_type.upper()),
+        tif="DAY",
+        qty=qty,
+        client_order_id=client_order_id,
+        nonce=f"internal:{issuer}:{client_order_id}",
+        position_effect=position_effect,
+    )
+    attempt_kind = "earnings_hook_flat" if issuer == "earnings_hook" else issuer
+    return await place_order(
+        cfg=cfg,
+        db=db,
+        redis=redis,
+        registry=registry,
+        capability=capability,
+        request_data=request.model_dump(mode="json"),
+        attempt_kind=attempt_kind,
+        _skip_csrf=True,
+    )
 
 
 async def modify_order(

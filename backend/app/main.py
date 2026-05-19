@@ -42,6 +42,7 @@ from app.api.chart_layouts import router as chart_layouts_router
 from app.api.combos import router as combos_router
 from app.api.contracts import router as contracts_router
 from app.api.crypto import router as crypto_router
+from app.api.earnings import router as earnings_router
 from app.api.forex import router as forex_router
 from app.api.funds import router as funds_router
 from app.api.futures import router as futures_router
@@ -89,6 +90,7 @@ from app.services.broker_registry_factory import MissingBrokerSecrets, build_bro
 from app.services.brokers import AccountService, BrokerDiscoverer, BrokerRegistry
 from app.services.config import ConfigService
 from app.services.config_cache import ConfigCache
+from app.services.earnings.earnings_service import EarningsService
 from app.services.oco_orchestrator import OcoOrchestrator, OcoOrchestratorImpl
 from app.services.order_capability_service import OrderCapabilityService
 from app.services.order_event_consumer import OrderEventConsumer
@@ -711,6 +713,34 @@ async def lifespan(_app: FastAPI) -> Any:
         misfire_grace_time=60,
     )
 
+    finnhub_key = await svc.get("earnings", "finnhub_api_key", None)
+    earnings_service = EarningsService(
+        db_factory=session_factory,
+        redis=redis,
+        finnhub_api_key=finnhub_key,
+    )
+    _app.state.earnings_service = earnings_service
+    scheduler.add_job(
+        earnings_service.poll_nasdaq,
+        "cron",
+        hour=6,
+        minute=0,
+        timezone="US/Eastern",
+        id="earnings_nasdaq_poll",
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        earnings_service.poll_finnhub,
+        "cron",
+        hour=6,
+        minute=15,
+        timezone="US/Eastern",
+        id="earnings_finnhub_poll",
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+
     # Run once immediately on startup (non-blocking).
     pre_warm_task: asyncio.Task[None] = asyncio.create_task(_run_pre_warm())
 
@@ -927,6 +957,7 @@ app.include_router(options_admin_router)
 app.include_router(ws_options_router)
 app.include_router(algo_router)
 app.include_router(filings_api.router)
+app.include_router(earnings_router)
 app.include_router(scanner_api.router)
 app.include_router(ws_scanner_api.router)
 
