@@ -869,11 +869,19 @@ Rule-based scanner (RSI / breakout / volume / mcap / fundamentals) + LLM comment
 - [x] 18.1: SecEdgarClient (10 req/s token bucket), SecEdgarPoller, HkexRnsPoller, InstrumentLinker, FilingsService, LLM summariser (source-labeled), REST API (admin-only /poll), 8 metrics, FE FilingsPage+FilingsPanel
 - [x] 18.2: NasdaqCalendarPoller+FinnhubCalendarPoller, EarningsService (db_factory, source-priority upsert), HookExecutor (db_factory concurrency, Redis+PG double-dedup, minutes_before SQL), place_order_internal (conid ValueError, position_effect wired), REST API 7 endpoints (CSRF+allowlist), 7 metrics, APScheduler 2 jobs, FE EarningsPage+EarningsBadge+EarningsPanel+EarningsHookDrawer
 
-## Phase 19 — Backtesting harness
+## Phase 19 — Backtesting harness ✅ (shipped as Phase 20, v0.20.0)
 
-Replay historical bars through strategy code. PnL / drawdown / Sharpe / MAR report. Walk-forward. Monte Carlo.
+- [x] Alembic 0062: backtests + backtest_bar_uploads + backtest_bars tables
+- [x] CommissionSchedule, BarFeed, BacktestContext, FillSimulator, MetricsComputer
+- [x] BacktestRunner (FIFO pairing + commission deduction + atomic CAS)
+- [x] worker_main (orphan sweep 120 min, own session, semaphore-capped)
+- [x] REST API 7 endpoints + WS /ws/bots/{id}/backtest/{job_id}
+- [x] CSV upload (50 MB limit, batch insert, OHLCV validation)
+- [x] FE: BacktestConfigForm, ProgressBar, ReportKpis, TradeTable, PnlChart, DrawdownChart
+- [x] FE: BacktestPage state machine + route /bots/$botId/backtest
+- [x] 1938 BE / 723 FE tests green; v0.20.0 tagged
 
-## Phase 20 — Bot engine v1 (rule-based)
+## Phase 20 — Bot engine v1 (rule-based) ✅ (shipped as Phase 19, v0.19.0)
 
 Strategy plugin model (Python files). Bot lifecycle (create/start/stop/version). Per-bot risk caps. Paper-mode-by-default. Bot worker is a separate Docker service.
 

@@ -7,6 +7,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 20 — Backtesting Harness (v0.20.0)
+
+Phase 20 shipped on 2026-05-19. 1938 BE tests green; 723 FE tests green. Replay OHLCV bars through any `BaseStrategy` implementation; stream progress via WebSocket; compute Sharpe/MAR/drawdown/win-rate report.
+
+**Migration (Alembic 0062)**
+
+- `0062_phase20_backtests.py`: `backtests` table (UUID PK, bot_id FK, status CHECK queued|running|done|failed, timeframe, canonical_id, start_date/end_date, slippage_bps, slippage_atr_pct, commission_cfg JSON, params_snapshot JSON, params_schema_hash, bars_source, parent_backtest_id, progress_pct SMALLINT, error_msg, report JSON nullable, created_at/started_at/completed_at); `backtest_bar_uploads` (id, canonical_id, timeframe, bar_count, uploaded_at); `backtest_bars` (upload_id FK, instrument_id FK, bucket_start TIMESTAMPTZ, OHLCV NUMERIC, UNIQUE upload_id+instrument_id+bucket_start).
+
+**Backend (`app/backtest/`)**
+
+- `commission.py`: `CommissionSchedule` — parses `commission_cfg` dict, supports per-share+min, per-trade, and zero-commission schedules; `compute(broker_id, qty)`.
+- `bar_feed.py`: `BarFeed` — loads bars from DB CAGG tables (`bars_1m`…`bars_1d`) or `backtest_bars` CSV upload; merges and sorts by timestamp; raises `BarFeedError` on unsupported timeframe.
+- `backtest_context.py`: `BacktestContext` — thin adapter between strategy and `FillSimulator`; exposes `place_order(canonical_id, side, qty, order_type, limit_price)`.
+- `fill_simulator.py`: `FillSimulator` — pending order queue; `process_pending_orders(bar)` fills market/limit orders at open; slippage in bps or ATR%; `force_close_open_positions(bar)` for end-of-range forced exits.
+- `metrics.py`: `MetricsComputer` — Sharpe (annualised daily returns via `exchange_calendars`), MAR (CAGR / max-drawdown), max-drawdown-pct, total-return-pct, win-rate (excl. forced), avg-trade-pnl, forced-close-pnl; `pnl_curve` + `drawdown_curve` as `[ts, value]` arrays; `ClosedTrade` dataclass.
+- `runner.py`: `BacktestRunner` — loads strategy from `/strategies/`, checks params_schema_hash drift, replays bars calling `on_start/on_bar/on_stop`, FIFO-pairs long+short fills with commission deduction, publishes progress every 0.5% of bars; atomic CAS `WHERE status='queued'` prevents double-start race.
+- `worker_main.py`: event loop entry point for `backtest_worker` Docker service; `asyncio.Semaphore(_CONCURRENCY)` cap; orphan sweep (120-min stale cutoff, own DB session per tick); `blmove` queue consumer.
+- `progress.py`: `ProgressPublisher` — `publish(i, total, trades, bar_ts)`, `publish_done(report)`, `publish_failed(error)` via Redis pubsub `backtest:progress:{id}`.
+
+**REST API (`app/api/backtests.py`) — 7 endpoints**
+
+- `POST /api/bots/{bot_id}/backtests` — submit, validates slippage XOR, builds `commission_cfg` from bot's broker accounts, enqueues to Redis `backtest:queue`.
+- `GET /api/bots/{bot_id}/backtests` — cursor-paginated list.
+- `GET /api/bots/{bot_id}/backtests/{id}` — detail with report.
+- `DELETE /api/bots/{bot_id}/backtests/{id}` — cancel running (marks failed + sets Redis cancel key) or delete done/failed; cascade support.
+- `POST /api/bots/{bot_id}/backtests/upload-bars` — CSV upload (50 MB limit; OHLCV positivity validation; batch INSERT via asyncpg executemany).
+- `GET /api/bots/{bot_id}/backtests/supported-timeframes` — returns list.
+- WS `/ws/bots/{bot_id}/backtest/{job_id}` — streams `progress/done/failed/heartbeat` frames from Redis pubsub; per-jwt cap 10, global cap 100; bounded reconnect backoff on client.
+
+**4 Prometheus metrics**: `backtest_runs_total{status}`, `backtest_duration_seconds`, `backtest_bars_processed_total`, `backtest_csv_upload_total`.
+
+**Frontend**
+
+- `services/backtests/types.ts` + `api.ts`: full type layer; `submitBacktest`, `listBacktests`, `getBacktest`, `cancelBacktest`, `uploadBars`.
+- `useBacktestStream` hook: WS connection with `string | null` jobId, `useCallback`-stabilised callbacks, bounded retry `[500,1500,5000,15000]` ms.
+- `BacktestConfigForm`: date range, timeframe select, bars source radio (db/backfill/csv), CSV upload, slippage mode (bps/ATR), 180-day corporate-action warning.
+- `BacktestProgressBar`, `BacktestReportKpis`, `BacktestTradeTable`, `BacktestPnlChart`, `BacktestDrawdownChart` components.
+- `BacktestPage`: configure→running→done/failed state machine; `getRouteApi('/bots/$botId/backtest')`.
+- `/bots/$botId/backtest` TanStack Router route; "Run Backtest" link in `BotDetailPage`.
+
+**Deferred**: WS auth wired to `CFAccessVerifier` (stub accepts any token — single-tenant, deferred to Phase 24 hardening); ATR slippage mode needs ATR pre-computation (returns zero when atr14=None); Sharpe O(N²) complexity on very long backtests (acceptable for Phase 20 scale).
+
+---
+
 ### Phase 19 — Bot Engine v1 (v0.19.0)
 
 Phase 19 shipped on 2026-05-19. 1848 BE tests green; 715 FE tests green. Rule-based bot engine: separate Docker service, multiprocessing child per bot, Redis-stream lifecycle, full FE management UI.
