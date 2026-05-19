@@ -10,8 +10,10 @@ import { ParamsEditor } from './components/ParamsEditor';
 import { RiskCapsForm } from './components/RiskCapsForm';
 import { BotRunsTable } from './components/BotRunsTable';
 import { BotOrdersTable } from './components/BotOrdersTable';
+import { AdvisorConfigForm } from './components/AdvisorConfigForm';
+import { AdvisorDecisionsTable } from './components/AdvisorDecisionsTable';
 
-type Tab = 'overview' | 'runs' | 'orders' | 'risk';
+type Tab = 'overview' | 'runs' | 'orders' | 'risk' | 'advisor';
 
 export function BotDetailPage(): React.JSX.Element {
   useBotStatus();
@@ -45,6 +47,7 @@ export function BotDetailPage(): React.JSX.Element {
     { id: 'runs', label: 'Runs' },
     { id: 'orders', label: 'Orders' },
     { id: 'risk', label: 'Risk caps' },
+    { id: 'advisor', label: 'Advisor' },
   ];
 
   return (
@@ -155,6 +158,12 @@ export function BotDetailPage(): React.JSX.Element {
       {tab === 'runs' && <BotRunsTable botId={botId} />}
       {tab === 'orders' && <BotOrdersTable botId={botId} />}
       {tab === 'risk' && <RiskCapsForm botId={botId} />}
+      {tab === 'advisor' && (
+        <div>
+          <AdvisorConfigForm botId={botId} />
+          <AdvisorDecisionsTable botId={botId} />
+        </div>
+      )}
     </main>
   );
 }
