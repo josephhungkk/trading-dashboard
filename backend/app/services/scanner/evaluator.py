@@ -34,11 +34,8 @@ OP: "<" | ">" | "<=" | ">=" | "==" | "!="
 
 _PARSER = Lark(GRAMMAR, parser="lalr", start="rule")
 
-# Baseline depth of the grammar for a simple `fn(x) < y` expression is 10.
-# MAX_DEPTH enforces a cap on nesting ABOVE the baseline.
-# 9 parens wrap adds ~36 depth (4 per wrap); MAX_DEPTH=20 safely blocks that.
-MAX_DEPTH = 20
-MAX_NODES = 512
+MAX_DEPTH = 8
+MAX_NODES = 256
 MAX_FUNC_CALLS = 32
 MAX_PERIOD_SUM = 5000
 
