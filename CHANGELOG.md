@@ -7,6 +7,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 19 — Bot Engine v1 (v0.19.0)
+
+Phase 19 shipped on 2026-05-19. 1848 BE tests green; 715 FE tests green. Rule-based bot engine: separate Docker service, multiprocessing child per bot, Redis-stream lifecycle, full FE management UI.
+
+**Migration (Alembic 0061, 0061a)**
+
+- `0061_phase19_bot_tables.py`: `bots` table (UUID PK, name, strategy_file, params_json JSONB, params_schema_json JSONB nullable, version INT, status CHECK 6 values, error_msg TEXT ≤2000, mode CHECK paper|live, bar_timeframe, soft-delete deleted_at, created_at, updated_at); `bot_accounts` join table (bot_id+account_id composite PK, CASCADE/RESTRICT FKs); `bot_risk_caps` (bot_id PK, 5 nullable cap fields, updated_at); `bot_runs` TimescaleDB hypertable (7-day chunks, 90-day retention, bot_id+started_at DESC index); `bot_orders` (order_id PK FK orders CASCADE, bot_id FK CASCADE, placed_at); widens `risk_decisions.attempt_kind` CHECK to include `bot_place_order`.
+- `0061a_bot_orders_account_id.py`: adds `account_id UUID nullable FK broker_accounts(id) SET NULL` + index to `bot_orders`.
+
+**Backend (`app/bot/`)**
+
+- `base.py`: `BaseStrategy` ABC (`on_start`, `on_bar`, `on_fill`, `on_stop` hooks; `params_schema` class attr for API-side JSON Schema validation; `BarEvent` + `FillEvent` frozen dataclasses).
+- `sandbox.py`: `DenylistFinder` MetaPathFinder blocking `app.api.*` + `app.services.orders_service`; `extract_params_schema()` subprocess runner (RLIMIT_AS 256 MB, RLIMIT_CPU 3s, 5s timeout; `bot_params_extraction_oom_total`, `bot_params_validation_failures_total` counters).
+- `bar_aggregator.py`: `BarAggregator` — child-local tick→bar conversion from `quote.*.*` Redis pubsub; UTC-boundary modulo for intraday timeframes; MarketCalendar session-close for 1d/1w; late-tick drop (2s post-boundary); bounded `asyncio.Queue(maxsize=100)` with drop-oldest on overflow; delivery paused during `on_start()`; `bot_ticks_dropped_late_total`, `bot_partial_bars_skipped_total`, `bot_bar_events_dropped_total`, `bot_bars_aggregator_unhealthy_total` metrics.
+- `conid_resolver.py`: `BotConidResolver` — DB `instruments` lookup → broker `search_contracts` fallback with Redis singleflight dedup.
+- `context.py`: `BotContext` — `subscribe(canonical_id)`, `place_order(account_id, ...)` calling `place_order_for_bot()` then inserting `bot_orders` row with `account_id`, `get_position(account_id, canonical_id)`.
+- `risk_caps.py`: `BotRiskCapService` — per-bot pre-filter caps (max_position_size, max_daily_loss, max_open_orders, max_order_size, allowed_asset_classes); per-(bot, account, day) loss tracking in Redis with `daily_loss_tz` from account's market calendar.
+- `fill_router.py`: `BotFillRouter` — lifespan singleton subscribing `fills:*` Redis pubsub; routes `FillEvent` to the matching running child's asyncio queue.
+- `supervisor.py`: `BotSupervisor` — one `multiprocessing.Process` per bot; state machine stopped→starting→running→pausing→paused→error; respawn backoff `[10, 30, 60]` seconds (3 attempts then error); SIGTERM + 5s drain on graceful stop; publishes `{bot_id, status, error_msg}` to `bot:status:{id}` Redis pubsub on every transition.
+
+**REST API (`app/api/bots.py`) — 16 endpoints**
+
+- `GET /api/bots` (list with status filter), `POST /api/bots` (create + params schema extraction), `GET /api/bots/{id}`, `PUT /api/bots/{id}` (version bump), `DELETE /api/bots/{id}` (soft-delete).
+- `POST /api/bots/{id}/start`, `POST /api/bots/{id}/stop`, `POST /api/bots/{id}/pause`, `POST /api/bots/{id}/resume` (lifecycle commands via `BotSupervisor`).
+- `GET /api/bots/{id}/runs`, `GET /api/bots/{id}/orders` (history).
+- `GET /api/bots/{id}/risk-caps`, `PUT /api/bots/{id}/risk-caps` (cap management).
+- `GET /api/bots/strategies` (list `/strategies/*.py` files), `GET /api/bots/{id}/strategy-schema` (return cached params_schema_json), `GET /api/bots/{id}/metrics` (Prometheus counters for the bot).
+
+**WS `/ws/bots/status`**
+
+- 50-connection cap; `psubscribe bot:status:*`; forwards `{bot_id, status, error_msg}` JSON frames to all connected clients; test uses minimal FastAPI + mock Redis (avoids asyncpg event loop conflict with sync `TestClient`).
+
+**`bot_worker` Docker service**
+
+- Separate service in `docker-compose.yml`; shares `strategies/` volume read-only at `/strategies`; own asyncpg pool + Redis client; runs `BotSupervisor` + `BotFillRouter` lifespan.
+
+**20 Prometheus metrics** under `bot_*`: `bot_starts_total`, `bot_stops_total`, `bot_errors_total`, `bot_respawns_total`, `bot_orders_placed_total`, `bot_order_blocked_total`, `bot_bars_processed_total`, `bot_ticks_dropped_late_total`, `bot_partial_bars_skipped_total`, `bot_bar_events_dropped_total`, `bot_bars_aggregator_unhealthy_total`, `bot_forbidden_import_total`, `bot_params_extraction_oom_total`, `bot_params_validation_failures_total`, `bot_fill_route_total`, `bot_fill_unrouted_total`, `bot_risk_cap_blocked_total`, `bot_daily_loss_cap_hit_total`, `bot_conid_resolve_total`, `bot_supervisor_state_transitions_total`.
+
+**Frontend**
+
+- `services/bots/types.ts` + `api.ts`: full type layer (`Bot`, `BotRun`, `BotOrder`, `RiskCaps`); `checkOk` helper on all mutating calls; `listBots`, `getBot`, `createBot`, `updateBot`, `deleteBot`, `startBot`, `stopBot`, `pauseBot`, `resumeBot`, `listBotRuns`, `listBotOrders`, `getBotRiskCaps`, `upsertRiskCaps`, `listStrategies`.
+- `useBotStatus` hook: WS `/ws/bots/status` with module-level `RETRY_DELAYS = [500, 1500, 5000, 15000]` bounded backoff; invalidates `['bots']` + `['bot', id]` queries on each status frame.
+- `BotStatusBadge`: TanStack Router `<Link>` (not bare `<a href>`) to `/bots?status=error`; polling via `refetchInterval: 10_000`.
+- `BotControlBar`: start/stop/pause/resume buttons; `useCallback` for `invalidate` to avoid stale closure in mutations.
+- `StrategyFilePicker`: select from `listStrategies`; accepts `id` prop for `htmlFor` a11y association.
+- `ParamsEditor`: JSON textarea; schema field hints; validate-on-change; init-only `useState` (parent remounts on edit mode toggle).
+- `RiskCapsForm`: 5 nullable numeric/array cap fields.
+- `BotRunsTable` + `BotOrdersTable`: history tables with colour-coded stop_reason / side.
+- `BotsPage`: `getRouteApi('/bots')` + `validateSearch` for `status` URL param; status badge + delete button.
+- `BotCreatePage`: create form with `StrategyFilePicker`, bar_timeframe select, mode select, `ParamsEditor`.
+- `BotDetailPage`: 4-tab layout (overview with params edit mode, runs, orders, risk caps); `getRouteApi('/bots/$botId')` for type-safe params.
+- Routes: `/bots` (`validateSearch`), `/bots/new`, `/bots/$botId`.
+
+**Deferred**
+
+- Kelly criterion position sizing (depends on strategy-tagged backtest stats — Phase 20).
+- `bypass_pdt_when_closing` PDT path in `place_order_for_bot` (Phase 20).
+- `auto_pause_bot` wiring from EarningsHookExecutor (bot_id FK was reserved in 0060).
+- `updateEarningsHook` FE function.
+- Real broker dispatch from `bot_worker` (currently calls `place_order_internal` which routes to existing orders pipeline).
+
+---
+
 ### Phase 18 — Scanner + Filings + Earnings (v0.18.0)
 
 Phase 18 shipped on 2026-05-19. 1806 BE tests green; 715 FE tests green. Three sub-phases: Universe Scanner (18.0), SEC/HKEX Filings Ingest (18.1), and Earnings Calendar + Auto-flat Hooks (18.2).
