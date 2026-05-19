@@ -40,9 +40,18 @@ def upgrade() -> None:
         "ON bot_param_suggestions (bot_id, status)"
     ))
     op.execute(text("""
+        CREATE OR REPLACE FUNCTION set_bot_param_suggestions_updated_at()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = now();
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    op.execute(text("""
         CREATE TRIGGER bot_param_suggestions_updated_at
             BEFORE UPDATE ON bot_param_suggestions
-            FOR EACH ROW EXECUTE FUNCTION set_updated_at()
+            FOR EACH ROW EXECUTE FUNCTION set_bot_param_suggestions_updated_at()
     """))
     op.execute(text("""
         ALTER TABLE bots
@@ -60,8 +69,8 @@ def upgrade() -> None:
         "ON bot_runs (bot_id, started_at DESC)"
     ))
     op.execute(text(
-        "CREATE INDEX IF NOT EXISTS bot_orders_bot_id_created_at_idx "
-        "ON bot_orders (bot_id, created_at DESC)"
+        "CREATE INDEX IF NOT EXISTS bot_orders_bot_id_placed_at_idx "
+        "ON bot_orders (bot_id, placed_at DESC)"
     ))
     # Widen risk_decisions.attempt_kind CHECK to include shadow_place_order
     op.execute(text(
@@ -88,7 +97,7 @@ def downgrade() -> None:
                     'preview', 'place_order', 'modify_order', 'bot_place_order'
                 ))
     """))
-    op.execute(text("DROP INDEX IF EXISTS bot_orders_bot_id_created_at_idx"))
+    op.execute(text("DROP INDEX IF EXISTS bot_orders_bot_id_placed_at_idx"))
     op.execute(text("DROP INDEX IF EXISTS bot_runs_bot_id_started_at_idx"))
     op.execute(text("DROP INDEX IF EXISTS bots_shadow_of_idx"))
     op.execute(text("""
@@ -100,3 +109,4 @@ def downgrade() -> None:
             DROP COLUMN IF EXISTS is_shadow
     """))
     op.execute(text("DROP TABLE IF EXISTS bot_param_suggestions"))
+    op.execute(text("DROP FUNCTION IF EXISTS set_bot_param_suggestions_updated_at()"))
