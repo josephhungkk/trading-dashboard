@@ -82,8 +82,22 @@ async def create_bot(
     redis: RedisDep,
     _user: JwtSubject,
 ) -> dict[str, Any]:
-    strategy_path = _STRATEGIES_DIR / body.strategy_file
-    params_schema = extract_params_schema(str(strategy_path)) if strategy_path.exists() else None
+    import asyncio
+
+    def _resolve_strategy() -> tuple[Path, bool]:
+        sp = (_STRATEGIES_DIR / body.strategy_file).resolve()
+        base = _STRATEGIES_DIR.resolve()
+        if not str(sp).startswith(str(base) + "/") or sp.suffix != ".py":
+            raise ValueError("invalid_strategy_file")
+        return sp, sp.exists()
+
+    try:
+        strategy_path, strategy_exists = await asyncio.get_event_loop().run_in_executor(
+            None, _resolve_strategy
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    params_schema = extract_params_schema(str(strategy_path)) if strategy_exists else None
 
     row = await db.execute(
         text(
@@ -187,22 +201,26 @@ async def update_bot(
     if bot[0] != "stopped":
         raise HTTPException(status_code=409, detail="bot_must_be_stopped")
 
-    updates: dict[str, Any] = {}
+    set_parts: list[str] = []
+    params: dict[str, Any] = {}
     if body.name is not None:
-        updates["name"] = body.name
+        set_parts.append("name = :name")
+        params["name"] = body.name
     if body.params_json is not None:
-        updates["params_json"] = json.dumps(body.params_json)
+        set_parts.append("params_json = CAST(:params_json AS jsonb)")
+        params["params_json"] = json.dumps(body.params_json)
     if body.bar_timeframe is not None:
-        updates["bar_timeframe"] = body.bar_timeframe
+        set_parts.append("bar_timeframe = :bar_timeframe")
+        params["bar_timeframe"] = body.bar_timeframe
 
-    if not updates:
+    if not set_parts:
         raise HTTPException(status_code=422, detail="no_fields_to_update")
 
-    set_clause = ", ".join(f"{k} = :{k}" for k in updates)
-    updates["id"] = bot_id
+    params["id"] = bot_id
+    set_sql = ", ".join(set_parts)
     result = await db.execute(
-        text(f"UPDATE bots SET {set_clause}, updated_at = now() WHERE id = :id RETURNING *"),
-        updates,
+        text(f"UPDATE bots SET {set_sql}, updated_at = now() WHERE id = :id RETURNING *"),
+        params,
     )
     await db.commit()
     updated = result.mappings().first()
@@ -260,6 +278,7 @@ async def remove_account(
     db: DbDep,
     _user: JwtSubject,
 ) -> None:
+    await _assert_stopped(bot_id, db)
     await db.execute(
         text("DELETE FROM bot_accounts WHERE bot_id = :bid AND account_id = :aid"),
         {"bid": bot_id, "aid": account_id},
@@ -334,7 +353,7 @@ async def upsert_risk_caps(
             INSERT INTO bot_risk_caps
               (bot_id, max_position_size, max_daily_loss,
                max_open_orders, max_order_size, allowed_asset_classes)
-            VALUES (:bid, :mps, :mdl, :moo, :mos, :aac)
+            VALUES (:bid, :mps, :mdl, :moo, :mos, CAST(:aac AS TEXT[]))
             ON CONFLICT (bot_id) DO UPDATE SET
                 max_position_size = EXCLUDED.max_position_size,
                 max_daily_loss = EXCLUDED.max_daily_loss,
@@ -429,15 +448,17 @@ async def deploy_bot(
 ) -> dict[str, Any]:
     row = await db.execute(
         text(
-            "UPDATE bots SET version = version + 1, updated_at=now() WHERE id=:id RETURNING version"
+            "UPDATE bots SET version = version + 1, updated_at=now()"
+            " WHERE id=:id AND deleted_at IS NULL RETURNING version"
         ),
         {"id": bot_id},
     )
-    new_version = row.scalar_one()
+    new_version = row.scalar_one_or_none()
+    if new_version is None:
+        raise HTTPException(status_code=404, detail="bot_not_found")
     await db.commit()
-    for cmd in ["STOP", "START"]:
-        cmd_id = str(uuid.uuid4())
-        await redis.xadd(f"bot:control:{bot_id}", {"data": json.dumps({"id": cmd_id, "cmd": cmd})})
+    cmd_id = str(uuid.uuid4())
+    await redis.xadd(f"bot:control:{bot_id}", {"data": json.dumps({"id": cmd_id, "cmd": "DEPLOY"})})
     return {"bot_id": str(bot_id), "version": new_version}
 
 

@@ -27,6 +27,7 @@ class BotSupervisor:
         self._running_bots: dict[str, multiprocessing.Process] = {}
         self._respawn_counts: dict[str, int] = {}
         self._child_queues: dict[str, multiprocessing.Queue[dict[str, Any]]] = {}
+        self._respawn_tasks: set[asyncio.Task[None]] = set()
 
     async def _process_command(self, bot_id: str, message_id: str, payload: dict[str, Any]) -> None:
         done_key = f"bot:control:done:{bot_id}"
@@ -63,6 +64,13 @@ class BotSupervisor:
                 logger.warning("bot_child_queue_full", bot_id=bot_id)
 
     async def _start_bot(self, bot_id: str) -> None:
+        stream_key = f"bot:control:{bot_id}"
+        try:
+            await self._redis.xgroup_create(stream_key, _STREAM_GROUP, id="0", mkstream=True)
+        except Exception as exc:
+            if "BUSYGROUP" not in str(exc):
+                logger.warning("bot_xgroup_create_error", bot_id=bot_id, exc=str(exc))
+        already_running = bot_id in self._running_bots
         q: multiprocessing.Queue[dict[str, Any]] = multiprocessing.Queue(maxsize=20)
         self._child_queues[bot_id] = q
         p = multiprocessing.Process(target=_child_main, args=(bot_id, q), daemon=True)
@@ -70,7 +78,8 @@ class BotSupervisor:
         self._running_bots[bot_id] = p
         self._respawn_counts[bot_id] = 0
         metrics.bot_starts_total.labels(bot_id=bot_id, mode="unknown").inc()
-        metrics.bot_active_count.labels(mode="unknown").inc()
+        if not already_running:
+            metrics.bot_active_count.labels(mode="unknown").inc()
 
     async def _check_heartbeat(self, bot_id: str) -> None:
         key = f"bot:heartbeat:{bot_id}"
@@ -88,9 +97,16 @@ class BotSupervisor:
                 {"id": bot_id},
             )
             await self._db.commit()
+            metrics.bot_active_count.labels(mode="unknown").dec()
+            self._running_bots.pop(bot_id, None)
             return
         delay = _RESPAWN_DELAYS[count]
         self._respawn_counts[bot_id] = count + 1
+        task = asyncio.create_task(self._delayed_respawn(bot_id, delay))
+        self._respawn_tasks.add(task)
+        task.add_done_callback(self._respawn_tasks.discard)
+
+    async def _delayed_respawn(self, bot_id: str, delay: float) -> None:
         await asyncio.sleep(delay)
         await self._respawn_bot(bot_id)
 
@@ -160,6 +176,7 @@ async def _child_async_main(
                 pass
     finally:
         heartbeat_task.cancel()
+        await redis.aclose()
 
 
 async def _heartbeat_writer(bot_id: str, redis: Any) -> None:

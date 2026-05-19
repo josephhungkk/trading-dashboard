@@ -65,4 +65,5 @@ async def ws_bots_status(websocket: WebSocket) -> None:
     finally:
         _active.discard(websocket)
         await pubsub.punsubscribe("bot:status:*")
+        await pubsub.aclose()
         logger.info("ws_bots_status_disconnected", total=len(_active))
