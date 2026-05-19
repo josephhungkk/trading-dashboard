@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
@@ -19,7 +19,16 @@ from app.api.admin import consume_confirmation_nonce
 from app.api.ws_auth import require_jwt
 from app.bot.sandbox import extract_params_schema
 from app.core.deps import get_db, get_redis
-from app.services.advisor.types import AdvisorConfig, AdvisorMode
+from app.services.advisor.metrics import (
+    advisor_account_config_writes_total,
+    advisor_overrides_total,
+)
+from app.services.advisor.types import (
+    AccountAdvisorConfigUpdate,
+    AdvisorConfig,
+    AdvisorDecisionOverride,
+    AdvisorMode,
+)
 from app.services.ai.capabilities import AICapability
 
 logger = structlog.get_logger(__name__)
@@ -489,7 +498,8 @@ async def list_advisor_decisions(
         text(
             f"""
             SELECT id, verdict, reasoning, confidence, advice_tags, canonical_id,
-                   effective_mode, latency_ms, ai_completion_ts, created_at
+                   effective_mode, latency_ms, ai_completion_ts, created_at,
+                   overridden_at, overridden_by, override_action, override_reason
             FROM bot_advisor_decisions
             WHERE bot_id = :bid {before_sql}
             ORDER BY created_at DESC
@@ -499,8 +509,8 @@ async def list_advisor_decisions(
         params,
     )
     items = [jsonable_encoder(dict(r._mapping)) for r in rows.fetchall()]
-    next_before = items[-1]["created_at"] if len(items) == limit and items else None
-    return {"items": items, "next_before": next_before}
+    next_cursor = items[-1]["created_at"] if len(items) == limit and items else None
+    return {"items": items, "next_cursor": next_cursor}
 
 
 @router.get("/{bot_id}/advisor-decisions/{decision_id}")
@@ -518,6 +528,133 @@ async def get_advisor_decision(
     if decision is None:
         raise HTTPException(status_code=404, detail="advisor_decision_not_found")
     return jsonable_encoder(dict(decision))
+
+
+@router.patch("/{bot_id}/advisor-decisions/{decision_id}")
+async def override_advisor_decision(
+    bot_id: UUID,
+    decision_id: int,
+    body: AdvisorDecisionOverride,
+    db: DbDep,
+    redis: RedisDep,
+    _user: JwtSubject,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+) -> dict[str, Any]:
+    row = await db.execute(
+        text(
+            """
+            SELECT d.id, d.overridden_at, d.overridden_by
+            FROM bot_advisor_decisions d
+            JOIN bots b ON b.id = d.bot_id
+            WHERE d.id = :did AND d.bot_id = :bid AND b.deleted_at IS NULL
+            """
+        ),
+        {"did": decision_id, "bid": bot_id},
+    )
+    existing = row.mappings().one_or_none()
+    if existing is None:
+        raise HTTPException(status_code=404, detail="advisor_decision_not_found")
+    if existing["overridden_at"] is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "already_overridden",
+                "overridden_by": existing["overridden_by"],
+                "overridden_at": existing["overridden_at"].isoformat(),
+            },
+        )
+    now_ts = datetime.now(UTC)
+    await db.execute(
+        text(
+            """
+            UPDATE bot_advisor_decisions
+            SET overridden_by = :by, override_action = :action,
+                override_reason = :reason, overridden_at = :at
+            WHERE id = :id AND bot_id = :bid
+            """
+        ),
+        {
+            "by": _user,
+            "action": body.override_action,
+            "reason": body.override_reason,
+            "at": now_ts,
+            "id": decision_id,
+            "bid": bot_id,
+        },
+    )
+    await db.commit()
+    logger.info(
+        "advisor.decision.overridden",
+        bot_id=str(bot_id),
+        decision_id=decision_id,
+        override_action=body.override_action,
+        jwt_subject=_user,
+    )
+    frame = json.dumps(
+        {
+            "v": 1,
+            "type": "decision_overridden",
+            "decision_id": decision_id,
+            "override_action": body.override_action,
+        }
+    )
+    try:
+        await redis.publish(f"bot:advisor:{bot_id}", frame)
+    except Exception:
+        logger.warning("advisor_override_publish_failed", bot_id=str(bot_id))
+    advisor_overrides_total.labels(override_action=body.override_action).inc()
+    return {
+        "decision_id": decision_id,
+        "override_action": body.override_action,
+        "overridden_by": _user,
+        "overridden_at": now_ts.isoformat(),
+    }
+
+
+@router.put("/{bot_id}/accounts/{account_id}/advisor-config")
+async def put_account_advisor_config(
+    bot_id: UUID,
+    account_id: UUID,
+    body: AccountAdvisorConfigUpdate,
+    db: DbDep,
+    redis: RedisDep,
+    _user: JwtSubject,
+    _csrf: Annotated[None, Depends(consume_confirmation_nonce)],
+) -> dict[str, Any]:
+    row = await db.execute(
+        text(
+            """
+            SELECT ba.account_id FROM bot_accounts ba
+            JOIN bots b ON b.id = ba.bot_id
+            WHERE ba.bot_id = :bid AND ba.account_id = :aid AND b.deleted_at IS NULL
+            """
+        ),
+        {"bid": bot_id, "aid": account_id},
+    )
+    if row.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="bot_account_not_found")
+    override_json: str | None = (
+        json.dumps(body.advisor_config_override.model_dump(exclude_none=True))
+        if body.advisor_config_override is not None
+        else None
+        # None binds as SQL NULL (clears override); exclude_none=True omits unset fields
+    )
+    await db.execute(
+        text(
+            "UPDATE bot_accounts SET advisor_config_override = CAST(:cfg AS jsonb) "
+            "WHERE bot_id = :bid AND account_id = :aid"
+        ),
+        {"cfg": override_json, "bid": bot_id, "aid": account_id},
+    )
+    await db.commit()
+    action = "set" if body.advisor_config_override is not None else "clear"
+    advisor_account_config_writes_total.labels(action=action).inc()
+    frame = json.dumps({"v": 1, "type": "account_config_updated", "account_id": str(account_id)})
+    try:
+        await redis.publish(f"bot:advisor:config:{bot_id}", frame)
+    except Exception:
+        logger.warning("account_config_publish_failed", bot_id=str(bot_id))
+    return {"bot_id": str(bot_id), "account_id": str(account_id), "action": action}
 
 
 @router.post("/{bot_id}/start")

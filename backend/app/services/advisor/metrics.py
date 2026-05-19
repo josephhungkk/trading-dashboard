@@ -93,3 +93,32 @@ advisor_hook_errors_total = Counter(
     "advisor_hook_errors_total",
     "Exceptions raised in strategy.on_advisor_reject hook",
 )
+
+advisor_overrides_total = Counter(
+    "advisor_overrides_total",
+    "Human veto overrides applied",
+    ["override_action"],
+)
+
+advisor_concurrent_calls = Gauge(
+    "advisor_concurrent_calls",
+    "Live concurrent advisor calls per bot",
+    ["bot_id"],
+)
+
+advisor_shadow_context_build_seconds = Histogram(
+    "advisor_shadow_context_build_seconds",
+    "Context-build latency in SHADOW mode (AI call excluded)",
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5],
+)
+
+advisor_semaphore_resize_deferred_total = Counter(
+    "advisor_semaphore_resize_deferred_total",
+    "max_concurrent config changes deferred because old semaphore did not drain in time",
+)
+
+advisor_account_config_writes_total = Counter(
+    "advisor_account_config_writes_total",
+    "Per-account advisor config writes (action=set|clear)",
+    ["action"],
+)

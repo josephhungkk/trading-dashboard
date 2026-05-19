@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.ai.capabilities import AICapability
 
@@ -16,6 +16,7 @@ class AdvisorMode(StrEnum):
     OFF = "OFF"
     OBSERVE = "OBSERVE"
     VETO = "VETO"
+    SHADOW = "SHADOW"
 
 
 class AdvisorConfig(BaseModel):
@@ -28,6 +29,7 @@ class AdvisorConfig(BaseModel):
     auto_pause_threshold: int = Field(default=0, ge=0)
     auto_pause_window_seconds: int = Field(default=300, gt=0)
     min_veto_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_concurrent: int = Field(default=1, ge=1, le=4)
 
     model_config = {"populate_by_name": True}
 
@@ -107,6 +109,10 @@ class AdvisorDecision(BaseModel):
     account_gate_decision_id: int | None
     effective_mode: str
     created_at: datetime
+    overridden_by: str | None = None
+    override_action: str | None = None
+    override_reason: str | None = None
+    overridden_at: datetime | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -116,3 +122,33 @@ class AdvisorVetoedResult:
     decision_id: int | None
     reasoning: str
     advice_tags: list[str]
+
+
+class AccountAdvisorConfigOverride(BaseModel):
+    """Per-account advisor config override.
+
+    max_concurrent intentionally absent — bot-level semaphore governs concurrency.
+    extra='forbid' raises 422 if caller sends max_concurrent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: AdvisorMode | None = None
+    capability: str | None = None
+    local_only: bool | None = None
+    timeout_ms: int | None = None
+    daily_budget_usd: float | None = None
+
+
+class AccountAdvisorConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    advisor_config_override: AccountAdvisorConfigOverride | None
+    # None = clear override (revert to bot-level default)
+
+
+class AdvisorDecisionOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    override_action: Literal["approve", "veto"]
+    override_reason: str = Field(..., min_length=1, max_length=500)

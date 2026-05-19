@@ -42,6 +42,10 @@ function decision(id: number, verdict: AdvisorVerdict): AdvisorDecision {
     account_gate_outcome: 'approved',
     account_gate_decision_id: null,
     effective_mode: 'VETO',
+    overridden_by: null,
+    override_action: null,
+    override_reason: null,
+    overridden_at: null,
     created_at: '2026-05-19T12:00:00Z',
   };
 }
@@ -77,6 +81,22 @@ describe('AdvisorDecisionsTable', () => {
     expect(await screen.findByText('approve')).toHaveClass('bg-green-100');
     expect(screen.getByText('veto')).toHaveClass('bg-red-100');
     expect(screen.getByText('fail_open')).toHaveClass('bg-yellow-100');
+  });
+
+  it('shows Overridden badge when overridden_at is set', async () => {
+    mocks.getAdvisorDecisions.mockResolvedValue(
+      page([
+        {
+          ...decision(1, 'approve'),
+          overridden_at: '2026-05-19T12:05:00Z',
+          override_action: 'approve',
+          overridden_by: 'admin@example.com',
+          override_reason: 'audit note',
+        },
+      ]),
+    );
+    renderWithQuery(<AdvisorDecisionsTable botId="bot-1" />);
+    expect(await screen.findByText('Overridden')).toBeInTheDocument();
   });
 
   it('shows Load more button when next_before present', async () => {

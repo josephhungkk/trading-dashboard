@@ -1,4 +1,4 @@
-export const ADVISOR_MODES = ['OFF', 'OBSERVE', 'VETO'] as const;
+export const ADVISOR_MODES = ['OFF', 'OBSERVE', 'VETO', 'SHADOW'] as const;
 export type AdvisorMode = (typeof ADVISOR_MODES)[number];
 
 export interface AdvisorConfig {
@@ -47,6 +47,10 @@ export interface AdvisorDecision {
   account_gate_outcome: AccountGateOutcome;
   account_gate_decision_id: number | null;
   effective_mode: AdvisorMode;
+  overridden_by: string | null;
+  override_action: 'approve' | 'veto' | null;
+  override_reason: string | null;
+  overridden_at: string | null;
   created_at: string;
 }
 
@@ -59,6 +63,23 @@ export interface AdvisorConfigResponse {
   bot_id: string;
   config: AdvisorConfig;
   account_overrides: Record<string, AdvisorConfig>;
+}
+
+export interface AccountAdvisorConfigOverride {
+  mode?: AdvisorMode;
+  capability?: string;
+  local_only?: boolean;
+  timeout_ms?: number;
+  daily_budget_usd?: string;
+}
+
+export interface AccountAdvisorConfigUpdate {
+  advisor_config_override: AccountAdvisorConfigOverride | null;
+}
+
+export interface AdvisorDecisionOverride {
+  override_action: 'approve' | 'veto';
+  override_reason: string;
 }
 
 export interface AdvisorWsFrame {

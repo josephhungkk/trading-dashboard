@@ -1,8 +1,11 @@
 import * as React from 'react';
+import { patchAdvisorDecisionOverride } from '@/services/advisor/api';
+import { mintCsrfNonce } from '../../../services/admin/api';
 import type { AdvisorDecision } from '../../../services/advisor/types';
 
 interface Props {
   decision: AdvisorDecision | null;
+  isAdmin: boolean;
   onClose: () => void;
 }
 
@@ -10,7 +13,7 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-export function AdvisorDecisionDrawer({ decision, onClose }: Props): React.JSX.Element | null {
+export function AdvisorDecisionDrawer({ decision, isAdmin, onClose }: Props): React.JSX.Element | null {
   const sectionRef = React.useRef<HTMLDivElement>(null);
   const onCloseRef = React.useRef(onClose);
   React.useEffect(() => { onCloseRef.current = onClose; });
@@ -69,6 +72,18 @@ export function AdvisorDecisionDrawer({ decision, onClose }: Props): React.JSX.E
             <dt className="text-muted-foreground">Verdict</dt>
             <dd className="font-medium">{decision.verdict}</dd>
           </div>
+          {decision.overridden_at != null ? (
+            <div className="col-span-2 rounded border border-amber-200 bg-amber-50 p-3 text-amber-900">
+              <p className="font-medium">Override recorded</p>
+              <p>By {decision.overridden_by ?? 'unknown'} at {new Date(decision.overridden_at).toLocaleString()}</p>
+              <p>Action: {decision.override_action ?? 'N/A'}</p>
+              <p className="whitespace-pre-wrap">Reason: {decision.override_reason ?? 'N/A'}</p>
+            </div>
+          ) : isAdmin ? (
+            <div className="col-span-2">
+              <OverrideButton decision={decision} />
+            </div>
+          ) : null}
           <div>
             <dt className="text-muted-foreground">Confidence</dt>
             <dd>{decision.confidence == null ? 'N/A' : `${Math.round(decision.confidence * 100)}%`}</dd>
@@ -127,6 +142,67 @@ export function AdvisorDecisionDrawer({ decision, onClose }: Props): React.JSX.E
           </section>
         </div>
       </div>
+    </div>
+  );
+}
+
+function OverrideButton({ decision }: { decision: AdvisorDecision }): React.JSX.Element {
+  const [submitting, setSubmitting] = React.useState(false);
+  const [done, setDone] = React.useState(false);
+  const [reason, setReason] = React.useState('');
+  const [error, setError] = React.useState<string | null>(null);
+
+  async function handleOverride(): Promise<void> {
+    const trimmed = reason.trim();
+    if (trimmed === '') return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const nonce = await mintCsrfNonce();
+      await patchAdvisorDecisionOverride(
+        decision.bot_id,
+        decision.id,
+        { override_action: 'approve', override_reason: trimmed },
+        nonce,
+      );
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Override failed. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <p className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+        Override recorded for audit purposes. The original order was not re-submitted.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <textarea
+        value={reason}
+        onChange={(event) => setReason(event.target.value)}
+        placeholder="Override reason required"
+        maxLength={500}
+        rows={2}
+        className="w-full rounded border border-border bg-background px-3 py-2 text-sm"
+      />
+      {error != null && (
+        <p role="alert" className="text-xs text-destructive">{error}</p>
+      )}
+      <button
+        type="button"
+        aria-label="Override (audit only)"
+        onClick={() => void handleOverride()}
+        disabled={submitting || reason.trim() === ''}
+        className="btn-secondary text-xs"
+      >
+        {submitting ? 'Submitting…' : 'Override (audit only)'}
+      </button>
     </div>
   );
 }

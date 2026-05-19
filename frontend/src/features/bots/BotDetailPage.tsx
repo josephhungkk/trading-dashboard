@@ -12,8 +12,22 @@ import { BotRunsTable } from './components/BotRunsTable';
 import { BotOrdersTable } from './components/BotOrdersTable';
 import { AdvisorConfigForm } from './components/AdvisorConfigForm';
 import { AdvisorDecisionsTable } from './components/AdvisorDecisionsTable';
+import { AccountAdvisorConfigForm } from './components/AccountAdvisorConfigForm';
 
 type Tab = 'overview' | 'runs' | 'orders' | 'risk' | 'advisor';
+
+interface BotAccountAdvisorConfig {
+  account_id: string;
+  advisor_config_override: Record<string, unknown> | null;
+}
+
+interface BotWithAdvisorAccounts {
+  accounts?: BotAccountAdvisorConfig[];
+  bot_accounts?: BotAccountAdvisorConfig[];
+  account_ids?: string[];
+  account_advisor_config_overrides?: Record<string, Record<string, unknown> | null>;
+  advisor_config?: Record<string, unknown> | null;
+}
 
 export function BotDetailPage(): React.JSX.Element {
   useBotStatus();
@@ -23,7 +37,7 @@ export function BotDetailPage(): React.JSX.Element {
   const [editParams, setEditParams] = React.useState(false);
   const [pendingParams, setPendingParams] = React.useState<Record<string, unknown> | null>(null);
 
-  const { data: bot, isLoading, error } = useQuery({
+  const { data: bot, isLoading, error, refetch: refetchBot } = useQuery({
     queryKey: ['bot', botId],
     queryFn: () => getBot(botId),
   });
@@ -49,6 +63,17 @@ export function BotDetailPage(): React.JSX.Element {
     { id: 'risk', label: 'Risk caps' },
     { id: 'advisor', label: 'Advisor' },
   ];
+  const botAdvisorData = bot as typeof bot & BotWithAdvisorAccounts;
+  const botAccounts =
+    botAdvisorData.accounts ??
+    botAdvisorData.bot_accounts ??
+    botAdvisorData.account_ids?.map((accountId) => ({
+      account_id: accountId,
+      advisor_config_override:
+        botAdvisorData.account_advisor_config_overrides?.[accountId] ?? null,
+    })) ??
+    [];
+  const botConfig = botAdvisorData.advisor_config ?? {};
 
   return (
     <main className="p-4">
@@ -159,9 +184,24 @@ export function BotDetailPage(): React.JSX.Element {
       {tab === 'orders' && <BotOrdersTable botId={botId} />}
       {tab === 'risk' && <RiskCapsForm botId={botId} />}
       {tab === 'advisor' && (
-        <div>
+        <div className="space-y-6">
           <AdvisorConfigForm botId={botId} />
-          <AdvisorDecisionsTable botId={botId} />
+          <AdvisorDecisionsTable botId={botId} isAdmin />
+          {botAccounts.map((account) => (
+            <section key={account.account_id} className="space-y-2">
+              <h4 className="text-sm font-semibold">
+                Account {account.account_id} advisor override
+              </h4>
+              <AccountAdvisorConfigForm
+                botId={bot.id}
+                account={account}
+                botConfig={botConfig}
+                onSaved={() => {
+                  void refetchBot();
+                }}
+              />
+            </section>
+          ))}
         </div>
       )}
     </main>

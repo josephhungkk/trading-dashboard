@@ -885,6 +885,19 @@ Rule-based scanner (RSI / breakout / volume / mcap / fundamentals) + LLM comment
 
 Strategy plugin model (Python files). Bot lifecycle (create/start/stop/version). Per-bot risk caps. Paper-mode-by-default. Bot worker is a separate Docker service.
 
+## Phase 21a.1 — Advisor Polish ✅ (shipped v0.21.1 · 2026-05-19)
+
+- [x] Alembic 0064: override columns on `bot_advisor_decisions`, `advisor_override_action_check`, partial CONCURRENTLY index, widen `advisor_config_mode_check` to include SHADOW
+- [x] `AdvisorMode.SHADOW` + `AdvisorConfig.max_concurrent` in types.py; `AccountAdvisorConfigOverride/Update`; `AdvisorDecisionOverride`; 4 override fields on `AdvisorDecision`
+- [x] 5 new metrics: `advisor_overrides_total`, `advisor_concurrent_calls`, `advisor_shadow_context_build_seconds`, `advisor_semaphore_resize_deferred_total`, `advisor_account_config_writes_total`
+- [x] Semaphore replaces Lock; `_ensure_semaphore()` + `_resize_semaphore()` with drain + deferred counter; `reload_config()` schedules resize; SHADOW mode path; publish channel fixed
+- [x] `PATCH /api/bots/{id}/advisor-decisions/{did}` (CSRF, 409, bot_id re-check in UPDATE)
+- [x] `PUT /api/bots/{id}/accounts/{aid}/advisor-config` (CSRF, SQL NULL clear, exclude_none=True)
+- [x] List endpoint adds 4 override columns; `next_before` → `next_cursor`
+- [x] FE: SHADOW in types, override fields, `patchAdvisorDecisionOverride`, `putAccountAdvisorConfig`, amber Overridden badge, `OverrideButton` with error feedback, `AccountAdvisorConfigForm`, isAdmin threading
+- [x] 8 new BE tests (test_shadow.py + test_semaphore.py); 767 FE tests green
+- [x] Tagged v0.21.1
+
 ## Phase 21a — LLM Advisor Gate ✅ (shipped v0.21.0 · 2026-05-19)
 
 - [x] Alembic 0063: `bot_advisor_decisions` hypertable, `bots.advisor_config` JSONB, `bot_accounts.advisor_config_override`, `bot_runs.stop_reason` CHECK widened

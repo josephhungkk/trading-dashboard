@@ -1,7 +1,9 @@
 import type {
+  AccountAdvisorConfigUpdate,
   AdvisorConfig,
   AdvisorConfigResponse,
   AdvisorDecision,
+  AdvisorDecisionOverride,
   AdvisorDecisionsPage,
 } from './types';
 
@@ -66,4 +68,46 @@ export async function getAdvisorFeed(filters?: {
   if (filters?.verdict) q.set('verdict', filters.verdict);
   const qs = q.toString();
   return json(await fetch(`${BASE}/advisor-feed${qs ? `?${qs}` : ''}`));
+}
+
+export async function patchAdvisorDecisionOverride(
+  botId: string,
+  decisionId: number,
+  body: AdvisorDecisionOverride,
+  csrfNonce: string,
+): Promise<AdvisorDecision> {
+  return json(
+    await fetch(
+      `${BASE}/${encodeURIComponent(botId)}/advisor-decisions/${encodeURIComponent(decisionId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'X-Confirm-Nonce': csrfNonce,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      },
+    ),
+  );
+}
+
+export async function putAccountAdvisorConfig(
+  botId: string,
+  accountId: string,
+  body: AccountAdvisorConfigUpdate,
+  csrfNonce: string,
+): Promise<{ bot_id: string; account_id: string; action: 'set' | 'clear' }> {
+  return json(
+    await fetch(
+      `${BASE}/${encodeURIComponent(botId)}/accounts/${encodeURIComponent(accountId)}/advisor-config`,
+      {
+        method: 'PUT',
+        headers: {
+          'X-Confirm-Nonce': csrfNonce,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      },
+    ),
+  );
 }

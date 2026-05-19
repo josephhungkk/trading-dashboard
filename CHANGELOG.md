@@ -7,6 +7,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 21a.1 — Advisor Polish (v0.21.1)
+
+Phase 21a.1 shipped on 2026-05-19. Delivers 4 deferred items from Phase 21a: SHADOW mode, async-parallel semaphore (replaces Lock), human veto override endpoint, and per-account advisor config FE form.
+
+**Migration (Alembic 0064)**
+
+- `0064_advisor_polish.py`: adds `overridden_by`, `override_action`, `override_reason`, `overridden_at` columns to `bot_advisor_decisions`; `advisor_override_action_check` CHECK constraint; partial CONCURRENTLY index on `overridden_at`; widens `advisor_config_mode_check` on `bots` to include `'SHADOW'`.
+
+**Backend**
+
+- `types.py`: `AdvisorMode.SHADOW`; `AdvisorConfig.max_concurrent` (1–4); `AdvisorDecision` gets 4 override fields; `AccountAdvisorConfigOverride` + `AccountAdvisorConfigUpdate` (extra="forbid"); `AdvisorDecisionOverride` (extra="forbid").
+- `metrics.py`: 5 new metrics — `advisor_overrides_total`, `advisor_concurrent_calls` (Gauge), `advisor_shadow_context_build_seconds` (Histogram), `advisor_semaphore_resize_deferred_total`, `advisor_account_config_writes_total`.
+- `service.py`: replaced `asyncio.Lock` with `asyncio.Semaphore` (per-bot, max_concurrent 1–4); `_ensure_semaphore()` + `_resize_semaphore()` (10s drain timeout, deferred counter); `review()` non-blocking capacity check, `_do_review()` extracted; `reload_config()` schedules semaphore resize on `max_concurrent` change; SHADOW mode path (context build + approve, no AI call, latency metric); publish channel fixed to `bot:advisor:{bot_id}`.
+- `bots.py`: `PATCH /api/bots/{id}/advisor-decisions/{did}` (CSRF, 409 on duplicate, UPDATE WHERE includes `bot_id`, publishes `decision_overridden` frame); `PUT /api/bots/{id}/accounts/{aid}/advisor-config` (CSRF, SQL NULL on clear, `next_cursor` in list response); list endpoint adds 4 override columns to SELECT.
+
+**Frontend**
+
+- `services/advisor/types.ts`: `SHADOW` mode, override fields on `AdvisorDecision`, `AccountAdvisorConfigOverride/Update`, `AdvisorDecisionOverride` interfaces.
+- `services/advisor/api.ts`: `patchAdvisorDecisionOverride()`, `putAccountAdvisorConfig()`.
+- `AdvisorDecisionsTable`: amber "Overridden" badge; `isAdmin` prop passed from `BotDetailPage`.
+- `AdvisorDecisionDrawer`: override metadata section; admin-only `OverrideButton` with textarea, error feedback, aria-label.
+- `AccountAdvisorConfigForm` (new): per-account mode/local_only/timeout_ms override; save + clear buttons; `useEffect` keyed on `account.account_id`.
+- `BotDetailPage`: wires `AccountAdvisorConfigForm` per bot account in advisor tab; threads `isAdmin` to table.
+
+---
+
 ### Phase 21a — LLM Advisor Gate (v0.21.0)
 
 Phase 21a shipped on 2026-05-19. 1985 BE tests green (excluding 12 pre-existing failures); 758 FE tests green. Per-bot LLM advisor intercepts order intents in OBSERVE (log-only) or VETO (block) mode before broker dispatch.

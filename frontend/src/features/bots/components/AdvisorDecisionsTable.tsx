@@ -6,6 +6,7 @@ import { AdvisorDecisionDrawer } from './AdvisorDecisionDrawer';
 
 interface Props {
   botId: string;
+  isAdmin?: boolean;
 }
 
 const VERDICT_CLASS: Record<AdvisorVerdict, string> = {
@@ -18,7 +19,7 @@ function formatConfidence(value: number | null): string {
   return value == null ? 'N/A' : `${Math.round(value * 100)}%`;
 }
 
-export function AdvisorDecisionsTable({ botId }: Props): React.JSX.Element {
+export function AdvisorDecisionsTable({ botId, isAdmin = false }: Props): React.JSX.Element {
   const [selected, setSelected] = React.useState<AdvisorDecision | null>(null);
   const query = useInfiniteQuery({
     queryKey: ['bot', botId, 'advisor-decisions'],
@@ -79,6 +80,11 @@ export function AdvisorDecisionsTable({ botId }: Props): React.JSX.Element {
                     <span className={`rounded px-2 py-1 text-xs ${VERDICT_CLASS[decision.verdict]}`}>
                       {decision.verdict}
                     </span>
+                    {decision.overridden_at != null && (
+                      <span className="ml-2 rounded-sm bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700">
+                        Overridden
+                      </span>
+                    )}
                   </td>
                   <td className="py-2 pr-3">{decision.canonical_id}</td>
                   <td className="py-2 pr-3">
@@ -112,7 +118,7 @@ export function AdvisorDecisionsTable({ botId }: Props): React.JSX.Element {
         <p role="alert" className="text-xs text-destructive">Failed to load advisor decisions.</p>
       )}
 
-      <AdvisorDecisionDrawer decision={selected} onClose={() => setSelected(null)} />
+      <AdvisorDecisionDrawer decision={selected} isAdmin={isAdmin} onClose={() => setSelected(null)} />
     </section>
   );
 }

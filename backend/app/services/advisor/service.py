@@ -18,12 +18,15 @@ from app.services.advisor.context_builder import ContextBuilder
 from app.services.advisor.metrics import (
     advisor_audit_insert_failures_total,
     advisor_budget_exceeded_total,
+    advisor_concurrent_calls,
     advisor_config_reloads_total,
     advisor_decisions_total,
     advisor_fail_open_total,
     advisor_in_flight_skips_total,
     advisor_latency_seconds,
     advisor_publish_failures_total,
+    advisor_semaphore_resize_deferred_total,
+    advisor_shadow_context_build_seconds,
     advisor_unexpected_errors_total,
     advisor_unknown_tags_total,
 )
@@ -45,7 +48,53 @@ class AdvisorService:
         self._ai_client = ai_client
         self._redis = redis
         self._db_factory = db_factory
-        self._in_flight: dict[str, asyncio.Lock] = {}
+        self._in_flight: dict[str, asyncio.Semaphore] = {}
+        self._in_flight_lock = asyncio.Lock()
+        self._in_flight_count: dict[str, int] = {}
+        self._resizing: dict[str, asyncio.Event] = {}
+        self._resize_done: dict[str, asyncio.Event] = {}
+
+    async def _ensure_semaphore(self, bot_key: str, config: AdvisorConfig) -> asyncio.Semaphore:
+        if bot_key in self._in_flight:
+            return self._in_flight[bot_key]
+        async with self._in_flight_lock:
+            if bot_key not in self._in_flight:
+                self._in_flight[bot_key] = asyncio.Semaphore(config.max_concurrent)
+                self._in_flight_count[bot_key] = 0
+                self._resize_done[bot_key] = asyncio.Event()
+                self._resize_done[bot_key].set()
+            return self._in_flight[bot_key]
+
+    async def _resize_semaphore(
+        self,
+        bot_key: str,
+        old_max: int,
+        new_max: int,
+        drain_timeout: float = 10.0,
+    ) -> None:
+        barrier = asyncio.Event()
+        self._resizing[bot_key] = barrier
+        try:
+            done_event = self._resize_done[bot_key]
+            sem = self._in_flight.get(bot_key)
+            available = getattr(sem, "_value", old_max) if sem is not None else old_max
+            if self._in_flight_count.get(bot_key, 0) > 0 or available < old_max:
+                done_event.clear()
+                await asyncio.wait_for(done_event.wait(), timeout=drain_timeout)
+            elif not done_event.is_set():
+                await asyncio.wait_for(done_event.wait(), timeout=drain_timeout)
+        except TimeoutError:
+            advisor_semaphore_resize_deferred_total.inc()
+            logger.warning(
+                "advisor.semaphore.resize_deferred", bot_key=bot_key, old=old_max, new=new_max
+            )
+            return
+        finally:
+            barrier.set()
+            self._resizing.pop(bot_key, None)
+        async with self._in_flight_lock:
+            self._in_flight[bot_key] = asyncio.Semaphore(new_max)
+        logger.info("advisor.semaphore.resized", bot_key=bot_key, old=old_max, new=new_max)
 
     async def review(
         self,
@@ -61,9 +110,16 @@ class AdvisorService:
         if effective_config.mode == AdvisorMode.OFF:
             return AdvisorVerdict(action="approve", confidence=None), None
 
-        lock = self._in_flight.setdefault(str(bot_id), asyncio.Lock())
-        if lock.locked():
-            advisor_in_flight_skips_total.labels(bot_id=str(bot_id)).inc()
+        bot_key = str(bot_id)
+
+        if bot_key in self._resizing:
+            await self._resizing[bot_key].wait()
+
+        sem = await self._ensure_semaphore(bot_key, effective_config)
+
+        at_capacity = sem._value == 0 if hasattr(sem, "_value") else sem.locked()
+        if at_capacity:
+            advisor_in_flight_skips_total.labels(bot_id=bot_key).inc()
             return await self._fail_open(
                 bot_id=bot_id,
                 run_id=run_id,
@@ -73,116 +129,186 @@ class AdvisorService:
                 reason="advisor_in_flight",
             )
 
-        async with lock:
-            if not await self._budget_ok_and_reserve(bot_id, effective_config):
-                advisor_budget_exceeded_total.labels(bot_id=str(bot_id)).inc()
-                return await self._fail_open(
-                    bot_id=bot_id,
-                    run_id=run_id,
-                    account_id=account_id,
-                    intent=intent,
-                    effective_config=effective_config,
-                    reason="daily_budget_exceeded",
-                )
+        await sem.acquire()
+        self._in_flight_count[bot_key] = self._in_flight_count.get(bot_key, 0) + 1
 
-            result = None
-            latency_ms = 0
-            context_summary = self._empty_context_summary()
-            start = time.monotonic()
+        advisor_concurrent_calls.labels(bot_id=bot_key).inc()
+        try:
+            result = await self._do_review(
+                bot_id=bot_id,
+                run_id=run_id,
+                account_id=account_id,
+                intent=intent,
+                strategy_params=strategy_params,
+                effective_config=effective_config,
+                db=db,
+            )
+        finally:
+            sem.release()
+            self._in_flight_count[bot_key] -= 1
+            advisor_concurrent_calls.labels(bot_id=bot_key).dec()
+            if self._in_flight_count.get(bot_key, 0) == 0:
+                if bot_key in self._resize_done:
+                    self._resize_done[bot_key].set()
+        return result
+
+    async def _do_review(
+        self,
+        *,
+        bot_id: UUID,
+        run_id: UUID | None,
+        account_id: UUID,
+        intent: OrderIntent,
+        strategy_params: dict,
+        effective_config: AdvisorConfig,
+        db: AsyncSession,
+    ) -> tuple[AdvisorVerdict, int | None]:
+        if not await self._budget_ok_and_reserve(bot_id, effective_config):
+            advisor_budget_exceeded_total.labels(bot_id=str(bot_id)).inc()
+            return await self._fail_open(
+                bot_id=bot_id,
+                run_id=run_id,
+                account_id=account_id,
+                intent=intent,
+                effective_config=effective_config,
+                reason="daily_budget_exceeded",
+            )
+
+        if effective_config.mode == AdvisorMode.SHADOW:
+            _start = time.monotonic()
+            payload, context_summary = await ContextBuilder.build(intent, strategy_params, db)
+            _latency_s = time.monotonic() - _start
+
+            advisor_shadow_context_build_seconds.observe(_latency_s)
+            shadow_verdict = AdvisorVerdict(
+                action="approve", reasoning="shadow_mode", confidence=None
+            )
+            _latency_ms = int(_latency_s * 1000)
+            decision_id = await self._persist(
+                bot_id=bot_id,
+                run_id=run_id,
+                account_id=account_id,
+                intent=intent,
+                effective_config=effective_config,
+                verdict=shadow_verdict,
+                result=None,
+                latency_ms=_latency_ms,
+                context_summary=context_summary,
+            )
+            await self._publish(
+                bot_id=bot_id,
+                account_id=account_id,
+                intent=intent,
+                verdict=shadow_verdict,
+                latency_ms=_latency_ms,
+                effective_config=effective_config,
+                decision_id=decision_id,
+            )
+            advisor_decisions_total.labels(
+                mode=str(effective_config.mode),
+                verdict=shadow_verdict.action,
+                capability=str(effective_config.capability),
+            ).inc()
+            return shadow_verdict, decision_id
+
+        result = None
+        latency_ms = 0
+        context_summary = self._empty_context_summary()
+        start = time.monotonic()
+        try:
+            payload, context_summary = await ContextBuilder.build(intent, strategy_params, db)
+            req = CompletionRequest(
+                capability=effective_config.capability,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"<<BEGIN_CONTEXT>>{payload}<<END_CONTEXT>>"},
+                ],
+                caller=f"advisor:bot:{bot_id}",
+                force_local_only=effective_config.local_only,
+            )
+            result = await asyncio.wait_for(
+                self._complete(req, bot_id=bot_id),
+                timeout=effective_config.timeout_ms / 1000,
+            )
+            latency_ms = int((time.monotonic() - start) * 1000)
+            advisor_latency_seconds.labels(
+                mode=str(effective_config.mode),
+                capability=str(effective_config.capability),
+            ).observe(latency_ms / 1000)
+
             try:
-                payload, context_summary = await ContextBuilder.build(intent, strategy_params, db)
-                req = CompletionRequest(
-                    capability=effective_config.capability,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": f"<<BEGIN_CONTEXT>>{payload}<<END_CONTEXT>>"},
-                    ],
-                    caller=f"advisor:bot:{bot_id}",
-                    force_local_only=effective_config.local_only,
-                )
-                result = await asyncio.wait_for(
-                    self._complete(req, bot_id=bot_id),
-                    timeout=effective_config.timeout_ms / 1000,
-                )
-                latency_ms = int((time.monotonic() - start) * 1000)
-                advisor_latency_seconds.labels(
-                    mode=str(effective_config.mode),
-                    capability=str(effective_config.capability),
-                ).observe(latency_ms / 1000)
-
-                try:
-                    verdict = AdvisorVerdict.model_validate(json.loads(result.text))
-                except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-                    return await self._fail_open(
-                        bot_id=bot_id,
-                        run_id=run_id,
-                        account_id=account_id,
-                        intent=intent,
-                        effective_config=effective_config,
-                        reason=f"schema_error:{exc.__class__.__name__}",
-                    )
-
-                verdict = await self._apply_safety_rules(verdict, effective_config)
-                if verdict.action == "fail_open":
-                    advisor_fail_open_total.labels(reason=verdict.reasoning or "safety_rule").inc()
-
-                if effective_config.mode == AdvisorMode.OBSERVE and verdict.action == "veto":
-                    verdict = verdict.model_copy(update={"action": "approve"})
-                    advisor_fail_open_total.labels(reason="observe_mode_veto_downgrade").inc()
-
-                decision_id = await self._persist(
-                    bot_id=bot_id,
-                    run_id=run_id,
-                    account_id=account_id,
-                    intent=intent,
-                    effective_config=effective_config,
-                    verdict=verdict,
-                    result=result,
-                    latency_ms=latency_ms,
-                    context_summary=context_summary,
-                )
-                await self._publish(
-                    bot_id=bot_id,
-                    account_id=account_id,
-                    intent=intent,
-                    verdict=verdict,
-                    latency_ms=latency_ms,
-                    effective_config=effective_config,
-                    decision_id=decision_id,
-                )
-                advisor_decisions_total.labels(
-                    mode=str(effective_config.mode),
-                    verdict=verdict.action,
-                    capability=str(effective_config.capability),
-                ).inc()
-                return verdict, decision_id
-            except TimeoutError:
-                latency_ms = int((time.monotonic() - start) * 1000)
+                verdict = AdvisorVerdict.model_validate(json.loads(result.text))
+            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
                 return await self._fail_open(
                     bot_id=bot_id,
                     run_id=run_id,
                     account_id=account_id,
                     intent=intent,
                     effective_config=effective_config,
-                    reason="timeout",
+                    reason=f"schema_error:{exc.__class__.__name__}",
                 )
-            except Exception as exc:
-                latency_ms = int((time.monotonic() - start) * 1000)
-                advisor_unexpected_errors_total.labels(error_class=exc.__class__.__name__).inc()
-                logger.exception(
-                    "advisor_review_unexpected_error",
-                    bot_id=str(bot_id),
-                    run_id=str(run_id) if run_id else None,
-                    latency_ms=latency_ms,
-                )
-                return await self._fail_open(
-                    bot_id=bot_id,
-                    run_id=run_id,
-                    account_id=account_id,
-                    intent=intent,
-                    effective_config=effective_config,
-                    reason=f"unexpected:{exc.__class__.__name__}",
-                )
+
+            verdict = await self._apply_safety_rules(verdict, effective_config)
+            if verdict.action == "fail_open":
+                advisor_fail_open_total.labels(reason=verdict.reasoning or "safety_rule").inc()
+
+            if effective_config.mode == AdvisorMode.OBSERVE and verdict.action == "veto":
+                verdict = verdict.model_copy(update={"action": "approve"})
+                advisor_fail_open_total.labels(reason="observe_mode_veto_downgrade").inc()
+
+            decision_id = await self._persist(
+                bot_id=bot_id,
+                run_id=run_id,
+                account_id=account_id,
+                intent=intent,
+                effective_config=effective_config,
+                verdict=verdict,
+                result=result,
+                latency_ms=latency_ms,
+                context_summary=context_summary,
+            )
+            await self._publish(
+                bot_id=bot_id,
+                account_id=account_id,
+                intent=intent,
+                verdict=verdict,
+                latency_ms=latency_ms,
+                effective_config=effective_config,
+                decision_id=decision_id,
+            )
+            advisor_decisions_total.labels(
+                mode=str(effective_config.mode),
+                verdict=verdict.action,
+                capability=str(effective_config.capability),
+            ).inc()
+            return verdict, decision_id
+        except TimeoutError:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return await self._fail_open(
+                bot_id=bot_id,
+                run_id=run_id,
+                account_id=account_id,
+                intent=intent,
+                effective_config=effective_config,
+                reason="timeout",
+            )
+        except Exception as exc:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            advisor_unexpected_errors_total.labels(error_class=exc.__class__.__name__).inc()
+            logger.exception(
+                "advisor_review_unexpected_error",
+                bot_id=str(bot_id),
+                run_id=str(run_id) if run_id else None,
+                latency_ms=latency_ms,
+            )
+            return await self._fail_open(
+                bot_id=bot_id,
+                run_id=run_id,
+                account_id=account_id,
+                intent=intent,
+                effective_config=effective_config,
+                reason=f"unexpected:{exc.__class__.__name__}",
+            )
 
     async def _apply_safety_rules(
         self, verdict: AdvisorVerdict, config: AdvisorConfig
@@ -367,7 +493,7 @@ class AdvisorService:
         }
         try:
             await self._redis.publish(
-                f"bot:advisor:decision:{bot_id}", json.dumps(payload, default=_json_default)
+                f"bot:advisor:{bot_id}", json.dumps(payload, default=_json_default)
             )
         except Exception as exc:
             advisor_publish_failures_total.inc()
@@ -399,6 +525,14 @@ class AdvisorService:
 
     def reload_config(self, bot_id: UUID, new_config: AdvisorConfig) -> None:
         advisor_config_reloads_total.labels(bot_id=str(bot_id)).inc()
+        bot_key = str(bot_id)
+        sem = self._in_flight.get(bot_key)
+        if sem is not None:
+            old_max = sem._value + self._in_flight_count.get(bot_key, 0)
+            new_max = new_config.max_concurrent
+            if old_max != new_max:
+                _t = asyncio.ensure_future(self._resize_semaphore(bot_key, old_max, new_max))
+                _t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     async def _complete(self, req: CompletionRequest, *, bot_id: UUID):
         try:
