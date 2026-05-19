@@ -78,7 +78,7 @@ class MetricsComputer:
             "avg_trade_pnl": round(float(sum(t.pnl for t in trades) / len(trades)), 4)
             if trades
             else None,
-            "forced_close_pnl": forced_close_pnl,
+            "forced_close_pnl": float(forced_close_pnl),
             "pnl_curve": pnl_curve,
             "drawdown_curve": dd_curve,
             "trades": [self._trade_to_dict(t) for t in trades],
@@ -130,7 +130,7 @@ class MetricsComputer:
             "total_trades": 0,
             "win_rate": None,
             "avg_trade_pnl": None,
-            "forced_close_pnl": Decimal("0"),
+            "forced_close_pnl": 0.0,
             "pnl_curve": [],
             "drawdown_curve": [],
             "trades": [],

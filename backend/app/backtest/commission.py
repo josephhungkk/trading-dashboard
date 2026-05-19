@@ -21,8 +21,12 @@ class CommissionSchedule:
             for k, v in sched.items():
                 try:
                     parsed[k] = Decimal(str(v))
-                except ValueError, TypeError, InvalidOperation:
+                except ValueError:
                     pass  # skip non-numeric fields like "tier"
+                except TypeError:
+                    pass
+                except InvalidOperation:
+                    pass
             self._schedules[broker] = parsed
         for broker, defaults in _DEFAULTS.items():
             if broker not in self._schedules:

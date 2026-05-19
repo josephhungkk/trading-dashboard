@@ -6,7 +6,6 @@ import importlib.util
 import inspect
 import json
 import sys
-from datetime import UTC
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -25,7 +24,6 @@ from app.bot.base import FillEvent
 from app.bot.sandbox import DenylistFinder, extract_params_schema
 
 logger = structlog.get_logger(__name__)
-UTC = UTC
 _STRATEGIES_DIR = Path("/strategies")
 
 
@@ -138,7 +136,8 @@ class BacktestRunner:
             sim.force_close_open_positions(bars[-1], on_fill=fills.append)
             forced_fill_ids = {f.order_id for f in fills[pre_count:]}
 
-        closed_trades = self._pair_fills(fills, forced_fill_ids)
+        broker_id = row["commission_cfg"].get("active_broker_id", "ibkr")
+        closed_trades = self._pair_fills(fills, forced_fill_ids, commission, broker_id)
         bar_ts = [b.ts for b in bars]
         mc = MetricsComputer(exchange="NYSE")
         report = mc.compute(closed_trades, bar_ts)
@@ -146,31 +145,67 @@ class BacktestRunner:
         await self._set_done(backtest_id, report)
         await progress.publish_done(report)
 
-    def _pair_fills(self, fills: list[FillEvent], forced_ids: set) -> list[ClosedTrade]:
+    def _pair_fills(
+        self,
+        fills: list[FillEvent],
+        forced_ids: set,
+        commission: CommissionSchedule,
+        broker_id: str,
+    ) -> list[ClosedTrade]:
         open_longs: list[FillEvent] = []
+        open_shorts: list[FillEvent] = []
         closed: list[ClosedTrade] = []
         for fill in fills:
             if fill.side == "BUY":
-                open_longs.append(fill)
-            elif fill.side == "SELL" and open_longs:
-                entry = open_longs.pop(0)
-                pnl = (fill.price - entry.price) * fill.qty
-                closed.append(
-                    ClosedTrade(
-                        canonical_id=fill.canonical_id,
-                        side="BUY",
-                        qty=fill.qty,
-                        entry_price=entry.price,
-                        exit_price=fill.price,
-                        entry_slippage=Decimal("0"),
-                        exit_slippage=Decimal("0"),
-                        commission=Decimal("0"),
-                        pnl=pnl,
-                        forced_close=fill.order_id in forced_ids,
-                        opened_at=entry.filled_at,
-                        closed_at=fill.filled_at,
+                if open_shorts:
+                    entry = open_shorts.pop(0)
+                    entry_comm = commission.compute(broker_id, qty=entry.qty)
+                    exit_comm = commission.compute(broker_id, qty=fill.qty)
+                    gross = (entry.price - fill.price) * fill.qty
+                    total_comm = entry_comm + exit_comm
+                    closed.append(
+                        ClosedTrade(
+                            canonical_id=fill.canonical_id,
+                            side="SELL",
+                            qty=fill.qty,
+                            entry_price=entry.price,
+                            exit_price=fill.price,
+                            entry_slippage=Decimal("0"),
+                            exit_slippage=Decimal("0"),
+                            commission=total_comm,
+                            pnl=gross - total_comm,
+                            forced_close=fill.order_id in forced_ids,
+                            opened_at=entry.filled_at,
+                            closed_at=fill.filled_at,
+                        )
                     )
-                )
+                else:
+                    open_longs.append(fill)
+            elif fill.side == "SELL":
+                if open_longs:
+                    entry = open_longs.pop(0)
+                    entry_comm = commission.compute(broker_id, qty=entry.qty)
+                    exit_comm = commission.compute(broker_id, qty=fill.qty)
+                    gross = (fill.price - entry.price) * fill.qty
+                    total_comm = entry_comm + exit_comm
+                    closed.append(
+                        ClosedTrade(
+                            canonical_id=fill.canonical_id,
+                            side="BUY",
+                            qty=fill.qty,
+                            entry_price=entry.price,
+                            exit_price=fill.price,
+                            entry_slippage=Decimal("0"),
+                            exit_slippage=Decimal("0"),
+                            commission=total_comm,
+                            pnl=gross - total_comm,
+                            forced_close=fill.order_id in forced_ids,
+                            opened_at=entry.filled_at,
+                            closed_at=fill.filled_at,
+                        )
+                    )
+                else:
+                    open_shorts.append(fill)
         return closed
 
     async def _load_and_start(self, backtest_id: str) -> dict:
@@ -178,10 +213,16 @@ class BacktestRunner:
             text("SELECT * FROM backtests WHERE id = :id"), {"id": backtest_id}
         )
         row = dict(result.mappings().one())
-        await self._db.execute(
-            text("UPDATE backtests SET status='running', started_at=now() WHERE id=:id"),
+        # Atomic CAS: only start if still queued — prevents double-start races
+        update = await self._db.execute(
+            text(
+                "UPDATE backtests SET status='running', started_at=now()"
+                " WHERE id=:id AND status='queued' RETURNING id"
+            ),
             {"id": backtest_id},
         )
+        if update.one_or_none() is None:
+            raise ValueError(f"backtest_not_queued: {backtest_id}")
         await self._db.commit()
         return row
 
@@ -193,7 +234,7 @@ class BacktestRunner:
         row = result.one_or_none()
         if row is None:
             raise ValueError(f"instrument_not_found: {canonical_id}")
-        return row[0]
+        return int(row[0])
 
     async def _set_done(self, backtest_id: str, report: dict) -> None:
         await self._db.execute(

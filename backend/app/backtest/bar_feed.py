@@ -63,7 +63,9 @@ class BarFeed:
     async def _fetch_db_bars(
         self, instrument_id: int, timeframe: str, start_date: date, end_date: date
     ) -> list[dict]:
-        table = _TF_TO_TABLE.get(timeframe, "bars_1m")
+        if timeframe not in _TF_TO_TABLE:
+            raise BarFeedError(f"unsupported_timeframe: {timeframe!r}")
+        table = _TF_TO_TABLE[timeframe]
         result = await self._db.execute(
             text(f"""
                 SELECT bucket_start, open, high, low, close, volume

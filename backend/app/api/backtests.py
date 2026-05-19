@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import structlog
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/bots/{bot_id}/backtests", tags=["backtests"])
 
 _STRATEGIES_DIR = Path("/strategies")
 _BACKTESTABLE_ASSET_CLASSES = {"STOCK", "ETF", "FUTURE", "OPTION", "CRYPTO"}
+_MAX_CSV_BYTES = 50 * 1024 * 1024  # 50 MB
 
 JwtSubject = Annotated[str, Depends(require_jwt)]
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -30,12 +31,12 @@ RedisDep = Annotated[Any, Depends(get_redis)]
 
 class BacktestSubmitRequest(BaseModel):
     canonical_id: str
-    timeframe: str
+    timeframe: Literal["1m", "5m", "15m", "30m", "1h", "1d"] = "1d"
     start_date: date
     end_date: date
     slippage_bps: float | None = None
     slippage_atr_pct: float | None = None
-    bars_source: str = "db"
+    bars_source: Literal["db", "backfill", "csv"] = "db"
 
     @model_validator(mode="after")
     def validate_slippage_xor(self) -> BacktestSubmitRequest:
@@ -45,8 +46,6 @@ class BacktestSubmitRequest(BaseModel):
         atr_set = self.slippage_atr_pct is not None
         if bps_set == atr_set:  # both set or neither set
             raise ValueError("exactly one of slippage_bps or slippage_atr_pct must be provided")
-        if self.bars_source not in ("db", "backfill", "csv"):
-            raise ValueError("bars_source must be db, backfill, or csv")
         return self
 
 
@@ -199,7 +198,15 @@ async def delete_backtest(
         raise HTTPException(status_code=409, detail={"children": child_count})
 
     if row["status"] in ("queued", "running"):
+        # Signal cancellation and let the runner transition to 'failed' before deletion
         await redis.set(f"backtest:cancel:{backtest_id}", "1", ex=3600)
+        # Soft-cancel: mark as failed immediately so the runner's next write is a no-op
+        await db.execute(
+            text("UPDATE backtests SET status='failed', error_msg='cancelled' WHERE id=:id"),
+            {"id": str(backtest_id)},
+        )
+        await db.commit()
+        return
 
     await db.execute(text("DELETE FROM backtests WHERE id=:id"), {"id": str(backtest_id)})
     await db.commit()
@@ -226,7 +233,11 @@ async def upload_bars(
         raise HTTPException(status_code=422, detail="instrument_not_found")
     instrument_id = instr_row[0]
 
+    if file.size is not None and file.size > _MAX_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="csv_too_large")
     content = await file.read()
+    if len(content) > _MAX_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="csv_too_large")
     rows = _parse_csv(content.decode())
 
     # Insert upload metadata
@@ -237,8 +248,8 @@ async def upload_bars(
     )
     upload_id = result.scalar_one()
 
-    # Insert bars
-    for row_data in rows:
+    # Batch insert bars — asyncpg executemany avoids N+1 round-trips
+    if rows:
         await db.execute(
             text(
                 "INSERT INTO backtest_bars"
@@ -246,7 +257,7 @@ async def upload_bars(
                 " VALUES(:uid,:iid,:ts,:o,:h,:l,:c,:v)"
                 " ON CONFLICT DO NOTHING"
             ),
-            {"uid": str(upload_id), "iid": instrument_id, **row_data},
+            [{"uid": str(upload_id), "iid": instrument_id, **row_data} for row_data in rows],
         )
     await db.commit()
     return {"upload_id": str(upload_id), "canonical_id": canonical_id, "bar_count": len(rows)}
@@ -265,13 +276,24 @@ def _parse_csv(content: str) -> list[dict]:
             ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
         except ValueError:
             ts = datetime.fromtimestamp(int(str(ts_raw)) / 1000, tz=UTC)
+        open_ = Decimal(r["open"])
+        high = Decimal(r["high"])
+        low = Decimal(r["low"])
+        close = Decimal(r["close"])
+        if open_ <= 0 or high < open_ or low > open_ or low <= 0 or not (low <= close <= high):
+            from fastapi import HTTPException as _HTTPException
+
+            raise _HTTPException(
+                status_code=422,
+                detail=f"invalid_ohlcv_row: o={open_} h={high} l={low} c={close}",
+            )
         rows.append(
             {
                 "ts": ts,
-                "o": Decimal(r["open"]),
-                "h": Decimal(r["high"]),
-                "l": Decimal(r["low"]),
-                "c": Decimal(r["close"]),
+                "o": open_,
+                "h": high,
+                "l": low,
+                "c": close,
                 "v": Decimal(r["volume"]) if r.get("volume") else None,
             }
         )
