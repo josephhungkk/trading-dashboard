@@ -1,11 +1,11 @@
 # Phase 21a.1 — Advisor Polish (v0.21.1)
 
 **Date:** 2026-05-19  
-**Status:** ARCHITECT-REVIEW Pass 1 applied — ready for /writing-plans  
+**Status:** ARCHITECT-REVIEW Pass 1 + Pass 2 applied — ready for /writing-plans  
 **Builds on:** Phase 21a (LLM advisor, v0.21.0)  
 **Next phases:** 21b (param-tuning + shadow-promotion + full LLM-in-loop)
 
-**ARCHITECT-REVIEW applied:** Pass 1 (4 HIGH + 7 MED + 4 LOW). All HIGH + MED inline. LOWs noted.
+**ARCHITECT-REVIEW applied:** Pass 1 (4 HIGH + 7 MED + 4 LOW) + Pass 2 (0 CRIT, 0 HIGH, 3 MED, 3 LOW). All HIGH + MED inline. LOWs noted.
 
 ---
 
@@ -104,12 +104,15 @@ class AdvisorConfig(BaseModel):
 
 **Semaphore creation (H2 — race-free):** Semaphores are pre-created (not lazily) when `AdvisorService` receives an `UPDATE_ADVISOR_CONFIG` pubsub frame or at bot startup. The `_in_flight` dict is populated at config-load time, not on first call. If a `bot_id` is not in `_in_flight`, a `Semaphore(1)` is inserted under a module-level `asyncio.Lock(_in_flight_lock)` before the first call — this covers the cold-start race. Pre-creation is preferred at config-load (no lock needed at call time).
 
-**Runtime resize on config change (H3):** `asyncio.Semaphore` cannot be resized after creation. When `UPDATE_ADVISOR_CONFIG` arrives with a changed `max_concurrent`, the service:
-1. Drains the old semaphore (waits until `_semaphore._value == old_max_concurrent`, i.e., no in-flight calls; timeout 10s).
-2. Replaces `_in_flight[bot_id]` with a new `Semaphore(new_max_concurrent)`.
-3. Logs `structlog.info("advisor.semaphore.resized", bot_id=..., old=..., new=...)`.
+**Runtime resize on config change (H3, M8):** `asyncio.Semaphore` cannot be resized after creation. When `UPDATE_ADVISOR_CONFIG` arrives with a changed `max_concurrent`, the service uses an explicit **per-bot resize-barrier** rather than polling the private `_semaphore._value` attribute (which is not atomic against concurrent release and may never drain if new acquires keep arriving):
 
-If drain times out (bot is in sustained high-frequency trading): the swap is deferred, metric `advisor_semaphore_resize_deferred_total` incremented, and the old semaphore is retained until next `UPDATE_ADVISOR_CONFIG` or child restart.
+1. Set a per-bot `_resizing[bot_id] = asyncio.Event()` flag under `_in_flight_lock`. While this flag is set, the call path checks it before acquiring the semaphore and waits (i.e., the call path blocks on `await _resizing[bot_id].wait()` before proceeding, preventing new acquires against the old semaphore).
+2. Wait for drain: `await asyncio.wait_for(_resize_done[bot_id].wait(), timeout=10.0)` — `_resize_done` is a per-bot event set when the last in-flight call under the old semaphore releases its slot (decrements a per-bot in-flight counter to zero).
+3. Replace `_in_flight[bot_id]` with `Semaphore(new_max_concurrent)`.
+4. Clear `_resizing[bot_id]` and set its barrier event so waiting callers proceed on the new semaphore.
+5. Logs `structlog.info("advisor.semaphore.resized", bot_id=..., old=..., new=...)`.
+
+If drain times out (bot is in sustained high-frequency trading): the swap is deferred, metric `advisor_semaphore_resize_deferred_total` incremented, `_resizing` flag cleared (callers resume on old semaphore), and the resize is retried on next `UPDATE_ADVISOR_CONFIG` or child restart.
 
 **Channel taxonomy (H4):**
 - `bot:advisor:{bot_id}` — **FE-bound frames only** (`decision` events, `decision_overridden`, WS gateway subscribes this).
@@ -142,7 +145,7 @@ class AdvisorDecisionOverride(BaseModel):
 ```
 
 - Requires `require_admin_jwt` + CSRF nonce.
-- 404 if `decision_id` not found OR `bot_id` mismatch — identical 404 body shape in both cases (existence-oracle defence, same as Phase 11a job endpoints). `test_override_existence_oracle_parity` asserts body shape identity (M6).
+- 404 if `decision_id` not found OR `bot_id` mismatch — identical 404 body shape in both cases (existence-oracle defence, same as Phase 11a job endpoints). Both paths are resolved via a **single SQL statement** joining `bot_advisor_decisions` and `bots` with both predicates, returning 404 unconditionally on no row — this eliminates timing-oracle leakage (a fast not-found path vs a slow join-mismatch path would leak existence via latency). `test_override_existence_oracle_parity` asserts body shape identity; timing-oracle is closed by the single-query design (M6, M10).
 - 409 if already overridden (`overridden_at IS NOT NULL`). **409 body includes `overridden_by` and `overridden_at`** so clients can distinguish "I already won" from "someone else won" (M1).
 - **Override is audit-only.** A vetoed order that is overridden-to-approve does NOT re-run the order. The endpoint has no code path that calls `place_order`, `orders_service`, or any broker facade. Server-side: `override_action` field is never forwarded beyond the DB write (M3 — server is the real enforcer; FE hiding is UX-only).
 - Emits `structlog.info("advisor.decision.overridden", bot_id=..., decision_id=..., override_action=..., jwt_subject=...)` (M2).
@@ -156,8 +159,20 @@ class AdvisorDecisionOverride(BaseModel):
 **New REST endpoint: `PUT /api/bots/{id}/accounts/{account_id}/advisor-config`**
 
 ```python
+class AccountAdvisorConfigOverride(BaseModel):
+    """Per-account advisor config override. Excludes max_concurrent — the per-bot semaphore
+    governs concurrency at the bot level; per-account max_concurrent is not supported and
+    would have no effect. Pydantic rejects any payload carrying max_concurrent. (L6)"""
+    mode: AdvisorMode | None = None
+    capability: str | None = None
+    local_only: bool | None = None
+    timeout_ms: int | None = None
+    daily_budget_usd: float | None = None
+    # max_concurrent intentionally absent — bot-level semaphore governs; per-account override
+    # cannot change it. If a caller sends max_concurrent, Pydantic raises ValidationError → 422.
+
 class AccountAdvisorConfigUpdate(BaseModel):
-    advisor_config_override: AdvisorConfig | None
+    advisor_config_override: AccountAdvisorConfigOverride | None
     # None = clear override (revert to bot-level default)
 ```
 
@@ -165,8 +180,8 @@ class AccountAdvisorConfigUpdate(BaseModel):
 - 404 if `bot_id` or `account_id` not found, or `bot_accounts` row absent.
 - Writes `bot_accounts.advisor_config_override` JSONB (the column already exists from 0063).
 - Publishes `bot:advisor:config:{bot_id}` frame `{v:1, type:"account_config_updated", account_id}` (child-bound channel, H4). Running child re-resolves effective config per-call from the DB row on next `place_order` — no restart required.
-- If `max_concurrent` changed in the override: child receives `account_config_updated` and triggers the semaphore-resize path (§3.2) for that account's effective config.
-- No dedicated metric (low-frequency admin write; covered by existing `advisor_config_reloads_total`).
+- `max_concurrent` is a bot-level semaphore parameter — per-account overrides cannot and do not change it. The `AccountAdvisorConfigOverride` schema does not include this field; any payload that sends it will be rejected with 422. (L6)
+- Emits metric `advisor_account_config_writes_total{action}` where `action` is `"set"` (override written) or `"clear"` (override nulled). This is a write-side Counter independent of `advisor_config_reloads_total` (which fires on the *child's* reload of effective config, not on the admin write itself — without this, per-account override attribution requires log grep). (M9)
 
 **FE:** new `AccountAdvisorConfigForm` component in `BotDetailPage` advisor tab. Rendered per `bot_accounts` row. Shows:
 - Current `bot_accounts.advisor_config_override` (or "Using bot default" if null).
@@ -220,8 +235,30 @@ op.create_check_constraint(
     "advisor_config ? 'mode' AND advisor_config->>'mode' IN ('OFF','OBSERVE','VETO','SHADOW')",
 )
 
-# downgrade(): reverse order — drop SHADOW from CHECK, drop index, drop columns.
-# NOTE: downgrade drops override columns, losing audit data. Document in migration docstring. (L2)
+# downgrade():
+# Step 1: Migrate SHADOW bots before narrowing the CHECK — dropping the widened constraint while
+# SHADOW rows exist is fine (DROP succeeds), but creating the narrower replacement will fail if any
+# bot still has mode='SHADOW'. Pre-flight update: (L5)
+op.execute("""
+    UPDATE bots
+    SET advisor_config = jsonb_set(advisor_config, '{mode}', '"OBSERVE"')
+    WHERE advisor_config->>'mode' = 'SHADOW'
+""")
+# Step 2: Re-create narrowed CHECK:
+op.drop_constraint("bots_advisor_config_mode_check", "bots")
+op.create_check_constraint(
+    "bots_advisor_config_mode_check",
+    "bots",
+    "advisor_config ? 'mode' AND advisor_config->>'mode' IN ('OFF','OBSERVE','VETO')",
+)
+# Step 3: Drop CONCURRENTLY index:
+with op.get_context().autocommit_block():
+    op.execute("DROP INDEX CONCURRENTLY IF EXISTS bot_advisor_decisions_overridden_at_idx")
+# Step 4: Drop override columns (loses audit data — documented in migration docstring): (L2)
+op.drop_column("bot_advisor_decisions", "overridden_at")
+op.drop_column("bot_advisor_decisions", "override_reason")
+op.drop_column("bot_advisor_decisions", "override_action")
+op.drop_column("bot_advisor_decisions", "overridden_by")
 ```
 
 ---
@@ -251,14 +288,15 @@ Existing endpoints unchanged.
 
 ---
 
-## 7. Prometheus metrics (3 new)
+## 7. Prometheus metrics (4 new)
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `advisor_overrides_total` | Counter | `override_action` | Human veto overrides applied |
-| `advisor_concurrent_calls` | Gauge | `bot_id` | Live concurrent advisor calls per bot |
+| `advisor_concurrent_calls` | Gauge | `bot_id` | Live concurrent advisor calls per bot (note: `bot_id` label is acceptable at current scale — single replica, modest N bots; revisit when per-bot metrics are split in Phase 24) (L7) |
 | `advisor_shadow_context_build_seconds` | Histogram | — | Context-build latency in SHADOW mode (separate from `advisor_latency_seconds` which covers AI-call paths only) |
 | `advisor_semaphore_resize_deferred_total` | Counter | — | `max_concurrent` config changes deferred because old semaphore did not drain in time |
+| `advisor_account_config_writes_total` | Counter | `action` | Per-account advisor config writes; `action=set\|clear`; write-side attribution independent of reload counter (M9) |
 
 Existing metrics unchanged. `advisor_in_flight_skips_total` retained (semaphore exhaustion still fires it, including during SHADOW mode when all slots are occupied).
 
@@ -309,7 +347,7 @@ Existing metrics unchanged. `advisor_in_flight_skips_total` retained (semaphore 
 | Chunk | Files | Routing | Gate |
 |---|---|---|---|
 | **A — Schema + types** | Alembic 0064 (override cols + CONCURRENTLY index + pre-flight assertion + mode CHECK widen), `types.py` (SHADOW mode + `max_concurrent`), migration tests | Qwen | — |
-| **B — Service changes** | `service.py` (semaphore pre-create + H3 resize-drain-swap + SHADOW path + H4 channel taxonomy), `metrics.py` (4 new metrics), tests | Qwen | after A |
+| **B — Service changes** | `service.py` (semaphore pre-create + resize-barrier drain-swap [M8] + SHADOW path + H4 channel taxonomy), `metrics.py` (5 new metrics incl. M9), tests | Qwen | after A |
 | **C — REST endpoints** | `api/bots.py` (PATCH override + PUT account config), tests | Codex | after A + B |
 | **D — Frontend** | `services/advisor/types.ts` (gen-types.sh), `api.ts`, `AdvisorDecisionDrawer` (override + admin-guard), `AccountAdvisorConfigForm`, `BotDetailPage` advisor tab | Codex | after C |
 | **E — Close-out** | CLAUDE.md, CHANGELOG.md, TASKS.md, tag v0.21.1 | Opus direct | after all |
@@ -337,6 +375,12 @@ Existing metrics unchanged. `advisor_in_flight_skips_total` retained (semaphore 
 | L2: Downgrade loses audit data | Noted in §4 migration docstring |
 | L3: gen-types.sh not called out | Noted in §6 FE components table |
 | L4: SHADOW + in-flight skips | Documented in §3.1: semaphore held during SHADOW; `advisor_in_flight_skips_total` fires correctly |
+| M8 (Pass 2): Semaphore drain polling `_value` | Replaced with per-bot resize-barrier event/flag in §3.2; call path checks `_resizing[bot_id]` before acquire; drain waits on `_resize_done[bot_id].wait()` with 10s timeout |
+| M9 (Pass 2): No write-side metric on account override | `advisor_account_config_writes_total{action=set\|clear}` added to §7; endpoint now emits it |
+| M10 (Pass 2): Existence-oracle timing leakage | Single SQL JOIN query for both 404 paths (wrong bot_id = decision not found); eliminates timing differential; documented in §3.3 |
+| L5 (Pass 2): Downgrade fails if SHADOW rows exist | Pre-flight `UPDATE bots SET mode='OBSERVE' WHERE mode='SHADOW'` before narrowing CHECK; documented in §4 downgrade() |
+| L6 (Pass 2): `max_concurrent` in per-account override | `AccountAdvisorConfigOverride` schema does not include `max_concurrent`; callers sending it get 422; bot-level semaphore governs concurrency; documented in §3.4 |
+| L7 (Pass 2): High-cardinality `bot_id` gauge label | Noted in §7 metrics table: acceptable at current scale (single replica, modest N); flag for Phase 24 revisit |
 
 ---
 

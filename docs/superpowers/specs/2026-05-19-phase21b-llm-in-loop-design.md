@@ -1,11 +1,11 @@
 # Phase 21b — LLM-in-Loop: Param-Tuning + Shadow-Promotion (v0.21.2)
 
 **Date:** 2026-05-19  
-**Status:** ARCHITECT-REVIEW Pass 1 applied — ready for /writing-plans  
+**Status:** ARCHITECT-REVIEW Pass 1 + Pass 2 applied — ready for /writing-plans  
 **Builds on:** Phase 21a (LLM advisor, v0.21.0) · Phase 21a.1 (advisor polish, v0.21.1) · Phase 20 (backtesting harness, v0.20.0) · Phase 18 (scanner/filings/earnings, v0.18.0) · Phase 11c (Telegram bot, v0.11.2.0)  
 **Next phases:** 21c (perf-attribution — "was the advisor right?")
 
-**ARCHITECT-REVIEW applied:** Pass 1 (8 HIGH + 9 MED + 5 LOW). All HIGH + MED inline. LOWs noted.
+**ARCHITECT-REVIEW applied:** Pass 1 (8 HIGH + 9 MED + 5 LOW) + Pass 2 (0 CRIT, 4 HIGH, 7 MED, 4 LOW). All HIGH + MED inline. LOWs noted.
 
 ---
 
@@ -108,8 +108,10 @@ CREATE TABLE bot_param_suggestions (
     strategy_params_current     JSONB NOT NULL,
     ai_reasoning                TEXT,
     candidates                  JSONB NOT NULL DEFAULT '[]'
-                                    CHECK (jsonb_array_length(candidates) <= 5),
+                                    CHECK (candidates IS NOT NULL AND jsonb_array_length(candidates) <= 5),
     -- Hard cap of 5 candidates; enforced at DB level (belt-and-braces, M1).
+    -- NOT NULL is also in the column definition above; the CHECK redundantly asserts it
+    -- to prevent a NULL bypass of the array-length cap (L-new-2 paranoia-documentation).
     -- candidates array element shape:
     -- {
     --   "params": {...},
@@ -124,8 +126,12 @@ CREATE TABLE bot_param_suggestions (
     -- }
     -- AI provenance (H3): link to ai_completions ledger
     ai_completion_id            BIGINT,          -- ai_completions.id; no FK (hypertable)
+    -- M-new-1: Phase 11a cost ledger is fire-and-forget (batch insert every 1s/100 rows).
+    -- The ai_completions row may not be visible when we write ai_completion_id.
+    -- Provenance lookups from bot_param_suggestions must tolerate eventual consistency:
+    -- JOIN may return null; callers should retry after 2s or accept "not yet committed".
     ai_model                    TEXT,            -- model that generated candidates
-    ai_prompt_hash              TEXT,            -- sha256 of context payload (first 16 hex)
+    ai_prompt_hash              TEXT,            -- sha256 of context payload (first 16 hex); CHAR(16) semantics but stored as TEXT (L-new-3)
     approved_candidate_index    INT,
     approved_by                 TEXT,
     applied_at                  TIMESTAMPTZ,
@@ -153,7 +159,11 @@ ALTER TABLE bots
     ADD COLUMN strategy_schema JSONB;
 -- NULL for bots created before 0065; tuner skips bots with strategy_schema IS NULL.
 -- Operator backfill: POST /api/admin/bots/{id}/backfill-schema introspects the strategy
--- class and stores its params_schema + params_bounds_schema (M9 operator runbook).
+-- class and stores its params_schema + params_bounds_schema (M9 / M-new-2 operator runbook).
+-- IMPORTANT (M-new-2): this endpoint MUST use the same DenylistFinder + RLIMIT_AS 256MB +
+-- RLIMIT_CPU 3s + 5s timeout subprocess sandbox as Phase 19 params_schema extraction
+-- (app/bot/sandbox.py). Importing strategy in-process allows a malicious strategy file to
+-- crash the backend. Sandbox is mandatory — not optional.
 
 -- Index for shadow queries
 CREATE INDEX bots_shadow_of_idx ON bots (shadow_of) WHERE shadow_of IS NOT NULL;
@@ -169,6 +179,19 @@ CREATE INDEX IF NOT EXISTS bot_orders_bot_id_created_at_idx
 CREATE TRIGGER bot_param_suggestions_updated_at
     BEFORE UPDATE ON bot_param_suggestions
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- H-new-1: Widen risk_decisions.attempt_kind CHECK to include 'shadow_place_order'
+-- (Referenced in §6.2 and §15 M6 but was missing from the DDL block — shipped broken
+-- without this, RiskService INSERT fails with CHECK violation on shadow bots.)
+-- Drop existing constraint (name from alembic 0061 — check with \d risk_decisions):
+ALTER TABLE risk_decisions
+    DROP CONSTRAINT risk_decisions_attempt_kind_check;
+ALTER TABLE risk_decisions
+    ADD CONSTRAINT risk_decisions_attempt_kind_check
+        CHECK (attempt_kind IN (
+            'preview', 'place_order', 'modify_order',
+            'bot_place_order', 'shadow_place_order'
+        ));
 ```
 
 ### Alembic 0066
@@ -303,7 +326,19 @@ class ParamTunerService:
     ) -> None: ...
 ```
 
-**`BacktestSubmitter`** calls the internal backtest submission service method directly (not via HTTP) — same DB session family, avoids round-trip overhead. Extracted to allow injection in tests without standing up a full backtest worker. In production it wraps `BacktestService.submit(bot_id, params, bars_source)` from `app/backtest/`.
+**`BacktestSubmitter`** calls the internal backtest submission service method directly (not via HTTP) — same DB session family, avoids round-trip overhead. Extracted to allow injection in tests without standing up a full backtest worker.
+
+**`BacktestSubmitter.submit(bot_id, params)` full signature (M-new-4):**
+```python
+async def submit(self, bot_id: UUID, params: dict) -> UUID:
+    """Submit one candidate backtest. Returns backtest_job_id."""
+```
+In production it wraps `BacktestService.submit()` with the following sourced parameters:
+- **`bars_source`**: `"db"` (reads from `backtest_bars` / `bars_1m` CAGG for the bot's canonical instruments). No CSV upload — tuner-submitted backtests always use the DB bar feed.
+- **`start_ts` / `end_ts`**: rolling window of last 90 days (`now() - interval '90 days'` to `now()`). Operator cannot override per-suggestion; the 90-day window is fixed to ensure comparability across candidates within one suggestion run. Configurable via `app_config[param_tuner/backtest_window_days]` (default `90`).
+- **`slippage_config`**: copied from the bot's most recent completed backtest (`backtests WHERE bot_id=... ORDER BY created_at DESC LIMIT 1`). If no prior backtest exists: `{"type": "bps", "value": 5}` (5 bps default). This ensures tuner backtests use the same slippage assumption as the operator's manual backtests.
+- **`commission_schedule`**: same source as slippage — from the bot's most recent completed backtest; default `{"type": "zero"}` if none.
+- **`advisor_config`**: `null` (no advisor stub during param-tuner backtests — would create recursive dependency).
 
 #### `trigger(bot_id, triggered_by, db) → UUID`
 
@@ -311,7 +346,13 @@ class ParamTunerService:
 
 1. Read bot row. Assert `is_shadow=False`, `status != 'deleted'`, `strategy_schema IS NOT NULL` (strategy has `params_schema`; pre-0065 bots without `strategy_schema` → 422 with hint to run backfill-schema endpoint).
 2. Assert no suggestion in `status IN ('pending','backtesting','ranked')` already exists for this bot — one active suggestion per bot at a time. If exists → raise `TunerAlreadyActiveError` (409 from REST handler).
-3. **Daily cost ceiling check (H1):** query `ai_completions WHERE caller LIKE 'param_tuner:bot:%' AND ts >= now() - interval '1 day'`, sum `cost_usd`. If sum ≥ `app_config[param_tuner/cost_ceiling_usd_daily]` (default `"2.00"`) → raise `TunerCostCeilingError` (429); metric `param_tuner_trigger_failures_total{reason="cost_ceiling"}`.
+3. **Daily cost ceiling check (H1, H-new-3 — TOCTOU-safe):** Two concurrent `trigger()` calls (manual + scheduled, or two manuals) both reading the `ai_completions` SUM before either AI call completes can both pass the check and together spend ≈2× the ceiling. Fix: use a Redis reservation counter as a soft atomic guard.
+   - Read `ai_completions WHERE caller LIKE 'param_tuner:bot:%' AND ts >= now() - interval '1 day'`, sum `cost_usd`. Call this `committed_cost`.
+   - **Reserve estimated cost atomically:** `INCRBYFLOAT param_tuner:cost_pending:{utc_date} {estimated_cost_usd} EX 86400`. `estimated_cost_usd` = `0.10` (conservative estimate per trigger; actual cost recorded after AI call). The key expires at UTC midnight + 24h. Read the post-increment value back.
+   - If `committed_cost + post_increment_value > ceiling` → `DECRBY` the reservation (clean up), raise `TunerCostCeilingError` (429); metric `param_tuner_trigger_failures_total{reason="cost_ceiling"}`.
+   - After the AI call returns and actual cost is known: `DECRBY param_tuner:cost_pending:{utc_date} {estimated_cost_usd}` (removes the reservation; actual cost is recorded in `ai_completions` ledger by Phase 11a machinery).
+   - This makes the ceiling "soft with bounded overrun ≤ estimated_cost_usd × N_concurrent" rather than hard-exact. At `N_concurrent ≤ 5` bots and `estimated_cost_usd = 0.10`, maximum overrun is `$0.50` above ceiling — acceptable and explicitly documented.
+   - If Redis is unavailable during reservation: fail-OPEN on the reservation (proceed without reservation), log `structlog.warning("param_tuner.cost_reservation_failed", ...)`, metric `param_tuner_cost_reservation_failures_total`. The DB ceiling check still applies as a backstop.
 4. Build context payload via `TunerContextBuilder.build(bot_id, db)`. Record `ai_prompt_hash = sha256(payload)[:16]`.
 5. **Capability routing (H4):** default `capability = AICapability.LOCAL_ONLY`. If `app_config[param_tuner/allow_cloud_reasoning]` is `true`, use `capability = AICapability.REASONING`. This makes LOCAL_ONLY the safe default — operator must explicitly opt cloud in.
 6. Call AI router:
@@ -322,7 +363,7 @@ class ParamTunerService:
    - `timeout = 30s`
 7. Parse `CandidateListResponse`. Hard-cap: `len(candidates) = min(len(candidates), MAX_CANDIDATES_PER_SUGGESTION)` where `MAX_CANDIDATES_PER_SUGGESTION = 5` (H1). Validate each remaining candidate dict against `strategy_schema` (type check via Pydantic). Then validate against `params_bounds_schema` (semantic bounds — per-field min/max; H2). Drop invalid candidates; metric `param_tuner_invalid_candidates_total{reason}` per drop (reasons: `schema_type`, `out_of_bounds`).
 8. If `len(valid_candidates) < 1` → persist row with `status='pending'`, `candidates=[]`, publish failure frame `{type:"failed", reason:"no_valid_candidates"}`, metric `param_tuner_trigger_failures_total{reason="no_valid_candidates"}`. Return suggestion_id (202).
-9. **Queue depth check (H7):** call `backtest_submitter.queue_depth()`. If depth ≥ `MAX_BACKTEST_QUEUE_DEPTH` (= 20, constant) → persist row with `status='pending'`, publish `{type:"failed", reason:"queue_full"}`, metric `param_tuner_trigger_failures_total{reason="queue_full"}`. Return suggestion_id (202 — operator can retry once queue drains). Metric `param_tuner_backtest_queue_depth` (gauge, updated here).
+9. **Queue depth check (H7):** call `backtest_submitter.queue_depth()`. If depth ≥ `app_config[param_tuner/max_backtest_queue_depth]` (default `20`; moved from magic constant to config for parity with other tuner knobs — L-new-1) → persist row with `status='pending'`, publish `{type:"failed", reason:"queue_full"}`, metric `param_tuner_trigger_failures_total{reason="queue_full"}`. Return suggestion_id (202 — operator can retry once queue drains). Metric `param_tuner_backtest_queue_depth` (gauge, updated here).
 10. Persist `bot_param_suggestions` row: `status='backtesting'`, `candidates` array with `params` only, `ai_reasoning`, `ai_completion_id`, `ai_model`, `ai_prompt_hash` (H3).
 11. Fan-out: for each valid candidate, call `backtest_submitter.submit(bot_id, candidate.params)` → store `backtest_job_id` per candidate. Update `candidates` JSONB in-place. Metric `param_tuner_backtest_fan_out_total`.
 12. Publish `bot:tuner:{bot_id}` frame `{v:1, type:"backtesting", suggestion_id, candidate_count: N}`.
@@ -335,11 +376,11 @@ class ParamTunerService:
 1. Query all `bot_param_suggestions WHERE status='backtesting'`.
 2. For each suggestion, for each candidate with `backtest_job_id` and no `backtest_result`:
    - Query `backtests` table by `backtest_job_id`.
-   - If `status='done'`: copy KPI fields into `candidate.backtest_result`; compute `delta_vs_current` (difference vs `strategy_params_current` run metrics from most recent `bot_runs` row).
+   - If `status='done'`: copy KPI fields into `candidate.backtest_result`. (`delta_vs_current` is computed in step 3 once all candidates resolve — do not compute here against a single run.)
    - If `status='failed'`: set `candidate.backtest_result=null`, `candidate.rank=null`.
    - If `status` still running/queued: skip.
 3. When all candidates have `backtest_result IS NOT NULL` or `backtest_job_id` job is failed:
-   - **Delta computation (M8):** compute `delta_vs_current` using a rolling window aggregate — mean Sharpe/MAR/max_dd over last 5 completed `bot_runs` rows (same window the context-builder fed the LLM). A single anomalous recent run no longer distorts the delta. If < 5 completed runs exist, use all available.
+   - **Delta computation (M8, M-new-3):** compute `delta_vs_current` using a rolling window aggregate — mean Sharpe/MAR/max_dd over last 5 completed `bot_runs` rows (same window the context-builder fed the LLM). A single anomalous recent run no longer distorts the delta. If < 5 completed runs exist, use all available. The `delta_vs_current` dict is then applied to each candidate that has a non-null `backtest_result`.
    - Rank remaining candidates by `sharpe DESC` (MAR as tiebreaker; NaN/null ranked last).
    - Set `status='ranked'`.
    - Publish `bot:tuner:{bot_id}` frame `{v:1, type:"ranked", suggestion_id, candidate_count: N}`.
@@ -361,6 +402,43 @@ class ParamTunerService:
 #### `reject(suggestion_id, rejected_by, db)`
 
 Sets `status='rejected'`. No bot changes. No pubsub.
+
+### 5.3a `BotSupervisor.restart()` — Full Specification (H-new-2)
+
+**New method on `app/bot/supervisor.py::BotSupervisor`.** Phase 19's module is extended; no new file.
+
+```python
+async def restart(self, bot_id: UUID, stop_drain_seconds: float = 5.0) -> None:
+    """Atomically stop a running bot and restart it with its current DB configuration.
+    
+    Valid source states: running, paused, error.
+    Raises SupervisorRestartError on state-machine violations or stop timeout.
+    """
+```
+
+**Valid source states:**
+- `running` → normal path: SIGTERM → drain → start.
+- `paused` → treated as running for restart purposes: sends SIGTERM; waits for process exit (no drain timeout issue since paused bots have already drained the bar queue).
+- `error` → the respawn backoff counter is **reset to zero** on `restart()` call. This is the intended semantics: a human-triggered restart (via approve() or Telegram) signals that the operator has acknowledged the error. The `[10, 30, 60]s` backoff sequence restarts from `10s` on the next failure.
+
+**Rejection states (raise `SupervisorRestartError` immediately):**
+- `stopped` → no process to stop; caller must call `start()` directly.
+- `starting` → mid-startup; restart would race with the startup sequence.
+- `deleted` → bot is soft-deleted; cannot restart.
+
+**Mid-respawn behaviour:** if the supervisor is mid-respawn (state = `starting`, process is being launched after a crash):
+- `restart()` raises `SupervisorRestartError(reason="mid_respawn")`.
+- Caller (`approve()`) re-raises as HTTP 409 with `retry_after_seconds=10`.
+- The operator can poll `GET /api/bots/{id}` for `status != 'starting'` then retry.
+
+**Stop sequence (mirrors Phase 19 graceful-stop):**
+1. Publish `STOP` to bot control queue.
+2. Send `SIGTERM` to child process.
+3. Poll `bot:status:{bot_id}` Redis pubsub channel for `status` transition to `stopped` or `paused` (same channel Phase 19 `BotSupervisor` publishes on every transition — **poll pubsub, not process state or DB**). Timeout = `stop_drain_seconds + 3s` (default 8s).
+4. If timeout: raise `SupervisorRestartError(reason="stop_timeout")`. Child process is left running; caller must recover.
+5. On success: call `start(bot_id)` (existing Phase 19 method). Publishes `bot:status:{bot_id} → starting` then `running` on success.
+
+**Backoff interaction:** `start()` called from `restart()` resets `_respawn_count[bot_id] = 0` before returning, so the next crash begins the backoff ladder from `10s` again. This is the same semantics as a fresh bot start.
 
 ### 5.4 APScheduler jobs
 
@@ -393,6 +471,7 @@ For every bot satisfying:
 | `param_tuner_applied_total` | Counter | `triggered_by` |
 | `param_tuner_ai_latency_seconds` | Histogram | — |
 | `param_tuner_fleet_cost_ceiling_total` | Counter | — |
+| `param_tuner_cost_reservation_failures_total` | Counter | — | Redis reservation unavailable; ceiling check fell back to DB-only (H-new-3) |
 
 ---
 
@@ -418,7 +497,7 @@ class ShadowVsLive(BaseModel):
     delta: dict[str, str]    # {"sharpe": "+0.31", "max_dd": "+0.04"}
     running_since: datetime
     comparison_window_days: int
-    comparison_ready: bool   # True if shadow has run >= comparison_window_days
+    comparison_ready: bool   # True if oldest completed bot_run started >= window_days ago (M-new-7)
 
 class ShadowComparisonReport(BaseModel):
     live_bot_id: UUID
@@ -466,16 +545,24 @@ class ShadowPromoterService:
 **Three-layer paper-mode enforcement (H6 — mirrors Phase 11a LOCAL_ONLY defence-in-depth):**
 1. **`BotContext.place_order`**: asserts `self.bot.is_shadow == False` before calling facade; if True → raises `ShadowBotLiveTradeAttempt` (never reaches broker).
 2. **`place_order_for_bot()` in `app/api/bots.py`**: re-reads `bots.is_shadow` from DB and forces `mode='paper'` on the order request before entering the risk gate.
-3. **`RiskService.evaluate()`**: reads `ctx.is_shadow` and returns `BLOCK` with `check_name="shadow_bot_live_mode"` if the evaluation context somehow has `mode='live'` on an `is_shadow=True` bot. Widens `risk_decisions.attempt_kind` CHECK to include `shadow_place_order` (Alembic 0065, M6).
+3. **`RiskService.evaluate()`**: reads `ctx.is_shadow` and returns `BLOCK` with `check_name="shadow_bot_live_mode"` if the evaluation context somehow has `mode='live'` on an `is_shadow=True` bot. Widens `risk_decisions.attempt_kind` CHECK to include `shadow_place_order` (Alembic 0065, H-new-1, M6).
 
 Single-layer guards on money-moving paths have caused real bugs in prior phases. Three layers are required.
+
+**Fill routing isolation (H-new-4):** `BotFillRouter` (Phase 19) subscribes `fills:*` Redis pubsub and routes fills to the matching running child. Shadow bots use the same `bot_accounts` as live bots (with `mode='paper'`). Without explicit isolation, paper fills published by the broker paper gateway could be routed to both the live child and the shadow child if both are subscribed.
+
+Isolation design:
+- Paper-mode broker fills are published to channel namespace `fills:paper:{account_id}:{order_id}` (distinct from live fills at `fills:live:{account_id}:{order_id}`). The paper broker adapter already uses this naming (confirm against Phase 19 `BrokerFillListener` implementation before chunk D).
+- `BotFillRouter` matching predicate is `(bot_id, is_shadow)` **not** `(account_id)` alone. When a fill event arrives, the router checks: is this a paper fill channel (`fills:paper:*`)? → only route to children where `bot.is_shadow=True` OR `bot.mode=paper` for that account. Is this a live fill channel? → only route to children where `bot.is_shadow=False`.
+- If Phase 19 does **not** already split channels by live/paper: Alembic 0065 does not fix this (it's runtime code), but chunk D of this phase must add the channel split to `BotFillRouter` and document it in the Phase 19 section of CLAUDE.md.
+- Test: `test_shadow_bot_fill_does_not_leak_to_live_child` — live bot child receives a live fill; shadow child does not receive it and vice versa.
 
 #### `get_comparison(live_bot_id, db) → ShadowComparisonReport`
 
 Pure read. For each `is_shadow=True, shadow_of=live_bot_id, status != 'deleted'` bot:
 - Aggregate `bot_runs` metrics for shadow bot and live bot over `comparison_window_days`.
 - Compute delta fields.
-- Set `comparison_ready = True` if shadow has at least one completed `bot_runs` row with `started_at >= now() - comparison_window_days * interval '1 day'`.
+- Set `comparison_ready = True` if shadow has at least one completed `bot_runs` row with `started_at <= now() - comparison_window_days * interval '1 day'` — i.e., the shadow has been running continuously since *before* the comparison window boundary. A shadow started yesterday with `window=14` is **not** comparison-ready; it must have its oldest completed run starting at least 14 days ago. (M-new-7 — previous `>=` was a semantics inversion.)
 
 Returns `ShadowComparisonReport`. No DB write.
 
@@ -572,6 +659,7 @@ HTML-escaped via existing `html.escape()` pattern from Phase 11c/11d. `bot_name`
 - `decision_id` is a BIGINT; validated as numeric before any DB call (injection guard).
 - Calls `PATCH /api/bots/{bot_id}/advisor-decisions/{decision_id}` override endpoint internally (Phase 21a.1) with `override_action='approve'` and `override_reason=f"telegram_override:{from_user_id}"`.
 - Requires `from_user_id` in `app_config[telegram/allowlist]`.
+- **jwt-subject scoping (M-new-5):** the PATCH call is scoped to bots whose `created_by` matches the Telegram user's mapped jwt_subject. The mapping `telegram_user_id → jwt_subject` is stored in `app_config[telegram/user_jwt_map]` (JSONB, operator-configured). If no mapping exists for this `from_user_id`, the override is rejected with a Telegram reply: `⛔ Your Telegram user is not mapped to a JWT subject — contact admin.` This prevents any allowlisted Telegram user from overriding any bot's decisions regardless of ownership.
 - Uses `check_trade` rate-limit bucket (fail-CLOSED on Redis error — same money-moving bucket as Phase 11d).
 - Replies with confirmation: `✅ Override recorded for decision {decision_id}. The original order was not re-submitted.`
 - **Override is audit-only** — same invariant as Phase 21a.1 §3.3.
@@ -629,7 +717,8 @@ In `app/backtest/runner.py`:
    - Record `backtest_advisor_decisions` row (batch insert, same pattern as `backtest_bars` batch insert in Phase 20).
    - If `verdict='veto'`: skip order (do not push to fill queue); add `|fill_price * qty|` to `advisor_vetoed_pnl` accumulator.
    - If `verdict='approve'`: proceed normally.
-3. Latency measured via `time.monotonic()` around `stub.review()` — context-build time only.
+3. **Flush on status transition (M-new-6):** the batch-insert buffer for `backtest_advisor_decisions` is flushed whenever the backtest transitions to `done`, `failed`, or `cancelled` — regardless of buffer size. This prevents unflushed advisor-decision rows from being lost on early termination. The flush hook is added to `BacktestRunner._on_status_change()` (same hook point used by `ProgressPublisher`).
+4. Latency measured via `time.monotonic()` around `stub.review()` — context-build time only.
 
 ### 8.3 `BacktestConfigForm` changes
 
@@ -699,6 +788,18 @@ Toggle between single/dual view via a checkbox above the chart. Default: dual vi
 
 All frames include `v: 1` version field. FE drops `v !== 1` (same guard as Phase 21a advisor WS).
 
+**Versioned frame shapes (L-new-4 — for parser symmetry):**
+```jsonc
+// backtesting
+{"v": 1, "type": "backtesting", "suggestion_id": "uuid", "candidate_count": 3}
+// ranked
+{"v": 1, "type": "ranked",      "suggestion_id": "uuid", "candidate_count": 3}
+// applied
+{"v": 1, "type": "applied",     "suggestion_id": "uuid", "candidate_index": 1}
+// failed — explicit v:1 shape (was missing from Pass 1)
+{"v": 1, "type": "failed",      "suggestion_id": "uuid", "reason": "no_valid_candidates|cost_ceiling|queue_full|ai_error"}
+```
+
 **WS endpoint:** `GET /ws/bots/{id}/tuner` — per-bot, 50-conn cap, **global cap 100** (same pattern as Phase 19 `/ws/bots/status`; prevents connection exhaustion across many bots, M7), pubsub `bot:tuner:{bot_id}`, 500ms conflation.
 
 ### `bot:shadow:{live_bot_id}` pubsub channel
@@ -761,6 +862,7 @@ All frames include `v: 1` version field. FE drops `v !== 1` (same guard as Phase
 - `test_promote_wrong_shadow_of`: shadow not owned by live bot → 400.
 - `test_promote_already_deleted_shadow`: → 404.
 - `test_shadow_bot_cannot_trade_live`: `BotContext.place_order` with `is_shadow=True` → asserts paper mode on facade call (integration test).
+- `test_shadow_bot_fill_does_not_leak_to_live_child`: live bot child receives live fill event (`fills:live:*`); shadow child does not. Shadow child receives paper fill event (`fills:paper:*`); live child does not. (H-new-4)
 
 **Advisor extensions:**
 - `test_filings_injected_into_context`: `filings` row exists → appears in context payload.
@@ -804,7 +906,7 @@ All frames include `v: 1` version field. FE drops `v !== 1` (same guard as Phase
 | **A — Schema** | Alembic 0065 + 0066 + 0067, migration tests | Qwen | — |
 | **B — Param-tuner types + context builder** | `param_tuner/types.py`, `param_tuner/context_builder.py`, tests | Qwen | after A |
 | **C — Param-tuner service + APScheduler** | `param_tuner/service.py`, `param_tuner/metrics.py`, APScheduler job wiring in `main.py`, tests | Codex | after B |
-| **D — Shadow-promoter service + APScheduler** | `shadow_promoter/types.py`, `shadow_promoter/service.py`, `shadow_promoter/metrics.py`, APScheduler wiring, `BotContext` `is_shadow` guard, tests | Codex | after A |
+| **D — Shadow-promoter service + APScheduler** | `shadow_promoter/types.py`, `shadow_promoter/service.py`, `shadow_promoter/metrics.py`, APScheduler wiring, `BotContext` `is_shadow` guard, `BotFillRouter` fill-channel isolation (H-new-4), `BotSupervisor.restart()` (H-new-2), tests | Codex | after A |
 | **E — Advisor extensions** | `advisor/context_builder.py` (filings/earnings), `AdvisorConfig.notify_telegram`, `telegram/advisor_notify.py`, tests | Codex | after A |
 | **F — Advisor-in-backtest** | `backtest/advisor_stub.py`, `backtest/runner.py`, `BacktestReportKpis` extension, tests | Qwen | after A |
 | **G — REST + WS API** | `api/bots.py` (param-tuner + shadow endpoints), `api/ws_bots.py` (tuner + shadow WS), tests | Codex | after C + D |
@@ -812,6 +914,25 @@ All frames include `v: 1` version field. FE drops `v !== 1` (same guard as Phase
 | **I — Close-out** | CLAUDE.md, CHANGELOG.md, TASKS.md, tag v0.21.2 | Opus direct | after all |
 
 **Reviewer chain per chunk:** spec-compliance (haiku) + code-quality (sonnet) + lang-reviewer (haiku) on all. Chunk A: + database-reviewer (sonnet). Chunks C + D + E + G: + security-reviewer (sonnet). Chunk H: + typescript-reviewer (haiku). Phase end: ARCHITECT-REVIEW (opus).
+
+---
+
+## 13a. Cross-cutting concerns (Pass 2)
+
+**1. Phase 19 interfaces this phase modifies or depends on.** Implementers must read Phase 19 CLAUDE.md section before touching these surfaces:
+- `BotSupervisor.restart()` — new method, `supervisor.py` modified (§5.3a).
+- `BotFillRouter` shadow routing — fill channel namespace and matching predicate (§6.2, H-new-4).
+- `BotContext.place_order` shadow guard — `is_shadow` assertion (§6.2, H6).
+- `params_schema` subprocess sandbox — `app/bot/sandbox.py` reused by backfill-schema endpoint (§4, M-new-2).
+
+**2. Concurrency assumptions.** Every "read-aggregate then act" path in this spec is racy under concurrent triggers unless explicitly serialised:
+- `trigger()` cost ceiling: guarded by Redis `INCRBYFLOAT` reservation (H-new-3).
+- `trigger()` active-suggestion check: guarded by `SELECT … FOR UPDATE` on the `bot_param_suggestions` row (step 2 in §5.3 — implementer must use `SELECT … FOR UPDATE SKIP LOCKED` or equivalent to prevent double-trigger).
+- Scheduled fleet loop: serialised by single-replica today; multi-worker locking deferred to Phase 24.
+
+**3. Audit completeness.** The `applied` event — the most consequential write — currently has no immutable audit row independent of `bot_param_suggestions.status='applied'`. If the suggestion row is later mutated, the apply event history is lost. `shadow_promotion_events` handles this correctly for promotions. A future `bot_param_audit` append-only log keyed off `suggestion_id + timestamp` is recommended for Phase 23+; deferred intentionally here.
+
+**4. Param-approve risk gate note.** The LLM-proposes → human-approves param flow does not invoke `RiskService.evaluate()` directly. The documented assumption: bot risk caps (`bot_risk_caps`) + on-next-bar gate evaluation will catch any bad params at order time. This is acceptable for v0.21.2 but should be explicitly re-evaluated if param tuner ever becomes fully automated (auto-approve stub becomes real).
 
 ---
 
@@ -857,6 +978,21 @@ Every Phase 11a AI router consumer must re-apply these conventions — they are 
 | L3: Default mutable arg in `AdvisorStub` | `veto_injections: list[...] | None = None` pattern; `or []` in body; per Codex defaults |
 | L4: Single-replica cron caveat | Documented in §14 invariants and CLAUDE.md update (Phase 24 will add cron lease) |
 | L5: LLM verdict feedback loop | Documented as known characteristic; future test "veto-heavy context → bias check" noted |
+| H-new-1 (Pass 2): `risk_decisions.attempt_kind` CHECK DDL missing | `ALTER TABLE risk_decisions DROP CONSTRAINT ... ADD CONSTRAINT CHECK (... 'shadow_place_order')` added to Alembic 0065 §4 |
+| H-new-2 (Pass 2): `BotSupervisor.restart()` unspecified | Full specification added as §5.3a: signature, valid source states (`running/paused/error`), respawn backoff reset, mid-respawn rejection, stop-polling-via-pubsub, 8s timeout |
+| H-new-3 (Pass 2): Cost ceiling TOCTOU race | Redis `INCRBYFLOAT param_tuner:cost_pending:{utc_date}` reservation before AI call; `DECRBY` after; bounded overrun ≤ `$0.50` at N=5; `param_tuner_cost_reservation_failures_total` metric; documented in `trigger()` step 3 |
+| H-new-4 (Pass 2): Shadow fill isolation unspecified | `BotFillRouter` matching predicate is `(bot_id, is_shadow)` not `account_id` alone; paper fills on `fills:paper:*` channel; live fills on `fills:live:*`; isolation specified in §6.2; `test_shadow_bot_fill_does_not_leak_to_live_child` added |
+| M-new-1 (Pass 2): `ai_completion_id` eventual consistency | Comment in §4 DDL: provenance JOIN may return null; retry after 2s or accept eventual consistency |
+| M-new-2 (Pass 2): Backfill-schema endpoint subprocess sandbox | `POST /api/admin/bots/{id}/backfill-schema` mandated to use `DenylistFinder + RLIMIT_*` subprocess; documented in §4 DDL comment |
+| M-new-3 (Pass 2): "Most recent run" vs "rolling 5" contradiction | Stale "most recent bot_runs row" phrasing removed from `poll_backtest_results` step 2; delta deferred to step 3 where rolling-5 is computed |
+| M-new-4 (Pass 2): `BacktestSubmitter.submit()` parameters unspecified | Full parameter list added in §5.3: 90-day rolling window (`app_config[param_tuner/backtest_window_days]`), slippage/commission copied from bot's most recent backtest |
+| M-new-5 (Pass 2): Telegram override not jwt-subject-scoped | `/override_{decision_id}` now requires `app_config[telegram/user_jwt_map]` mapping; PATCH scoped to bots `created_by` matching operator's jwt_subject |
+| M-new-6 (Pass 2): Advisor decisions lost on backtest failure | Batch buffer flushed on `done/failed/cancelled` status transition via `BacktestRunner._on_status_change()` |
+| M-new-7 (Pass 2): `comparison_ready` semantics inverted | Fixed: `started_at <= now() - window_days * interval '1 day'` (oldest run is older than window); `>=` was wrong (any run started within window) |
+| L-new-1 (Pass 2): `MAX_BACKTEST_QUEUE_DEPTH` magic constant | Moved to `app_config[param_tuner/max_backtest_queue_depth]` (default 20) |
+| L-new-2 (Pass 2): `candidates` CHECK missing NOT NULL | `CHECK (candidates IS NOT NULL AND jsonb_array_length(candidates) <= 5)` — paranoia-documented |
+| L-new-3 (Pass 2): `ai_prompt_hash` unbounded TEXT | Documented in §4 DDL comment: CHAR(16) semantics, stored as unbounded TEXT |
+| L-new-4 (Pass 2): `failed` frame missing v:1 example | Full v:1-versioned frame shapes for all 4 frame types added to §10 |
 
 ---
 
