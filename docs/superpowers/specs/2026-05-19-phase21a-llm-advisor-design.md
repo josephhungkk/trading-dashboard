@@ -1,11 +1,11 @@
 # Phase 21a — LLM Advisor (v0.21.0)
 
 **Date:** 2026-05-19  
-**Status:** ARCHITECT-REVIEW Pass 1 + Pass 2 + Pass 3 + Pass 4 applied — ready for /writing-plans  
+**Status:** ARCHITECT-REVIEW Pass 1–5 applied — ready for /writing-plans  
 **Builds on:** Phase 19 (bot engine v1, v0.19.0) · Phase 20 (backtesting harness, v0.20.0) · Phase 11a (AI router, v0.11.0.8)  
 **Next phases:** 21b (param-tuning + shadow-promotion), 21c (perf-attribution)
 
-**ARCHITECT-REVIEW applied:** Pass 1 (4 CRIT + 6 HIGH + 7 MED) + Pass 2 (5 CRIT + 8 HIGH + 9 MED) + Pass 3 (6 CRIT + 9 HIGH + 11 MED) + Pass 4 (7 CRIT + 11 HIGH + 13 MED). All inline.
+**ARCHITECT-REVIEW applied:** Pass 1 (4 CRIT + 6 HIGH + 7 MED) + Pass 2 (5 CRIT + 8 HIGH + 9 MED) + Pass 3 (6 CRIT + 9 HIGH + 11 MED) + Pass 4 (7 CRIT + 11 HIGH + 13 MED) + Pass 5 (7 CRIT + 12 HIGH + 14 MED — 1 finding withdrawn). All inline.
 
 ---
 
@@ -37,7 +37,18 @@ Verified at `app/bot/supervisor.py:158–179`: `_child_async_main` is a stub —
 | **PAUSE/RESUME child handling** | child loop sets local `paused` flag on `{"cmd":"PAUSE"}`; stops dispatching `on_bar`/`on_fill` but keeps heartbeat alive; clears flag on `{"cmd":"RESUME"}` (CRIT-2-c) |
 | Heartbeat | already exists; reuse |
 
-If Phase 19.1 is deferred, **Chunk C** of Phase 21a must absorb this build-out (~3× its current size). The spec keeps Chunk C scoped for the advisor wiring only; implementers must confirm Phase 19.1 has shipped before starting Chunk C.
+**Sync/async impedance (HIGH-12):** Verified at `app/bot/base.py:51–65`: `BaseStrategy.on_bar`, `on_fill`, `on_start`, `on_stop` are all **synchronous**. Verified at `app/bot/context.py:75`: `BotContext.place_order` is **async**. A sync `on_bar` cannot directly await an async `place_order`. The advisor service is necessarily async (awaits the AI client). Phase 19.1 must pick one resolution:
+
+| Option | Trade-off |
+|---|---|
+| **Run strategies on a dedicated thread** (`asyncio.run_coroutine_threadsafe`) | Keeps `BaseStrategy` sync; `place_order` returns a `Future` the strategy blocks on via `.result()`; strategy thread idles during 3s advisor gate |
+| **Migrate `BaseStrategy` to async** | Breaking change; in-tree strategies are toy examples today so cost is low; cleaner long-term |
+
+Until Phase 19.1 picks one, this is a **known unresolved engineering question** that blocks Chunk C. `BaseStrategy.on_advisor_reject` (§4.2) stays **sync** to match the existing ABC — the hook is fire-and-forget from the async `place_order` path, not awaited.
+
+**Final recommendation: ship Phase 19.1 first.** Without a real supervisor child, a resolved sync/async hook model, and working PAUSE/RESUME, Chunk C of Phase 21a absorbs **3–5× its documented scope** — the entire supervisor child build-out plus the advisor wiring. Shipping 19.1 first keeps each phase independently reviewable and Chunk C at its documented size.
+
+If Phase 19.1 is deferred, **Chunk C** of Phase 21a must absorb this full build-out. The spec keeps Chunk C scoped for advisor wiring only; implementers must confirm Phase 19.1 has shipped (including a chosen sync/async bridge) before starting Chunk C.
 
 ---
 
@@ -468,7 +479,7 @@ Any Redis error is swallowed + logged (`advisor_auto_pause_errors_total`).
 
 #### `app/bot/base.py`
 
-Optional hook (noop default, additive):
+Optional hook (noop default, additive). **Stays synchronous** (matches existing `on_bar`/`on_fill`/`on_start`/`on_stop` ABC convention — HIGH-12). Called from `BotContext.place_order` (async) via `try: strategy.on_advisor_reject(...)` — no `await`. If the sync/async bridge in Phase 19.1 runs strategies on a thread, the hook is called from that thread; if BaseStrategy migrates to async, this hook becomes `async def` in the same migration:
 
 ```python
 def on_advisor_reject(
@@ -476,7 +487,11 @@ def on_advisor_reject(
     intent: "OrderIntent",
     decision: "AdvisorDecision",
 ) -> None:
-    """Called when the advisor vetoes an order. Noop by default."""
+    """Called when the advisor vetoes an order. Noop by default.
+
+    Sync hook — must not block the event loop. Long-running work should be
+    queued or scheduled, not executed inline.
+    """
 ```
 
 #### `app/bot/context.py`
@@ -616,6 +631,8 @@ finally:
 #### `app/api/bots.py`
 
 **NEW: `PUT /api/bots/{id}/advisor-config` — hot-reload endpoint (CRIT-7, HIGH-11)**
+
+Pattern: mirrors `PUT /api/bots/{id}/risk-caps` (verified `app/api/bots.py:342-377`) which publishes `bot:risk_caps:invalidate:{bot_id}` Redis pubsub without requiring `status='stopped'`. Advisor config follows the same hot-reload-by-pubsub pattern.
 
 - Requires `require_admin_jwt` dependency (same pattern as `app/api/combos.py` confirm endpoint).
 - Requires CSRF nonce (same pattern: `mintCsrfNonce()` on FE; nonce validated server-side).
@@ -1056,7 +1073,11 @@ advisor_audit_insert_failures_total                             counter
 advisor_publish_failures_total                                  counter
 advisor_budget_exceeded_total{bot_id}                           counter
 advisor_auto_pause_triggered_total{bot_id}                      counter
-advisor_unexpected_errors_total{exception}                      counter
+advisor_unexpected_errors_total{error_class}                    counter
+    # MED-14: closed taxonomy to prevent unbounded cardinality from provider-generated exception names
+    # error_class values: timeout | schema | network | provider | auth | other
+    # Mapping: TimeoutError→timeout; ValidationError→schema; ConnectionError→network;
+    #          AuthError→auth; AnthropicError/LiteLLMError→provider; *→other
 advisor_in_flight_skips_total{bot_id}                           counter
 advisor_unknown_tags_total{tag}                                 counter
 advisor_budget_reconcile_delta_usd                              gauge   (last reconcile diff)
@@ -1090,7 +1111,7 @@ advisor_config_reloads_total{bot_id}                            counter  [CRIT-7
 | **CRIT-2-c (Phase 19.1 integration, gated)** | PAUSE cmd sets child `paused` flag → `on_bar` not dispatched; RESUME clears `paused` flag → dispatch resumes; advisor threshold breach → PAUSE cmd emitted → bot status flips to `paused` (note: tests gated on Phase 19.1 child build-out) (3) |
 | **Total** | **~95** |
 
-*(target ~63 from post-pass-1 spec + ~23 additional from passes 2+3 + ~9 additional from pass 4)*
+*(target ~63 from post-pass-1 spec + ~23 additional from passes 2+3 + ~9 additional from pass 4; pass 5 validates totals as correct — no additional tests needed beyond HIGH-12/MED-14 which are documentation-only findings)*
 
 ### Frontend (~29 tests, Vitest + RTL)
 
@@ -1177,6 +1198,10 @@ Create paper bot → enable advisor OBSERVE → place order via debug endpoint �
 | MED-12 (NEW Pass 4): FK ON DELETE CASCADE for audit integrity | Changed to `ON DELETE RESTRICT` on both `bot_id` and `account_id`; comment in migration; documented in §4.3 |
 | MED-13 (NEW Pass 4): No cross-bot fan-out WS for AdvisorFeedPage | `GET /ws/bots/advisor` admin fan-out WS added (`psubscribe bot:advisor:*`); `AdvisorFeedPage` uses `useAdvisorFeedStream` hook; removes 10s polling; §4.2/§4.4/§2 updated |
 | LOW-8 (NEW Pass 4): Soft-deleted bots in advisor decision queries | Decision queries do NOT filter `deleted_at IS NULL` — auditors need decisions for retired bots; documented in §4.2 |
+| HIGH-12 (NEW Pass 5): Sync `on_bar` vs. async `place_order` impedance | Documented in §1.1 as known engineering question for Phase 19.1; `on_advisor_reject` explicitly stays sync; Phase 19.1 must pick sync/async bridge (thread + `run_coroutine_threadsafe` vs. migrate ABC to async) |
+| MED-14 (NEW Pass 5): `advisor_unexpected_errors_total{exception}` unbounded cardinality | Changed label to `{error_class}` with closed taxonomy: `timeout\|schema\|network\|provider\|auth\|other`; mapping documented in §7 |
+| LOW-9 (Pass 5 clarification): Storybook coverage for advisor components | No stories needed — advisor components live in `features/` layer; project convention (CLAUDE.md) is "features tested E2E, not Storybook"; confirmed by checking 17 existing feature-layer components |
+| CRIT-7 (Pass 5 refinement): Hot-reload pattern | Confirmed follows `PUT /api/bots/{id}/risk-caps` precedent (verified `app/api/bots.py:342–377`); same Redis-pubsub-without-stopped-check pattern; no novel design |
 
 ---
 
@@ -1198,6 +1223,8 @@ Create paper bot → enable advisor OBSERVE → place order via debug endpoint �
 | Full prompt persistence for compliance/replay | document requirement if raised by user |
 | Per-bot vs. fleet-shared cost ceiling | default is per-bot `daily_budget_usd`; fleet rollup via `ai_completions WHERE caller LIKE 'advisor:bot:%'` |
 | Per-account advisor config UI (FE form) | 21a.1 — `bot_accounts.advisor_config_override` column ships in 0063 to avoid a future migration |
+| Sync/async strategy hook bridge decision | Phase 19.1 — pick: thread-per-strategy + `run_coroutine_threadsafe`, or migrate `BaseStrategy` ABC to async (HIGH-12) |
+| Storybook stories for advisor components | Not needed — feature layer; tests + E2E is the policy (LOW-9 clarification) |
 
 ---
 
@@ -1236,7 +1263,12 @@ Create paper bot → enable advisor OBSERVE → place order via debug endpoint �
   psubscribe bot:advisor:*; AdvisorFeedPage uses this instead of 10s polling). REST:
   cursor list/detail (base64url cursor; decisions for soft-deleted bots remain queryable) +
   admin feed + dedicated advisor-config endpoint. 14 Prometheus metrics under `advisor_*`.
+  `advisor_unexpected_errors_total{error_class}` uses closed taxonomy
+  {timeout|schema|network|provider|auth|other} to prevent cardinality blowup.
+  `BaseStrategy.on_advisor_reject` is sync (matches ABC; called non-awaited from async
+  place_order). Sync/async bridge (sync on_bar→async place_order) is a Phase 19.1 decision.
   ~95 BE / ~29 FE tests. **Gated on Phase 19.1** (supervisor child build-out; PAUSE/RESUME
-  child loop handling). Deferred: SHADOW, async-parallel, human override,
+  child loop; sync/async strategy bridge decision). Ship 19.1 first — without it, Chunk C
+  absorbs 3–5× its documented scope. Deferred: SHADOW, async-parallel, human override,
   advisor-in-backtest, Telegram, per-account advisor config UI.
 ```
