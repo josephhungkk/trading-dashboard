@@ -7,6 +7,7 @@
 
 **Sub-phases:**
 - **22a** — BotOrchestrator + PortfolioExposureGate + CorrelationService + AutoPromoteEvaluator + NightlyRetrainJob → v0.22.0
+- **22a.1** — Sector ingestion + marginal-variance correlation + auto-promote veto window (deferrals from 22a) → v0.22.0.1 *(spec'd separately when scheduled)*
 - **22b** — StrategyGenerator + child-process sandbox + Bot worker integration → v0.22.1
 - **22c** — HealthDigestService + FE OrchestrationPage → v0.22.2
 
