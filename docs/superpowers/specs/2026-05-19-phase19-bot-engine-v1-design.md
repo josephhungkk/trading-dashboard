@@ -18,7 +18,7 @@ Phase 20 (backtesting harness) will replay historical bars through the same `Bas
 
 ### 2.1 BaseStrategy ABC
 
-Strategies live in a `strategies/` directory at the repo root (gitignored; volume-mounted read-only into the bot_worker container at `/strategies`). Each strategy is a Python file containing exactly one class that subclasses `BaseStrategy`:
+Strategies live in a `strategies/` directory at the repo root (gitignored; volume-mounted read-only into both `backend` and `bot_worker` containers at `/strategies`). Each strategy is a Python file containing exactly one class that subclasses `BaseStrategy`:
 
 ```python
 # app/bot/base.py
@@ -31,29 +31,32 @@ class BaseStrategy(ABC):
     accounts: list[UUID]         # injected at init from bot.account_ids
     ctx: BotContext              # injected at init
 
-    # Optional: declare a JSON Schema dict here for API-side params validation.
-    # If present, POST /api/bots and PUT /api/bots/{id} validate params_json
-    # against it and return 400 with field-level errors on mismatch.
+    # Optional: declare a JSONSchema dict here for API-side params validation.
+    # The API extracts this via a sandboxed subprocess (see §2.1 extraction) at
+    # bot create/update time; validates params_json and returns 400 on mismatch.
     params_schema: dict[str, Any] | None = None
 
     @abstractmethod
     async def on_start(self) -> None: ...
-    # Called once on bot launch. Use for warm-up: subscribe to symbols,
-    # load initial state, validate params.
+    # Called once on bot launch, AFTER BarAggregator is started (but bar delivery
+    # is paused until on_start() returns). Subscribe symbols here via ctx.subscribe().
 
     @abstractmethod
     async def on_bar(self, bar: BarEvent) -> None: ...
-    # Called on each bar-complete event at the configured timeframe.
-    # Primary decision point for the strategy.
+    # Called on each bar-complete event. Primary decision point.
 
     async def on_fill(self, fill: FillEvent) -> None: ...
-    # Optional. Called when a fill event arrives for an order placed by this bot.
-    # Fills are routed here by BotFillRouter (see §4.4), not by place_order().
+    # Optional. Routed here by BotFillRouter (§4.4), not by place_order().
 
     async def on_stop(self) -> None: ...
-    # Optional. Called on graceful shutdown. Responsible for cancelling open
-    # orders if desired.
+    # Optional. Called on graceful shutdown. Cancel open orders here if desired.
 ```
+
+**`params_schema` extraction:** When `POST /api/bots` or `PUT /api/bots/{id}` is called, the API runs a sandboxed subprocess:
+```
+python -c "import json, importlib.util; spec = importlib.util.spec_from_file_location('s', '<path>'); m = spec.loader.load_module(); cls = next(c for c in vars(m).values() if isinstance(c, type) and issubclass(c, BaseStrategy) and c is not BaseStrategy); print(json.dumps(cls.params_schema))"
+```
+with a 5s timeout and the MetaPathFinder denylist active. Result is cached in `bots.params_schema_json` (see §3.1). If `params_schema` is non-null, `params_json` is validated against it; mismatch → 400 with field-level errors. Counter: `bot_params_validation_failures_total`.
 
 ### 2.2 BarEvent and FillEvent
 
@@ -67,7 +70,7 @@ class BarEvent:
     low: Decimal
     close: Decimal
     volume: Decimal
-    ts: datetime            # bar close time (UTC)
+    ts: datetime            # bar close time (UTC for intraday; session-close for daily)
 
 @dataclass(frozen=True)
 class FillEvent:
@@ -82,58 +85,73 @@ class FillEvent:
 
 ### 2.3 Strategy Loading & Import Sandbox
 
-The supervisor loads strategies in the child process using `importlib.util.spec_from_file_location` — no `eval`, no `exec`. The child scans the loaded module for the single concrete subclass of `BaseStrategy` and instantiates it with injected `params`, `accounts`, and `ctx`.
+The child process loads strategies using `importlib.util.spec_from_file_location` — no `eval`, no `exec`. It scans the loaded module for the single concrete subclass of `BaseStrategy` and instantiates it with injected `params`, `accounts`, and `ctx`.
 
-Before importing, the child installs a `MetaPathFinder` denylist that blocks any attempt to import `app.api.*` or `app.services.orders_service` from within the strategy module. A denied import raises `ImportError` → child exits with `status='error'`, `error_msg='strategy_imports_forbidden_module'`. Metric: `bot_forbidden_import_total{module}`.
+Before importing, the child installs a `MetaPathFinder` denylist blocking `app.api.*` and `app.services.orders_service`. A denied import → `ImportError` → child exits `status='error'`, `error_msg='strategy_imports_forbidden_module'`. Metric: `bot_forbidden_import_total{bot_id, module}`.
 
-Strategies may use any other installed Python library. All side-effects must go through `BotContext`.
+All side-effects must go through `BotContext`.
 
 ### 2.4 Bar Feed — Child-Local Tick→Bar Aggregator
 
-The `quote.<source>.<canonical_id>` Redis pubsub carries **ticks**, not bars. `BarService` is a pull-only DB query service; it does not emit bar-complete events. Therefore each child process runs a `BarAggregator` to convert ticks to bars.
+`quote.<source>.<canonical_id>` Redis pubsub carries **ticks**, not bars. `BarService` is pull-only. Each child runs a `BarAggregator` (`app/bot/bar_aggregator.py`) to convert ticks to bars.
 
-`BarAggregator` (`app/bot/bar_aggregator.py`):
-- Subscribes to `quote.*.<canonical_id>` for each symbol registered via `ctx.subscribe(canonical_id)`.
-- Maintains a per-symbol OHLCV accumulator keyed by `(canonical_id, timeframe_bucket)`.
-- When a tick's timestamp crosses a timeframe boundary, emits a `BarEvent` to a bounded `asyncio.Queue(maxsize=100)` shared with the strategy runner.
-- On queue overflow: drops oldest event, emits `bot_bar_events_dropped_total{bot_id}` counter, logs `structlog.warning`.
+**Boundary computation:**
+- `1m`, `5m`, `15m`, `30m`, `1h` → UTC-boundary modulo timeframe (standard OHLCV convention).
+- `1d`, `1w` → market session-close boundary via `MarketCalendar` (Phase 5b surface). Uses the primary exchange of the instrument to select the right calendar.
 
-Metric: `bot_bars_aggregator_unhealthy_total{bot_id}` — incremented when the aggregator task exits unexpectedly (supervisor re-creates the task).
+**Startup:** `BarAggregator` starts **before** `on_start()` is called, but bar delivery to the strategy queue is **paused** until `on_start()` returns. Ticks arriving during warm-up are accumulated in the running bar; no bar-complete events are emitted into the queue during pause. Partial bars at startup (bars whose open tick was missed) are skipped once delivery unpauses. Metric: `bot_partial_bars_skipped_total{bot_id}`.
 
-The strategy runner pulls from the queue and calls `await strategy.on_bar(bar)`.
+**Queue:** A bounded `asyncio.Queue(maxsize=100)` sits between `BarAggregator` and the strategy runner. On overflow: drop oldest, emit `bot_bar_events_dropped_total{bot_id}`, `structlog.warning`.
+
+Metric: `bot_bars_aggregator_unhealthy_total{bot_id}` — incremented when the aggregator task exits unexpectedly.
 
 ---
 
 ## 3. Data Model (Alembic 0061)
 
-> **Note:** Migrations 0059 (`filings`) and 0060 (`earnings`) were shipped in Phase 18.1/18.2. This migration depends on 0060 having widened `risk_decisions.attempt_kind` (for `auto_flat_close`); 0061 widens it further for `bot_place_order`.
+> **Note:** 0059 = Phase 18.1 filings; 0060 = Phase 18.2 earnings. This migration adds `bot_place_order` to the existing 11-value `risk_decisions.attempt_kind` allowlist (see §3.5).
 
 ### 3.1 `bots`
 
 ```sql
 CREATE TABLE bots (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name            TEXT NOT NULL,
-    strategy_file   TEXT NOT NULL,         -- relative path under /strategies
-    params_json     JSONB NOT NULL DEFAULT '{}',
-    account_ids     UUID[] NOT NULL,       -- FK-checked at API layer
-    version         INT NOT NULL DEFAULT 1,
-    status          TEXT NOT NULL DEFAULT 'stopped'
-                    CHECK (status IN ('stopped','starting','running','pausing','paused','error')),
-    error_msg       TEXT,
-    mode            TEXT NOT NULL DEFAULT 'paper'
-                    CHECK (mode IN ('paper','live')),
-    bar_timeframe   TEXT NOT NULL DEFAULT '1m',
-    deleted_at      TIMESTAMPTZ,           -- soft-delete
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                TEXT NOT NULL,
+    strategy_file       TEXT NOT NULL,         -- relative path under /strategies
+    params_json         JSONB NOT NULL DEFAULT '{}',
+    params_schema_json  JSONB,                 -- extracted from params_schema class attr; NULL = no schema
+    version             INT NOT NULL DEFAULT 1,
+    status              TEXT NOT NULL DEFAULT 'stopped'
+                        CHECK (status IN ('stopped','starting','running','pausing','paused','error')),
+    error_msg           TEXT CHECK (length(error_msg) <= 2000),  -- truncated at writer
+    mode                TEXT NOT NULL DEFAULT 'paper'
+                        CHECK (mode IN ('paper','live')),
+    bar_timeframe       TEXT NOT NULL DEFAULT '1m',
+    deleted_at          TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX ON bots (status) WHERE deleted_at IS NULL;
 ```
 
-### 3.2 `bot_risk_caps`
+### 3.2 `bot_accounts` (replaces `bots.account_ids` UUID array)
 
-One row per bot. NULL value = inherit the account-level limit from `risk_limits`.
+Join table with proper FK integrity. Replaces the UUID array approach.
+
+```sql
+CREATE TABLE bot_accounts (
+    bot_id      UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    account_id  UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
+    PRIMARY KEY (bot_id, account_id)
+);
+CREATE INDEX ON bot_accounts (account_id);
+```
+
+`ON DELETE RESTRICT` on `account_id` prevents silent orphaning — operator must remove accounts from bots before deleting a `broker_accounts` row.
+
+### 3.3 `bot_risk_caps`
+
+One row per bot. NULL value = inherit the account-level limit from `risk_limits`. Daily-loss is tracked **per (bot, account, day)** (see §5.2); `daily_loss_tz` is derived at runtime from the account's primary market calendar, not stored here.
 
 ```sql
 CREATE TABLE bot_risk_caps (
@@ -143,12 +161,13 @@ CREATE TABLE bot_risk_caps (
     max_open_orders         INT,
     max_order_size          NUMERIC(20,8),
     allowed_asset_classes   TEXT[],          -- NULL = all asset classes allowed
-    daily_loss_tz           TEXT NOT NULL DEFAULT 'UTC',  -- market TZ for daily-loss key
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
-### 3.3 `bot_runs` (TimescaleDB hypertable)
+### 3.4 `bot_runs` (TimescaleDB hypertable)
+
+`order_count` and `fill_count` are **removed** — computed on-demand via `bot_orders` count queries (avoids the run_id linkage problem after 90-day retention drops rows).
 
 ```sql
 CREATE TABLE bot_runs (
@@ -159,8 +178,6 @@ CREATE TABLE bot_runs (
     stopped_at      TIMESTAMPTZ,
     stop_reason     TEXT CHECK (stop_reason IN ('manual','error','daily_loss_cap','kill_switch')),
     bar_count       INT NOT NULL DEFAULT 0,
-    order_count     INT NOT NULL DEFAULT 0,
-    fill_count      INT NOT NULL DEFAULT 0,
     PRIMARY KEY (id, started_at)
 );
 SELECT create_hypertable('bot_runs', 'started_at', chunk_time_interval => INTERVAL '7 days');
@@ -168,9 +185,13 @@ SELECT add_retention_policy('bot_runs', INTERVAL '90 days');
 CREATE INDEX ON bot_runs (bot_id, started_at DESC);
 ```
 
-### 3.4 `bot_orders`
+`order_count` / `fill_count` for a run are computed as:
+```sql
+SELECT COUNT(*) FROM bot_orders WHERE bot_id = :bot_id
+  AND placed_at BETWEEN :started_at AND COALESCE(:stopped_at, now())
+```
 
-Audit trail linking every bot-placed order to its bot. No `run_id` column — `bot_orders` outlives the 90-day `bot_runs` hypertable retention; the owning run can be reconstructed by time-range join on `placed_at` vs `bot_runs.started_at/stopped_at`.
+### 3.5 `bot_orders`
 
 ```sql
 CREATE TABLE bot_orders (
@@ -181,19 +202,23 @@ CREATE TABLE bot_orders (
 CREATE INDEX ON bot_orders (bot_id, placed_at DESC);
 ```
 
-### 3.5 `risk_decisions.attempt_kind` widening
+No `run_id` — avoids FK integrity problem with hypertable composite PK + 90-day retention. Run ownership is reconstructed by time-range join when needed.
+
+### 3.6 `risk_decisions.attempt_kind` widening
+
+The existing constraint from 0060 allows 11 values. 0061 adds `bot_place_order`:
 
 ```sql
 ALTER TABLE risk_decisions DROP CONSTRAINT risk_decisions_attempt_kind_check;
 ALTER TABLE risk_decisions ADD CONSTRAINT risk_decisions_attempt_kind_check
   CHECK (attempt_kind IN (
-    'preview', 'place_order', 'modify_order',
-    'auto_flat_close',    -- added Phase 18.2 (0060)
-    'bot_place_order'     -- added Phase 19 (0061)
+    'preview', 'place', 'modify', 'place_order', 'modify_order',
+    'combo_preview', 'combo_place', 'combo_autoclose',
+    'telegram', 'telegram_confirm',
+    'earnings_hook_flat',
+    'bot_place_order'    -- added Phase 19 (0061)
   ));
 ```
-
-`BotContext.place_order()` passes `attempt_kind='bot_place_order'` through to `RiskService.evaluate()` / the audit insert, distinguishing bot-placed orders from operator-placed orders in the `risk_decisions` table.
 
 ---
 
@@ -216,76 +241,78 @@ bot_worker:
     - backend
 ```
 
-`strategies/` is gitignored at the repo root. Operator places strategy `.py` files there manually or via the admin UI (future phase).
+`backend` also mounts `/strategies:ro` for the `params_schema` extraction subprocess (§2.1). `strategies/` is gitignored at repo root.
 
 ### 4.2 BotSupervisor
 
 `app/bot/supervisor.py` — runs as the main process in `bot_worker`.
 
 **Startup:**
-1. Drain `bot:control:{bot_id}` command queues for all known bots (pick up commands sent during supervisor downtime).
-2. Query `bots WHERE status IN ('running', 'pausing') AND deleted_at IS NULL` and re-spawn each as a child process (crash recovery).
+1. Drain inflight command keys for all known bots (skip already-executed command IDs).
+2. Query `bots WHERE status IN ('running', 'pausing') AND deleted_at IS NULL`; re-spawn each as a child process (crash recovery).
 
-**Control queue (Redis LIST — replaces pubsub for reliability):**
+**Control queue — Redis Streams with consumer groups:**
 
-Commands are delivered via `LPUSH bot:control:{bot_id} <CMD>` (API side) and consumed via `BRPOPLPUSH bot:control:{bot_id} bot:control:inflight:{bot_id}` (supervisor side). After the command is acted on, supervisor removes it from the inflight list. If the supervisor restarts mid-command, the inflight list is drained on startup.
+Commands use `XADD bot:control:{bot_id}` (API) and a consumer group `supervisor` with `XREADGROUP` + `XACK` (supervisor). Built-in ack/redeliver semantics: if supervisor crashes mid-command, the unacked entry is redeliverable via `XAUTOCLAIM` on next startup. Command payload: `{id: uuid, cmd: START|STOP|PAUSE|RESUME|DEPLOY}`. Recently-executed command IDs are tracked in a Redis SET (`bot:control:done:{bot_id}`, 1h TTL) to skip duplicates on redeliver.
 
-| API action | Command pushed | Supervisor action |
+| API action | Stream entry | Supervisor action |
 |---|---|---|
-| `POST /start` | `START` | Spawn child; INSERT `bot_runs` row with `bots.version` snapshot |
-| `POST /stop` | `STOP` | Send `STOP` via child's per-bot control queue; child calls `on_stop()` → exits 0 |
-| `POST /pause` | `PAUSE` | Send `PAUSE` via child control queue; child pauses bar feed |
-| `POST /resume` | `RESUME` | Send `RESUME` via child control queue; child resumes bar feed |
-| `POST /deploy` | `STOP` then `START` | Atomically: `UPDATE bots SET version = version + 1 RETURNING version`; stop old child, spawn new |
+| `POST /start` | `{cmd: START}` | Spawn child; INSERT `bot_runs` with `bots.version` snapshot |
+| `POST /stop` | `{cmd: STOP}` | Send STOP via child's `multiprocessing.Queue`; child calls `on_stop()` → exits 0 |
+| `POST /pause` | `{cmd: PAUSE}` | Forward via child queue; child pauses bar delivery |
+| `POST /resume` | `{cmd: RESUME}` | Forward via child queue; child resumes |
+| `POST /deploy` | `{cmd: DEPLOY}` | `UPDATE bots SET version = version + 1 RETURNING version` (atomic); STOP old child; spawn new |
 
-Metric: `bot_control_command_timeouts_total{action}` — incremented when a bot remains in `starting` or `pausing` status for >30s (command presumed lost).
+Metric: `bot_control_command_timeouts_total{action}` — status stuck in `starting`/`pausing` >30s.
 
-**In-band pause/resume (replaces SIGUSR1/2):** The supervisor forwards `PAUSE`/`RESUME` commands to the child via a `multiprocessing.Queue` (per-child, created at spawn time). The child's asyncio loop polls this queue and suspends/resumes the bar feed consumer. No POSIX signals used for control (SIGUSR1/2 conflict with profilers/debuggers).
+**In-band pause/resume:** Supervisor forwards PAUSE/RESUME/STOP to child via per-child `multiprocessing.Queue`. No POSIX signals for control.
 
-**Heartbeat monitoring:** each child writes `bot:heartbeat:{bot_id}` Redis key with 10s TTL every 5s. Supervisor polls every 8s. On expiry:
-1. Mark `bots.status='error'`, UPDATE `bot_runs.stopped_at`, `stop_reason='error'`
-2. Respawn with exponential backoff: 10s → 30s → 60s (3 attempts max)
-3. After 3 failures: set `status='error'`, set `error_msg`, stop retrying, publish `bot:status:{id}` event
-4. Increment `bot_respawn_total{bot_id}` on each attempt; `bot_unexpected_exit_total{bot_id}` on exit-code mismatch (exit 0 while `status='running'`)
+**Heartbeat monitoring:** each child writes `bot:heartbeat:{bot_id}` Redis key (10s TTL) every 5s. Supervisor polls every 8s. On expiry:
+1. Mark `bots.status='error'`; UPDATE `bot_runs.stopped_at`, `stop_reason='error'`
+2. Respawn with backoff: 10s → 30s → 60s (3 attempts max)
+3. After 3 failures: set `status='error'`, `error_msg`, stop retrying, publish `bot:status:{id}`
+4. Metrics: `bot_respawn_total{bot_id}` per attempt; `bot_unexpected_exit_total{bot_id}` on exit-code mismatch
 
 **Exit-code contract:**
-- Exit 0 + `status IN ('pausing','stopping')` → supervisor marks `status='stopped'`, no respawn.
+- Exit 0 + `status IN ('pausing','stopping')` → mark `status='stopped'`, no respawn.
 - Exit non-zero OR heartbeat expiry → respawn with backoff.
-- Exit 0 + `status='running'` → unexpected; log, increment `bot_unexpected_exit_total`, treat as crash.
+- Exit 0 + `status='running'` → log, increment `bot_unexpected_exit_total`, treat as crash.
 
 ### 4.3 Child Process
 
 Each bot runs as a `multiprocessing.Process` with its own:
 - asyncio event loop
-- SQLAlchemy async DB connection pool (**4 connections** — place_order holds 1 during RiskService + audit; get_positions is a concurrent read path)
+- SQLAlchemy async DB connection pool (4 connections)
 - Redis connection
 - `BotContext` instance
 - `BarAggregator` instance
-- `multiprocessing.Queue` for in-band PAUSE/RESUME/STOP commands from supervisor
+- `multiprocessing.Queue` for PAUSE/RESUME/STOP from supervisor
 
 Child process lifecycle:
 1. Install `MetaPathFinder` denylist (§2.3)
-2. Load strategy file via `importlib`; fail fast if `params_schema` validation fails
-3. **Live-mode check:** if `bot.mode='live'`, verify all `account_ids` resolve to `broker_accounts.mode='live'`; if any mismatch → exit with `status='error'`, `error_msg='mode_mismatch'` (this is the authoritative check; API does a cheap pre-flight for UX only)
-4. INSERT `bot_runs (bot_id, version, started_at)` — `version` copied from `bots.version` at this moment
-5. Instantiate strategy with `params`, `accounts`, `ctx`; call `await strategy.on_start()`
-6. Start `BarAggregator` task; subscribe to tick stream for each symbol registered in `on_start()`
-7. Poll per-child `multiprocessing.Queue` for PAUSE/RESUME/STOP alongside bar-event loop
-8. On each bar-complete (from bounded asyncio.Queue, maxsize=100): `await strategy.on_bar(bar)`
-9. On fill routed by `BotFillRouter` (§4.4): `await strategy.on_fill(fill)`
-10. On STOP command: cancel bar subscription, `await strategy.on_stop()`, UPDATE `bot_runs.stopped_at + stop_reason='manual'`, exit 0
+2. Load strategy file via `importlib`; validate `params_json` against `params_schema` if set
+3. **Authoritative live-mode check:** if `bot.mode='live'`, verify all `bot_accounts.account_id` resolve to `broker_accounts.mode='live'`; mismatch → exit `status='error'`, `error_msg='mode_mismatch'`
+4. INSERT `bot_runs(bot_id, version, started_at)` — `version` from `bots.version` at this moment
+5. Start `BarAggregator` task (bar delivery paused)
+6. Instantiate strategy; call `await strategy.on_start()` (symbols registered here via `ctx.subscribe()`)
+7. Unpause bar delivery; begin consuming bar queue
+8. Poll per-child `multiprocessing.Queue` for control commands alongside bar loop
+9. On each bar-complete: `await strategy.on_bar(bar)` (histogram: `bot_on_bar_latency_seconds`)
+10. On fill event via `bot:fill:{bot_id}` Redis pubsub: `await strategy.on_fill(fill)`
+11. On STOP: cancel bar subscription, `await strategy.on_stop()`, UPDATE `bot_runs.stopped_at + stop_reason='manual'`, exit 0
+
+**Per-call mode-drift check in `BotContext.place_order`:** re-verifies `broker_accounts.mode` matches `self.mode` (60s Redis cache). Mismatch → `BotModeMismatchError` → child exits `error_msg='mode_drift'`.
 
 ### 4.4 BotFillRouter
 
-`app/bot/fill_router.py` — a lightweight asyncio task running in the **backend** (not bot_worker), co-located with the existing `OrderFillProcessor`.
+`app/bot/fill_router.py` — asyncio task running in **backend**, co-located with `OrderFillProcessor`.
 
 When a fill arrives whose `order_id` exists in `bot_orders`:
-1. Publish `bot:fill:{bot_id}` Redis pubsub event (child's asyncio loop subscribes)
-2. `UPDATE bot_runs SET fill_count = fill_count + 1 WHERE id = :run_id AND started_at = :started_at`
-3. `INCRBYFLOAT bot:daily_loss:{bot_id}:{market_tz_date}` by the fill's realised PnL
-4. Increment `bot_fill_events_total{bot_id, side}`
+1. Publish `bot:fill:{bot_id}` Redis pubsub (child subscribes; triggers `on_fill()`)
+2. `INCRBYFLOAT bot:daily_loss:{bot_id}:{account_id}:{tz_date}` by fill's realised PnL (per-account key — see §5.2)
+3. Increment `bot_fill_events_total{bot_id, side}`
 
-Fills do **not** come from `BotContext.place_order()` — that returns an order acknowledgement only. `BotFillRouter` is the single path that routes async broker fills back to bots.
+Fills do **not** come from `BotContext.place_order()`. `BotFillRouter` is the sole fill-routing path.
 
 ---
 
@@ -293,63 +320,97 @@ Fills do **not** come from `BotContext.place_order()` — that returns an order 
 
 ### 5.1 BotRiskCapService
 
-`app/bot/risk_caps.py` — runs *before* `RiskService.evaluate()` in every `BotContext.place_order()` call. The bot caps are a **pre-filter**, not an override injected into `RiskService` — `EvaluationContext` (frozen dataclass, 22 fields) is not modified. Account-level `risk_limits` remain fully active after the pre-filter passes.
+`app/bot/risk_caps.py` — pure pre-filter before `RiskService.evaluate()`. `EvaluationContext` (frozen, 22 fields) is not modified.
 
 Five checks:
 
 | Check | Fail policy | Rationale |
 |---|---|---|
-| `qty × price > max_order_size` | **fail-CLOSED** | Money-moving; Redis outage must not let this through |
-| `bot open order count ≥ max_open_orders` | fail-OPEN | Non-catastrophic; count query failure is unlikely |
-| `bot realised PnL today ≤ −max_daily_loss` | **fail-CLOSED** | Money-moving |
-| `allowed_asset_classes IS NOT NULL AND instrument.asset_class NOT IN allowed_asset_classes` | fail-OPEN | Account-level gate still enforces |
+| `qty × price > max_order_size` | **fail-CLOSED** | Money-moving |
+| `bot open order count ≥ max_open_orders` | fail-OPEN | Non-catastrophic |
+| `bot realised PnL today (per account) ≤ −max_daily_loss` | **fail-CLOSED** | Money-moving |
+| `allowed_asset_classes IS NOT NULL AND instrument.asset_class NOT IN allowed_asset_classes` | fail-OPEN | Account gate still enforces |
 | `resulting position size > max_position_size` | **fail-CLOSED** | Money-moving |
 
-Caps are Redis-cached with 60s TTL. Invalidation: `PUT /api/bots/{id}/risk-caps` publishes `bot:risk_caps:invalidate:{bot_id}` to a Redis pubsub channel; both the API process and the bot_worker child subscribe and drop their local LRU cache entry on receipt.
+Caps cached 60s in Redis. Invalidation: `PUT /api/bots/{id}/risk-caps` publishes `bot:risk_caps:invalidate:{bot_id}`; API and bot_worker child both subscribe and evict.
 
-### 5.2 Daily Loss Tracking
+### 5.2 Daily Loss Tracking (per account)
 
-`bot:daily_loss:{bot_id}:{market_tz_yyyy_mm_dd}` Redis key:
-- Key suffix uses the **account's market calendar timezone** (`bot_risk_caps.daily_loss_tz`, default `'UTC'`), not hardcoded UTC. Pattern: `bot:daily_loss:{bot_id}:{tz_date}`.
-- `INCRBYFLOAT` on each fill (written by `BotFillRouter`, §4.4).
-- TTL set to seconds until midnight in `daily_loss_tz`.
-- On cap hit: supervisor publishes `bot:status:{id}` with `stop_reason='daily_loss_cap'`, sends STOP command to child, which calls `on_stop()` and exits.
+Redis key: `bot:daily_loss:{bot_id}:{account_id}:{tz_date}` where `tz_date` is computed from the **account's primary market calendar timezone** (derived via `MarketCalendar` from `broker_accounts.primary_exchange`; e.g. `US/Eastern` for NYSE accounts, `Asia/Hong_Kong` for HKEX). TTL = seconds until midnight in that timezone.
+
+Written by `BotFillRouter` (§4.4). Read by `BotRiskCapService` — sums across all of the bot's accounts to get total daily PnL before comparing to `max_daily_loss`.
 
 ---
 
-## 6. BotContext
+## 6. BotContext & Order Placement
 
-`app/bot/context.py` — the only surface strategies touch for side-effects.
+`app/bot/context.py` and `app/bot/orders_facade.py`.
+
+**`BotOrdersFacade`** — thin class holding injected dependencies (`db`, `redis`, `cfg`, `registry`, `capability`) and exposing bot-flavoured order operations. Avoids injecting a non-existent "OrdersService" class (orders_service.py is a module of module-level coroutines).
+
+```python
+class BotOrdersFacade:
+    async def place_order(
+        self,
+        account_id: UUID,
+        canonical_id: str,
+        side: str,
+        qty: Decimal,
+        order_type: str,
+        limit_price: Decimal | None = None,
+        stop_price: Decimal | None = None,
+        tif: str = "DAY",
+        algo_strategy: str | None = None,
+        conid: int | None = None,   # optional: skip InstrumentResolver if caller knows it
+    ) -> OrderResponse:
+        # Resolves conid via InstrumentResolver if not supplied (handles new positions).
+        # Calls place_order_internal(issuer='bot', attempt_kind='bot_place_order', ...).
+        # place_order_internal fabricates nonce f"internal:bot:{client_order_id}";
+        # no Redis preview-mint required.
+        ...
+
+    async def cancel_order(self, order_id: UUID, account_id: UUID) -> None:
+        # Calls orders_service.cancel_order (no risk gate; conid resolved via bot_orders join).
+        # Emits bot_fill_events_total{side='cancel'} for consistency.
+        ...
+```
+
+**`place_order_internal` wiring:**  `issuer` Literal is widened to include `"bot"`. `attempt_kind` is derived as `"bot_place_order"` when `issuer == "bot"`. The internal path skips Redis nonce validation and uses `InstrumentResolver` for conid lookup, so both new and existing positions are handled.
+
+**`BotContext`** — the strategy-facing surface:
 
 ```python
 class BotContext:
-    # Fields injected at child-process init.
     bot_id: UUID
     run_id: UUID
     accounts: list[UUID]
     mode: Literal["paper", "live"]
-    _orders_svc: OrdersService          # injected; not exposed to strategy
-    _risk_cap_svc: BotRiskCapService    # injected; not exposed to strategy
+    _facade: BotOrdersFacade
+    _risk_cap_svc: BotRiskCapService
 
     async def subscribe(self, canonical_id: str) -> None:
         # Registers canonical_id with the child's BarAggregator.
 
-    async def place_order(self, account_id: UUID, req: PlaceOrderRequest) -> OrderResponse:
-        # 1. assert account_id in self.accounts      → raises BotAccountError
-        # 2. BotRiskCapService.check()               → raises BotRiskCapError on BLOCK
-        # 3. OrdersService.place_order(              # full pipeline incl. RiskService
-        #        attempt_kind='bot_place_order')
-        # 4. INSERT bot_orders(order_id, bot_id, placed_at)
-        # 5. UPDATE bot_runs SET order_count = order_count + 1
-        # Fills are async — routed back via BotFillRouter (§4.4), not here.
+    async def place_order(self, account_id: UUID, **kwargs) -> OrderResponse:
+        # 1. assert account_id in self.accounts          → BotAccountError
+        # 2. re-verify broker_accounts.mode (60s cache)  → BotModeMismatchError on drift
+        # 3. BotRiskCapService.check()                   → BotRiskCapError on BLOCK
+        # 4. BotOrdersFacade.place_order(attempt_kind='bot_place_order')
+        # 5. INSERT bot_orders(order_id, bot_id, placed_at)
+        # 6. Increment bot_runs.bar_count [no — update order_count on-demand]
 
-    async def cancel_order(self, order_id: UUID) -> None: ...
-    async def get_positions(self, account_id: UUID) -> list[PositionRow]: ...
-    async def get_open_orders(self, account_id: UUID) -> list[OrderRow]: ...
-    async def get_fills_today(self, account_id: UUID) -> list[FillRow]: ...
+    async def cancel_order(self, order_id: UUID) -> None:
+        # delegates to BotOrdersFacade.cancel_order; verifies order_id in bot_orders
+    
+    async def get_positions(self, account_id: UUID) -> list[PositionRow]:
+        # DB positions table — eventual-consistent, always available
+
+    async def get_open_orders(self, account_id: UUID) -> list[OrderRow]:
+        # DB orders WHERE status IN ('working','submitted') AND account_id = ?
+
+    async def get_fills_today(self, account_id: UUID) -> list[FillRow]:
+        # DB order_fills WHERE account_id = ? AND filled_at >= session_open(account_tz)
 ```
-
-In `paper` mode, `place_order` routes to the broker's paper account (`broker_accounts.mode='paper'`). Strategies are mode-agnostic; `BotContext` enforces routing.
 
 ---
 
@@ -359,24 +420,24 @@ In `paper` mode, `place_order` routes to the broker's paper account (`broker_acc
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/api/bots` | Create bot. Validates `account_ids` exist. Validates `params_json` against `params_schema` if present. |
+| `POST` | `/api/bots` | Create bot. Validates accounts exist via `bot_accounts`. Extracts + caches `params_schema_json`. Validates `params_json` if schema present. |
 | `GET` | `/api/bots` | List bots. Filters: `status`, `mode`. Cursor pagination on `created_at`. |
-| `GET` | `/api/bots/{id}` | Detail + current run stats. |
+| `GET` | `/api/bots/{id}` | Detail + on-demand run stats (order/fill counts computed from `bot_orders`). |
 | `PUT` | `/api/bots/{id}` | Update `name`, `params_json`, `bar_timeframe`. Only when `status='stopped'`. |
-| `DELETE` | `/api/bots/{id}` | Soft-delete (`deleted_at = now()`). Only when `status='stopped'`. |
+| `DELETE` | `/api/bots/{id}` | Soft-delete. Only when `status='stopped'`. |
 | `GET` | `/api/bots/{id}/runs` | List `bot_runs`. Cursor pagination on `started_at`. |
 | `GET` | `/api/bots/{id}/orders` | List `bot_orders` joined to `orders`. Cursor pagination on `placed_at`. |
-| `PUT` | `/api/bots/{id}/risk-caps` | Upsert `bot_risk_caps`. Requires CSRF nonce. Publishes `bot:risk_caps:invalidate:{id}`. |
-| `POST` | `/api/bots/{id}/start` | Pre-flight: checks account mode match for live bots (UX only; authoritative check is in child). `LPUSH bot:control:{id} START`. Sets `status='starting'`. |
-| `POST` | `/api/bots/{id}/stop` | `LPUSH bot:control:{id} STOP`. Sets `status='pausing'` (supervisor confirms `stopped`). |
-| `POST` | `/api/bots/{id}/pause` | `LPUSH bot:control:{id} PAUSE`. |
-| `POST` | `/api/bots/{id}/resume` | `LPUSH bot:control:{id} RESUME`. |
-| `POST` | `/api/bots/{id}/deploy` | `UPDATE bots SET version = version + 1 RETURNING version` (atomic). Then `LPUSH STOP` + `LPUSH START`. |
-| `GET` | `/api/bots/strategies` | Lists `.py` files in `/strategies` volume. Returns `[{filename, size, mtime}]`. JWT-only (single-user system). |
+| `PUT` | `/api/bots/{id}/risk-caps` | Upsert `bot_risk_caps`. CSRF nonce. Publishes `bot:risk_caps:invalidate:{id}`. |
+| `POST` | `/api/bots/{id}/start` | Pre-flight account-mode check (UX). `XADD bot:control:{id} cmd=START`. Sets `status='starting'`. |
+| `POST` | `/api/bots/{id}/stop` | `XADD cmd=STOP`. Sets `status='pausing'`. |
+| `POST` | `/api/bots/{id}/pause` | `XADD cmd=PAUSE`. |
+| `POST` | `/api/bots/{id}/resume` | `XADD cmd=RESUME`. |
+| `POST` | `/api/bots/{id}/deploy` | Atomic `UPDATE bots SET version = version + 1 RETURNING version`. `XADD STOP` + `XADD START`. |
+| `GET` | `/api/bots/strategies` | Lists `.py` files in `/strategies`. Returns `[{filename, size, mtime: ISO8601}]`. JWT-only. |
 
 ### 7.1 WebSocket
 
-`WS /ws/bots/status` — streams bot status events to FE. Redis pubsub `bot:status:*` → conflation (500ms) → WS push. Connection cap: **50** (matches scanner; operators routinely have phone + desktop + secondary monitor open). Frame schema:
+`WS /ws/bots/status` — Redis pubsub `bot:status:*` → conflation (500ms) → WS push. Connection cap: **50**. Frame schema:
 
 ```json
 {
@@ -401,23 +462,23 @@ In `paper` mode, `place_order` routes to the broker's paper account (`broker_acc
 
 ### 8.2 Key Components
 
-- **`BotStatusBadge`** — stopped/starting/running/pausing/paused/error with colour coding. Injected into sidebar nav as "N running / M total" summary (not per-bot badges — avoids wall-of-badges when operator has 30+ bots).
-- **`BotControlBar`** — start/stop/pause/resume/deploy buttons. Live-mode start requires confirm dialog; reuses existing `useConfirmDialog` hook (same pattern as paper→live mode toggle).
-- **`StrategyFilePicker`** — dropdown populated from `GET /api/bots/strategies`.
-- **`ParamsEditor`** — Monaco JSON editor (reuses existing `/admin/ai` pattern). Disabled when bot is not stopped.
-- **`RiskCapsForm`** — per-field override inputs. NULL input = inherit account limit (shown as placeholder).
-- **`BotRunsTable`** — cursor-paginated run history with bar/order/fill counts.
-- **`BotOrdersTable`** — cursor-paginated orders linked to existing order detail.
+- **`BotStatusBadge`** — sidebar nav shows `"N running · K errors / M total"` (K links to error-filtered list). Not per-bot badges.
+- **`BotControlBar`** — start/stop/pause/resume/deploy. Live-mode start: `useConfirmDialog` hook (same as paper→live toggle).
+- **`StrategyFilePicker`** — dropdown from `GET /api/bots/strategies`.
+- **`ParamsEditor`** — Monaco JSON editor (reuses `/admin/ai` pattern). Disabled when not stopped.
+- **`RiskCapsForm`** — per-field override inputs; NULL = inherit (shown as placeholder).
+- **`BotRunsTable`** — cursor-paginated; order/fill counts from on-demand query.
+- **`BotOrdersTable`** — cursor-paginated; links to existing order detail.
 
 ### 8.3 State
 
-Bot list and detail use TanStack Query + WS push (same hybrid pattern as `/portfolio/rollup`). WS status events call `queryClient.invalidateQueries` on the relevant bot. Zustand not needed — no cross-page shared bot state.
+TanStack Query + WS push hybrid (same as `/portfolio/rollup`). WS events call `queryClient.invalidateQueries`. Zustand not needed.
 
 ---
 
 ## 9. Prometheus Metrics
 
-14 metrics under `bot_*` prefix. `bot_on_bar_latency_seconds` drops `bot_id` label (cardinality: 30+ bots × histogram buckets = Prometheus explosion); per-bot latency is exposed via OpenTelemetry traces instead.
+17 metrics under `bot_*` prefix. `bot_on_bar_latency_seconds` has no `bot_id` label (cardinality: 30+ bots × histogram buckets).
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -429,10 +490,11 @@ Bot list and detail use TanStack Query + WS push (same hybrid pattern as `/portf
 | `bot_respawn_total` | Counter | `bot_id` |
 | `bot_unexpected_exit_total` | Counter | `bot_id` |
 | `bot_bars_processed_total` | Counter | `bot_id`, `timeframe` |
-| `bot_on_bar_latency_seconds` | Histogram | *(no bot_id — see note above)* |
+| `bot_on_bar_latency_seconds` | Histogram | *(no bot_id)* |
 | `bot_bar_events_dropped_total` | Counter | `bot_id` |
+| `bot_partial_bars_skipped_total` | Counter | `bot_id` |
 | `bot_bars_aggregator_unhealthy_total` | Counter | `bot_id` |
-| `bot_active_count` | Gauge | — |
+| `bot_active_count` | Gauge | `mode` |
 | `bot_fill_events_total` | Counter | `bot_id`, `side` |
 | `bot_context_errors_total` | Counter | `bot_id`, `error_type` |
 | `bot_forbidden_import_total` | Counter | `bot_id`, `module` |
@@ -447,27 +509,27 @@ Bot list and detail use TanStack Query + WS push (same hybrid pattern as `/portf
 
 | File | Scope |
 |---|---|
-| `tests/bot/test_base_strategy.py` | ABC conformance, `params_schema` validation at API layer, `BotContext` method contracts, mode routing |
-| `tests/bot/test_bar_aggregator.py` | Tick→bar boundary detection, bounded queue overflow drops oldest + counter, aggregator-unhealthy metric |
-| `tests/bot/test_bot_risk_cap_service.py` | All 5 pre-filter checks; fail-CLOSED on money-moving checks under Redis failure; fail-OPEN on non-catastrophic; override vs inherit; Redis daily-loss reset; `daily_loss_tz` key computation |
-| `tests/bot/test_bot_context.py` | `place_order`: `bot_orders` row inserted, `attempt_kind='bot_place_order'` threaded to RiskService, unknown `account_id` raises, paper mode routes correctly, fill NOT published here |
-| `tests/bot/test_bot_fill_router.py` | Fill for `bot_orders` order → `bot:fill:{id}` published, `fill_count` incremented, daily-loss key updated |
-| `tests/bot/test_supervisor.py` | Command queue drain on startup; heartbeat expiry triggers respawn; 3-failure backoff sets error; exit-0-while-running triggers `bot_unexpected_exit_total`; STOP command → exit 0 → `status='stopped'`; crash-recovery re-spawns running bots |
-| `tests/bot/test_import_sandbox.py` | Strategy importing `app.api.bots` fails at load → `bot_forbidden_import_total` incremented |
-| `tests/bot/test_api.py` | All 14 REST endpoints: lifecycle state machine, CSRF on risk-caps, cursor pagination, strategy listing, deploy atomicity, live-mode pre-flight |
-| `tests/bot/test_ws_status.py` | Status change events delivered; heartbeat-loss event; WS cap 50 enforced |
-| `tests/bot/test_e2e_bot_lifecycle.py` | Fixture strategy places one order on first bar; asserts `bot_orders` row with `attempt_kind='bot_place_order'` in `risk_decisions`; stop → `bot_runs.stop_reason='manual'` |
+| `tests/bot/test_base_strategy.py` | ABC conformance; `params_schema` extraction subprocess; API-side validation; mode routing |
+| `tests/bot/test_bar_aggregator.py` | Tick→bar boundary (UTC intraday + market-calendar daily); bounded queue overflow; pause-before-on_start; partial bar skipped on resume |
+| `tests/bot/test_bot_risk_cap_service.py` | All 5 checks; fail-CLOSED on money-moving caps under Redis failure; fail-OPEN on non-catastrophic; per-account daily-loss key with market-TZ |
+| `tests/bot/test_bot_orders_facade.py` | `place_order_internal` with `issuer='bot'`; conid resolution via InstrumentResolver for new positions; `attempt_kind='bot_place_order'` in risk_decisions; `cancel_order` emits cancel metric |
+| `tests/bot/test_bot_context.py` | `place_order`: `bot_orders` row inserted, mode-drift check fires, unknown account raises; `get_positions/orders/fills` read from DB not sidecar |
+| `tests/bot/test_bot_fill_router.py` | Fill for bot_orders order → `bot:fill` published; per-account daily-loss key updated |
+| `tests/bot/test_supervisor.py` | Redis Stream ack/redeliver; duplicate command ID skipped; heartbeat expiry respawn; exit-code contract; crash recovery on startup |
+| `tests/bot/test_import_sandbox.py` | Strategy importing `app.api.bots` → `bot_forbidden_import_total` incremented |
+| `tests/bot/test_api.py` | All 14 endpoints; lifecycle state machine; CSRF; pagination; deploy atomicity; `bot_accounts` FK rejects unknown account |
+| `tests/bot/test_ws_status.py` | Status events delivered; error count in sidebar summary; WS cap 50 |
+| `tests/bot/test_e2e_bot_lifecycle.py` | Fixture strategy places one order on first bar; `bot_orders` row; `attempt_kind='bot_place_order'` in `risk_decisions`; stop → `bot_runs.stop_reason='manual'` |
 
 Target: **≥80% coverage** on `app/bot/` module.
 
 ### 10.2 Frontend (Vitest + RTL)
 
-- Bot list renders "N running / M total" summary in sidebar
-- Start button on live-mode bot triggers `useConfirmDialog`
-- Params editor disables when bot is not stopped
-- WS hook updates bot status on incoming event (mock WS)
-- RiskCapsForm sends null for unset fields (inherit behaviour)
-- `bot_params_validation_failures_total` counter fires when API rejects bad params
+- Sidebar badge shows "N running · K errors / M total"
+- Live-mode start triggers `useConfirmDialog`
+- Params editor disabled when not stopped
+- WS hook updates status on event (mock WS)
+- RiskCapsForm sends null for unset fields
 
 ---
 
@@ -480,16 +542,18 @@ Target: **≥80% coverage** on `app/bot/` module.
 | LLM-suggested parameter tuning | 21 |
 | Shadow-mode strategy promotion | 21 |
 | Multi-bot orchestration | 22 |
-| Kelly criterion sizing per bot | originally Phase 19 in sizing spec — deferred to Phase 21 (needs backtest stats) |
+| Kelly criterion sizing per bot | Phase 21 (needs backtest stats) |
 
 ---
 
 ## 12. Security
 
-- Strategy files are loaded read-only from `/strategies` volume. `bot_worker` has no write access to that path.
-- `MetaPathFinder` denylist blocks `app.api.*` and `app.services.orders_service` imports from strategy modules (§2.3).
-- `BotContext.place_order()` asserts `account_id in self.accounts` before any downstream call.
-- Live-mode bots require `mode='live'` at creation. **Authoritative check** is in the child process at `on_start()` — verifies all `account_ids` resolve to `broker_accounts.mode='live'` (§4.3 step 3). API pre-flight is UX-only.
-- CSRF nonce required on risk-caps mutation.
-- Bot worker has no inbound network ports — outbound to Redis and Postgres only.
-- `bot_place_order` in `risk_decisions.attempt_kind` provides forensic separation of bot vs operator orders in the audit trail.
+- `/strategies` mounted read-only; `bot_worker` has no write access.
+- `MetaPathFinder` denylist blocks `app.api.*` and `app.services.orders_service` in child processes and in `params_schema` extraction subprocess.
+- `BotContext.place_order()` asserts `account_id in self.accounts` and re-verifies `broker_accounts.mode` (60s cache) on every call.
+- Authoritative live-mode check in child at `on_start()` (§4.3 step 3); API pre-flight is UX only.
+- `bot_accounts.ON DELETE RESTRICT` prevents silent account-reference orphaning.
+- CSRF nonce on risk-caps mutation.
+- Bot worker: no inbound ports; outbound to Redis and Postgres only.
+- `bot_place_order` in `risk_decisions.attempt_kind` provides forensic audit separation.
+- `error_msg` capped at 2000 chars (CHECK constraint + writer truncation).
