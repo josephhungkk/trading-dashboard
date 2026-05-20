@@ -900,7 +900,7 @@ async def promote_shadow(
         redis=request.app.state.redis,
     )
     try:
-        await svc.promote(bot_id, shadow_id, promoted_by=_admin.email, db=db)
+        await svc.promote(bot_id, shadow_id, "manual", db=db, promoted_by=_admin.email)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}

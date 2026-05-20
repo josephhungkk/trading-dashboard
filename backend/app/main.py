@@ -641,6 +641,18 @@ async def lifespan(_app: FastAPI) -> Any:
         misfire_grace_time=600,
     )
 
+    from app.services.orchestrator.auto_promote import AutoPromoteEvaluator as _AutoPromoteEvaluator
+
+    _shadow_promoter_svc = ShadowPromoterService(
+        db_factory=session_factory,
+        supervisor=_app.state.supervisor,
+        redis=redis,
+    )
+    _app.state.auto_promote_evaluator = _AutoPromoteEvaluator(
+        promoter_service=_shadow_promoter_svc,
+        telegram=getattr(_app.state, "telegram", None),
+    )
+
     # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
     # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery
     # dispatcher + capability-flip pubsub listener + nightly retention sweep.

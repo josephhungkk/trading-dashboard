@@ -24,7 +24,7 @@ class NightlyRetrainJob:
     def __init__(
         self,
         db_factory: Any,
-        param_tuner_factory: Callable,
+        param_tuner_factory: Callable[..., Any],
         telegram: Any,
         max_parallel: int = 2,
         timeout_seconds: int = 3600,
@@ -68,7 +68,7 @@ class NightlyRetrainJob:
                 except TimeoutError:
                     log.warning("retrain_timeout", bot_id=str(bot_id))
                     results.append((bot_id, "timeout"))
-                except Exception:
+                except BaseException:
                     log.exception("retrain_failed", bot_id=str(bot_id))
                     results.append((bot_id, "error"))
 

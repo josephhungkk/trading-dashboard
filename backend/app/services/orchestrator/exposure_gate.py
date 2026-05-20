@@ -83,25 +83,29 @@ class PortfolioExposureGate:
             limits = await self._fetch_limits(account_id, instrument_id, db)
 
             outcome = ExposureOutcome.ALLOW
+            triggered_limit_type = "none"
             for _limit_id, limit_type, instr_id, max_notional, _currency, enabled in limits:
                 if not enabled:
                     continue
                 if limit_type == "total_notional":
                     projected = exposure["total"] + order_notional
-                    if projected > max_notional:
-                        outcome = ExposureOutcome.BLOCK
-                        break
                 elif limit_type == "per_instrument" and instr_id == instrument_id:
                     instr_key = f"instr:{instrument_id}"
                     projected = exposure.get(instr_key, Decimal("0")) + order_notional
-                    if projected > max_notional:
-                        outcome = ExposureOutcome.BLOCK
-                        break
+                else:
+                    continue
+                warn_threshold = max_notional * Decimal("0.8")
+                if projected > max_notional:
+                    outcome = ExposureOutcome.BLOCK
+                    triggered_limit_type = limit_type
+                    break
+                if projected > warn_threshold and outcome == ExposureOutcome.ALLOW:
+                    outcome = ExposureOutcome.WARN
+                    triggered_limit_type = limit_type
 
-            label = outcome.value
             m.orchestrator_exposure_checks_total.labels(
-                outcome=label,
-                limit_type="total_notional",
+                outcome=outcome.value,
+                limit_type=triggered_limit_type,
             ).inc()
             m.orchestrator_exposure_gate_latency_seconds.observe(time.perf_counter() - t0)
             return outcome
@@ -128,21 +132,30 @@ class PortfolioExposureGate:
             }
 
         m.orchestrator_exposure_gate_pg_fallback_total.labels(outcome="used").inc()
-        row = (
+        rows = (
             await db.execute(
                 text(
-                    "SELECT COALESCE(SUM(ABS(notional_usd)), 0)::numeric"
+                    "SELECT instrument_id, COALESCE(SUM(ABS(notional_usd)), 0)::numeric"
                     " FROM bot_orders"
                     " WHERE account_id = :acct"
                     "   AND status NOT IN ('cancelled', 'rejected')"
+                    " GROUP BY instrument_id"
                 ),
                 {"acct": account_id},
             )
-        ).scalar_one_or_none()
-        total = Decimal(str(row)) if row is not None else Decimal("0")
-        exposure: dict[str, Decimal] = {"total": total}
+        ).all()
+        total = Decimal("0")
+        per_instr: dict[str, Decimal] = {}
+        for iid, notional in rows:
+            val = Decimal(str(notional)) if notional is not None else Decimal("0")
+            total += val
+            if iid is not None:
+                per_instr[f"instr:{iid}"] = val
+        exposure: dict[str, Decimal] = {"total": total, **per_instr}
         try:
-            await self._redis.hset(redis_key, mapping={"total": str(total)})
+            mapping = {"total": str(total)}
+            mapping.update({k: str(v) for k, v in per_instr.items()})
+            await self._redis.hset(redis_key, mapping=mapping)
             await self._redis.expire(redis_key, 3600)
         except Exception:
             pass

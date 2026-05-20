@@ -159,8 +159,9 @@ class ShadowPromoterService:
         self,
         live_bot_id: UUID,
         shadow_bot_id: UUID,
-        promoted_by: str,
+        promoted_via: str,
         db: AsyncSession,
+        promoted_by: str = "system",
     ) -> None:
         try:
             shadow_result = await db.execute(
@@ -202,12 +203,12 @@ class ShadowPromoterService:
                 text(
                     """
                     INSERT INTO shadow_promotion_events (
-                        shadow_bot_id, live_bot_id, promoted_by,
+                        shadow_bot_id, live_bot_id, promoted_by, promoted_via,
                         comparison_window_days, comparison_window_start,
                         shadow_metrics, live_metrics
                     )
                     VALUES (
-                        :shadow_bot_id, :live_bot_id, :promoted_by,
+                        :shadow_bot_id, :live_bot_id, :promoted_by, :promoted_via,
                         :comparison_window_days,
                         now() - :comparison_window_days * interval '1 day',
                         :shadow_metrics::jsonb, :live_metrics::jsonb
@@ -218,6 +219,7 @@ class ShadowPromoterService:
                     "shadow_bot_id": shadow_bot_id,
                     "live_bot_id": live_bot_id,
                     "promoted_by": promoted_by,
+                    "promoted_via": promoted_via,
                     "comparison_window_days": window_days,
                     "shadow_metrics": json.dumps(shadow_metrics.model_dump()),
                     "live_metrics": json.dumps(live_metrics.model_dump()),

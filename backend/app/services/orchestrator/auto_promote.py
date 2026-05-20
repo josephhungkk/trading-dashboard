@@ -111,7 +111,7 @@ class AutoPromoteEvaluator:
                 max_dd=max_dd,
                 win_rate=win_rate,
             )
-            m.orchestrator_auto_promote_total.labels(outcome="skipped").inc()
+            m.orchestrator_auto_promote_total.labels(outcome="criteria_not_met").inc()
             return "criteria_not_met"
 
         try:
