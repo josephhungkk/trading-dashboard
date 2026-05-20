@@ -827,12 +827,29 @@ class OrderEventConsumer:
                 },
             )
             return
+        enrich = await session.execute(
+            text(
+                "SELECT i.id AS instrument_id, LOWER(o.side::text) AS side, bo.bot_id "
+                "FROM orders o "
+                "LEFT JOIN instruments i ON i.conid = o.conid "
+                "LEFT JOIN bot_orders bo ON bo.order_id = o.id "
+                "WHERE o.id = :oid"
+            ),
+            {"oid": order_id},
+        )
+        enrich_row = enrich.fetchone()
+        fill_instrument_id = enrich_row.instrument_id if enrich_row else None
+        fill_side = enrich_row.side if enrich_row else None
+        fill_bot_id = enrich_row.bot_id if enrich_row else None
+
         try:
             async with session.begin_nested():
                 await session.execute(
                     text(
-                        "INSERT INTO fills (order_id, exec_id, qty, price, currency, executed_at) "
-                        "VALUES (:o, :e, :q, :p, :c, :ts) "
+                        "INSERT INTO fills "
+                        "  (order_id, exec_id, qty, price, currency, executed_at,"
+                        "   instrument_id, side, bot_id) "
+                        "VALUES (:o, :e, :q, :p, :c, :ts, :iid, :side, :bid) "
                         "ON CONFLICT (exec_id) DO NOTHING"
                     ),
                     {
@@ -842,6 +859,9 @@ class OrderEventConsumer:
                         "p": event.avg_fill_price or "0",
                         "c": currency,
                         "ts": broker_event_at,
+                        "iid": fill_instrument_id,
+                        "side": fill_side,
+                        "bid": fill_bot_id,
                     },
                 )
                 buffered = await _commission_buffer_pop(self._redis, event.exec_id)
@@ -889,6 +909,21 @@ class OrderEventConsumer:
         order_id: UUID,
         broker_order_id: str,
     ) -> None:
+        enrich = await session.execute(
+            text(
+                "SELECT i.id AS instrument_id, LOWER(o.side::text) AS side, bo.bot_id "
+                "FROM orders o "
+                "LEFT JOIN instruments i ON i.conid = o.conid "
+                "LEFT JOIN bot_orders bo ON bo.order_id = o.id "
+                "WHERE o.id = :oid"
+            ),
+            {"oid": order_id},
+        )
+        enrich_row = enrich.fetchone()
+        drain_instrument_id = enrich_row.instrument_id if enrich_row else None
+        drain_side = enrich_row.side if enrich_row else None
+        drain_bot_id = enrich_row.bot_id if enrich_row else None
+
         await session.execute(
             text(
                 "WITH drained AS ("
@@ -897,12 +932,18 @@ class OrderEventConsumer:
                 "            commission, commission_currency"
                 ") "
                 "INSERT INTO fills (order_id, exec_id, qty, price, currency, executed_at, "
-                "                   commission, commission_currency) "
+                "                   commission, commission_currency, instrument_id, side, bot_id) "
                 "SELECT :o, exec_id, qty, price, currency, executed_at, "
-                "       commission, commission_currency FROM drained "
+                "       commission, commission_currency, :iid, :side, :bid FROM drained "
                 "ON CONFLICT (exec_id) DO NOTHING"
             ),
-            {"o": order_id, "bo": broker_order_id},
+            {
+                "o": order_id,
+                "bo": broker_order_id,
+                "iid": drain_instrument_id,
+                "side": drain_side,
+                "bid": drain_bot_id,
+            },
         )
 
     async def _publish_payload(self, session: AsyncSession, event_id: int) -> str:

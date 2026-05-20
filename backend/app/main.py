@@ -1079,6 +1079,62 @@ async def lifespan(_app: FastAPI) -> Any:
         misfire_grace_time=3600,
     )
 
+    # ── Phase 23a — CGT IBKR Flex daily pull ─────────────────────────────
+    from app.services.cgt.importers.scheduler import run_ibkr_flex_job as _ibkr_flex_job
+
+    async def _run_cgt_flex() -> None:
+        from app.core.deps import get_config as _get_config
+
+        cfg = _get_config()
+        flex_token = await cfg.get("cgt", "ibkr_flex_token", default=None)
+        flex_query_id = await cfg.get("cgt", "ibkr_flex_query_id", default=None)
+        account_id_str = await cfg.get("cgt", "ibkr_flex_account_id", default=None)
+        if not (flex_token and flex_query_id and account_id_str):
+            log.info("cgt.flex.not_configured")
+            return
+        import uuid as _uuid
+
+        await _ibkr_flex_job(
+            account_id=_uuid.UUID(account_id_str),
+            flex_token=flex_token,
+            flex_query_id=flex_query_id,
+            db_factory=_app.state.db_factory,
+        )
+
+    scheduler.add_job(
+        _run_cgt_flex,
+        CronTrigger(hour=22, minute=0, timezone="UTC"),
+        id="cgt_ibkr_flex_daily",
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # ── Phase 23a — CGT recompute queue worker ────────────────────────────
+    from app.services.cgt.engine import recompute as _cgt_recompute
+
+    async def _run_cgt_recompute_queue() -> None:
+        from redis.asyncio import Redis as _Redis
+
+        redis: _Redis = _app.state.redis
+        raw = await redis.lpop("cgt:recompute_queue")
+        if raw is None:
+            return
+        account_str, instrument_str = raw.decode().split(":")
+        import uuid as _uuid2
+
+        async with _app.state.db_factory() as _s:
+            await _cgt_recompute(_uuid2.UUID(account_str), int(instrument_str), _s)
+            await _s.commit()
+
+    scheduler.add_job(
+        _run_cgt_recompute_queue,
+        "interval",
+        seconds=300,
+        id="cgt_recompute_queue",
+        coalesce=True,
+        max_instances=1,
+    )
+
     log.info("startup_ok", env=settings.env)
     try:
         yield
