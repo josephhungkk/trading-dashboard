@@ -1,7 +1,7 @@
 """Phase 10b.1 position-sizing orchestrator.
 
 Per-request service. Loads account+instrument, FX-converts asset prices
-to account.currency_base via the existing ``_fx_rate`` helper, dispatches
+to account.currency_base via the shared ``get_fx_rate`` helper, dispatches
 to the appropriate pure-math function in ``position_sizing_math``, calls
 ``RiskService.evaluate(ctx, mode='preview')`` for the verdict, and
 returns a SizingResult.
@@ -31,7 +31,8 @@ from app.schemas.sizing import (
     SizingResult,
     VolTargetedInputs,
 )
-from app.services.orders_service import RedisLike, _fx_rate, capability_broker_id
+from app.services.fx import get_fx_rate
+from app.services.orders_service import RedisLike, capability_broker_id
 from app.services.position_sizing_math import (
     compute_fixed_fractional,
     compute_risk_per_trade,
@@ -80,7 +81,7 @@ class PositionSizingService:
 
         asset_currency = str(instrument["currency"]).strip()
         base_currency = str(account["currency_base"])
-        fx_rate = await _fx_rate(self._redis, asset_currency, base_currency)
+        fx_rate = await get_fx_rate(asset_currency, self._redis, base=base_currency)
         nlv_base = Decimal(account["last_nlv"])
         gateway_label = str(account["gateway_label"])
         broker_id = capability_broker_id(gateway_label)

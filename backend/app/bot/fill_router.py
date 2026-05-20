@@ -4,7 +4,8 @@ import datetime as _dt
 import json
 import zoneinfo
 from datetime import datetime
-from typing import Any
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
@@ -12,6 +13,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
+
+if TYPE_CHECKING:
+    from app.services.orchestrator.exposure_gate import PortfolioExposureGate
 
 logger = structlog.get_logger(__name__)
 
@@ -26,9 +30,15 @@ _BROKER_TZ: dict[str, str] = {
 class BotFillRouter:
     """Asyncio task in backend. Routes order:fill events to bot:fill:{bot_id} pubsub."""
 
-    def __init__(self, db: AsyncSession, redis: Any) -> None:
+    def __init__(
+        self,
+        db: AsyncSession,
+        redis: Any,
+        exposure_gate: PortfolioExposureGate | None = None,
+    ) -> None:
         self._db = db
         self._redis = redis
+        self._exposure_gate = exposure_gate
 
     async def handle_event(self, raw: str) -> None:
         try:
@@ -63,6 +73,26 @@ class BotFillRouter:
         fill_payload = json.dumps(event)
         await self._redis.publish(f"bot:fill:{bot_id}", fill_payload)
         metrics.bot_fill_events_total.labels(bot_id=str(bot_id), side=side).inc()
+
+        if self._exposure_gate is not None:
+            try:
+                from app.services.fx import get_fx_rate
+
+                side_sign = Decimal("1") if side.lower() == "buy" else Decimal("-1")
+                fill_qty = Decimal(str(event.get("fill_qty", "0")))
+                fill_price = Decimal(str(event.get("fill_price", "0")))
+                multiplier = Decimal(str(event.get("multiplier", "1")))
+                instr_id = int(event.get("instrument_id", 0))
+                currency = event.get("currency", "USD")
+                fx = await get_fx_rate(currency, self._redis)
+                delta = side_sign * fill_qty * fill_price * multiplier * fx
+                await self._exposure_gate.update_on_fill(
+                    account_id=account_id,
+                    instrument_id=instr_id,
+                    signed_delta_usd=delta,
+                )
+            except Exception:
+                logger.exception("exposure_update_on_fill_failed", account_id=str(account_id))
 
         await self._update_daily_loss(bot_id=bot_id, account_id=account_id)
 

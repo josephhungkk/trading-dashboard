@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import weakref
 from decimal import Decimal
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 import structlog
@@ -20,6 +20,9 @@ from app.services.advisor.types import (
     OrderIntent,
 )
 
+if TYPE_CHECKING:
+    from app.services.orchestrator.exposure_gate import PortfolioExposureGate
+
 logger = structlog.get_logger(__name__)
 
 _MODE_CACHE_TTL = 60
@@ -31,6 +34,13 @@ class BotAccountError(Exception):
 
 class BotModeMismatchError(Exception):
     pass
+
+
+class BotOrderBlocked(Exception):  # noqa: N818
+    def __init__(self, reason: str, *, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail or {}
 
 
 class BotContext:
@@ -50,6 +60,7 @@ class BotContext:
         advisor: AdvisorService | None = None,
         advisor_config: dict[str, Any] | None = None,
         account_overrides: dict[str, dict[str, Any]] | None = None,
+        exposure_gate: PortfolioExposureGate | None = None,
         bar_aggregator: Any = None,
     ) -> None:
         self.bot_id = bot_id
@@ -61,6 +72,7 @@ class BotContext:
         self._db = db
         self._redis = redis
         self._advisor = advisor
+        self._exposure_gate = exposure_gate
         self._advisor_config = (
             AdvisorConfig.from_jsonb_dict(advisor_config) if advisor_config else AdvisorConfig()
         )
@@ -124,12 +136,16 @@ class BotContext:
         await self._verify_account_mode(account_id)
 
         instr_row = await self._db.execute(
-            text("SELECT id, asset_class FROM instruments WHERE canonical_id = :cid LIMIT 1"),
+            text(
+                "SELECT id, asset_class, currency"
+                " FROM instruments WHERE canonical_id = :cid LIMIT 1"
+            ),
             {"cid": canonical_id},
         )
         instr = instr_row.first()
         instrument_id = instr[0] if instr is not None else 0
         asset_class = instr[1] if instr is not None else "STOCK"
+        currency = instr[2] if instr is not None else "USD"
 
         price = limit_price or Decimal("0")
         await self._risk_cap_svc.check(
@@ -142,6 +158,24 @@ class BotContext:
             instrument_id=instrument_id,
             db=self._db,
         )
+
+        # Station 5.75 -- portfolio-level exposure gate
+        if self._exposure_gate is not None:
+            from app.services.orchestrator.exposure_gate import ExposureOutcome
+
+            exp_outcome = await self._exposure_gate.check(
+                account_id=account_id,
+                instrument_id=instrument_id,
+                qty=qty,
+                price=price,
+                currency=currency or "USD",
+                db=self._db,
+            )
+            if exp_outcome == ExposureOutcome.BLOCK:
+                raise BotOrderBlocked(
+                    "portfolio_exposure_gate",
+                    detail={"instrument_id": instrument_id},
+                )
 
         decision_id: int | None = None
         verdict: AdvisorVerdict | None = None
