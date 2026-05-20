@@ -7,6 +7,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 22b — LLM Strategy Generator (v0.22.1) — 2026-05-20
+
+Phase 22b ships the LLM-in-the-loop strategy generator: LLM generates Python strategy code, RestrictedPython + AST allowlist sandbox validates it, human admin approves/rejects it, and a child-process worker executes the promoted code.
+
+**Migration (Alembic 0071)**
+
+- `0071_phase22b_strategy_gen.py`: `generated_strategies` table (source_code, source_hash, generation_prompt, prompt_hash, llm_model, sandbox_status, backtest_id UUID, promoted_bot_id UUID, approved_by, approved_at); `bot_strategy_provenance` table (bot_id, strategy_id, generated_at, replaced_at); `bots.strategy_class TEXT`; `bots.status` check widened to include `paper_pending` and `vetoed`.
+
+**Backend**
+
+- `app/services/strategy_gen/sandbox.py` — `SandboxValidator`: 5-step pipeline (ast.parse → RestrictedPython compile → prohibited-import walk → prohibited-call walk → prohibited-attr walk); `_PROHIBITED_ATTRS` includes dunder reflection chains (`__dict__`, `__code__`, `__closure__`, `__wrapped__`, `__init_subclass__`, `__func__`, `__self__`); `compute_source_hash()` SHA-256 helper.
+- `app/services/strategy_gen/generator.py` — `StrategyGenerator.generate()`: calls AI router (CODING capability), extracts code block, validates via sandbox, logs metric.
+- `app/services/strategy_gen/metrics.py` — 5 Prometheus metrics: `strategy_gen_generated_total`, `strategy_gen_sandbox_latency_seconds`, `strategy_gen_auto_approved_total`, `strategy_gen_veto_window_cancellations_total`, `strategy_gen_load_hash_mismatch_total`.
+- `app/bot/strategy_loader.py` — `load_generated_strategy()`: SELECT FOR UPDATE, status check, SHA-256 re-hash, AST re-validation (M4 spec), child-process spawn via `multiprocessing.get_context("spawn")`, `RLIMIT_AS` (soft limit) + `RLIMIT_CPU` resource limits.
+- `app/bot/strategy_worker.py` — child-process entry: RestrictedPython compile + exec in `safe_globals`, BaseStrategy subclass discovery, event loop with `queue.Empty` + `BrokenPipeError` handling.
+- `app/api/strategy_gen.py` — 5 endpoints: list, get, generate (admin, computes `prompt_hash`), approve (admin + CSRF, writes `promoted_bot_id`), reject (admin + CSRF).
+
+**Frontend**
+
+- `src/services/strategy-gen/types.ts` — TypeScript types: `SandboxStatus`, `GeneratedStrategy`, `GeneratedStrategyDetail`, request/response types.
+- `src/services/strategy-gen/api.ts` — 5 fetch functions including `X-Confirm-Nonce` header on approve/reject.
+- `src/features/strategy-gen/StrategyGenFeed.tsx` — strategy feed component; `useQuery` with `staleTime: 60_000`; sandbox status badges.
+
+**Tests**
+
+- 28 Phase 22b tests green: alembic × 5, sandbox × 10, strategy_loader × 6, API × 7.
+
+---
+
 ### Phase 22a — Strategy Orchestrator (v0.22.0) — 2026-05-20
 
 Phase 22a ships the portfolio-level orchestration layer: a pre-trade exposure gate, a daily correlation matrix service, an auto-promote evaluator, and a nightly retrain job. All wired into `app.state` via the lifespan block; 8 new REST endpoints under `/api/orchestrator/`.

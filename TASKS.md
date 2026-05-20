@@ -960,7 +960,7 @@ Multi-bot portfolio-level orchestration: exposure gate, correlation matrix, auto
 
 Multi-bot orchestration. Nightly retrain. LLM-driven strategy generation with guardrails. Auto-promotion rules. **No raw RL.**
 
-Sub-phases: 22a ✅ shipped · 22b (LLM strategy gen) · 22c (health digest + dashboard)
+Sub-phases: 22a ✅ shipped · 22b ✅ shipped (v0.22.1 · 2026-05-20) · 22c (health digest + dashboard)
 
 ## Phase 23 — UK CGT awareness + per-bot attribution + cgt-calc handoff
 

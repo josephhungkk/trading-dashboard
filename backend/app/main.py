@@ -61,6 +61,7 @@ from app.api.portfolio import router as portfolio_router
 from app.api.risk import router as risk_router
 from app.api.sizing import router as sizing_router
 from app.api.sse import router as sse_router
+from app.api.strategy_gen import router as strategy_gen_router
 from app.api.telegram import router as telegram_router
 from app.api.ws_ai import router as ws_ai_router
 from app.api.ws_alerts import router as ws_alerts_router
@@ -1179,6 +1180,7 @@ app.include_router(backtests_api.router)
 app.include_router(ws_backtests_api.router)
 
 app.include_router(orchestrator_router)
+app.include_router(strategy_gen_router)
 
 
 @app.get("/health")

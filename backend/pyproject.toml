@@ -32,6 +32,7 @@ dependencies = [
     "uvicorn[standard]>=0.45.0",
     "websockets>=16.0",
     "python-multipart>=0.0.29",
+    "RestrictedPython>=7.0,<8",
 ]
 
 [dependency-groups]
