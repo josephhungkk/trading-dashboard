@@ -54,6 +54,7 @@ from app.api.metrics import router as metrics_router
 from app.api.oauth import router as oauth_router
 from app.api.options import admin_router as options_admin_router
 from app.api.options import router as options_router
+from app.api.orchestrator import router as orchestrator_router
 from app.api.orders import fills_router
 from app.api.orders import router as orders_router
 from app.api.portfolio import router as portfolio_router
@@ -566,7 +567,8 @@ async def lifespan(_app: FastAPI) -> Any:
             async with session_factory() as _corr_db:
                 acct_rows = await _corr_db.execute(
                     text(
-                        "SELECT DISTINCT b.account_id FROM bots b"
+                        "SELECT DISTINCT ba.account_id FROM bots b"
+                        " JOIN bot_accounts ba ON ba.bot_id = b.id"
                         " WHERE b.deleted_at IS NULL AND b.status = 'running'"
                     )
                 )
@@ -620,6 +622,7 @@ async def lifespan(_app: FastAPI) -> Any:
         param_tuner_factory=_make_retrain_tuner,
         telegram=getattr(_app.state, "telegram", None),
     )
+    _app.state.nightly_retrain = _nightly_retrain
 
     async def _run_nightly_retrain() -> None:
         try:
@@ -1162,6 +1165,8 @@ app.include_router(bots_api.router)
 app.include_router(ws_bots.router)
 app.include_router(backtests_api.router)
 app.include_router(ws_backtests_api.router)
+
+app.include_router(orchestrator_router)
 
 
 @app.get("/health")
