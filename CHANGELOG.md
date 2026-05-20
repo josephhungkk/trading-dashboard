@@ -7,6 +7,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 23a — UK CGT Foundation (v0.23.0) — 2026-05-20
+
+**Migration (Alembic 0073)**
+
+- `0073_phase23a_uk_cgt.py`: 11 new tables — `broker_statements`, `tax_events`, `s104_pool`, `cgt_disposals`, `short_obligations`, `derivative_positions`, `cgt_class_links`, `hmrc_fx_rates`, `income_events`, `corporate_actions`, `cgt_lock`; `fills` enriched with `instrument_id`, `side`, `bot_id` columns; partial indices on active pool positions, open obligations, open derivatives; 2-year retention on `tax_events` via TimescaleDB policy.
+
+**Backend**
+
+- `app/services/cgt/types.py` — `TaxEvent`, `Disposal` Pydantic v2 models; `CGT_TRACK_POOL/DERIVATIVE/CRYPTO`.
+- `app/services/cgt/metrics.py` — Prometheus counters: `cgt_engine_events_total`, `cgt_disposals_total`, `cgt_importer_runs_total`, `cgt_importer_records_imported_total`, `cgt_hmrc_fx_fetch_total`, `cgt_bb_gate_fires_total`.
+- `app/services/cgt/fx.py` — `to_gbp()`: HMRC monthly rate lookup with spot fallback; `Decimal`-typed throughout.
+- `app/services/cgt/hmrc_rates.py` — `fetch_and_store_rates()`: dual-URL strategy (2021+ trade-tariff, pre-2021 HMRC); HTTPS enforced; 9 target currencies.
+- `app/services/cgt/engine.py` — S104 pool engine: same-day rule → b&b 30-day rule → S104 FIFO matching; `process()` dispatcher with `pg_advisory_xact_lock`; `recompute()` for full pool rebuild from tax_events.
+- `app/services/cgt/derivative_engine.py` — derivative open/close tracking; CFD/option/future position management.
+- `app/services/cgt/corporate_engine.py` — stock splits, dividends, consolidations via `corporate_actions`.
+- `app/services/cgt/importers/normaliser.py` — `ibkr_trade_to_tax_event()`: IBKR Flex trade → `TaxEvent`; `resolve_cgt_track()` asset-class mapping.
+- `app/services/cgt/importers/ibkr_flex.py` — two-step Flex Web Service pull (SendRequest → GetStatement, 5 retries); SHA-256 dedup via `broker_statements`; `_resolve_instrument()` returns `None` on unknown symbols (skip + warn + metric, no FK violation).
+- `app/services/cgt/importers/scheduler.py` — APScheduler cron job at 07:00 UTC.
+- `app/services/risk_service.py` — `_check_bb_warning()`: 30-day b&b pre-trade gate; queries `tax_events` for same-instrument disposals within 30 days; returns `GateWarningEntry(code="bb_30_day_match")`; fail-OPEN with error metric.
+- `app/schemas/cgt.py` — `CgtSummaryResponse`, `S104PoolEntry`, `S104PoolResponse`, `PoolSeedRequest` (qty/cost validators), `RecomputeRequest`, `CgtClassLinkRequest` (pattern-validated key), `ShortObligationEntry`, `DerivativePositionEntry`.
+- `app/api/cgt.py` — 12 REST endpoints under `/api/cgt/*` and `/api/admin/cgt/*`; `Query(ge=2001, le=2100)` validated tax_year; schema-filtered response objects; named done-callback on background Flex task.
+
+**Frontend**
+
+- `frontend/src/features/tax/hooks/useCgtSummary.ts` — `useQuery` wrapping `GET /api/cgt/summary`, 30s refetch.
+- `frontend/src/features/tax/hooks/useS104Pool.ts` — `useQuery` wrapping `GET /api/cgt/pool`, 60s refetch.
+- `frontend/src/features/tax/components/AllowanceGauge.tsx` — progress bar: red when over £3,000 CGT allowance.
+- `frontend/src/features/tax/components/TaxYearSelector.tsx` — Radix Select showing 4 most recent tax years.
+- `frontend/src/features/tax/components/S104PoolTable.tsx` — native `<table>` rendering live S104 pool positions.
+- `frontend/src/features/tax/components/OpenPositionsPanel.tsx` — informational panel.
+- `frontend/src/features/tax/components/BbWarningBanner.tsx` — HMRC b&b warning banner with Radix Checkbox acknowledgement; injected into TradeTicketModal when `bb_30_day_match` risk warning is present.
+- `frontend/src/features/tax/pages/TaxPage.tsx` — Tabs: S104 Pool (live) + Disposals/Income/Shorts (disabled, 23b).
+- `frontend/src/routes/tax.tsx` — TanStack Router file-based route `/tax`.
+- `frontend/src/components/layout/Topbar/Topbar.tsx` — "Tax" nav link added.
+- `frontend/src/services/types.ts` — `RiskWarningEntry` extended with `code?: string | null`.
+- `frontend/src/features/orders/TradeTicketModal.tsx` — `BbWarningBanner` injected into `PreviewStep`; confirm button gated on b&b acknowledgement.
+
+**Tests**
+
+- 108 new BE tests across: `test_cgt_engine.py` (S104/same-day/b&b matching, 24 cases), `test_cgt_fx.py` (HMRC lookup + fallback), `test_cgt_hmrc_rates.py` (dual-URL parse), `test_cgt_ibkr_flex.py` (importer idempotency), `test_alembic_0073.py` (migration round-trip), `test_cgt_api.py` (12 endpoints), `test_risk_service_bb.py` (b&b gate). All passing.
+- FE: 8 tests in `TaxPage.test.tsx`. Topbar test updated for 8 nav links.
+
+---
+
 ### Phase 22c — Health Digest + FE Orchestration Dashboard (v0.22.2) — 2026-05-20
 
 **Migration (Alembic 0072)**

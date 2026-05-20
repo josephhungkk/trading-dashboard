@@ -62,6 +62,7 @@ Per-phase deep detail in memory files — read before changing those surfaces. P
 
 | Phase | v | What shipped |
 |---|---|---|
+| 23a — UK CGT Foundation | 0.23.0 | S104 pool engine (same-day + b&b + FIFO), IBKR Flex importer, HMRC FX rates, 12 REST endpoints, pre-trade b&b gate, FE Tax page; alembic 0073 |
 | 22c — Health Digest + Orchestration Dashboard | 0.22.2 | HealthDigestService (03:00 UTC, bot_health_snapshots hypertable), Telegram rank table with trend badges, 3 REST endpoints, FE OrchestrationPage (4 panels); alembic 0072 |
 | 22b — LLM Strategy Generator | 0.22.1 | RestrictedPython sandbox, AST allowlist, StrategyGenerator, child-process worker, approve/reject REST; alembic 0071 |
 | 22a.1 — Orchestrator Patch | 0.22.0.1 | SectorIngestionService (IBKR GetContractFundamentals), MV gate (corr-discounted notional), per_sector limits, Lua 3-ARGV, veto window; alembic 0069.1 |
