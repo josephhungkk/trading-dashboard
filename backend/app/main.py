@@ -675,10 +675,28 @@ async def lifespan(_app: FastAPI) -> Any:
         misfire_grace_time=600,
     )
 
-    _app.state.auto_promote_evaluator = _AutoPromoteEvaluator(
+    from app.services.orchestrator.auto_promote import recover_pending_veto_windows as _recover_veto
+
+    _auto_promote_evaluator = _AutoPromoteEvaluator(
         promoter_service=_shadow_promoter_svc,
         telegram=getattr(_app.state, "telegram", None),
+        scheduler=scheduler,
+        db_factory=session_factory,
     )
+    _app.state.auto_promote_evaluator = _auto_promote_evaluator
+
+    # Reschedule any promote_pending rows that survived a restart
+    try:
+        async with session_factory() as _veto_db:
+            await _recover_veto(
+                db=_veto_db,
+                scheduler=scheduler,
+                promoter=_shadow_promoter_svc,
+                telegram=getattr(_app.state, "telegram", None),
+                db_factory=session_factory,
+            )
+    except Exception:
+        log.exception("auto_promote_veto_recovery_failed")
 
     # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
     # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery

@@ -424,6 +424,40 @@ def register_handlers(
             msg, entry=entry, redis=redis, roll_service=_roll_svc, db_factory=db_factory
         )
 
+    # Veto auto-promote: /veto_promote_<uuid>
+    @dp.message(
+        F.text.regexp(
+            r"^/veto_promote_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+    )
+    async def _veto_promote(msg: Message) -> None:
+        entry = await _authed(msg)
+        if entry is None:
+            return
+        if not await rate_limiter.check_write(chat_id=msg.chat.id, from_user_id=entry.from_user_id):
+            await msg.answer("Rate limit exceeded. Try again later.")
+            return
+        import re as _re
+        import uuid as _uuid
+
+        from app.services.orchestrator.auto_promote import handle_veto_token
+
+        text_val = (msg.text or "").strip()
+        m_match = _re.search(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            text_val,
+        )
+        if not m_match:
+            await msg.answer("Invalid veto token.")
+            return
+        token = _uuid.UUID(m_match.group(0))
+        async with db_factory() as db:
+            vetoed = await handle_veto_token(token=token, db=db)
+        if vetoed:
+            await msg.answer("Veto accepted. Auto-promotion cancelled.")
+        else:
+            await msg.answer("Token not found or already expired.")
+
     # Account-selection numeric reply — MUST be before the AI chat catch-all
     @dp.message(F.text.regexp(r"^[0-9]+$"))
     async def _acct_select(msg: Message) -> None:

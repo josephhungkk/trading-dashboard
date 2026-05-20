@@ -60,7 +60,8 @@ async def test_auto_promote_evaluator_already_promoted_idempotent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_promote_evaluator_promotes_when_all_criteria_pass() -> None:
+async def test_auto_promote_evaluator_enters_veto_window_when_criteria_pass() -> None:
+    """When criteria pass, insert promote_pending row and send Telegram veto message."""
     import uuid
     from unittest.mock import AsyncMock, MagicMock
 
@@ -68,8 +69,8 @@ async def test_auto_promote_evaluator_promotes_when_all_criteria_pass() -> None:
     shadow_id = uuid.uuid4()
     db = AsyncMock()
     call_results = [
-        MagicMock(scalar_one_or_none=MagicMock(return_value='"true"')),
-        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+        MagicMock(scalar_one_or_none=MagicMock(return_value='"true"')),  # master_switch
+        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # no prior success
         MagicMock(
             scalar_one_or_none=MagicMock(
                 return_value=(
@@ -79,17 +80,28 @@ async def test_auto_promote_evaluator_promotes_when_all_criteria_pass() -> None:
             )
         ),
         MagicMock(all=MagicMock(return_value=[(1.2, 0.05, 0.6, 1.1, 100, 14)])),
+        MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # no existing pending
+        MagicMock(),  # INSERT promote_pending
     ]
     db.execute = AsyncMock(side_effect=call_results)
+    db.commit = AsyncMock()
 
     promoter_svc = AsyncMock()
     telegram = AsyncMock()
-    evaluator = AutoPromoteEvaluator(promoter_service=promoter_svc, telegram=telegram)
+    scheduler = MagicMock()
+    scheduler.add_job = MagicMock()
+    evaluator = AutoPromoteEvaluator(
+        promoter_service=promoter_svc,
+        telegram=telegram,
+        scheduler=scheduler,
+    )
 
     result = await evaluator.evaluate(live_id, shadow_id, db)
-    assert result == "promoted"
-    promoter_svc.promote.assert_called_once_with(live_id, shadow_id, "auto", db)
+    assert result == "pending_veto_window"
+    promoter_svc.promote.assert_not_called()
     telegram.send.assert_called_once()
+    assert "veto" in telegram.send.call_args[0][0].lower()
+    scheduler.add_job.assert_called_once()
 
 
 @pytest.mark.asyncio
