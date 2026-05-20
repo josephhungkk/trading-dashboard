@@ -138,6 +138,7 @@ export interface PositionSanityResult {
 // Phase 10a E2 — risk-gate verdict entries surfaced inside PreviewResponse.
 export interface RiskWarningEntry {
   check: string;
+  code?: string | null;
   message: string;
   value?: number | null;
   threshold?: number | null;

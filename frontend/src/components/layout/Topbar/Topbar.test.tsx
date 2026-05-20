@@ -28,7 +28,7 @@ const ROUTE_PATHS = [
   '/settings',
 ] as const;
 
-const ROUTE_LABELS = ['Overview', 'Orders', 'Positions', 'Watchlist', 'Orchestration', 'Admin', 'Settings'] as const;
+const ROUTE_LABELS = ['Overview', 'Orders', 'Positions', 'Watchlist', 'Orchestration', 'Tax', 'Admin', 'Settings'] as const;
 
 const allGreen: ConnectedStatus[] = [
   { broker: 'ibkr', mode: 'live', gatewayId: 'ibkr-live-gw-1', alias: 'IBKR Live Gateway 1', backendOk: true, gatewayOk: true, latencyMs: 120 },
@@ -91,7 +91,7 @@ describe('Topbar', () => {
     useCommandsStore.setState({ open: false, commands: [] });
   });
 
-  it('renders all 7 nav tabs', async () => {
+  it('renders all 8 nav tabs', async () => {
     renderTopbar();
     const links = await screen.findAllByRole('link');
     expect(links).toHaveLength(ROUTE_LABELS.length);

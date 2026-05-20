@@ -15,6 +15,7 @@ import type { SizingMethod, SizingRequest } from '@/services/sizing/types';
 import { usePositionSizing } from '@/services/sizing/usePositionSizing';
 import { useSizingDefaults } from '@/services/sizing/useSizingDefaults';
 import { ContractSearchInput, type ContractSearchInputValue } from './ContractSearchInput';
+import { BbWarningBanner } from '@/features/tax/components/BbWarningBanner';
 import { TradeTicketAiSection } from '@/features/orders/TradeTicketAiSection';
 import { AlgoSection } from './AlgoSection';
 import { tradeTicketStore, useTradeTicketStore } from './use-trade-ticket';
@@ -857,6 +858,8 @@ function PreviewStep({
   onBack: () => void;
   onConfirm: () => void;
 }): React.JSX.Element {
+  const [bbAcknowledged, setBbAcknowledged] = React.useState(false);
+
   // Phase 10a E2: structured risk-gate verdict surfaces.
   const riskWarnings = preview.risk_warnings ?? [];
   // E7-fix (spec/quality H2): merge place_order 422 blockers in with
@@ -865,6 +868,7 @@ function PreviewStep({
   const riskBlockers = [...(preview.risk_blockers ?? []), ...placeOrderBlockers];
   const hasRiskWarnings = riskWarnings.length > 0;
   const hasRiskBlockers = riskBlockers.length > 0;
+  const bbWarning = riskWarnings.find((w) => w.code === "bb_30_day_match");
 
   return (
     <section className="flex flex-col gap-4">
@@ -947,12 +951,21 @@ function PreviewStep({
         </label>
       ) : null}
 
+      {bbWarning ? (
+        <BbWarningBanner message={bbWarning.message} onAcknowledge={setBbAcknowledged} />
+      ) : null}
+
       <div className="mt-2 flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onBack}>Back</Button>
         <Button
           type="button"
           onClick={onConfirm}
-          disabled={confirmDisabled || hasRiskBlockers || (hasRiskWarnings && !acknowledgedRiskWarnings)}
+          disabled={
+            confirmDisabled ||
+            hasRiskBlockers ||
+            (hasRiskWarnings && !acknowledgedRiskWarnings) ||
+            (!!bbWarning && !bbAcknowledged)
+          }
         >
           {inFlight ? 'Confirming' : 'Confirm'}
         </Button>

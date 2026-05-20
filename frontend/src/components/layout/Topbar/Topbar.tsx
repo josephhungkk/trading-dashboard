@@ -21,6 +21,7 @@ const ROUTES: readonly RouteEntry[] = [
   { to: '/positions', label: 'Positions' },
   { to: '/watchlist', label: 'Watchlist' },
   { to: '/orchestration', label: 'Orchestration' },
+  { to: '/tax', label: 'Tax' },
   { to: '/admin', label: 'Admin' },
   { to: '/settings', label: 'Settings' },
 ] as const;
