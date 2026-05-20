@@ -38,6 +38,30 @@ class FakeRedis:
         v = self._store.get(key)
         return v.encode() if isinstance(v, str) else v
 
+    def pipeline(self, transaction: bool = True) -> _FakeRedisPipeline:
+        return _FakeRedisPipeline(self)
+
+
+class _FakeRedisPipeline:
+    def __init__(self, redis: FakeRedis) -> None:
+        self._redis = redis
+        self._cmds: list = []
+
+    def set(self, key: str, val: str, ex: int = 0) -> _FakeRedisPipeline:
+        self._cmds.append((key, val, ex))
+        return self
+
+    async def execute(self) -> list:
+        for key, val, ex in self._cmds:
+            await self._redis.set(key, val, ex=ex or None)
+        return []
+
+    async def __aenter__(self) -> _FakeRedisPipeline:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.execute()
+
 
 @pytest.mark.asyncio
 async def test_correlation_two_instruments_identical_returns() -> None:

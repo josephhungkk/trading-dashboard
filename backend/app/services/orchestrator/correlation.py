@@ -71,7 +71,8 @@ class CorrelationService:
                     matrix[str(iid_i)][str(iid_j)] = _pearson(returns[iid_i], returns[iid_j])
 
         redis_key = f"portfolio:correlation:{account_id}"
-        await self._redis.set(redis_key, json.dumps(matrix), ex=86400)
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.set(redis_key, json.dumps(matrix), ex=86400)
 
         m.orchestrator_correlation_matrix_age_seconds.labels(account_id=str(account_id)).set(0)
 

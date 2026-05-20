@@ -26,6 +26,12 @@ class FakeRedis:
         v = self._store.get(key, {})
         return v if isinstance(v, dict) else {}
 
+    async def hset(self, key: str, mapping: dict) -> None:
+        self._store[key] = mapping
+
+    async def expire(self, key: str, ttl: int) -> None:
+        pass
+
     async def evalsha(self, *args: object, **kwargs: object) -> None:
         pass
 
@@ -65,11 +71,15 @@ async def test_exposure_gate_allow_under_limit() -> None:
     redis = FakeRedis({f"portfolio:exposure:{account_id}": {"total": b"50000.0"}})
     db = AsyncMock()
     db.execute = AsyncMock(
-        return_value=MagicMock(
-            all=MagicMock(
-                return_value=[(1, "total_notional", None, Decimal("100000"), "USD", True)]
-            )
-        )
+        side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # gate_enabled
+            MagicMock(scalar_one_or_none=MagicMock(return_value='"false"')),  # mv_enabled
+            MagicMock(
+                all=MagicMock(
+                    return_value=[(1, "total_notional", None, Decimal("100000"), "USD", True, None)]
+                )
+            ),
+        ]
     )
     gate = PortfolioExposureGate(redis=redis)
     outcome = await gate.check(
@@ -91,11 +101,15 @@ async def test_exposure_gate_block_over_limit() -> None:
     redis = FakeRedis({f"portfolio:exposure:{account_id}": {"total": b"95000.0"}})
     db = AsyncMock()
     db.execute = AsyncMock(
-        return_value=MagicMock(
-            all=MagicMock(
-                return_value=[(1, "total_notional", None, Decimal("100000"), "USD", True)]
-            )
-        )
+        side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # gate_enabled
+            MagicMock(scalar_one_or_none=MagicMock(return_value='"false"')),  # mv_enabled
+            MagicMock(
+                all=MagicMock(
+                    return_value=[(1, "total_notional", None, Decimal("100000"), "USD", True, None)]
+                )
+            ),
+        ]
     )
     gate = PortfolioExposureGate(redis=redis)
     outcome = await gate.check(
@@ -120,15 +134,20 @@ async def test_exposure_gate_redis_miss_pg_fallback() -> None:
     gate_enabled_result.scalar_one_or_none = MagicMock(return_value=None)
 
     pg_fallback_result = MagicMock()
-    pg_fallback_result.scalar_one_or_none = MagicMock(return_value=Decimal("30000"))
+    pg_fallback_result.all = MagicMock(return_value=[])
+
+    mv_enabled_result = MagicMock()
+    mv_enabled_result.scalar_one_or_none = MagicMock(return_value='"false"')
 
     limits_result = MagicMock()
     limits_result.all = MagicMock(
-        return_value=[(1, "total_notional", None, Decimal("100000"), "USD", True)]
+        return_value=[(1, "total_notional", None, Decimal("100000"), "USD", True, None)]
     )
 
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=[gate_enabled_result, pg_fallback_result, limits_result])
+    db.execute = AsyncMock(
+        side_effect=[gate_enabled_result, pg_fallback_result, mv_enabled_result, limits_result]
+    )
     gate = PortfolioExposureGate(redis=redis)
     outcome = await gate.check(
         account_id=account_id,
