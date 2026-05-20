@@ -1,13 +1,10 @@
-import datetime
-
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf import empty_pb2 as _empty_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
+from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -216,7 +213,7 @@ class GetHistoricalBarsRequest(_message.Message):
     range_start: _timestamp_pb2.Timestamp
     range_end: _timestamp_pb2.Timestamp
     limit: int
-    def __init__(self, canonical_id: _Optional[str] = ..., timeframe: _Optional[str] = ..., range_start: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., range_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., limit: _Optional[int] = ...) -> None: ...
+    def __init__(self, canonical_id: _Optional[str] = ..., timeframe: _Optional[str] = ..., range_start: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., range_end: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., limit: _Optional[int] = ...) -> None: ...
 
 class GetHistoricalBarsResponse(_message.Message):
     __slots__ = ("bars", "truncated")
@@ -242,7 +239,7 @@ class HistoricalBar(_message.Message):
     close: str
     volume: str
     trade_count: int
-    def __init__(self, bucket_start: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., open: _Optional[str] = ..., high: _Optional[str] = ..., low: _Optional[str] = ..., close: _Optional[str] = ..., volume: _Optional[str] = ..., trade_count: _Optional[int] = ...) -> None: ...
+    def __init__(self, bucket_start: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., open: _Optional[str] = ..., high: _Optional[str] = ..., low: _Optional[str] = ..., close: _Optional[str] = ..., volume: _Optional[str] = ..., trade_count: _Optional[int] = ...) -> None: ...
 
 class Empty(_message.Message):
     __slots__ = ()
@@ -268,7 +265,7 @@ class HealthResponse(_message.Message):
     sidecar_version: str
     started_at: _timestamp_pb2.Timestamp
     broker_id: str
-    def __init__(self, label: _Optional[str] = ..., gateway_connected: bool = ..., gateway_version: _Optional[str] = ..., last_tick_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., sidecar_version: _Optional[str] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., broker_id: _Optional[str] = ...) -> None: ...
+    def __init__(self, label: _Optional[str] = ..., gateway_connected: bool = ..., gateway_version: _Optional[str] = ..., last_tick_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., sidecar_version: _Optional[str] = ..., started_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., broker_id: _Optional[str] = ...) -> None: ...
 
 class Account(_message.Message):
     __slots__ = ("account_number", "mode", "gateway_label", "currency_base", "account_hash")
@@ -318,7 +315,7 @@ class Summary(_message.Message):
     unrealized_pnl: Money
     buying_power: Money
     updated_at: _timestamp_pb2.Timestamp
-    def __init__(self, net_liquidation: _Optional[_Union[Money, _Mapping]] = ..., total_cash: _Optional[_Union[Money, _Mapping]] = ..., realized_pnl: _Optional[_Union[Money, _Mapping]] = ..., unrealized_pnl: _Optional[_Union[Money, _Mapping]] = ..., buying_power: _Optional[_Union[Money, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    def __init__(self, net_liquidation: _Optional[_Union[Money, _Mapping]] = ..., total_cash: _Optional[_Union[Money, _Mapping]] = ..., realized_pnl: _Optional[_Union[Money, _Mapping]] = ..., unrealized_pnl: _Optional[_Union[Money, _Mapping]] = ..., buying_power: _Optional[_Union[Money, _Mapping]] = ..., updated_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class SummaryResponse(_message.Message):
     __slots__ = ("summary",)
@@ -356,6 +353,18 @@ class ContractResponse(_message.Message):
     contract: Contract
     def __init__(self, contract: _Optional[_Union[Contract, _Mapping]] = ...) -> None: ...
 
+class ContractFundamentalsResponse(_message.Message):
+    __slots__ = ("industry", "category", "primary_exchange", "country")
+    INDUSTRY_FIELD_NUMBER: _ClassVar[int]
+    CATEGORY_FIELD_NUMBER: _ClassVar[int]
+    PRIMARY_EXCHANGE_FIELD_NUMBER: _ClassVar[int]
+    COUNTRY_FIELD_NUMBER: _ClassVar[int]
+    industry: str
+    category: str
+    primary_exchange: str
+    country: str
+    def __init__(self, industry: _Optional[str] = ..., category: _Optional[str] = ..., primary_exchange: _Optional[str] = ..., country: _Optional[str] = ...) -> None: ...
+
 class Position(_message.Message):
     __slots__ = ("contract", "quantity", "avg_cost", "market_price", "market_value", "unrealized_pnl", "realized_pnl_today", "daily_pnl")
     CONTRACT_FIELD_NUMBER: _ClassVar[int]
@@ -383,7 +392,7 @@ class PositionsResponse(_message.Message):
     def __init__(self, positions: _Optional[_Iterable[_Union[Position, _Mapping]]] = ...) -> None: ...
 
 class Order(_message.Message):
-    __slots__ = ("order_id", "contract", "side", "order_type", "quantity", "limit_price", "stop_price", "time_in_force", "status", "quantity_filled", "avg_fill_price", "submitted_at", "updated_at", "avg_fill_price_inferred", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date")
+    __slots__ = ("order_id", "contract", "side", "order_type", "quantity", "limit_price", "stop_price", "time_in_force", "status", "quantity_filled", "avg_fill_price", "submitted_at", "updated_at", "avg_fill_price_inferred", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date", "algo_strategy")
     ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     CONTRACT_FIELD_NUMBER: _ClassVar[int]
     SIDE_FIELD_NUMBER: _ClassVar[int]
@@ -403,6 +412,7 @@ class Order(_message.Message):
     TRAIL_OFFSET_TYPE_FIELD_NUMBER: _ClassVar[int]
     TRAIL_LIMIT_OFFSET_FIELD_NUMBER: _ClassVar[int]
     EXPIRY_DATE_FIELD_NUMBER: _ClassVar[int]
+    ALGO_STRATEGY_FIELD_NUMBER: _ClassVar[int]
     order_id: str
     contract: Contract
     side: OrderSide
@@ -422,7 +432,8 @@ class Order(_message.Message):
     trail_offset_type: str
     trail_limit_offset: str
     expiry_date: str
-    def __init__(self, order_id: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., quantity: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., time_in_force: _Optional[_Union[TimeInForce, str]] = ..., status: _Optional[_Union[OrderStatus, str]] = ..., quantity_filled: _Optional[str] = ..., avg_fill_price: _Optional[_Union[Money, _Mapping]] = ..., submitted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., avg_fill_price_inferred: bool = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ...) -> None: ...
+    algo_strategy: str
+    def __init__(self, order_id: _Optional[str] = ..., contract: _Optional[_Union[Contract, _Mapping]] = ..., side: _Optional[_Union[OrderSide, str]] = ..., order_type: _Optional[_Union[OrderType, str]] = ..., quantity: _Optional[str] = ..., limit_price: _Optional[_Union[Money, _Mapping]] = ..., stop_price: _Optional[_Union[Money, _Mapping]] = ..., time_in_force: _Optional[_Union[TimeInForce, str]] = ..., status: _Optional[_Union[OrderStatus, str]] = ..., quantity_filled: _Optional[str] = ..., avg_fill_price: _Optional[_Union[Money, _Mapping]] = ..., submitted_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., avg_fill_price_inferred: bool = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ..., algo_strategy: _Optional[str] = ...) -> None: ...
 
 class OrdersResponse(_message.Message):
     __slots__ = ("orders",)
@@ -431,7 +442,14 @@ class OrdersResponse(_message.Message):
     def __init__(self, orders: _Optional[_Iterable[_Union[Order, _Mapping]]] = ...) -> None: ...
 
 class PlaceOrderRequest(_message.Message):
-    __slots__ = ("account_number", "client_order_id", "conid", "side", "order_type", "tif", "qty", "limit_price", "stop_price", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date", "oco_group_id")
+    __slots__ = ("account_number", "client_order_id", "conid", "side", "order_type", "tif", "qty", "limit_price", "stop_price", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date", "oco_group_id", "algo_strategy", "algo_params")
+    class AlgoParamsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
     ACCOUNT_NUMBER_FIELD_NUMBER: _ClassVar[int]
     CLIENT_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     CONID_FIELD_NUMBER: _ClassVar[int]
@@ -447,6 +465,8 @@ class PlaceOrderRequest(_message.Message):
     TRAIL_LIMIT_OFFSET_FIELD_NUMBER: _ClassVar[int]
     EXPIRY_DATE_FIELD_NUMBER: _ClassVar[int]
     OCO_GROUP_ID_FIELD_NUMBER: _ClassVar[int]
+    ALGO_STRATEGY_FIELD_NUMBER: _ClassVar[int]
+    ALGO_PARAMS_FIELD_NUMBER: _ClassVar[int]
     account_number: str
     client_order_id: str
     conid: str
@@ -462,15 +482,19 @@ class PlaceOrderRequest(_message.Message):
     trail_limit_offset: str
     expiry_date: str
     oco_group_id: str
-    def __init__(self, account_number: _Optional[str] = ..., client_order_id: _Optional[str] = ..., conid: _Optional[str] = ..., side: _Optional[str] = ..., order_type: _Optional[str] = ..., tif: _Optional[str] = ..., qty: _Optional[str] = ..., limit_price: _Optional[str] = ..., stop_price: _Optional[str] = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ..., oco_group_id: _Optional[str] = ...) -> None: ...
+    algo_strategy: str
+    algo_params: _containers.ScalarMap[str, str]
+    def __init__(self, account_number: _Optional[str] = ..., client_order_id: _Optional[str] = ..., conid: _Optional[str] = ..., side: _Optional[str] = ..., order_type: _Optional[str] = ..., tif: _Optional[str] = ..., qty: _Optional[str] = ..., limit_price: _Optional[str] = ..., stop_price: _Optional[str] = ..., cash_amount: _Optional[str] = ..., trail_offset: _Optional[str] = ..., trail_offset_type: _Optional[str] = ..., trail_limit_offset: _Optional[str] = ..., expiry_date: _Optional[str] = ..., oco_group_id: _Optional[str] = ..., algo_strategy: _Optional[str] = ..., algo_params: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class PlaceOrderResponse(_message.Message):
-    __slots__ = ("broker_order_id", "status")
+    __slots__ = ("broker_order_id", "status", "algo_strategy")
     BROKER_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
+    ALGO_STRATEGY_FIELD_NUMBER: _ClassVar[int]
     broker_order_id: str
     status: str
-    def __init__(self, broker_order_id: _Optional[str] = ..., status: _Optional[str] = ...) -> None: ...
+    algo_strategy: str
+    def __init__(self, broker_order_id: _Optional[str] = ..., status: _Optional[str] = ..., algo_strategy: _Optional[str] = ...) -> None: ...
 
 class ModifyOrderRequest(_message.Message):
     __slots__ = ("broker_order_id", "account_number", "contract", "side", "order_type", "tif", "qty", "limit_price", "stop_price", "client_order_id", "cash_amount", "trail_offset", "trail_offset_type", "trail_limit_offset", "expiry_date")
@@ -559,7 +583,7 @@ class CancelOrderResponse(_message.Message):
     def __init__(self, accepted: bool = ...) -> None: ...
 
 class OrderEventMessage(_message.Message):
-    __slots__ = ("broker_order_id", "client_order_id", "status", "filled_qty", "avg_fill_price", "event_at", "raw_payload", "exec_id", "kind")
+    __slots__ = ("broker_order_id", "client_order_id", "status", "filled_qty", "avg_fill_price", "event_at", "raw_payload", "exec_id", "kind", "algo_strategy")
     BROKER_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     CLIENT_ORDER_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
@@ -569,6 +593,7 @@ class OrderEventMessage(_message.Message):
     RAW_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     EXEC_ID_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
+    ALGO_STRATEGY_FIELD_NUMBER: _ClassVar[int]
     broker_order_id: str
     client_order_id: str
     status: str
@@ -578,7 +603,8 @@ class OrderEventMessage(_message.Message):
     raw_payload: str
     exec_id: str
     kind: str
-    def __init__(self, broker_order_id: _Optional[str] = ..., client_order_id: _Optional[str] = ..., status: _Optional[str] = ..., filled_qty: _Optional[str] = ..., avg_fill_price: _Optional[str] = ..., event_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., raw_payload: _Optional[str] = ..., exec_id: _Optional[str] = ..., kind: _Optional[str] = ...) -> None: ...
+    algo_strategy: str
+    def __init__(self, broker_order_id: _Optional[str] = ..., client_order_id: _Optional[str] = ..., status: _Optional[str] = ..., filled_qty: _Optional[str] = ..., avg_fill_price: _Optional[str] = ..., event_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., raw_payload: _Optional[str] = ..., exec_id: _Optional[str] = ..., kind: _Optional[str] = ..., algo_strategy: _Optional[str] = ...) -> None: ...
 
 class SearchContractsRequest(_message.Message):
     __slots__ = ("query", "asset_class")
@@ -643,7 +669,7 @@ class StreamQuotesRequest(_message.Message):
         TICK_COUNT_RECEIVED_FIELD_NUMBER: _ClassVar[int]
         client_time: _timestamp_pb2.Timestamp
         tick_count_received: int
-        def __init__(self, client_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., tick_count_received: _Optional[int] = ...) -> None: ...
+        def __init__(self, client_time: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., tick_count_received: _Optional[int] = ...) -> None: ...
     class Resync(_message.Message):
         __slots__ = ("expected",)
         EXPECTED_FIELD_NUMBER: _ClassVar[int]
@@ -725,7 +751,7 @@ class QuoteMessage(_message.Message):
     is_delayed: bool
     delay_seconds: int
     raw_payload: bytes
-    def __init__(self, canonical_id: _Optional[str] = ..., tick_time: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., received_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., source: _Optional[str] = ..., last: _Optional[str] = ..., bid: _Optional[str] = ..., ask: _Optional[str] = ..., volume: _Optional[str] = ..., day_high: _Optional[str] = ..., day_low: _Optional[str] = ..., open: _Optional[str] = ..., prev_close: _Optional[str] = ..., change_pct: _Optional[str] = ..., change: _Optional[str] = ..., is_delayed: bool = ..., delay_seconds: _Optional[int] = ..., raw_payload: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, canonical_id: _Optional[str] = ..., tick_time: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., received_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ..., source: _Optional[str] = ..., last: _Optional[str] = ..., bid: _Optional[str] = ..., ask: _Optional[str] = ..., volume: _Optional[str] = ..., day_high: _Optional[str] = ..., day_low: _Optional[str] = ..., open: _Optional[str] = ..., prev_close: _Optional[str] = ..., change_pct: _Optional[str] = ..., change: _Optional[str] = ..., is_delayed: bool = ..., delay_seconds: _Optional[int] = ..., raw_payload: _Optional[bytes] = ...) -> None: ...
 
 class TokenRefreshRequest(_message.Message):
     __slots__ = ("broker_id",)
@@ -741,7 +767,7 @@ class TokenRefreshResponse(_message.Message):
     access_token: str
     refresh_token: str
     access_issued_at: _timestamp_pb2.Timestamp
-    def __init__(self, access_token: _Optional[str] = ..., refresh_token: _Optional[str] = ..., access_issued_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    def __init__(self, access_token: _Optional[str] = ..., refresh_token: _Optional[str] = ..., access_issued_at: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class OptionChainRequest(_message.Message):
     __slots__ = ("underlying_symbol", "expiry_date", "currency", "strike_count")
@@ -1058,3 +1084,143 @@ class FxMidRate(_message.Message):
     mid: str
     timestamp: str
     def __init__(self, base_currency: _Optional[str] = ..., quote_currency: _Optional[str] = ..., mid: _Optional[str] = ..., timestamp: _Optional[str] = ...) -> None: ...
+
+class BondInstrument(_message.Message):
+    __slots__ = ("id", "canonical_id", "display_name", "currency", "primary_exchange", "isin", "cusip", "coupon_rate", "coupon_frequency", "maturity_date", "face_value", "bond_type", "credit_rating")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    CANONICAL_ID_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    CURRENCY_FIELD_NUMBER: _ClassVar[int]
+    PRIMARY_EXCHANGE_FIELD_NUMBER: _ClassVar[int]
+    ISIN_FIELD_NUMBER: _ClassVar[int]
+    CUSIP_FIELD_NUMBER: _ClassVar[int]
+    COUPON_RATE_FIELD_NUMBER: _ClassVar[int]
+    COUPON_FREQUENCY_FIELD_NUMBER: _ClassVar[int]
+    MATURITY_DATE_FIELD_NUMBER: _ClassVar[int]
+    FACE_VALUE_FIELD_NUMBER: _ClassVar[int]
+    BOND_TYPE_FIELD_NUMBER: _ClassVar[int]
+    CREDIT_RATING_FIELD_NUMBER: _ClassVar[int]
+    id: int
+    canonical_id: str
+    display_name: str
+    currency: str
+    primary_exchange: str
+    isin: str
+    cusip: str
+    coupon_rate: str
+    coupon_frequency: int
+    maturity_date: str
+    face_value: str
+    bond_type: str
+    credit_rating: str
+    def __init__(self, id: _Optional[int] = ..., canonical_id: _Optional[str] = ..., display_name: _Optional[str] = ..., currency: _Optional[str] = ..., primary_exchange: _Optional[str] = ..., isin: _Optional[str] = ..., cusip: _Optional[str] = ..., coupon_rate: _Optional[str] = ..., coupon_frequency: _Optional[int] = ..., maturity_date: _Optional[str] = ..., face_value: _Optional[str] = ..., bond_type: _Optional[str] = ..., credit_rating: _Optional[str] = ...) -> None: ...
+
+class SearchBondsRequest(_message.Message):
+    __slots__ = ("query", "limit")
+    QUERY_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    query: str
+    limit: int
+    def __init__(self, query: _Optional[str] = ..., limit: _Optional[int] = ...) -> None: ...
+
+class SearchBondsResponse(_message.Message):
+    __slots__ = ("bonds",)
+    BONDS_FIELD_NUMBER: _ClassVar[int]
+    bonds: _containers.RepeatedCompositeFieldContainer[BondInstrument]
+    def __init__(self, bonds: _Optional[_Iterable[_Union[BondInstrument, _Mapping]]] = ...) -> None: ...
+
+class GetBondAccruedInterestRequest(_message.Message):
+    __slots__ = ("instrument_id", "account_id")
+    INSTRUMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    instrument_id: int
+    account_id: str
+    def __init__(self, instrument_id: _Optional[int] = ..., account_id: _Optional[str] = ...) -> None: ...
+
+class GetBondAccruedInterestResponse(_message.Message):
+    __slots__ = ("accrued", "as_of")
+    ACCRUED_FIELD_NUMBER: _ClassVar[int]
+    AS_OF_FIELD_NUMBER: _ClassVar[int]
+    accrued: str
+    as_of: str
+    def __init__(self, accrued: _Optional[str] = ..., as_of: _Optional[str] = ...) -> None: ...
+
+class FundInstrument(_message.Message):
+    __slots__ = ("id", "canonical_id", "display_name", "currency", "fund_family", "fund_type", "isin", "cusip", "min_investment", "allows_fractional", "nav_currency")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    CANONICAL_ID_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    CURRENCY_FIELD_NUMBER: _ClassVar[int]
+    FUND_FAMILY_FIELD_NUMBER: _ClassVar[int]
+    FUND_TYPE_FIELD_NUMBER: _ClassVar[int]
+    ISIN_FIELD_NUMBER: _ClassVar[int]
+    CUSIP_FIELD_NUMBER: _ClassVar[int]
+    MIN_INVESTMENT_FIELD_NUMBER: _ClassVar[int]
+    ALLOWS_FRACTIONAL_FIELD_NUMBER: _ClassVar[int]
+    NAV_CURRENCY_FIELD_NUMBER: _ClassVar[int]
+    id: int
+    canonical_id: str
+    display_name: str
+    currency: str
+    fund_family: str
+    fund_type: str
+    isin: str
+    cusip: str
+    min_investment: str
+    allows_fractional: bool
+    nav_currency: str
+    def __init__(self, id: _Optional[int] = ..., canonical_id: _Optional[str] = ..., display_name: _Optional[str] = ..., currency: _Optional[str] = ..., fund_family: _Optional[str] = ..., fund_type: _Optional[str] = ..., isin: _Optional[str] = ..., cusip: _Optional[str] = ..., min_investment: _Optional[str] = ..., allows_fractional: bool = ..., nav_currency: _Optional[str] = ...) -> None: ...
+
+class SearchFundsRequest(_message.Message):
+    __slots__ = ("query", "limit")
+    QUERY_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    query: str
+    limit: int
+    def __init__(self, query: _Optional[str] = ..., limit: _Optional[int] = ...) -> None: ...
+
+class SearchFundsResponse(_message.Message):
+    __slots__ = ("funds",)
+    FUNDS_FIELD_NUMBER: _ClassVar[int]
+    funds: _containers.RepeatedCompositeFieldContainer[FundInstrument]
+    def __init__(self, funds: _Optional[_Iterable[_Union[FundInstrument, _Mapping]]] = ...) -> None: ...
+
+class CFDInstrument(_message.Message):
+    __slots__ = ("id", "canonical_id", "display_name", "currency", "underlying_type", "underlying_symbol", "tick_size", "multiplier", "margin_rate", "max_leverage", "exchange")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    CANONICAL_ID_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    CURRENCY_FIELD_NUMBER: _ClassVar[int]
+    UNDERLYING_TYPE_FIELD_NUMBER: _ClassVar[int]
+    UNDERLYING_SYMBOL_FIELD_NUMBER: _ClassVar[int]
+    TICK_SIZE_FIELD_NUMBER: _ClassVar[int]
+    MULTIPLIER_FIELD_NUMBER: _ClassVar[int]
+    MARGIN_RATE_FIELD_NUMBER: _ClassVar[int]
+    MAX_LEVERAGE_FIELD_NUMBER: _ClassVar[int]
+    EXCHANGE_FIELD_NUMBER: _ClassVar[int]
+    id: int
+    canonical_id: str
+    display_name: str
+    currency: str
+    underlying_type: str
+    underlying_symbol: str
+    tick_size: str
+    multiplier: str
+    margin_rate: str
+    max_leverage: str
+    exchange: str
+    def __init__(self, id: _Optional[int] = ..., canonical_id: _Optional[str] = ..., display_name: _Optional[str] = ..., currency: _Optional[str] = ..., underlying_type: _Optional[str] = ..., underlying_symbol: _Optional[str] = ..., tick_size: _Optional[str] = ..., multiplier: _Optional[str] = ..., margin_rate: _Optional[str] = ..., max_leverage: _Optional[str] = ..., exchange: _Optional[str] = ...) -> None: ...
+
+class SearchCFDsRequest(_message.Message):
+    __slots__ = ("query", "limit")
+    QUERY_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    query: str
+    limit: int
+    def __init__(self, query: _Optional[str] = ..., limit: _Optional[int] = ...) -> None: ...
+
+class SearchCFDsResponse(_message.Message):
+    __slots__ = ("cfds",)
+    CFDS_FIELD_NUMBER: _ClassVar[int]
+    cfds: _containers.RepeatedCompositeFieldContainer[CFDInstrument]
+    def __init__(self, cfds: _Optional[_Iterable[_Union[CFDInstrument, _Mapping]]] = ...) -> None: ...

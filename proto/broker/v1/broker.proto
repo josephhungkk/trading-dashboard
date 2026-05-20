@@ -23,6 +23,8 @@ service Broker {
   rpc GetPositions(AccountRef) returns (PositionsResponse);
   rpc GetOrders(AccountRef) returns (OrdersResponse);
   rpc GetContract(ContractRef) returns (ContractResponse);
+  // Phase 22a.1 — sector classification from IBKR reqContractDetails
+  rpc GetContractFundamentals(ContractRef) returns (ContractFundamentalsResponse);
   rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
   rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
   rpc OrderEvent(AccountRef) returns (stream OrderEventMessage);
@@ -288,6 +290,13 @@ message ContractRef {
 }
 message ContractResponse {
   Contract contract = 1;
+}
+
+message ContractFundamentalsResponse {
+  string industry = 1;
+  string category = 2;
+  string primary_exchange = 3;
+  string country = 4;
 }
 
 message Position {

@@ -1501,6 +1501,35 @@ class BrokerHandlers(broker_pb2_grpc.BrokerServicer):  # type: ignore[misc]
 
         return broker_pb2.ContractResponse(contract=proto_contract)
 
+    async def GetContractFundamentals(  # noqa: N802
+        self,
+        request: broker_pb2.ContractRef,
+        context: grpc.aio.ServicerContext,
+    ) -> broker_pb2.ContractFundamentalsResponse:
+        try:
+            from ib_async import Contract as _IbContract  # type: ignore[import-untyped, unused-ignore]
+            details = await self.ib.reqContractDetailsAsync(  # type: ignore[attr-defined]
+                _IbContract(conId=int(request.conid))
+            )
+            if not details:
+                return broker_pb2.ContractFundamentalsResponse()
+            d = details[0]
+            return broker_pb2.ContractFundamentalsResponse(
+                industry=d.industry or "",
+                category=d.category or "",
+                primary_exchange=getattr(d.contract, "primaryExch", "") or "",
+                country=getattr(d.contract, "country", "") or "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "get_contract_fundamentals_failed",
+                label=self.label,
+                conid=request.conid,
+                error=str(exc),
+            )
+            await context.abort(grpc.StatusCode.INTERNAL, str(exc))
+            return broker_pb2.ContractFundamentalsResponse()
+
     async def SearchContracts(  # noqa: N802
         self,
         request: broker_pb2.SearchContractsRequest,
