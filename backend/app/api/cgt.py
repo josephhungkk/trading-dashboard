@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -16,10 +16,12 @@ from app.api.ws_auth import require_jwt
 from app.schemas.cgt import (
     CgtClassLinkRequest,
     CgtSummaryResponse,
+    DerivativePositionEntry,
     PoolSeedRequest,
     RecomputeRequest,
     S104PoolEntry,
     S104PoolResponse,
+    ShortObligationEntry,
 )
 from app.services.cgt import engine
 
@@ -37,7 +39,7 @@ def _db(request: Request) -> async_sessionmaker:
 @router.get("/api/cgt/summary", response_model=CgtSummaryResponse)
 async def get_cgt_summary(
     request: Request,
-    tax_year: int | None = None,
+    tax_year: int | None = Query(default=None, ge=2001, le=2100),
 ) -> CgtSummaryResponse:
     ty = tax_year or _current_tax_year()
     exempt_amount = Decimal("3000")
@@ -123,7 +125,8 @@ async def get_short_obligations(request: Request) -> dict:
             """)
         )
         rows = result.fetchall()
-    return {"shorts": [dict(r._mapping) for r in rows]}
+    items = [ShortObligationEntry(**dict(r._mapping)) for r in rows]
+    return {"shorts": [i.model_dump() for i in items]}
 
 
 @router.get("/api/cgt/derivatives")
@@ -139,7 +142,8 @@ async def get_derivative_positions(request: Request) -> dict:
             """)
         )
         rows = result.fetchall()
-    return {"derivatives": [dict(r._mapping) for r in rows]}
+    items = [DerivativePositionEntry(**dict(r._mapping)) for r in rows]
+    return {"derivatives": [i.model_dump() for i in items]}
 
 
 # ─── Admin: import ───────────────────────────────────────────────────────────
@@ -158,6 +162,13 @@ async def trigger_ibkr_flex(request: Request) -> dict:
 
     from app.services.cgt.importers.scheduler import run_ibkr_flex_job
 
+    def _on_flex_done(task: asyncio.Task) -> None:  # type: ignore[type-arg]
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log.error("cgt.ibkr_flex.background_task_failed", exc=str(exc))
+
     _task = asyncio.create_task(
         run_ibkr_flex_job(
             uuid.UUID(acct_str),
@@ -166,7 +177,7 @@ async def trigger_ibkr_flex(request: Request) -> dict:
             request.app.state.db_factory,
         )
     )
-    _task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    _task.add_done_callback(_on_flex_done)
     return {"status": "triggered"}
 
 

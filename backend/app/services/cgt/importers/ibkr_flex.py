@@ -72,6 +72,15 @@ async def run_import(
                 instrument_id, cgt_class_key = await _resolve_instrument(
                     trade.symbol, getattr(trade, "isin", None), session
                 )
+                if instrument_id is None:
+                    log.warning(
+                        "cgt.ibkr_flex.unknown_symbol",
+                        symbol=getattr(trade, "symbol", "?"),
+                    )
+                    metrics.cgt_importer_records_imported_total.labels(
+                        broker="ibkr", record_type="unknown_symbol"
+                    ).inc()
+                    continue
                 cgt_track = resolve_cgt_track(getattr(trade, "assetCategory", "STK"))
 
                 gbp_amount, fx_rate, fx_source = await to_gbp(
@@ -188,12 +197,12 @@ async def _fetch_flex_xml(flex_token: str, flex_query_id: str) -> bytes:
 
 async def _resolve_instrument(
     symbol: str, isin: str | None, session: AsyncSession
-) -> tuple[int, str | None]:
+) -> tuple[int | None, str | None]:
     result = await session.execute(
         text("SELECT id FROM instruments WHERE symbol = :s LIMIT 1"),
         {"s": symbol},
     )
     row = result.fetchone()
-    instrument_id = row.id if row else 0
+    instrument_id: int | None = row.id if row else None
     cgt_class_key = isin if isin else f"{symbol}:USD"
     return instrument_id, cgt_class_key

@@ -14,7 +14,7 @@ log = structlog.get_logger(__name__)
 _TARGET_CURRENCIES = {"USD", "HKD", "EUR", "JPY", "CAD", "AUD", "CHF", "CNH", "CNY"}
 _URL_2021_PLUS = "https://www.trade-tariff.service.gov.uk/api/v2/exchange_rates/files/monthly_xml_{year}-{month:02d}.xml"
 _URL_PRE_2021 = (
-    "http://www.hmrc.gov.uk/softwaredevelopers/rates/exrates-monthly-{month:02d}{year2}.xml"
+    "https://www.hmrc.gov.uk/softwaredevelopers/rates/exrates-monthly-{month:02d}{year2}.xml"
 )
 
 

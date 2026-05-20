@@ -1362,6 +1362,12 @@ class RiskService:
             )
         except Exception as exc:
             log.exception("risk.bb_warning_check_failed", exc=str(exc))
+            try:
+                from app.services.cgt.metrics import cgt_bb_gate_fires_total
+
+                cgt_bb_gate_fires_total.labels(outcome="error").inc()
+            except Exception:
+                pass
             return None  # fail-OPEN
 
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:

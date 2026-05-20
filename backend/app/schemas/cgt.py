@@ -6,7 +6,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CgtSummaryResponse(BaseModel):
@@ -44,7 +44,7 @@ class CgtClassLinkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     instrument_id: int
-    cgt_class_key: str
+    cgt_class_key: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9:._-]+$")
 
 
 class PoolSeedRequest(BaseModel):
@@ -56,6 +56,20 @@ class PoolSeedRequest(BaseModel):
     qty: Decimal
     total_cost_gbp: Decimal
     notes: str | None = None
+
+    @field_validator("qty")
+    @classmethod
+    def qty_must_be_positive(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("qty must be > 0")
+        return v
+
+    @field_validator("total_cost_gbp")
+    @classmethod
+    def cost_must_be_non_negative(cls, v: Decimal) -> Decimal:
+        if v < 0:
+            raise ValueError("total_cost_gbp must be >= 0")
+        return v
 
 
 class RecomputeRequest(BaseModel):
