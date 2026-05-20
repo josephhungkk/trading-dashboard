@@ -975,7 +975,19 @@ Three items deferred from Phase 22a: sector ingestion, MV-adjusted notional gate
 
 Multi-bot orchestration. Nightly retrain. LLM-driven strategy generation with guardrails. Auto-promotion rules. **No raw RL.**
 
-Sub-phases: 22a ✅ shipped · 22a.1 ✅ shipped (v0.22.0.1 · 2026-05-20) · 22b ✅ shipped (v0.22.1 · 2026-05-20) · 22c (health digest + dashboard)
+Sub-phases: 22a ✅ shipped · 22a.1 ✅ shipped (v0.22.0.1 · 2026-05-20) · 22b ✅ shipped (v0.22.1 · 2026-05-20) · 22c ✅ shipped (v0.22.2 · 2026-05-20)
+
+## Phase 22c — Health Digest + FE Orchestration Dashboard (v0.22.2) ✅ shipped 2026-05-20
+
+- [x] Alembic 0072 — `bot_health_snapshots` hypertable (UUID bot_id, 10 columns, 2-year retention)
+- [x] `HealthDigestService` — APScheduler 03:00 UTC, per-bot Sharpe/drawdown/win-rate/advisor accuracy from `bot_runs` + `bot_advisor_decisions`
+- [x] `orchestrator/digest_telegram.py` — rank table, trend badge (▲/▼/—), ⚠ underperformer flag, kill switch via `app_config`
+- [x] `app/main.py` — Phase 22c lifespan: HealthDigestService wired at 03:00 UTC
+- [x] `app/services/orchestrator/metrics.py` — `orchestrator_digest_runs_total` counter
+- [x] REST: `GET /api/orchestrator/digest/latest`, `/digest/history/{bot_id}`, `/correlation`
+- [x] FE: `OrchestrationPage` (4 panels: league table, exposure limits, correlation matrix, strategy gen feed)
+- [x] FE: route `/orchestration` + Topbar nav link
+- [x] 74 BE tests green (including 19 new) + 789 FE tests green
 
 ## Phase 23 — UK CGT awareness + per-bot attribution + cgt-calc handoff
 

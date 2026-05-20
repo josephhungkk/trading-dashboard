@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 from uuid import UUID
@@ -254,3 +255,119 @@ async def trigger_sector_refresh(
     _task = asyncio.ensure_future(sector_svc.refresh(instrument_id, db))
     del _task
     return {"status": "accepted", "instrument_id": instrument_id}
+
+
+# ── Phase 22c — Health Digest endpoints ──────────────────────────────────────
+
+
+def _trend_badge(sharpe_7d: Decimal | None, sharpe_30d: Decimal | None) -> str:
+    if sharpe_7d is None or sharpe_30d is None:
+        return "—"
+    if sharpe_30d == 0:
+        return "—"
+    if sharpe_7d > sharpe_30d * Decimal("1.05"):
+        return "▲"
+    if sharpe_7d < sharpe_30d * Decimal("0.95"):
+        return "▼"
+    return "—"
+
+
+class BotHealthSnapshotResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    bot_id: UUID
+    snapshot_at: datetime
+    bot_name: str
+    sharpe_30d: Decimal | None
+    sharpe_7d: Decimal | None
+    max_drawdown: Decimal | None
+    win_rate: Decimal | None
+    total_pnl: Decimal | None
+    trade_count: int | None
+    advisor_veto_accuracy_1h: Decimal | None
+    exposure_utilisation: Decimal | None
+    trend_badge: str
+
+
+class BotHealthSnapshotHistory(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    snapshot_at: datetime
+    sharpe_30d: Decimal | None
+    sharpe_7d: Decimal | None
+    max_drawdown: Decimal | None
+    trade_count: int | None
+
+
+@router.get("/digest/latest", response_model=list[BotHealthSnapshotResponse])
+async def get_digest_latest(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _jwt: Annotated[Any, Depends(require_jwt)],
+) -> list[BotHealthSnapshotResponse]:
+    rows = (
+        (
+            await db.execute(
+                text(
+                    "SELECT DISTINCT ON (h.bot_id)"
+                    " h.bot_id, h.snapshot_at, b.name AS bot_name,"
+                    " h.sharpe_30d, h.sharpe_7d, h.max_drawdown,"
+                    " h.win_rate, h.total_pnl, h.trade_count,"
+                    " h.advisor_veto_accuracy_1h, h.exposure_utilisation"
+                    " FROM bot_health_snapshots h"
+                    " JOIN bots b ON b.id = h.bot_id"
+                    " WHERE b.deleted_at IS NULL"
+                    " ORDER BY h.bot_id, h.snapshot_at DESC"
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        BotHealthSnapshotResponse(
+            **{**dict(r), "trend_badge": _trend_badge(r["sharpe_7d"], r["sharpe_30d"])}
+        )
+        for r in rows
+    ]
+
+
+@router.get("/digest/history/{bot_id}", response_model=list[BotHealthSnapshotHistory])
+async def get_digest_history(
+    bot_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _jwt: Annotated[Any, Depends(require_jwt)],
+) -> list[BotHealthSnapshotHistory]:
+    rows = (
+        (
+            await db.execute(
+                text(
+                    "SELECT snapshot_at, sharpe_30d, sharpe_7d, max_drawdown, trade_count"
+                    " FROM bot_health_snapshots"
+                    " WHERE bot_id = :bot_id"
+                    " ORDER BY snapshot_at DESC"
+                    " LIMIT 90"
+                ),
+                {"bot_id": bot_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if not rows:
+        raise HTTPException(404, "No history found for bot")
+    return [BotHealthSnapshotHistory(**dict(r)) for r in rows]
+
+
+@router.get("/correlation")
+async def get_correlation(
+    account_id: UUID,
+    request: Request,
+    _jwt: Annotated[Any, Depends(require_jwt)],
+) -> dict:
+    redis_client = getattr(request.app.state, "redis", None)
+    if redis_client is None:
+        raise HTTPException(404, "Correlation data not found")
+    raw = await redis_client.get(f"portfolio:correlation:{account_id}")
+    if raw is None:
+        raise HTTPException(404, "Correlation data not found")
+    return json.loads(raw.decode() if isinstance(raw, bytes) else raw)

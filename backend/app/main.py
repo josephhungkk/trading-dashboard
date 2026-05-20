@@ -698,6 +698,33 @@ async def lifespan(_app: FastAPI) -> Any:
     except Exception:
         log.exception("auto_promote_veto_recovery_failed")
 
+    # ── Phase 22c — HealthDigestService (03:00 UTC) ──────────────────────────
+    from app.services.orchestrator.digest import HealthDigestService as _HealthDigestSvc
+
+    _health_digest = _HealthDigestSvc(
+        db_factory=session_factory,
+        telegram=getattr(_app.state, "telegram", None),
+        redis=redis,
+    )
+    _app.state.health_digest = _health_digest
+
+    async def _run_health_digest() -> None:
+        try:
+            await _health_digest.run()
+        except Exception:
+            log.exception("health_digest_outer_failed")
+
+    scheduler.add_job(
+        _run_health_digest,
+        "cron",
+        hour=3,
+        minute=0,
+        id="orchestrator_health_digest",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
     # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
     # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery
     # dispatcher + capability-flip pubsub listener + nightly retention sweep.

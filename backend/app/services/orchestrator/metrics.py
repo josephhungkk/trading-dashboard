@@ -43,3 +43,7 @@ orchestrator_marginal_variance_fallback_total = Counter(
     "MV gate fallback events",
     ["reason"],
 )
+orchestrator_digest_runs_total = Counter(
+    "orchestrator_digest_runs_total",
+    "Total HealthDigestService run completions",
+)

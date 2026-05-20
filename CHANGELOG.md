@@ -7,6 +7,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 22c — Health Digest + FE Orchestration Dashboard (v0.22.2) — 2026-05-20
+
+**Migration (Alembic 0072)**
+
+- `0072_phase22c_health_digest.py`: `bot_health_snapshots` hypertable — `bot_id UUID FK bots`, `snapshot_at TIMESTAMPTZ`, `sharpe_30d/7d`, `max_drawdown`, `win_rate`, `total_pnl`, `trade_count`, `advisor_veto_accuracy_1h`, `exposure_utilisation`; 2-year retention policy; composite PK `(bot_id, snapshot_at)`.
+
+**Backend**
+
+- `app/services/orchestrator/digest.py` — `HealthDigestService.run()`: queries live bots, computes rolling 30d/7d Sharpe + drawdown + win-rate + advisor accuracy from `bot_runs` + `bot_advisor_decisions`; INSERTs `bot_health_snapshots` per bot (ON CONFLICT DO NOTHING); reads `digest_telegram_enabled` + `underperform_sharpe_threshold` from `app_config`; delegates to `send_digest`.
+- `app/services/orchestrator/digest_telegram.py` — `send_digest()`: sorts by Sharpe desc (None=−∞), renders rank table with trend badge (▲ = +5%, ▼ = −5%, — = stable), ⚠ prefix for underperformers.
+- `app/services/orchestrator/metrics.py` — `orchestrator_digest_runs_total` counter.
+- `app/api/orchestrator.py` — `GET /api/orchestrator/digest/latest` (DISTINCT ON latest snapshot + trend_badge); `GET /digest/history/{bot_id}` (90 rows); `GET /correlation?account_id` (Redis read, 404 if missing).
+- `app/main.py` — `HealthDigestService` wired to APScheduler at 03:00 UTC, `max_instances=1, coalesce=True`.
+
+**Frontend**
+
+- `frontend/src/services/orchestrator/types.ts` — `BotHealthSnapshot`, `BotHealthSnapshotHistory`, `CorrelationMatrix`, `ExposureLimit`, `GeneratedStrategy`.
+- `frontend/src/services/orchestrator/api.ts` — `getDigestLatest`, `getDigestHistory`, `getCorrelation`, `getExposureLimits`, `getGeneratedStrategies`, `approveStrategy`, `rejectStrategy`.
+- `frontend/src/features/orchestration/OrchestrationPage.tsx` — 4 panels: league table (sortable by Sharpe/drawdown/win-rate/advisor acc, trend badge, links to BotDetailPage); exposure limits table (staleTime 60s); correlation matrix heatmap (|ρ|>0.7 border, staleTime 3600s); strategy gen feed (approve/reject buttons).
+- `frontend/src/routes/orchestration.tsx` — TanStack Router route with `account_id` search param.
+- `frontend/src/components/layout/Topbar/Topbar.tsx` — "Orchestration" nav link added.
+
+**Tests**
+
+- 19 new BE tests: `test_digest_telegram.py` (8), `test_digest.py` (4), `test_orchestrator_digest.py` (8), `test_alembic_0072.py` (2). Total 74 targeted tests green.
+- 7 new FE tests in `OrchestrationPage.test.tsx`. Total 789 FE tests green.
+
+---
+
 ### Phase 22a.1 — Orchestrator Patch (v0.22.0.1) — 2026-05-20
 
 Three items deferred from Phase 22a: sector ingestion pipeline, correlation-discounted marginal-variance gate, Telegram veto window for auto-promote.
