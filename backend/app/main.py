@@ -552,6 +552,92 @@ async def lifespan(_app: FastAPI) -> Any:
         CronTrigger(hour=8, minute=0),
     )
 
+    # ── Phase 22a — PortfolioExposureGate + Correlation + NightlyRetrain ─────
+    from app.services.orchestrator.correlation import CorrelationService as _CorrelationSvc
+    from app.services.orchestrator.exposure_gate import PortfolioExposureGate as _ExposureGate
+    from app.services.orchestrator.retrain import NightlyRetrainJob as _NightlyRetrainJob
+
+    _exposure_gate = _ExposureGate(redis=redis)
+    _app.state.exposure_gate = _exposure_gate
+    _correlation_svc = _CorrelationSvc(redis=redis)
+
+    async def _run_correlation_update() -> None:
+        try:
+            async with session_factory() as _corr_db:
+                acct_rows = await _corr_db.execute(
+                    text(
+                        "SELECT DISTINCT b.account_id FROM bots b"
+                        " WHERE b.deleted_at IS NULL AND b.status = 'running'"
+                    )
+                )
+                acct_ids = [r[0] for r in acct_rows.all()]
+            for acct_id in acct_ids:
+                try:
+                    async with session_factory() as _corr_db2:
+                        instr_rows = await _corr_db2.execute(
+                            text(
+                                "SELECT DISTINCT p.instrument_id FROM positions p"
+                                " WHERE p.account_id = :acct AND p.qty != 0"
+                            ),
+                            {"acct": acct_id},
+                        )
+                        instr_ids = [r[0] for r in instr_rows.all()]
+                        if instr_ids:
+                            await _correlation_svc.compute_and_store(
+                                account_id=acct_id,
+                                instrument_ids=instr_ids,
+                                db=_corr_db2,
+                            )
+                except Exception:
+                    log.exception("correlation_update_failed", account_id=str(acct_id))
+        except Exception:
+            log.exception("correlation_update_outer_failed")
+
+    scheduler.add_job(
+        _run_correlation_update,
+        "cron",
+        hour=1,
+        minute=0,
+        id="orchestrator_correlation_update",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
+    from app.services.param_tuner.service import BacktestSubmitter as _BacktestSubmitter
+    from app.services.param_tuner.service import ParamTunerService as _ParamTunerSvc
+
+    def _make_retrain_tuner(_db):
+        return _ParamTunerSvc(
+            ai_client=_app.state.ai_client,
+            redis=redis,
+            db_factory=session_factory,
+            backtest_submitter=_BacktestSubmitter(session_factory),
+        )
+
+    _nightly_retrain = _NightlyRetrainJob(
+        db_factory=session_factory,
+        param_tuner_factory=_make_retrain_tuner,
+        telegram=getattr(_app.state, "telegram", None),
+    )
+
+    async def _run_nightly_retrain() -> None:
+        try:
+            await _nightly_retrain.run()
+        except Exception:
+            log.exception("nightly_retrain_outer_failed")
+
+    scheduler.add_job(
+        _run_nightly_retrain,
+        "cron",
+        hour=2,
+        minute=0,
+        id="orchestrator_nightly_retrain",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
     # ── Phase 11b chunk-B-close: alerts evaluator + delivery dispatcher ──────
     # Spec §6 wiring: AlertsEvaluator + bars_1m Redis subscriber + delivery
     # dispatcher + capability-flip pubsub listener + nightly retention sweep.
