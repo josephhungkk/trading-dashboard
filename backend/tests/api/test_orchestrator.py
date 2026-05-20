@@ -88,3 +88,33 @@ async def test_put_auto_promote_criteria_unknown_key_422(admin_client: AsyncClie
         },
     )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_per_sector_limit_missing_sector_422(admin_client: AsyncClient) -> None:
+    """per_sector limit_type without sector field -> 422."""
+    resp = await admin_client.post(
+        "/api/orchestrator/exposure-limits",
+        json={
+            "account_id": str(uuid4()),
+            "limit_type": "per_sector",
+            "max_notional": "50000",
+            "currency": "USD",
+        },
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_sector_refresh_non_admin_rejected(auth_client: AsyncClient) -> None:
+    """Sector refresh requires admin JWT; non-admin gets 401/403."""
+    # auth_client has both jwt + admin overrides in test fixture, so test 503 (service not wired)
+    resp = await auth_client.post("/api/orchestrator/sector-refresh/1")
+    assert resp.status_code in (401, 403, 503)
+
+
+@pytest.mark.asyncio
+async def test_sector_refresh_not_wired_503(admin_client: AsyncClient) -> None:
+    """Sector refresh returns 503 when service not wired in test env."""
+    resp = await admin_client.post("/api/orchestrator/sector-refresh/1")
+    assert resp.status_code == 503

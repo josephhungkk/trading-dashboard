@@ -18,10 +18,14 @@ from app.services.orchestrator.auto_promote import AutoPromoteCriteria
 router = APIRouter(prefix="/api/orchestrator", tags=["orchestrator"])
 
 
+_VALID_LIMIT_TYPES = frozenset({"total_notional", "per_instrument", "per_sector"})
+
+
 class ExposureLimitCreate(BaseModel):
     account_id: UUID
     limit_type: str
     instrument_id: int | None = None
+    sector: str | None = None
     max_notional: Decimal
     currency: str = "USD"
 
@@ -33,6 +37,7 @@ class ExposureLimitResponse(BaseModel):
     account_id: UUID
     limit_type: str
     instrument_id: int | None
+    sector: str | None
     max_notional: Decimal
     currency: str
     enabled: bool
@@ -57,22 +62,28 @@ async def create_exposure_limit(
     db: Annotated[AsyncSession, Depends(get_db)],
     _jwt: Annotated[Any, Depends(require_admin_jwt)],
 ) -> ExposureLimitResponse:
-    if body.limit_type not in ("total_notional", "per_instrument"):
-        raise HTTPException(422, "limit_type must be total_notional or per_instrument")
+    if body.limit_type not in _VALID_LIMIT_TYPES:
+        raise HTTPException(
+            422,
+            f"limit_type must be one of: {', '.join(sorted(_VALID_LIMIT_TYPES))}",
+        )
+    if body.limit_type == "per_sector" and not body.sector:
+        raise HTTPException(422, "sector is required for per_sector limit_type")
     try:
         row = (
             (
                 await db.execute(
                     text(
                         "INSERT INTO portfolio_exposure_limits"
-                        " (account_id, limit_type, instrument_id, max_notional, currency)"
-                        " VALUES (:acct, :lt, :iid, :mn, :cur)"
+                        " (account_id, limit_type, instrument_id, sector, max_notional, currency)"
+                        " VALUES (:acct, :lt, :iid, :sec, :mn, :cur)"
                         " RETURNING *"
                     ),
                     {
                         "acct": body.account_id,
                         "lt": body.limit_type,
                         "iid": body.instrument_id,
+                        "sec": body.sector,
                         "mn": body.max_notional,
                         "cur": body.currency,
                     },
@@ -220,3 +231,26 @@ async def trigger_retrain(
     _task = asyncio.ensure_future(retrain_job.run())
     del _task
     return {"status": "accepted"}
+
+
+@router.post("/sector-refresh/{instrument_id}", status_code=202)
+async def trigger_sector_refresh(
+    instrument_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _jwt: Annotated[Any, Depends(require_admin_jwt)],
+) -> dict:
+    sector_svc = getattr(request.app.state, "sector_ingestion_svc", None)
+    if sector_svc is None:
+        raise HTTPException(503, "SectorIngestionService not wired")
+    exists = (
+        await db.execute(
+            text("SELECT 1 FROM instruments WHERE id = :id"),
+            {"id": instrument_id},
+        )
+    ).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(404, "Instrument not found")
+    _task = asyncio.ensure_future(sector_svc.refresh(instrument_id, db))
+    del _task
+    return {"status": "accepted", "instrument_id": instrument_id}
