@@ -1316,6 +1316,54 @@ class RiskService:
             return None, warnings[0]
         return None, None
 
+    async def _check_bb_warning(self, ctx: EvaluationContext) -> CheckResult:
+        """Warn on BUY within 30 UK calendar days of a disposal (b&b rule HMRC §2.2)."""
+        if ctx.side != "buy":
+            return None
+        if ctx.instrument_id is None:
+            return None
+        if ctx.asset_class in ("FUTURE", "FUT", "CFD"):
+            return None
+        try:
+            from app.services.cgt.metrics import cgt_bb_gate_fires_total
+
+            result = await self._db.execute(
+                text("""
+                    SELECT te.uk_trade_date, te.qty, te.price_gbp
+                    FROM tax_events te
+                    JOIN cgt_class_links ccl ON ccl.cgt_class_key = te.cgt_class_key
+                    WHERE te.account_id = :a
+                      AND ccl.instrument_id = :iid
+                      AND te.side = 'sell'
+                      AND te.cgt_track = 'pool'
+                      AND te.uk_trade_date >= CURRENT_DATE - 30
+                      AND te.uk_trade_date < CURRENT_DATE
+                    ORDER BY te.uk_trade_date DESC
+                    LIMIT 1
+                """),
+                {"a": ctx.account_id, "iid": ctx.instrument_id},
+            )
+            row = result.fetchone()
+            if row is None:
+                cgt_bb_gate_fires_total.labels(outcome="no_match").inc()
+                return None
+            cgt_bb_gate_fires_total.labels(outcome="warned").inc()
+            return (
+                None,
+                GateWarningEntry(
+                    check="bb_warning",
+                    code="bb_30_day_match",
+                    message=(
+                        f"Acquiring within 30 days of disposal on {row.uk_trade_date} "
+                        f"(qty: {row.qty}, proceeds: £{row.price_gbp:.2f}). "
+                        "This acquisition will be b&b matched under HMRC rules."
+                    ),
+                ),
+            )
+        except Exception as exc:
+            log.exception("risk.bb_warning_check_failed", exc=str(exc))
+            return None  # fail-OPEN
+
     async def evaluate(self, ctx: EvaluationContext, mode: EvalMode) -> GateVerdict:
         """Run all 7 checks; aggregate to GateVerdict (allow/warn/block precedence).
 
@@ -1493,6 +1541,12 @@ class RiskService:
                 blockers.append(blocker)
             if warning is not None:
                 warnings.append(warning)
+
+        bb_result = await self._check_bb_warning(ctx)
+        if bb_result is not None:
+            _, bb_warning = bb_result
+            if bb_warning is not None:
+                warnings.append(bb_warning)
 
         verdict_str: Literal["allow", "warn", "block"] = (
             "block" if blockers else ("warn" if warnings else "allow")

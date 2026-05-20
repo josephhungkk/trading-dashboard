@@ -42,6 +42,7 @@ from app.api.brokers import router as brokers_router
 from app.api.brokers_admin import router as brokers_admin_router
 from app.api.capabilities import router as capabilities_router
 from app.api.cfd import router as cfd_router
+from app.api.cgt import router as cgt_router
 from app.api.chart_layouts import router as chart_layouts_router
 from app.api.combos import router as combos_router
 from app.api.contracts import router as contracts_router
@@ -1329,6 +1330,7 @@ app.include_router(ws_backtests_api.router)
 
 app.include_router(orchestrator_router)
 app.include_router(strategy_gen_router)
+app.include_router(cgt_router)
 
 
 @app.get("/health")
