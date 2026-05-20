@@ -1,7 +1,7 @@
 # Phase 22a.1 — Orchestrator Patch: Sector Ingestion + Marginal-Variance Gate + Auto-Promote Veto Window (v0.22.0.1)
 
 **Date:** 2026-05-20
-**Status:** Architect-review pass applied (3 CRIT + 7 HIGH + 8 MED inline) — ready for /writing-plans
+**Status:** Architect-review pass 1+2 applied (CRIT-1 walk-back + MED-9-new + LOW-5 inline) — ready for /writing-plans
 **Builds on:** Phase 22a (v0.22.0) — all chunks A–F shipped
 **Version target:** v0.22.0.1
 
@@ -28,10 +28,10 @@ This sub-phase closes all three.
 
 ## 2. Data Model (Alembic 0069.1)
 
-Patch migration applied after 0069. **CRIT-1 fix:** 0069 created `shadow_promotion_events` with an anonymous inline CHECK `('success','reverted')`. The migration must resolve the actual constraint name via `information_schema` before dropping it.
+Patch migration applied after 0069. **CRIT-1 fix (pass-2 confirmed):** Postgres names inline column-add CHECKs as `{table}_{column}_check`, so the constraint from 0069 is `shadow_promotion_events_status_check`. The `DROP CONSTRAINT` can reference it by name directly — no runtime lookup needed.
 
 ```python
-# In the alembic upgrade() function — resolve anonymous constraint name at runtime
+# In the alembic upgrade() function
 def upgrade() -> None:
     # ---------- instruments: sector columns ----------
     op.add_column("instruments", sa.Column("sector", sa.Text(), nullable=True))
@@ -74,17 +74,12 @@ def upgrade() -> None:
         sa.Column("veto_token", postgresql.UUID(as_uuid=True),
                   server_default=sa.text("NULL"), nullable=True),
     )
-    # CRIT-1: resolve anonymous constraint name, extend vocabulary preserving 'reverted'
-    conn = op.get_bind()
-    row = conn.execute(sa.text(
-        "SELECT conname FROM pg_constraint"
-        " JOIN pg_class ON conrelid = pg_class.oid"
-        " WHERE pg_class.relname = 'shadow_promotion_events'"
-        "   AND contype = 'c'"
-        "   AND pg_get_constraintdef(pg_constraint.oid) LIKE '%status%'"
-    )).fetchone()
-    if row:
-        op.drop_constraint(row[0], "shadow_promotion_events", type_="check")
+    # CRIT-1: constraint name is predictable (table_column_check); drop directly
+    op.drop_constraint(
+        "shadow_promotion_events_status_check",
+        "shadow_promotion_events",
+        type_="check",
+    )
     op.create_check_constraint(
         "shadow_promotion_events_status_check_v2",
         "shadow_promotion_events",
@@ -366,8 +361,15 @@ If `RETURNING` is empty, the other path won — exit silently (no error).
 **Full flow when criteria pass AND `auto_apply=True` AND master switch on AND `veto_enabled=True`:**
 
 1. Generate `veto_token = uuid4()`.
-2. Insert `shadow_promotion_events(live_bot_id, shadow_bot_id, status='promote_pending', promoted_via='auto', veto_expires_at=now() + N minutes, veto_token=veto_token)`.
-   - `uq_shadow_promotion_pending` index prevents duplicate pending rows.
+2. **MED-9 fix — INSERT before Telegram send, catch duplicate:** Attempt INSERT under a savepoint; on `IntegrityError` (duplicate `promote_pending` row — concurrent evaluator tick) catch and return `"skipped_pending_exists"` without sending Telegram. Only proceed to steps 3–4 if INSERT succeeded.
+   ```python
+   try:
+       await db.execute(INSERT_PROMOTE_PENDING, {..., veto_token: veto_token})
+       await db.commit()
+   except IntegrityError:
+       await db.rollback()
+       return "skipped_pending_exists"
+   ```
 3. Post Telegram: `"Auto-promote candidate: shadow {shadow_bot_id} → live {live_bot_id}\nSharpe={s:.2f}, MaxDD={dd:.1%}, WinRate={wr:.1%}\nUse /veto_promote_{veto_token} to cancel. Expires in {N}m."` (HIGH-5: token, not integer ID).
 4. Schedule APScheduler `DateTrigger` one-shot job ID `auto_promote_veto_{veto_token}` at `veto_expires_at`.
 
@@ -467,7 +469,7 @@ Return 422 if not found. Normalise (strip, lower-case) the incoming `sector` val
 | **A — Schema + Proto** | Alembic 0069.1 (instruments cols, per_sector type, promote_pending status, veto_token, veto_expires_at checks, recovery index); `proto/broker/v1/broker.proto` + `FundamentalsResponse` + sidecar handler + `BrokerSidecarClient.get_contract_fundamentals`; buf generate + cross-platform stubs; migration tests | **Codex** | — |
 | **B — SectorIngestionService** | `orchestrator/sector_ingestion.py` (IBKR path via new RPC, Schwab fallback, synthetic `_class:*` prefix, case normalisation); backfill serial loop; APScheduler 01:30 wiring; `InstrumentsService` hook; unit tests (IBKR path, Schwab fallback, synthetic, backfill returns `{processed,updated,skipped,errors}`, sidecar unavailable preserves existing value) | Codex | after A |
 | **C — Marginal-variance gate** | Extend `correlation.py` (vol cache `vol:30d:{iid}`, MULTI/EXEC pipeline write — MED-4); modify `exposure_gate.py` (correlation-discounted formula — CRIT-3, `instrument_sector` param, MED-6 boot seed, LOW-2 `path` label); update Lua script (3-ARGV, `_SCRIPT_VERSION` bump — HIGH-1); audit `fill_router.py` + `supervisor.py` for sector passthrough (HIGH-2); tests (opposite-side hedge ρ=+1 → effective~0, uncorrelated ρ=0 → effective≈raw, stale matrix fallback, kill switch, sector HASH key written, per_sector limit check, Lua nil-guard) | Codex | after A |
-| **D — Auto-promote veto window** | Modify `orchestrator/auto_promote.py` (veto_token, promote_pending insert, DateTrigger job, CAS updates — HIGH-6, expiry promote() failure → reverted — HIGH-7); startup recovery sweep (HIGH-4); Telegram `/veto_promote_{token}` handler; config keys; tests (veto fires, expiry promotes, immediate path, promote() raise → reverted, CAS race won by expiry, CAS race won by veto, recovery sweep re-schedules vs fires immediately, duplicate pending blocked by index, regression test: veto_enabled=false reproduces 22a writes) | Qwen | after A |
+| **D — Auto-promote veto window** | Modify `orchestrator/auto_promote.py` (veto_token, promote_pending insert under savepoint — MED-9, DateTrigger job, CAS updates — HIGH-3, expiry promote() failure → reverted — HIGH-7-new); startup recovery sweep (HIGH-2); Telegram `/veto_promote_{token}` handler; config keys; tests (veto fires, expiry promotes, immediate path, promote() raise → reverted, CAS race won by expiry, CAS race won by veto, recovery sweep re-schedules vs fires immediately, concurrent evaluator tick → skipped_pending_exists + no duplicate Telegram, regression test: veto_enabled=false reproduces 22a writes) | Qwen | after A |
 | **E — REST API** | `api/orchestrator.py` — sector-refresh endpoints (MED-7 response shape), per_sector CRUD with sector validation (MED-1), exposure response update; tests | Qwen | after B/C/D |
 | **F — Close-out** | CLAUDE.md, CHANGELOG.md, TASKS.md (LOW-4: include all new config keys in operator runbook), tag v0.22.0.1 | Opus direct | after all |
 
@@ -509,7 +511,7 @@ Return 422 if not found. Normalise (strip, lower-case) the incoming `sector` val
 - Recovery sweep: `promote_pending` row with future `veto_expires_at` → job re-scheduled
 - Recovery sweep: `promote_pending` row with past `veto_expires_at` → fires immediately
 - `veto_enabled=False` → immediate `promote()`, no `promote_pending` row (regression: same writes as 22a)
-- Duplicate `promote_pending` blocked by `uq_shadow_promotion_pending` index
+- Duplicate `promote_pending` blocked by `uq_shadow_promotion_pending` index → `skipped_pending_exists` returned, no Telegram sent (MED-9)
 - `uq_shadow_promotion_success` prevents double-promotion after expiry
 
 **REST API (~7):**
@@ -557,3 +559,4 @@ Return 422 if not found. Normalise (strip, lower-case) the incoming `sector` val
 | Per-bot marginal-variance threshold | Not needed for 22a.1 correctness |
 | KPI leakage in Telegram veto message | Single-user allowlist today; harden with RBAC in Phase 24 (MED-8) |
 | `vol:30d:{iid}` consumed by gate | Written for FE/HealthDigest; not yet read by gate — gate uses correlation-discounted notional which needs no vol |
+| ADR for MV interpretation choice | LOW-5: document the correlation-discount-factor decision (interpretation ii vs variance-budget i) in `docs/decisions/` so future maintainers understand why `effective_notional` is dimensionally consistent with `max_notional` |
