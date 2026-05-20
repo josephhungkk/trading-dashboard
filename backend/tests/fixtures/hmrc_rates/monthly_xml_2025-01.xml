@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<exchangeRateYear>
+  <exchangeRate>
+    <currencyCode>USD</currencyCode>
+    <rateNew>1.27</rateNew>
+  </exchangeRate>
+  <exchangeRate>
+    <currencyCode>HKD</currencyCode>
+    <rateNew>9.87</rateNew>
+  </exchangeRate>
+  <exchangeRate>
+    <currencyCode>EUR</currencyCode>
+    <rateNew>1.17</rateNew>
+  </exchangeRate>
+</exchangeRateYear>

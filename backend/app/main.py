@@ -1058,6 +1058,27 @@ async def lifespan(_app: FastAPI) -> Any:
     except Exception:
         log.exception("bot_fill_router.lifespan_init_failed")
 
+    # ── Phase 23a — CGT HMRC FX rate fetch ───────────────────────────────
+    from datetime import date as _date
+
+    from app.services.cgt.hmrc_rates import fetch_and_store_rates as _fetch_hmrc_rates
+
+    async def _run_hmrc_rate_fetch() -> None:
+        today = _date.today()
+        period = today.replace(day=1)
+        async with SessionLocal() as _s:
+            await _fetch_hmrc_rates(period, _s)
+            await _s.commit()
+
+    scheduler.add_job(
+        _run_hmrc_rate_fetch,
+        CronTrigger(day=1, hour=22, minute=0, timezone="UTC"),
+        id="cgt_hmrc_rates_monthly",
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
     log.info("startup_ok", env=settings.env)
     try:
         yield
