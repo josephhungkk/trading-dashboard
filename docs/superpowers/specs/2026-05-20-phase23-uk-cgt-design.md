@@ -202,6 +202,10 @@ CREATE TABLE short_obligations (
 );
 
 -- Derivative position ledger (FUTURE + CFD open/close pairs)
+-- total_proceeds_gbp accumulates ALL cashflows that reduce cost (open short proceeds,
+-- close long proceeds, settlement receipts, variation margin credits).
+-- total_cost_gbp accumulates ALL cashflows that increase cost (open long cost,
+-- close short cost, margin debits). gain = total_proceeds_gbp - total_cost_gbp.
 CREATE TABLE derivative_positions (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id          UUID REFERENCES broker_accounts(id) NOT NULL,
@@ -210,8 +214,8 @@ CREATE TABLE derivative_positions (
   close_tax_event_id  UUID REFERENCES tax_events(id) NULLABLE,
   side                VARCHAR(8)     NOT NULL CHECK (side IN ('long','short')),
   qty                 NUMERIC(20,8)  NOT NULL,
-  total_proceeds_gbp  NUMERIC(20,8)  NOT NULL DEFAULT 0,
-  total_cost_gbp      NUMERIC(20,8)  NOT NULL DEFAULT 0,
+  total_proceeds_gbp  NUMERIC(20,8)  NOT NULL DEFAULT 0,  -- all inflow cashflows
+  total_cost_gbp      NUMERIC(20,8)  NOT NULL DEFAULT 0,  -- all outflow cashflows
   gain_gbp            NUMERIC(20,8)  NULLABLE,
   status              VARCHAR(8)     NOT NULL CHECK (status IN ('open','closed')),
   opened_at           TIMESTAMPTZ    NOT NULL,
