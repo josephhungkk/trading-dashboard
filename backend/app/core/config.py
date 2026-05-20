@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     database_url: str = Field(alias="DATABASE_URL")
     postgres_pool_size: int = Field(default=5, alias="POSTGRES_POOL_SIZE")
     postgres_max_overflow: int = Field(default=10, alias="POSTGRES_MAX_OVERFLOW")
+    pg_ssl_cert_path: str | None = Field(default=None, alias="PG_SSL_CERT_PATH")
+    pg_ssl_key_path: str | None = Field(default=None, alias="PG_SSL_KEY_PATH")
+    pg_ssl_ca_path: str | None = Field(default=None, alias="PG_SSL_CA_PATH")
+    postgres_pool_size_scheduler: int = Field(default=10, alias="POSTGRES_POOL_SIZE_SCHEDULER")
     redis_password: str = Field(alias="REDIS_PASSWORD")
     redis_url: str = Field(alias="REDIS_URL")
 

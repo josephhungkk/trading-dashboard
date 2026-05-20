@@ -3,6 +3,13 @@
 # Usage: ./scripts/deploy.sh
 set -euo pipefail
 
+# Assert .env is not world-readable
+ENV_PERMS=$(stat -c '%a' .env 2>/dev/null || echo "000")
+if [[ "$ENV_PERMS" != "600" ]]; then
+    echo "ERROR: .env permissions are ${ENV_PERMS} — must be 600. Run: chmod 600 .env"
+    exit 1
+fi
+
 VPS_HOST="${VPS_HOST:-88.208.197.219}"
 VPS_USER="${VPS_USER:-trader}"
 VPS_PORT="${VPS_PORT:-2222}"
