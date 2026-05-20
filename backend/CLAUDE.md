@@ -35,9 +35,12 @@ Run once, save output, read all failures together before fixing. See memory `fee
 | AI router | `app/services/ai/router.py` | 8 capabilities; LOCAL_ONLY is 3-layer defence; 404 not 403 on unknown job id |
 | Advisor | `app/services/advisor/service.py` | `AdvisorService.review()` fail-OPEN; OFF passthrough; semaphore per-bot (max_concurrent 1–4) |
 | Param tuner | `app/services/param_tuner/service.py` | SELECT FOR UPDATE SKIP LOCKED; Redis cost reservation fail-OPEN; ranks by Sharpe+MAR |
-| Shadow promoter | `app/services/shadow_promoter/service.py` | `create_shadow()` forces `mode='paper'`; `_insert_mapping` table validated against frozenset allowlist |
+| Shadow promoter | `app/services/shadow_promoter/service.py` | `create_shadow()` forces `mode='paper'`; `_insert_mapping` table validated against frozenset allowlist; `promote()` takes `promoted_via` (3rd positional: 'manual'/'auto') + `promoted_by` keyword |
 | Bot supervisor | `app/bot/supervisor.py` | State machine stopped→starting→running→pausing→paused→error; `restart()` = stop→pubsub-poll→start (10s timeout) |
 | Backtest runner | `app/backtest/runner.py` | Atomic CAS `WHERE status='queued'`; FIFO long+short pairing with commission deduction |
+| Exposure gate | `app/services/orchestrator/exposure_gate.py` | Pre-trade station 5.75; Redis HASH two-tier (miss→PG fallback per-instrument GROUP BY); WARN at 80% of limit; fail-CLOSED on PG error |
+| AutoPromote | `app/services/orchestrator/auto_promote.py` | Fire-once guard via `shadow_promotion_events WHERE status='success'`; master switch in `app_config` (namespace=orchestrator, key=auto_promote_enabled) |
+| NightlyRetrain | `app/services/orchestrator/retrain.py` | `TaskGroup` + `Semaphore(max_parallel)`; `except BaseException`; APScheduler 02:00 UTC |
 
 ## Broker adapter invariants
 

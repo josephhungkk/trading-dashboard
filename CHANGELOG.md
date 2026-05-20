@@ -7,6 +7,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 22a — Strategy Orchestrator (v0.22.0) — 2026-05-20
+
+Phase 22a ships the portfolio-level orchestration layer: a pre-trade exposure gate, a daily correlation matrix service, an auto-promote evaluator, and a nightly retrain job. All wired into `app.state` via the lifespan block; 8 new REST endpoints under `/api/orchestrator/`.
+
+**Migrations (Alembic 0069–0070)**
+
+- `0069_phase22a_orchestrator.py`: `portfolio_exposure_limits` table (account-level `total_notional` + `per_instrument` caps, `enabled` flag, partial unique indexes); `portfolio_correlation_snapshots` table (`instrument_ids BIGINT[]`, `matrix_json JSONB`, `window_days`); `shadow_promotion_events.status TEXT NOT NULL DEFAULT 'success'`; `shadow_promotion_events.promoted_via TEXT CHECK IN ('manual','auto')`; partial index `uq_shadow_promotion_success` for fire-once guard; `bots.auto_promote_criteria JSONB`; `bots.shadow_promoted_at TIMESTAMPTZ`.
+- `0070_phase22a_fixup.py`: `portfolio_correlation_snapshots.account_id SET NOT NULL`; rebuilds `uq_portfolio_exposure_total` partial index with `WHERE instrument_id IS NULL` (one total-notional limit per account).
+
+**Backend**
+
+- `app/services/fx.py` — `get_fx_rate(currency, redis) -> Decimal`: reads `fx:{currency}:USD` from Redis; returns `Decimal("1.0")` on cache miss.
+- `app/services/orchestrator/exposure_gate.py` — `PortfolioExposureGate`: pre-trade station 5.75; Redis HASH `portfolio:exposure:{account_id}` with `total` + `instr:{id}` fields; two-tier fail (Redis miss → PG fallback seeding both total and per-instrument via `GROUP BY instrument_id`; PG failure → fail-CLOSED BLOCK); WARN tier fires at 80–100% of limit; Lua atomic `HINCRBYFLOAT` on fill; metric label tracks which `limit_type` triggered outcome.
+- `app/services/orchestrator/correlation.py` — `CorrelationService`: Pearson matrix from `bars_1d` log returns; `_MIN_BARS=10`; stores `portfolio:correlation:{account_id}` in Redis with TTL 86400 s.
+- `app/services/orchestrator/auto_promote.py` — `AutoPromoteEvaluator`: master switch via `app_config`; fire-once guard via `shadow_promotion_events WHERE status='success'`; `AutoPromoteCriteria(min_sharpe, max_drawdown, min_win_rate, min_comparison_days=14, auto_apply=False)` with `extra="forbid"`; 8 outcome strings.
+- `app/services/orchestrator/retrain.py` — `NightlyRetrainJob`: fan-out over all running non-shadow bots using `asyncio.TaskGroup` + `asyncio.Semaphore(max_parallel=2)`; per-bot `asyncio.wait_for`; Telegram report on completion.
+- `app/services/orchestrator/metrics.py` — 7 Prometheus metrics.
+- `app/services/shadow_promoter/service.py` — `promote()` adds `promoted_via: str` parameter; INSERT writes both `promoted_by` (identity) and `promoted_via` ('manual'/'auto').
+- `app/api/orchestrator.py` — 8 endpoints: exposure limits CRUD, live exposure state, auto-promote criteria/evaluate, retrain trigger.
+- `app/main.py` lifespan: ExposureGate, CorrelationService cron 01:00 UTC, NightlyRetrainJob cron 02:00 UTC, AutoPromoteEvaluator all wired to `app.state`.
+
+**Tests**
+
+- 48 Phase 22a tests total green: exposure gate × 8, correlation × 4, auto-promote × 7, retrain × 3, REST × 5, shadow × 26.
+
+---
+
 ### Phase 21c — Advisor Perf-Attribution (v0.21.3)
 
 Phase 21c shipped on 2026-05-19. Closes the attribution loop: for every `bot_advisor_decisions` row the system now computes a simulated P&L outcome across four windows (15 m / 1 h / 4 h / EOD) and marks each verdict correct or incorrect. The AdvisorScoreCard surfaces veto accuracy, approve accuracy, and average avoided/missed value directly on the bot detail page.

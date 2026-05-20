@@ -940,9 +940,27 @@ Per-bot / per-strategy / per-advisor-verdict P&L attribution. Advisor decision q
 - [x] FE `BotDetailPage` — AdvisorScoreCard rendered on overview tab
 - [x] 24 BE unit tests + 4 API tests; 778 FE tests green; 2103 BE tests green
 
+## Phase 22a — Strategy Orchestrator (v0.22.0) ✅ shipped 2026-05-20
+
+Multi-bot portfolio-level orchestration: exposure gate, correlation matrix, auto-promote evaluator, nightly retrain job.
+
+- [x] Alembic 0069: `portfolio_exposure_limits`, `portfolio_correlation_snapshots`, `shadow_promotion_events.{status,promoted_via}`, `bots.auto_promote_criteria`
+- [x] Alembic 0070 (fixup): `portfolio_correlation_snapshots.account_id NOT NULL`; partial index uses `instrument_id IS NULL`
+- [x] `app/services/fx.py` — `get_fx_rate()` Redis-cached, Decimal("1.0") on miss
+- [x] `app/services/orchestrator/exposure_gate.py` — `PortfolioExposureGate`: Redis HASH, PG fallback per-instrument, WARN tier (80-100%), Lua atomic fill update
+- [x] `app/services/orchestrator/correlation.py` — `CorrelationService`: Pearson matrix from `bars_1d`, Redis TTL 86400s
+- [x] `app/services/orchestrator/auto_promote.py` — `AutoPromoteEvaluator`: master switch, fire-once guard, criteria state machine
+- [x] `app/services/orchestrator/retrain.py` — `NightlyRetrainJob`: `TaskGroup` + `Semaphore`, APScheduler 02:00 UTC
+- [x] `app/api/orchestrator.py` — 8 REST endpoints (exposure limits CRUD, exposure state, auto-promote criteria/evaluate, retrain trigger)
+- [x] `app/main.py` — Phase 22a lifespan: ExposureGate, CorrelationSvc (01:00 UTC), NightlyRetrainJob, AutoPromoteEvaluator all wired to `app.state`
+- [x] `shadow_promoter/service.py` — `promote()` accepts `promoted_via` + `promoted_by` separately
+- [x] 48 tests passing (exposure gate × 8, correlation × 4, auto-promote × 7, retrain × 3, REST × 5, shadow × 26)
+
 ## Phase 22 — Bot engine v3 (autonomous, self-refining)
 
 Multi-bot orchestration. Nightly retrain. LLM-driven strategy generation with guardrails. Auto-promotion rules. **No raw RL.**
+
+Sub-phases: 22a ✅ shipped · 22b (LLM strategy gen) · 22c (health digest + dashboard)
 
 ## Phase 23 — UK CGT awareness + per-bot attribution + cgt-calc handoff
 
