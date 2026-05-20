@@ -956,11 +956,26 @@ Multi-bot portfolio-level orchestration: exposure gate, correlation matrix, auto
 - [x] `shadow_promoter/service.py` — `promote()` accepts `promoted_via` + `promoted_by` separately
 - [x] 48 tests passing (exposure gate × 8, correlation × 4, auto-promote × 7, retrain × 3, REST × 5, shadow × 26)
 
+## Phase 22a.1 — Orchestrator Patch (v0.22.0.1) ✅ shipped 2026-05-20
+
+Three items deferred from Phase 22a: sector ingestion, MV-adjusted notional gate, Telegram veto window for auto-promote.
+
+- [x] Alembic 0069.1: `instruments.sector/sub_sector`, `portfolio_exposure_limits.sector` column + per_sector limit_type, `shadow_promotion_events.{veto_expires_at,veto_token}` + promote_pending status, `marginal_variance_enabled` app_config seed
+- [x] Proto: `GetContractFundamentals(ContractRef) → ContractFundamentalsResponse` + sidecar handler
+- [x] `app/services/orchestrator/sector_ingestion.py` — `SectorIngestionService`: equity→IBKR gRPC, non-equity→synthetic `_class:{cls}`, normalised lower+strip; APScheduler 01:30 UTC backfill
+- [x] `app/services/orchestrator/exposure_gate.py` — `_compute_mv_notional` (corr-discounted effective notional), `_mv_enabled` flag, per_sector limit check, `update_on_fill(sector=)`, latency histogram `path` label
+- [x] `app/services/orchestrator/exposure_gate_lua.py` — `_SCRIPT_VERSION=2`, Lua 3-ARGV (total/instr/sector)
+- [x] `app/services/orchestrator/correlation.py` — pipeline(transaction=True) for atomic matrix write
+- [x] `app/services/orchestrator/auto_promote.py` — `_VETO_WINDOW_S=300`, veto_token INSERT→APScheduler date job, `_expiry_promote` CAS, `handle_veto_token`, `recover_pending_veto_windows` startup sweep
+- [x] `app/services/telegram/commands.py` — `/veto_promote_{uuid}` regex handler
+- [x] `app/api/orchestrator.py` — per_sector validation, `sector` field on ExposureLimitCreate/Response, `POST /sector-refresh/{instrument_id}`
+- [x] 52 tests green (alembic × 8, sector_ingestion × 7, mv_gate × 9, veto_window × 7, auto_promote updates × 5, REST × 3)
+
 ## Phase 22 — Bot engine v3 (autonomous, self-refining)
 
 Multi-bot orchestration. Nightly retrain. LLM-driven strategy generation with guardrails. Auto-promotion rules. **No raw RL.**
 
-Sub-phases: 22a ✅ shipped · 22b ✅ shipped (v0.22.1 · 2026-05-20) · 22c (health digest + dashboard)
+Sub-phases: 22a ✅ shipped · 22a.1 ✅ shipped (v0.22.0.1 · 2026-05-20) · 22b ✅ shipped (v0.22.1 · 2026-05-20) · 22c (health digest + dashboard)
 
 ## Phase 23 — UK CGT awareness + per-bot attribution + cgt-calc handoff
 

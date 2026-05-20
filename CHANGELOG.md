@@ -7,6 +7,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+### Phase 22a.1 — Orchestrator Patch (v0.22.0.1) — 2026-05-20
+
+Three items deferred from Phase 22a: sector ingestion pipeline, correlation-discounted marginal-variance gate, Telegram veto window for auto-promote.
+
+**Migration (Alembic 0069.1)**
+
+- `0069_1_phase22a1_orchestrator_patch.py`: `instruments.sector TEXT`, `instruments.sub_sector TEXT`, partial index `instruments_sector_idx`; `portfolio_exposure_limits.sector TEXT`, per_sector added to CHECK; `shadow_promotion_events.veto_expires_at TIMESTAMPTZ`, `veto_token UUID`, status_check_v2 with `promote_pending`/`vetoed`; `uq_shadow_promotion_pending` partial unique index; seeds `marginal_variance_enabled=true` in `app_config`.
+
+**Backend**
+
+- `proto/broker/v1/broker.proto` — `GetContractFundamentals(ContractRef)` → `ContractFundamentalsResponse {industry, category, primary_exchange, country}`; sidecar handler via `reqContractDetailsAsync`.
+- `app/services/orchestrator/sector_ingestion.py` — `SectorIngestionService.refresh()`: equity classes (STOCK/ETF/INDEX/WARRANT/CBBC/OPTION) → IBKR `GetContractFundamentals`; non-equity → synthetic `_class:{asset_class}`; normalised lower+strip; `backfill_all()` serial loop; APScheduler 01:30 UTC cron.
+- `app/services/orchestrator/exposure_gate_lua.py` — `_SCRIPT_VERSION=2`; Lua 3-ARGV: `total_delta`, `instr_key`, `sector_key`; atomically updates `total` + `instr:{id}` + `sector:{sector}`.
+- `app/services/orchestrator/exposure_gate.py` — `_compute_mv_notional()`: reads correlation matrix from Redis; `corr_sum = sum_i(w_i/w_new)*rho(i,new)`; `effective = raw * sqrt(max(1+2*corr_sum, 0))`; `_mv_enabled()` flag; per_sector limit check in `check()`; `update_on_fill(sector=)` keyword arg; latency histogram now labels `path=raw|mv`.
+- `app/services/orchestrator/correlation.py` — `pipeline(transaction=True)` for atomic matrix write.
+- `app/services/orchestrator/auto_promote.py` — `_VETO_WINDOW_S=300`; `evaluate()` inserts `promote_pending` row with `veto_token` UUID, schedules `_expiry_promote` APScheduler date job; `_expiry_promote` CAS `promote_pending→success`; `handle_veto_token()` marks vetoed; `recover_pending_veto_windows()` startup sweep.
+- `app/services/telegram/commands.py` — `/veto_promote_{uuid}` regex handler → `handle_veto_token`.
+- `app/api/orchestrator.py` — `per_sector` validation (sector required); `sector` field on `ExposureLimitCreate`/`ExposureLimitResponse`; `POST /api/orchestrator/sector-refresh/{instrument_id}`.
+- `app/main.py` — `AutoPromoteEvaluator` wired with `scheduler` + `db_factory`; `recover_pending_veto_windows` called on startup.
+
+**Tests**
+
+- 52 new/updated tests: alembic 0069.1 × 8, sector_ingestion × 7, mv_gate × 9, veto_window × 7, auto_promote updates × 5, orchestrator REST × 3.
+
+---
+
 ### Phase 22b — LLM Strategy Generator (v0.22.1) — 2026-05-20
 
 Phase 22b ships the LLM-in-the-loop strategy generator: LLM generates Python strategy code, RestrictedPython + AST allowlist sandbox validates it, human admin approves/rejects it, and a child-process worker executes the promoted code.
