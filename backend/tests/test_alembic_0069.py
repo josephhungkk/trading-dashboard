@@ -1,4 +1,5 @@
 import pytest
+import sqlalchemy.exc
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,15 +32,16 @@ async def test_portfolio_exposure_limits_unique_total(session: AsyncSession) -> 
         ),
         {"aid": acct_id},
     )
-    with pytest.raises(Exception, match="uq_portfolio_exposure_total"):
-        await session.execute(
-            text(
-                "INSERT INTO portfolio_exposure_limits"
-                " (account_id, limit_type, max_notional, currency)"
-                " VALUES (:aid, 'total_notional', 200000, 'USD')"
-            ),
-            {"aid": acct_id},
-        )
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="uq_portfolio_exposure_total"):
+        async with session.begin_nested():
+            await session.execute(
+                text(
+                    "INSERT INTO portfolio_exposure_limits"
+                    " (account_id, limit_type, max_notional, currency)"
+                    " VALUES (:aid, 'total_notional', 200000, 'USD')"
+                ),
+                {"aid": acct_id},
+            )
 
 
 @pytest.mark.asyncio

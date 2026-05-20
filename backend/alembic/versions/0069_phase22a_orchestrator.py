@@ -19,7 +19,7 @@ def upgrade() -> None:
     op.execute(text("""
         CREATE TABLE portfolio_exposure_limits (
             id              BIGSERIAL PRIMARY KEY,
-            account_id      UUID REFERENCES broker_accounts(id) ON DELETE CASCADE,
+            account_id      UUID NOT NULL REFERENCES broker_accounts(id) ON DELETE CASCADE,
             limit_type      TEXT NOT NULL
                 CHECK (limit_type IN ('total_notional','per_instrument')),
             instrument_id   BIGINT REFERENCES instruments(id) ON DELETE CASCADE,
