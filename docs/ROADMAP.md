@@ -29,9 +29,9 @@ End-state: a self-hosted personal trading dashboard covering every asset class s
 - §9 → 9 / 9.5 → v0.9.0 / v0.9.0.1 *(retagged from v0.11.0 / v0.11.0.1)*
 - §10 → 10a / 10a.5 / 10b.1 / 10b.2 → v0.10.0 / v0.10.1 / v0.10.2 / v0.10.3 *(retagged from v0.12.0–v0.12.3; 10b.1 had an extra v0.13.0 → v0.12.2 step earlier)*
 
-Going forward: §11 → v0.11.x, §12 → v0.12.x, §14 Futures → v0.14.x, §25 PWA → 1.0.0.
+Going forward: §11 → v0.11.x, §12 → v0.12.x, §14 Futures → v0.14.x, §26 PWA → 1.0.0.
 
-**1.0.0** ships when ROADMAP §25 (PWA mobile) is complete. The intermediate Tag column below shows the FIRST tag in each phase's `x` window; sub-phases land at `0.x.{1,2,3,…}`.
+**1.0.0** ships when ROADMAP §26 (PWA mobile) is complete. The intermediate Tag column below shows the FIRST tag in each phase's `x` window; sub-phases land at `0.x.{1,2,3,…}`.
 
 See `memory/feedback_sub_phase_versioning.md` for the case-by-case decision rule and `CHANGELOG.md` for the per-tag commit log.
 
@@ -60,9 +60,10 @@ See `memory/feedback_sub_phase_versioning.md` for the case-by-case decision rule
 | 21 | 0.21.0 | Bot engine v2 — LLM-in-loop | LLM-as-analyst on bot decisions, parameter-tuning loop with human approval, shadow-mode strategy promotion, perf-attribution per bot. |
 | 22 | 0.22.0 | Bot engine v3 — autonomous, self-refining | Multi-bot orchestration, nightly retrain, LLM-driven strategy generation with guardrails, auto-promotion rules. **No raw RL.** |
 | **23** | 0.23.0 | **UK CGT awareness + per-bot attribution + cgt-calc handoff** | Real-time Section 104 pool tracker (mirrors `fills`), same-day + 30-day b&b matcher, pre-trade gate "would trigger b&b" warning, live £3k allowance gauge, "Tax" page (Section 104 positions + per-bot/per-strategy/per-asset PnL), year-end RAW-CSV export consumable by [`KapJI/capital-gains-calculator`](https://github.com/KapJI/capital-gains-calculator), optional admin-page subprocess invocation of `cgt-calc` for in-place PDF. **Contingency:** if cgt-calc proves unfit at Phase 23 start (current bug investigation pending; tracked as a side task), scope expands to include an in-house Section 104 calculation engine. |
-| 24 | 0.24.0 | Infra hardening | PG client-cert auth (drops `.env` plaintext password). Multi-worker uvicorn (Redis-backed nonce / replay / commission stores). ClickHouse for tick history if TimescaleDB outgrows the volume. |
-| **25** | **1.0.0** | **PWA mobile + v1.0 ship** | Service worker, install-to-home-screen, FCM / Web Push notifications, mobile-only chart UX, offline order queue, biometric lock via WebAuthn. |
-| **26** | 1.0.0-rc | **Pre-launch DB reset** *(one-shot ritual, immediately before v1.0.0 cut)* | Save operator-tuned tables (`app_config`, `app_secrets`, `risk_limits`, `account_kill_switches`, `broker_order_capability`, `order_types`, `time_in_force`, `broker_features`) via `pg_dump --data-only`. DROP + recreate `dashboard` DB. `alembic upgrade head`. Replay saved dumps. Restart backend → BrokerDiscoverer + `seed_instruments_from_positions` rebuild `broker_accounts` + `instruments` automatically. Result: zero operational residue from dev/test sessions, every order placed after this point is real history. Scripts live under `scripts/go-live/` (build during the phase, run once). |
+| 24 | 0.24.0 | **Infra & Ops hardening** | PG client-cert auth on both prod NUC PG18 and dev WSL PG18 (drops plaintext password from DSN). Multi-worker uvicorn (Redis-backed nonce / replay / commission stores; `_last_position_tick_at` Redis key). `account_balances` current-state table decoupled from `broker_accounts`. TimescaleDB CAGG backlog × 10 (5s–1d). Ops automation: Windows sidecar path cutover, post-deploy recovery script, Futu OpenD full-restart script. Observability: Grafana dashboards × 6, alert denoising + maintenance-window inhibit rules, structlog correlation IDs across all workers. |
+| **25** | **0.25.0** | **Quality Gate** *(to be fully brainstormed — placeholder)* | Full horizontal audit across all 24 phases: test coverage ≥ 85% BE / ≥ 80% FE, OWASP security sweep (0 CRITICAL/HIGH findings), performance + N+1 query review, FE accessibility level-A. Selective rewrites of the worst 3–5 architectural findings surfaced by the audit. Ships `docs/QUALITY-REPORT-v0.25.md`. All quality gates must pass before Phase 26 (PWA) begins. |
+| **26** | **1.0.0** | **PWA mobile + v1.0 ship** *(was Phase 25)* | Service worker, install-to-home-screen, FCM / Web Push notifications, mobile-only chart UX, offline order queue, biometric lock via WebAuthn. |
+| **27** | 1.0.0-rc | **Pre-launch DB reset** *(one-shot ritual, immediately before v1.0.0 cut; was Phase 26)* | Save operator-tuned tables (`app_config`, `app_secrets`, `risk_limits`, `account_kill_switches`, `broker_order_capability`, `order_types`, `time_in_force`, `broker_features`) via `pg_dump --data-only`. DROP + recreate `dashboard` DB. `alembic upgrade head`. Replay saved dumps. Restart backend → BrokerDiscoverer + `seed_instruments_from_positions` rebuild `broker_accounts` + `instruments` automatically. Result: zero operational residue from dev/test sessions, every order placed after this point is real history. Scripts live under `scripts/go-live/` (build during the phase, run once). |
 
 ## Pacing
 
@@ -81,7 +82,7 @@ Larger phases that may split during their own brainstorm: 8 (broker × order-typ
 7. **Bar aggregator + historical store land in Phase 9, not 7.** Schwab CHART_EQUITY gives free 1m US bars; the aggregator handles non-Schwab sources + sub-1m bars.
 8. **Risk engine before bots.** Phase 10 ships before Phase 20. Bots cannot bypass the pre-trade gate.
 9. **Self-refinement ceiling = parameter tuning + LLM-suggested refinements + shadow-mode promotion** (Phase 21–22). **No raw RL.**
-10. **Mobile is PWA-only.** Phase 25 ships as v1.0.0. No React Native phase.
+10. **Mobile is PWA-only.** Phase 26 ships as v1.0.0. No React Native phase.
 
 ## Quote source routing matrix (default; user-overridable in `app_config`)
 
