@@ -643,12 +643,38 @@ async def lifespan(_app: FastAPI) -> Any:
     )
 
     from app.services.orchestrator.auto_promote import AutoPromoteEvaluator as _AutoPromoteEvaluator
+    from app.services.orchestrator.sector_ingestion import (
+        SectorIngestionService as _SectorIngestionSvc,
+    )
 
     _shadow_promoter_svc = ShadowPromoterService(
         db_factory=session_factory,
         supervisor=_app.state.supervisor,
         redis=redis,
     )
+
+    # ── Sector ingestion service ─────────────────────────────────────────────
+    _ibkr_broker = getattr(_app.state, "ibkr_broker", None)
+    _ibkr_stub = getattr(_ibkr_broker, "stub", None) if _ibkr_broker else None
+    _sector_svc = _SectorIngestionSvc(ibkr_stub=_ibkr_stub, schwab_broker=None)
+    _app.state.sector_ingestion_svc = _sector_svc
+
+    async def _run_sector_ingestion() -> None:
+        try:
+            async with session_factory() as _si_db:
+                await _sector_svc.backfill_all(_si_db)
+        except Exception:
+            log.exception("sector_ingestion_job_failed")
+
+    scheduler.add_job(
+        _run_sector_ingestion,
+        CronTrigger.from_crontab("30 1 * * *", timezone="UTC"),
+        id="orchestrator_sector_ingestion",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
     _app.state.auto_promote_evaluator = _AutoPromoteEvaluator(
         promoter_service=_shadow_promoter_svc,
         telegram=getattr(_app.state, "telegram", None),

@@ -8,6 +8,7 @@ orchestrator_exposure_checks_total = Counter(
 orchestrator_exposure_gate_latency_seconds = Histogram(
     "orchestrator_exposure_gate_latency_seconds",
     "Portfolio exposure gate check latency",
+    ["path"],
 )
 orchestrator_exposure_gate_pg_fallback_total = Counter(
     "orchestrator_exposure_gate_pg_fallback_total",
@@ -31,4 +32,14 @@ orchestrator_retrain_bots_total = Counter(
 orchestrator_retrain_latency_seconds = Histogram(
     "orchestrator_retrain_latency_seconds",
     "NightlyRetrainJob total latency",
+)
+orchestrator_sector_ingestion_total = Counter(
+    "orchestrator_sector_ingestion_total",
+    "Sector ingestion outcomes",
+    ["outcome", "source"],
+)
+orchestrator_marginal_variance_fallback_total = Counter(
+    "orchestrator_marginal_variance_fallback_total",
+    "MV gate fallback events",
+    ["reason"],
 )
