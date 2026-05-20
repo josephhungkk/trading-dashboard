@@ -216,7 +216,7 @@ async def test_get_advisor_decisions_empty(
     resp = await bots_client.get(f"/api/bots/{bot_id}/advisor-decisions", headers=auth_headers)
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": [], "next_before": None}
+    assert resp.json() == {"items": [], "next_cursor": None}
 
 
 @pytest.mark.asyncio
@@ -245,7 +245,7 @@ async def test_get_advisor_decisions_pagination(
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["items"]) == 2
-    assert data["next_before"] == data["items"][-1]["created_at"]
+    assert data["next_cursor"] == data["items"][-1]["created_at"]
     assert data["items"][0]["created_at"] > data["items"][1]["created_at"]
 
 
